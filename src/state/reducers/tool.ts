@@ -45,9 +45,19 @@ import { decodeSkillResourceInput } from '../../kernel/skill.js';
 import { supervisorInspectorIdentity } from '../supervisor-inspector.js';
 import { addBudget, assertBudgetWithin } from '../invariants.js';
 import { assertChildAncestryRelease } from '../child-ancestry.js';
-import { assertOwnedMcpRunCapture, readMcpRunCapture, assertMcpCaptureObservation } from '../mcp-execution.js';
+import { assertOwnedMcpRunCapture, readMcpRunCapture, assertMcpCaptureObservation, readMcpNoReleaseHistory, planMcpNoReleaseResult } from '../mcp-execution.js';
 import { assertInstalledMcpRunOwner } from '../mcp-native-binding.js';
 import type { NativeMcpRunHttpOwner, RunMcpHttpBinding } from '../mcp-broker-native.js';
+import { loadMcpServerLifecycle } from '../mcp-server-lifecycle.js';
+import type { NativeMcpStdioRunOwner, RunMcpStdioCallBinding } from '../mcp-stdio-broker-native.js';
+import { assertInstalledMcpStdioRunOwner, assertInstalledMcpStdioCallOwner } from '../mcp-stdio-native-binding.js';
+import { assertOwnedMcpServerInstance, prepareMcpServerTerminal } from '../mcp-server-retirement.js';
+import { assertOwnedMcpStdioRunCapture } from '../mcp-stdio-execution.js';
+import { readMcpStdioRunCapture, assertMcpStdioCaptureObservation } from '../mcp-stdio-history.js';
+import { decodeMcpHttpRetryClaimIdentity, mcpRetryPositiveFailureAction, mcpRetryState, mcpRetryLastClaimedTerminal, type McpHttpRetryClaimIdentityV1 } from '../../kernel/mcp-retry.js';
+import { mcpNoReleaseCheckpointId } from '../../kernel/mcp.js';
+import { prepareMcpRetryAdmission, acknowledgeMcpRetryAdmission, readMcpRetryJournalHistory, type McpRetryAdmission } from '../mcp-retry-admission.js';
+import type { HeldInstalledRuntime } from '../installed-runtime.js';
 
 const TOOL_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
 type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = T extends ToolResultPayloadV1
@@ -55,17 +65,39 @@ type ResultFields<T = Exclude<ToolResultPayloadV1, { source: 'user_input' }>> = 
 type ToolCompletionInput = { opId: string; attempt: number; expectedRunRevision: number; observationRef: string };
 declare const mcpClaimOwnerBrand: unique symbol;
 export type McpToolClaimOwner = Readonly<{ [mcpClaimOwnerBrand]: true }>;
-const mcpClaims = new WeakMap<McpToolClaimOwner, { driver: SqliteDriver; owner: StateOwnerContext; native: NativeMcpRunHttpOwner;
-  binding: RunMcpHttpBinding; input: ClaimInvocationDispatchInput }>();
+type McpNativeClaim = Readonly<{ kind: 'http'; owner: NativeMcpRunHttpOwner; binding: RunMcpHttpBinding }> |
+  Readonly<{ kind: 'stdio'; owner: NativeMcpStdioRunOwner; binding: RunMcpStdioCallBinding }>;
+const mcpClaims = new WeakMap<McpToolClaimOwner, { driver: SqliteDriver; owner: StateOwnerContext; resource: McpNativeClaim;
+  input: ClaimInvocationDispatchInput; httpRetryIdentity?: Readonly<{ ref: string; identity: McpHttpRetryClaimIdentityV1 }> }>();
+function assertMcpNativeClaim(driver: SqliteDriver, owner: StateOwnerContext, resource: McpNativeClaim) {
+  if (resource.kind === 'http') { assertInstalledMcpRunOwner(resource.owner, resource.binding); return resource.binding; }
+  const { launch } = resource.binding;
+  assertInstalledMcpStdioRunOwner(resource.owner, launch); assertInstalledMcpStdioCallOwner(resource.owner, resource.binding);
+  assertOwnedMcpServerInstance(driver, owner, resource.owner, resource.binding.instanceIdentityRef, resource.binding.instanceIdentityDigest, launch);
+  return { runId: launch.runId, opId: resource.binding.opId, attempt: resource.binding.attempt, dispatchId: resource.binding.dispatchId,
+    dispatchJournalSeq: resource.binding.dispatchJournalSeq, requestRef: resource.binding.requestRef, requestDigest: resource.binding.requestDigest,
+    targetRef: resource.binding.targetRef, targetDigest: resource.binding.targetDigest, grantRef: resource.binding.grantRef, grantDigest: resource.binding.grantDigest,
+    registryRef: launch.registryRef, manifestDigest: launch.manifestDigest, toolContractDigest: resource.binding.toolContractDigest,
+    batchItemId: launch.batchItemId, callId: launch.callId, callIndex: launch.callIndex, supervisorInstanceId: launch.supervisorInstanceId,
+    stateOwnerEpoch: launch.stateOwnerEpoch, workerLaunchId: launch.workerLaunchId, leaseEpoch: launch.leaseEpoch,
+    brokerFenceTokenDigest: resource.binding.releaseFenceTokenDigest, deadlineMs: launch.callDeadlineMs };
+}
 /** Only claimTool below issues this owner after reproducing policy/grant and
  * exact native binding. A structural token or arbitrary validator cannot
  * enter the generic claim seam for MCP. */
 export function assertMcpToolClaimOwner(driver: SqliteDriver, owner: StateOwnerContext, handle: McpToolClaimOwner,
-  input: ClaimInvocationDispatchInput): void {
+  input: ClaimInvocationDispatchInput) {
   const original = mcpClaims.get(handle);
   if (!original || original.driver !== driver || original.owner !== owner || canonicalSha256(original.input) !== canonicalSha256(input))
     throw new KernelStorageError('INVALID_REQUEST', 'MCP claim lost its original typed policy/native owner');
-  assertInstalledMcpRunOwner(original.native, original.binding);
+  assertMcpNativeClaim(driver, owner, original.resource);
+  if (original.httpRetryIdentity) {
+    if (original.resource.kind !== 'http') throw new TypeError('MCP stdio claim cannot borrow an HTTP retry identity');
+    requireEqual(original.httpRetryIdentity.identity.binding, original.resource.binding, 'MCP actual original HTTP retry claim identity');
+    return { evidenceRef: original.httpRetryIdentity.ref, evidenceDigest: original.httpRetryIdentity.identity.identityDigest };
+  }
+  return original.resource.kind === 'stdio' ? { evidenceRef: original.resource.binding.instanceIdentityRef,
+    evidenceDigest: original.resource.binding.instanceIdentityDigest } : undefined;
 }
 
 function policyItem(evidence: ToolPolicyChannelEvidenceV1, decision: { grantRef: string } | { outcomeItemRef: string },
@@ -116,10 +148,11 @@ export { resultPlan as planToolInvocationResult, nextFrontier as nextToolFrontie
 export async function loadToolContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; contracts: ToolInputAuthority[];
   resolveToolInput: ResolveToolInput; releaseKeys?: readonly ReleaseTrustKey[]; recoveredItems: readonly RunItemReferenceV1[];
+  installedRuntime?: HeldInstalledRuntime;
 }, reobserve?: NativeWorkerRetirement, openingSignal?: AbortSignal) {
   const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
   openingReads.assertReadActive();
-  const { run: admittedRun, spec, assembly, contracts, resolveToolInput } = input;
+  const { run: admittedRun, spec, assembly, contracts, resolveToolInput, installedRuntime } = input;
   const runId = admittedRun.id;
   const session = readSession(driver, admittedRun.sessionId);
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(openingReads, session.workspaceIdentityRef));
@@ -130,7 +163,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   let policy: ReturnType<typeof loadToolPolicy> | undefined;
   let policyArtifactRefs: readonly string[] = [];
   let retainedPolicy: RunPolicySnapshotV1 | undefined;
-  const toolEntries = contracts.map(({ inputSchema: _schema, ...entry }) => entry);
+  const toolEntries = contracts.map(({ inputSchema: _schema, mcpRecovery: _mcpRecovery, ...entry }) => entry);
   const assertRuntime = async (reads = artifacts, signal?: AbortSignal) => {
     if (!retainedPolicy || !input.releaseKeys) throw new KernelStorageError('RECOVERY_REQUIRED', 'missing original signed tool authority');
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(reads, assembly.runtime.runtimeBundleRef);
@@ -221,6 +254,42 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return Object.freeze({ closure, generationState: immutableSnapshot(live.generation) });
   }
 
+  const mcpServer = loadMcpServerLifecycle(driver, artifacts, owner, { run: admittedRun, spec, assembly,
+    principalId: workspace.ownerPrincipalId, workspaceIdentityDigest: workspace.identityDigest, cut, requestFor, assertCut, assertRuntime });
+
+  async function completeMcpRetryPositiveFailure(selected: ToolCut, prepared: ToolCut['journal'][number], failed: ToolCut['journal'][number], reads: ArtifactCatalog) {
+    if (selected.run.activeWorkerLaunchId || selected.run.status !== 'queued' || prepared.replayClass !== 'retry')
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP delayed positive result requires its original worker-free queued cut');
+    const claim = selected.journal.find(entry => entry.opId === prepared.opId && entry.attempt === prepared.attempt && entry.phase === 'dispatch_claimed');
+    if (!claim) throw new TypeError('MCP delayed positive result cannot replace an unclaimed or UNKNOWN operation');
+    const original = await readMcpNoReleaseHistory(driver, reads, { prepared, claim, failed, assembly });
+    const createdAt = sampleCanonicalNow(), history = await readMcpRetryJournalHistory(driver, reads, assembly, selected.journal, prepared.opId, createdAt);
+    if (mcpRetryLastClaimedTerminal(history.entries)?.seq !== failed.seq || history.deadline === undefined || mcpRetryPositiveFailureAction(history.state, 'failed', !!selected.run.stopIntentRef || selected.run.cancelRequested,
+      history.launchCapacity) !== 'result') throw new TypeError('MCP positive result cannot discard remaining original retry capacity');
+    const result = planMcpNoReleaseResult(original.request, failed, createdAt);
+    const plan = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
+      items: [result.item], frontier: nextFrontier(selected, 1), checkpointId: mcpNoReleaseCheckpointId(runId, prepared.opId, prepared.attempt),
+      workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: result.artifacts });
+    reads.assertReadActive(); let outcome: TimeFenceAdvance | undefined, updated!: Run;
+    driver.transaction(connection => {
+      assertActiveStateOwner(connection, owner); const now = sampleCanonicalNow();
+      outcome = advanceTimeFence(connection, owner.ownerEpoch, now); if (outcome !== 'healthy') return;
+      const current = readRun(connection, runId); assertCut(connection, current, selected);
+      requireEqual(readInvocationJournal(connection, runId), selected.journal, 'MCP delayed positive result exact original Journal');
+      if (current.activeWorkerLaunchId || current.status !== 'queued' || now < createdAt ||
+          mcpRetryPositiveFailureAction(mcpRetryState(history.policy, history.entries, now, history.deadline!), 'failed',
+            !!current.stopIntentRef || current.cancelRequested, history.launchCapacity) !== 'result')
+        throw new KernelStorageError('LEASE_FENCED', 'MCP positive result lost its original current closure decision');
+      for (const artifact of plan.metadata) insertArtifactMetadata(connection, artifact, now);
+      plan.commit(connection, current, selected.journal.length, now);
+      const changed = connection.prepare('UPDATE runs SET revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+        .run(now, runId, BigInt(current.revision));
+      if (changed.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'MCP positive result original Run cut changed');
+      updated = readRun(connection, runId); appendRunStateEvent(connection, updated, now);
+    });
+    requireHealthyFence(outcome); return immutableSnapshot({ disposition: 'result_committed' as const, run: updated });
+  }
+
   const waitProof = (ref: string, reads = artifacts) => readToolApprovalWait(reads, admittedRun, requirePolicy(), ref);
   const verifyApproval = (ref: string, reads = artifacts) => readToolApproval(driver, reads, admittedRun, requirePolicy(), ref);
 
@@ -251,7 +320,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     return expiry.format === 'cliq-tool-grant-expiry-v1' && expiry.grantRef === prepared.grantRef &&
       expiry.preparedJournalSeq === prepared.seq && (expiry.waitingSubjectRef !== undefined || expiry.selectionCheckpointId !== undefined);
   }
-  const selectionCheckpointId = (selected: ToolCut, reason: 'input' | 'children' | 'approval' | 'child_admission') =>
+  const selectionCheckpointId = (selected: ToolCut, reason: 'input' | 'children' | 'approval' | 'child_admission' | 'mcp_server_approval' | 'mcp_retry') =>
     identityHash('cliq-tool-selection-checkpoint-v1', runId, selected.run.frontierRef!, String(selected.run.revision), reason);
 
   // Recovery independently reproduces committed decisions, including deny, before exposing a usable handle.
@@ -268,7 +337,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     // The sole caller first runs readRunAuthority/full recovery, including the
     // verifier's complete subject-owned history. Its request is not a tool
     // request and has no inputRef; never reinterpret it as tool authority.
-    if (item.subjectKind === 'verifier_launch' || item.subjectKind === 'child_merge' || item.subjectKind === 'dependency_install_scripts') continue; // Each owns a complete independent recovery history.
+    if (item.subjectKind === 'verifier_launch' || item.subjectKind === 'child_merge' || item.subjectKind === 'dependency_install_scripts' || item.subjectKind === 'mcp_server_launch') continue; // Each owns a complete independent recovery history.
     if (item.subjectKind !== 'tool_call') throw new TypeError('retained tool policy item has an unsupported subject');
     const evidence = await readCanonicalArtifact<ToolPolicyChannelEvidenceV1>(openingReads, item.policyChannelEvidenceRef);
     const request = await readCanonicalArtifact<ToolRequestV1>(openingReads, evidence.requestRef);
@@ -282,8 +351,11 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   }
   if (admittedRun.waitingReason === 'approval' && admittedRun.waitingOnRef) {
     const selected = await cut(undefined, openingReads);
-    const proof = await waitProof(admittedRun.waitingOnRef, openingReads);
-    requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
+    const subject = await readCanonicalArtifact<{ subject?: { kind?: string } }>(openingReads, admittedRun.waitingOnRef);
+    if (subject.subject?.kind !== 'mcp_server_launch') {
+      const proof = await waitProof(admittedRun.waitingOnRef, openingReads);
+      requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
+    } // The complete original server wait/owning call is audited by readToolCut.
   }
 
   const controlAuthority = {
@@ -314,6 +386,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     let observationMetadata: Awaited<ReturnType<ArtifactCatalog['describe']>> | undefined;
     let checkedRun: Run | undefined, checkedStop: AgentStopIntent | undefined;
     let stopConflict: { error: KernelStorageError; revision: number } | undefined;
+    let stdioCapture: Awaited<ReturnType<typeof readMcpStdioRunCapture>> | undefined;
+    let stdioTerminal: Awaited<ReturnType<typeof prepareMcpServerTerminal>> | undefined;
 
     function validateOriginalCut(connection: SqliteConnection, current: Run) {
       if (!selection) throw new KernelStorageError('RECOVERY_REQUIRED', 'tool completion has no original selected cut');
@@ -428,11 +502,18 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
             captureMetadata = captured.metadata;
           } else if (expected.entry.execution.kind === 'mcp') {
             if (!observation.captureRef || !observation.captureDigest) throw new TypeError('MCP completion requires its original received capture');
-            assertOwnedMcpRunCapture(observation.captureRef, prepared, claim);
-            const captured = await readMcpRunCapture(driver, artifacts, { captureRef: observation.captureRef,
-              captureDigest: observation.captureDigest, prepared, claim, assembly });
-            await assertMcpCaptureObservation(artifacts, observation, captured);
-            captureMetadata = captured.metadata;
+            const format = (await readCanonicalArtifact<{ format?: string }>(artifacts, observation.captureRef)).format;
+            if (format === 'cliq-mcp-stdio-run-capture-v1' || format === 'cliq-mcp-stdio-known-unusable-run-capture-v1') {
+              assertOwnedMcpStdioRunCapture(observation.captureRef, prepared, claim);
+              stdioCapture = await readMcpStdioRunCapture(driver, artifacts, { captureRef: observation.captureRef,
+                captureDigest: observation.captureDigest, prepared, claim, assembly });
+              await assertMcpStdioCaptureObservation(artifacts, observation, stdioCapture); captureMetadata = stdioCapture.metadata;
+            } else {
+              assertOwnedMcpRunCapture(observation.captureRef, prepared, claim);
+              const captured = await readMcpRunCapture(driver, artifacts, { captureRef: observation.captureRef,
+                captureDigest: observation.captureDigest, prepared, claim, assembly });
+              await assertMcpCaptureObservation(artifacts, observation, captured); captureMetadata = captured.metadata;
+            }
           } else if (observation.captureRef !== undefined || observation.captureDigest !== undefined)
             throw new TypeError('legacy tool cannot borrow the signed script result recipe');
           const plans: PlannedArtifact[] = [];
@@ -473,6 +554,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         }
         if (!settlement) settlement = prepareValidatedInvocationSettlement(driver, artifacts, owner, { ...original, runId },
           { phase: 'completed', resultRef: observationRef, consumed: TOOL_BUDGET }, async ({ settlement: fixed }) => {
+            if (stdioCapture && !stdioTerminal) stdioTerminal = await prepareMcpServerTerminal(driver, owner,
+              stdioCapture.binding.instanceIdentityRef, fixed, 'completed');
             if (!graph) {
               const payload = observed.outcome === 'executed' ? { outcome: 'executed' as const, source: 'invocation' as const,
                 opId: original.opId, attempt: original.attempt, journalResultRef: observationRef, journalResultDigest: observed.observationDigest,
@@ -482,18 +565,19 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
                     diagnosticRef: observed.diagnosticRef, diagnosticDigest: observed.diagnosticDigest };
               const result = resultPlan(expected.request, fixed.settledAt, payload, observed.outcome === 'executed' ? observed.content : { code: observed.code });
               graph = planContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
-                items: [result.item], frontier: nextFrontier(selected, 1), checkpointId: toolCheckpointId(runId, original.opId, original.attempt),
+                items: [...(stdioTerminal ? [stdioTerminal.stopped] : []), result.item], frontier: nextFrontier(selected, stdioTerminal ? 2 : 1), checkpointId: toolCheckpointId(runId, original.opId, original.attempt),
                 workspaceStateRef: observed.postEffect?.workspaceStateRef ?? selected.checkpoint.workspaceStateRef, artifacts: result.artifacts });
             }
             const plan = await graph.publish();
             observationMetadata ??= await artifacts.describe(observationRef, 'application/json', observed.format);
             if (!refreshed) { await seal?.refresh(); refreshed = true; }
-            return { get metadata() { return [observationMetadata!, ...normalized!.captureMetadata, ...plan.metadata, ...(seal?.metadata ?? [])]; },
+            return { get metadata() { return [observationMetadata!, ...normalized!.captureMetadata, ...plan.metadata, ...(seal?.metadata ?? []), ...(stdioTerminal?.metadata ?? [])]; },
               commit(connection, current, journal, committedAt) {
                 assertCut(connection, current, selected);
                 if (fixed.settledAt < observed.observedAt) throw new TypeError('tool settlement precedes its observation');
                 seal?.commit(connection, current, committedAt);
-                plan.commit(connection, current, journal.seq, committedAt);
+                stdioTerminal?.commit(connection, journal, committedAt);
+                plan.commit(connection, current, stdioTerminal?.journalSeq ?? journal.seq, committedAt);
               } };
           }, validateSnapshot);
         // A rolled-back SQL attempt may need a newer observation, but never a
@@ -509,6 +593,10 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
   let completing: Promise<Awaited<ReturnType<ReturnType<typeof completionOwner>['complete']>>> | undefined;
 
   return {
+    prepareMcpServer: mcpServer.prepareMcpServer,
+    claimMcpServer: mcpServer.claimMcpServer,
+    waitForMcpServerApproval: mcpServer.waitForMcpServerApproval,
+    approveMcpServer: mcpServer.approveMcpServer,
     controlAuthority,
     waitForChildren: childContinuation.waitForChildren,
     waitForStoppedChildren: childContinuation.waitForStoppedChildren,
@@ -543,8 +631,73 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           ? childContinuation.plan(selected) : inputContinuation.plan(selected);
       }
       const { request, target, entry } = requestFor(selected);
-      const approved = await approvedGrant(selected, request, reads);
       const prior = readHighestPreparedAttempt(driver, runId, request.opId);
+      const previous = prior && readInvocationAttempt(driver, runId, request.opId, prior.attempt).at(-1);
+      const lastProductive = entry.execution.kind === 'mcp' && entry.replayClass === 'retry'
+        ? mcpRetryLastClaimedTerminal(selected.journal.filter(row => row.opId === request.opId)) : undefined;
+      const settledReplacement = previous !== undefined && ['failed', 'unknown'].includes(previous.phase);
+      const unknownRetry = settledReplacement && lastProductive?.phase === 'unknown', positiveRetry = settledReplacement && lastProductive?.phase === 'failed';
+      let retryAdmission: McpRetryAdmission | undefined;
+      let positivePredecessor: ReturnType<typeof readWorkerLaunchesForRun>[number] | undefined;
+      let retryHistory: Awaited<ReturnType<typeof readMcpRetryJournalHistory>> | undefined;
+      if (unknownRetry || positiveRetry) {
+        const progress = await readMcpRetryJournalHistory(driver, reads, assembly, selected.journal, request.opId, sampleCanonicalNow());
+        retryHistory = progress;
+        if (positiveRetry) {
+          const old = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.leaseEpoch === lastProductive!.leaseEpoch);
+          if (old.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP positive retry lost its sole original worker');
+          positivePredecessor = old[0]!;
+          if (positivePredecessor.launchId === selected.run.activeWorkerLaunchId)
+            return immutableSnapshot({ disposition: 'retirement_required' as const, reason: 'mcp_retry' as const,
+              run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_retry') });
+          if (positivePredecessor.phase !== 'retired' || !positivePredecessor.retiredAt || !positivePredecessor.retirementEvidenceRef ||
+              positivePredecessor.retiredAt < lastProductive!.timestamp)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP positive retry cannot overtake actual original worker retirement');
+          if (mcpRetryPositiveFailureAction(progress.state, 'failed', false, progress.launchCapacity) === 'result') {
+            if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+              reason: 'mcp_retry' as const, run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_retry') });
+            const originalPrepared = selected.journal.find(row => row.opId === request.opId && row.attempt === lastProductive!.attempt && row.phase === 'prepared');
+            if (!originalPrepared) throw new TypeError('MCP positive result lost its original productive preparation');
+            return completeMcpRetryPositiveFailure(selected, originalPrepared, lastProductive!, reads);
+          }
+        }
+        if (progress.state.kind !== 'ready' || progress.launchCapacity?.exhausted) {
+          if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+            reason: 'mcp_retry' as const, run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_retry') });
+          if (progress.state.kind === 'backoff' && !progress.launchCapacity?.exhausted) return immutableSnapshot({ disposition: 'retry_pending' as const, run: selected.run,
+            notBefore: progress.state.notBefore });
+          if (progress.state.kind === 'exhausted' || progress.state.kind === 'deadline' || progress.launchCapacity?.exhausted)
+            return immutableSnapshot({ disposition: 'retry_terminal_required' as const, run: selected.run });
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP UNKNOWN retry has no actual current literal recovery action');
+        }
+        if (selected.run.status === 'queued') return immutableSnapshot({ disposition: 'worker_required' as const, run: selected.run });
+        if (!installedRuntime) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP retry requires its genuine held installed runtime');
+        if (previous?.phase === 'unknown') retryAdmission = await prepareMcpRetryAdmission(driver, artifacts, owner, installedRuntime, selected, request.opId, readSignal);
+      }
+      if (lastProductive?.phase === 'unknown' && previous?.phase === 'prepared') {
+        const progress = await readMcpRetryJournalHistory(driver, reads, assembly, selected.journal, request.opId, sampleCanonicalNow());
+        if (progress.deadline !== undefined && parseCanonicalTime(progress.sampledAt) >= progress.deadline) {
+          if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+            reason: 'mcp_retry' as const, run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_retry') });
+          return immutableSnapshot({ disposition: 'retry_terminal_required' as const, run: selected.run });
+        }
+      }
+      const serverPermission = await mcpServer.selectMcpServerPermission(selected, reads);
+      if (serverPermission?.unavailableReason) {
+        if (lastProductive?.phase === 'unknown') {
+          if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+            reason: 'mcp_retry' as const, run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_retry') });
+          return immutableSnapshot({ disposition: 'retry_terminal_required' as const, run: selected.run });
+        }
+        return mcpServer.settleMcpServerUnavailable(selected, reads);
+      }
+      if (serverPermission && !serverPermission.grant) {
+        if (serverPermission.evidence.effectiveDisposition === 'deny') return mcpServer.denyMcpServerCall(selected, reads);
+        if (selected.run.activeWorkerLaunchId) return immutableSnapshot({ disposition: 'retirement_required' as const,
+          reason: 'mcp_server_approval' as const, run: selected.run, checkpointId: selectionCheckpointId(selected, 'mcp_server_approval') });
+        return mcpServer.publishMcpServerApproval(selected, reads);
+      }
+      const approved = await approvedGrant(selected, request, reads);
       if (prior && entry.execution.kind === 'mcp' && selected.run.status === 'running' && prior.phase === 'prepared' &&
           prior.leaseEpoch === leaseEpoch && prior.grantRef && readInvocationAttempt(driver, runId, request.opId, prior.attempt).length === 1) {
         const original = await verifyGrant(prior.grantRef, reads);
@@ -555,7 +708,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       }
       const canRenew = approved && approved.grant.expiresAt <= sampleCanonicalNow() && prior?.grantRef === approved.grantRef &&
         readInvocationAttempt(driver, runId, request.opId, prior.attempt).length === 1;
-      if (prior && !canRenew && !await retryAfterExpiry(request, reads)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool attempt already exists; retry/reconciliation requires its owning recovery reducer');
+      if (prior && !unknownRetry && !positiveRetry && !canRenew && !await retryAfterExpiry(request, reads)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool attempt already exists; retry/reconciliation requires its owning recovery reducer');
       const evaluatedAt = sampleCanonicalNow();
       const evidence = evaluator.evaluate(request, target, selected.call, evaluatedAt);
       const ask = evidence.effectiveDisposition === 'ask' && (!approved || approved.grant.expiresAt <= evaluatedAt);
@@ -624,16 +777,25 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const decision = policyItem(evidence, { grantRef: grantPlan.ref });
       const plan = await prepareContinuationCommit(reads, { context: selected.context, existingItems: selected.items,
         items: approved ? [] : [decision], frontier: selected.frontier,
-        checkpointId: identityHash('cliq-tool-admission-checkpoint-v1', grantPlan.ref),
+        checkpointId: unknownRetry || positiveRetry ? identityHash('cliq-mcp-retry-admission-checkpoint-v1', runId, request.opId, prior!.attempt + 1, grantPlan.ref)
+          : identityHash('cliq-tool-admission-checkpoint-v1', grantPlan.ref),
         workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: [requestPlan, targetPlan, grantPlan] });
       const prepared = await prepareValidatedInvocation(driver, reads, owner, { runId, expectedRunRevision, leaseEpoch,
         opId: request.opId, opKind: entry.execution.kind === 'mcp' ? 'mcp' : 'tool', target: request.targetRef,
         requestRef: requestPlan.ref, replayClass: entry.replayClass, grantRef: grantPlan.ref,
         ...(request.idempotencyKey === undefined ? {} : { idempotencyKey: request.idempotencyKey }), reservation: TOOL_BUDGET
-      }, { metadata: [...plan.metadata, evidenceArtifact], validate(connection, run, attempt) {
+      }, { metadata: [...plan.metadata, evidenceArtifact], ...(retryAdmission ? { mcpRetryAdmission: retryAdmission } : {}), validate(connection, run, attempt, now) {
         assertCut(connection, run, selected);
-        if (attempt !== (prior ? prior.attempt + 1 : 0) || sampleCanonicalNow() >= grant.expiresAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool grant is expired or attempt identity changed');
+        if (positivePredecessor) requireEqual(readWorkerLaunchesForRun(connection, runId).find(launch => launch.launchId === positivePredecessor!.launchId),
+          positivePredecessor, 'MCP positive retry original physically retired worker');
+        if (retryHistory && !retryAdmission) {
+          const current = retryHistory.deadline !== undefined && mcpRetryState(retryHistory.policy, retryHistory.entries, now, retryHistory.deadline);
+          if (!current || current.kind !== 'ready' || current.nextAttempt !== attempt || retryHistory.launchCapacity?.exhausted)
+            throw new KernelStorageError('LEASE_FENCED', 'MCP retry replacement lost original capacity, deadline or actual backoff at preparation');
+        }
+        if (attempt !== (prior ? prior.attempt + 1 : 0) || now >= grant.expiresAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'tool grant is expired or attempt identity changed');
       }, commit(connection, run, journal) { plan.commit(connection, run, journal.seq, journal.timestamp); } });
+      if (retryAdmission) await acknowledgeMcpRetryAdmission(driver, owner, retryAdmission);
       return immutableSnapshot({ disposition: 'prepared' as const, ...prepared, request, target,
         checkpointId: toolCheckpointId(runId, request.opId, prepared.entry.attempt) });
     }),
@@ -729,9 +891,34 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const contract = contracts.find(entry => entry.name === selected.call.toolName)!;
       let pending: ToolCut['journal'][number] | undefined;
       let expiringGrant: ToolOperationGrantV1 | undefined;
-      let reason: 'input' | 'children' | 'approval' | 'child_admission';
+      let reason: 'input' | 'children' | 'approval' | 'child_admission' | 'mcp_server_approval' | 'mcp_retry';
       const observedAt = sampleCanonicalNow();
-      if (contract.access === 'control') reason = contract.execution.kind === 'supervisor_control' && contract.execution.handlerId === 'await_children' ? 'children' : 'input';
+      const serverPermission = contract.access === 'control' ? undefined : await mcpServer.selectMcpServerPermission(selected, artifacts);
+      const retryRequest = contract.execution.kind === 'mcp' && contract.replayClass === 'retry' ? requestFor(selected).request : undefined;
+      const retryPrior = retryRequest && readHighestPreparedAttempt(driver, runId, retryRequest.opId);
+      const retryLast = retryPrior && readInvocationAttempt(driver, runId, retryPrior.opId, retryPrior.attempt).at(-1);
+      const retryProductive = retryRequest && mcpRetryLastClaimedTerminal(selected.journal.filter(row => row.opId === retryRequest.opId));
+      const retryProgress = retryPrior && await readMcpRetryJournalHistory(driver, artifacts, assembly, selected.journal, retryPrior.opId, observedAt);
+      const pendingDeadline = retryLast?.phase === 'prepared' && retryProductive?.phase === 'unknown' && retryProgress?.deadline !== undefined &&
+        parseCanonicalTime(observedAt) >= retryProgress.deadline;
+      if (retryLast && retryProductive && (['unknown', 'failed'].includes(retryLast.phase) && ['unknown', 'failed'].includes(retryProductive.phase) ||
+          retryLast.phase === 'prepared' && retryProductive.phase === 'unknown' && serverPermission?.unavailableReason || pendingDeadline)) {
+        const { request } = requestFor(selected), prior = readHighestPreparedAttempt(driver, runId, request.opId);
+        const previous = prior && readInvocationAttempt(driver, runId, request.opId, prior.attempt).at(-1);
+        const progress = retryProgress;
+        const pendingUnavailable = previous?.phase === 'prepared' && retryProductive.phase === 'unknown' && (serverPermission?.unavailableReason || pendingDeadline);
+        if (!previous || !['unknown', 'failed'].includes(previous.phase) && !pendingUnavailable || !progress ||
+            !['backoff', 'exhausted', 'deadline'].includes(progress.state.kind) && !progress.launchCapacity?.exhausted &&
+              !(retryProductive.phase === 'failed' && retryProductive.leaseEpoch === selected.run.leaseEpoch) && !pendingUnavailable)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP retry selection retirement lacks its original settled effect and real scheduling boundary');
+        reason = 'mcp_retry';
+      }
+      else if (contract.access === 'control') reason = contract.execution.kind === 'supervisor_control' && contract.execution.handlerId === 'await_children' ? 'children' : 'input';
+      else if (serverPermission?.evidence.effectiveDisposition === 'ask' && !serverPermission.grant) {
+        reason = 'mcp_server_approval';
+        if (readHighestPreparedAttempt(driver, runId, requestFor(selected).request.opId))
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP server permission retirement cannot overtake its original prepared effect');
+      }
       else if (contract.execution.kind === 'supervisor_operation' && contract.execution.handlerId === 'delegate') {
         const { request, target } = requestFor(selected);
         const approved = await approvedGrant(selected, request);
@@ -966,7 +1153,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       throw new KernelStorageError('REVISION_CONFLICT', 'approval control cut kept changing');
     }),
     claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, readSignal?: AbortSignal,
-      mcpOwner?: Readonly<{ owner: NativeMcpRunHttpOwner; binding: RunMcpHttpBinding }>) => {
+      mcpOwner?: McpNativeClaim) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
       input = { ...input };
@@ -979,11 +1166,11 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const proof = await verifyGrant(prepared.grantRef, reads);
       requireEqual(proof.request, expected.request, 'current tool request');
       if (proof.target.execution.kind === 'mcp' && (!input.brokerFenceTokenDigest || input.sandboxLaunchSpecRef !== undefined ||
-          prepared.replayClass !== 'manual')) throw new TypeError('MCP HTTP requires its original native broker fence and manual claim');
+          !['manual', 'retry', 'reconcile'].includes(prepared.replayClass) || prepared.replayClass === 'reconcile' && mcpOwner?.kind !== 'stdio'))
+        throw new TypeError('MCP requires its original native broker fence and exact supported transport recovery contract');
       if (proof.target.execution.kind === 'mcp') {
         if (!mcpOwner) throw new KernelStorageError('INVALID_REQUEST', 'MCP claim requires its original bound native owner');
-        assertInstalledMcpRunOwner(mcpOwner.owner, mcpOwner.binding);
-        const binding = mcpOwner.binding;
+        const binding = assertMcpNativeClaim(driver, owner, mcpOwner);
         if (binding.runId !== runId || binding.opId !== prepared.opId || binding.attempt !== prepared.attempt ||
             binding.dispatchId !== input.dispatchId || binding.requestRef !== prepared.requestRef || binding.requestDigest !== proof.request.requestDigest ||
             binding.targetRef !== prepared.target || binding.targetDigest !== proof.target.targetDigest || binding.grantRef !== prepared.grantRef ||
@@ -999,17 +1186,29 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const planMetadata = execution && await reads.describe(execution.closure.spec.containmentPlanRef,
         'application/json', 'cliq-process-containment-plan-v1');
       reads.assertReadActive();
+      let httpRetryIdentity: Readonly<{ ref: string; identity: McpHttpRetryClaimIdentityV1; artifact: PublishedArtifact }> | undefined;
+      if (mcpOwner?.kind === 'http' && prepared.replayClass === 'retry') {
+        assertMcpNativeClaim(driver, owner, mcpOwner);
+        const core = { schemaVersion: 1 as const, format: 'cliq-mcp-http-retry-claim-identity-v1' as const, binding: mcpOwner.binding };
+        const identity = decodeMcpHttpRetryClaimIdentity({ ...core, identityDigest: canonicalSha256(core) });
+        const artifact = await reads.publishCanonical(identity, identity.format); reads.assertReadActive();
+        httpRetryIdentity = { ref: artifact.ref, identity, artifact };
+      }
       const mcpClaim = mcpOwner ? Object.freeze({}) as McpToolClaimOwner : undefined;
-      if (mcpClaim) mcpClaims.set(mcpClaim, { driver, owner, native: mcpOwner!.owner, binding: mcpOwner!.binding, input: { ...input, runId } });
+      if (mcpClaim) {
+        if (!mcpOwner) throw new TypeError('MCP claim owner disappeared');
+        mcpClaims.set(mcpClaim, { driver, owner, resource: mcpOwner, input: { ...input, runId }, ...(httpRetryIdentity ? { httpRetryIdentity } : {}) });
+      }
       const claimed = await claimValidatedInvocation(driver, reads, owner, { ...input, runId }, (connection, run, current, now) => {
         assertCut(connection, run, selected);
         requireEqual(current, prepared, 'prepared tool claim');
+        if (httpRetryIdentity) insertArtifactMetadata(connection, httpRetryIdentity.artifact, now);
         if (mcpOwner) {
-          assertInstalledMcpRunOwner(mcpOwner.owner, mcpOwner.binding);
+          const binding = assertMcpNativeClaim(driver, owner, mcpOwner);
           const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
-          if (mcpOwner.binding.dispatchJournalSeq !== nextJournalSequence(connection, runId) ||
-              Date.parse(now) >= mcpOwner.binding.deadlineMs || !live.launch.leaseExpiresAt || mcpOwner.binding.workerLaunchId !== live.launch.launchId ||
-              mcpOwner.binding.deadlineMs > Math.min(Date.parse(run.deadlineAt), Date.parse(proof.grant.expiresAt), Date.parse(live.launch.leaseExpiresAt)))
+          if (binding.dispatchJournalSeq !== nextJournalSequence(connection, runId) ||
+              Date.parse(now) >= binding.deadlineMs || !live.launch.leaseExpiresAt || binding.workerLaunchId !== live.launch.launchId ||
+              binding.deadlineMs > Math.min(Date.parse(run.deadlineAt), Date.parse(proof.grant.expiresAt), Date.parse(live.launch.leaseExpiresAt)))
             throw new KernelStorageError('LEASE_FENCED', 'MCP original native claim sequence or fixed deadline changed');
         }
         if (execution) {

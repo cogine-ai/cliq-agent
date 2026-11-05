@@ -1,3 +1,5 @@
+import { decodeSessionContextHeadV2, SESSION_CONTEXT_PAGE_BYTES } from '../kernel/session-context-pages.js';
+import { readSessionContextPage } from '../kernel/session-context-page-reader.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { decodeReadControlRequest, encodeControlCheckpointCursor as encodeCheckpoint, decodeControlCheckpointCursor,
   CONTROL_FRAME_BYTES, type ReadControlRequest } from '../kernel/control-wire.js';
@@ -387,6 +389,66 @@ async function readArtifactQuery(driver: SqliteDriver, artifacts: ArtifactCatalo
     nextOffset, eof: nextOffset === artifact.sizeBytes };
 }
 
+/** Current SQL Session membership only, never a catalog label or orphan ref.
+ * Every child ordinal traverses complete verified ancestry; head drift refuses
+ * this cut rather than selecting a replacement. This creates no SQL metadata. */
+async function readSessionContextPageQuery(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  request: Extract<ReadControlRequest, { method: 'session.get' }>, identity: AuthenticatedControlIdentity,
+  frameIdentity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<SessionResult> {
+  const selected = request.contextPage;
+  if (!selected) throw new TypeError('Session context page requires its closed query');
+  const snapshot = () => driver.readSnapshot(connection => {
+    assertActiveStateOwner(connection, owner);
+    const session = checkedSession(requireOwnedRow(connection, 'sessions', request.sessionId, identity.principalId));
+    if (session.contextRevision !== selected.expectedContextRevision || session.contextProjectionRef !== selected.contextProjectionRef)
+      throw new KernelStorageError('REVISION_CONFLICT', 'Session context page head changed');
+    return session;
+  });
+  const session = snapshot(), headBytes = await artifacts.readBoundedBytes(session.contextProjectionRef, SESSION_CONTEXT_PAGE_BYTES);
+  const head = checkedData(() => {
+    const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(headBytes));
+    if (!canonicalJsonBytes(value).equals(headBytes)) return corrupt('Session page head is not canonical');
+    return decodeSessionContextHeadV2(value);
+  });
+  if (head.sessionId !== session.id || head.contextRevision !== session.contextRevision || head.throughItemSeq !== session.latestItemSeq)
+    return corrupt('Session page head differs from its actual SQL snapshot');
+  if (head.rootPageRef === null || selected.path.length > head.pageHeight) invalid('Session page path does not name a current page');
+  let edge = { ref: head.rootPageRef, height: head.pageHeight, fromItemSeq: 1, throughItemSeq: head.throughItemSeq };
+  let bytes: Buffer | undefined;
+  const reader = { assertReadActive: () => artifacts.assertReadActive(),
+    async readBoundedBytes(ref: string, maximum: number) { bytes = await artifacts.readBoundedBytes(ref, maximum); return bytes; } };
+  for (let depth = 0; ; depth++) {
+    signal?.throwIfAborted();
+    const page = await readSessionContextPage(reader, edge, { signal });
+    if (depth === selected.path.length) break;
+    if (page.kind !== 'branch') invalid('Session page path continues beyond its actual leaf');
+    const child = page.children[selected.path[depth]!];
+    if (!child) invalid('Session page ordinal is outside its actual parent');
+    edge = { ...child, height: page.height - 1 };
+  }
+  const current = await validateControlChannelClosure(artifacts, owner, identity);
+  signal?.throwIfAborted();
+  if (current.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, frameIdentity);
+  if (canonicalSha256(snapshot()) !== canonicalSha256(session))
+    throw new KernelStorageError('REVISION_CONFLICT', 'Session context page snapshot changed during its full read');
+  if (!bytes) return corrupt('Session page read returned no complete bytes');
+  const byteLength = bytes.length;
+  const artifact = driver.readSnapshot(connection => {
+    assertActiveStateOwner(connection, owner);
+    const retained = connection.prepare('SELECT byte_length,media_type FROM artifacts WHERE ref=?')
+      .get<{ byte_length: bigint; media_type: string }>(edge.ref);
+    if (retained && retained.byte_length !== BigInt(byteLength)) return corrupt('Session page differs from its prior same-byte declaration');
+    // Existing first declarations retain their descriptor, even when these
+    // same bytes also close a valid current page. An absent declaration is
+    // not inserted or made a generic artifact.get membership by this read.
+    return checkedData(() => decodeWireArtifactDescriptor({ schemaVersion: 1, ref: edge.ref, digest: edge.ref,
+      sizeBytes: byteLength, mediaType: retained?.media_type ?? 'application/json' }));
+  });
+  return { method: 'session.get', snapshot: { schemaVersion: 1, session }, items: [], highWaterItemSeq: session.latestItemSeq,
+    nextItemSeq: session.latestItemSeq, contextPage: { contextProjectionRef: session.contextProjectionRef, contextRevision: session.contextRevision,
+      path: selected.path, artifact, bytesBase64: bytes.toString('base64') } };
+}
+
 export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   request: ReadControlRequest, identity: AuthenticatedControlIdentity, signal?: AbortSignal): Promise<ReadControlResult> {
   signal?.throwIfAborted();
@@ -395,6 +457,8 @@ export async function readControl(driver: SqliteDriver, artifacts: ArtifactCatal
   const authenticated = { principalId: identity.principalId, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest };
   await validateControlChannelClosure(reads, owner, authenticated);
   signal?.throwIfAborted();
+  if (normalized.method === 'session.get' && normalized.contextPage)
+    return readSessionContextPageQuery(driver, reads, owner, normalized, authenticated, identity, signal);
   if (normalized.method === 'artifact.get') return readArtifactQuery(driver, reads, owner, normalized, authenticated, identity, signal);
   if (normalized.method === 'run.result' || normalized.method === 'run.diff')
     return readResultQuery(driver, reads, owner, normalized, authenticated, signal);

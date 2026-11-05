@@ -11,6 +11,7 @@ import type { RetainedVerifierToolchain } from '../state/guest-toolchain.js';
 import type { NativeGuestToolchain } from './guest-toolchain.js';
 import { assertLinuxWorkerController, reserveInstalledMcpHttpAdmin, cleanupInstalledMcpHttpAdmin, type LinuxWorkerController } from './linux-worker.js';
 import type { AdminMcpHttpBinding, NativeMcpAdminProbeImage, NativeMcpProtocolPeer } from '../state/mcp-broker-native.js';
+import type { NativeMcpAdminOriginalRetirement } from './mcp-admin-retirement.js';
 export type McpAdminScopeObservation = Readonly<{
   pid: number;
   processStartToken: string;
@@ -43,6 +44,8 @@ export type NativeMcpAdminScope = NativeMcpProtocolPeer & Readonly<{
   beginOutputAck(): void;
   pollOutputAck(): boolean;
   pollLifecycleSnapshot(): Buffer | undefined;
+  reobserveRetirement(): NativeMcpAdminOriginalRetirement;
+  assertRetirementObservation(value: NativeMcpAdminOriginalRetirement): void;
 }>;
 export type NativeAdminCleanupObservation = Readonly<{
   kind: 'mcp_admin_retained_cleanup_joined';
@@ -202,6 +205,8 @@ export type InstalledMcpHttpAdminScope = Readonly<{
   close(): Promise<McpAdminPhysicalJoined>;
   assertJoined(observation: McpAdminPhysicalJoined): void;
   lifecycleSnapshot(): Buffer;
+  reobserveRetirement(): NativeMcpAdminOriginalRetirement;
+  assertRetirementObservation(value: NativeMcpAdminOriginalRetirement): void;
 }>;
 export function assertInstalledMcpAdminScope(scope: InstalledMcpHttpAdminScope, input: HeldAdminMcpInput): void {
   const held = scopes.get(scope);
@@ -356,6 +361,14 @@ export async function openInstalledMcpHttpAdminScope(selected: HeldInstalledRunt
           throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP Admin original lifecycle custody is not complete');
         }
         return Buffer.from(bytes);
+      },
+      reobserveRetirement() {
+        withInstalledWorkerRoot(selected, anchor, () => {});
+        return original!.reobserveRetirement();
+      },
+      assertRetirementObservation(value) {
+        withInstalledWorkerRoot(selected, anchor, () => {});
+        original!.assertRetirementObservation(value);
       }
     });
     scopes.set(scope, {

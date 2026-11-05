@@ -8,13 +8,15 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { decodeInstalledControlResponse } from '../kernel/control-wire.js';
-import type { SessionContextProjection } from '../kernel/types.js';
 import { readTimeFence, recoverRegressedTimeFence } from './canonical-time.js';
 import { ListCutCapacityError } from './list-read-cut.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
-import { readSessionContextCut, frozenSessionCompactionIndex, readSessionContextEntries } from './session-context.js';
+import { frozenSessionCompactionIndex } from './session-context.js';
+import { readSessionContextGraphHead } from './session-context-stream.js';
+import { publishSessionContextGraph } from './session-context-graph.js';
+import { fixtureCurrentSessionContext, fixtureSessionContextEntries, fixtureSessionContextSegments } from './testing/session-context.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
@@ -31,7 +33,7 @@ test('real terminal publication, whole compaction, retained context, immutable f
   try {
     let identity = await publishInProcessChannel(fixture.store);
     const run = fixture.store.getRun(fixture.runId), originalSession = fixture.store.getSession(run.sessionId);
-    const originalProjection = await fixture.store.artifacts.readCanonical<SessionContextProjection>(originalSession.contextProjectionRef);
+    const originalProjection = await readSessionContextGraphHead(fixture.store.artifacts, originalSession.contextProjectionRef);
     const stopped = await fixture.agent.cancelRun({ ...identity, requestId: uuidv7(), expectedRunRevision: run.revision });
     const proof = await quiescedToolCheckpoint(fixture, stopped.checkpointId);
     await fixture.agent.commitTerminalStop({ expectedRunRevision: fixture.store.getRun(run.id).revision, checkpoint: proof.checkpoint });
@@ -48,14 +50,14 @@ test('real terminal publication, whole compaction, retained context, immutable f
     const compactReply = await fixture.store.sessionContinuity(compact, identity); assert(compactReply.result.method === 'session.compact');
     const compacted = compactReply.result.snapshot.session;
     assert.equal(compacted.contextRevision, parent.contextRevision + 1); assert.equal(compacted.latestItemSeq, 2);
-    const exportedContext = await readSessionContextCut(driver, fixture.store.artifacts, identity.principalId, parent.id);
+    const exportedContext = await fixtureCurrentSessionContext(driver, fixture.store.artifacts, identity.principalId, parent.id);
     const workspaceIdentity = await fixture.store.artifacts.readCanonical<any>(parent.workspaceIdentityRef);
     const expectedHandoff = { schemaVersion: 1, format: 'cliq-session-handoff-v1', sessionId: parent.id,
       workspaceIdentityRef: parent.workspaceIdentityRef, workspaceIdentityDigest: workspaceIdentity.identityDigest,
       contextRevision: compacted.contextRevision, throughItemSeq: compacted.latestItemSeq, contextProjectionRef: compacted.contextProjectionRef,
       contextProjectionDigest: exportedContext.projection.projectionDigest,
       entries: exportedContext.entries.map(({ sourceItemId: _id, ...entry }) => entry),
-      excludedRanges: exportedContext.projection.segments.filter(segment => segment.kind === 'excluded_control')
+      excludedRanges: exportedContext.segments.filter(segment => segment.kind === 'excluded_control')
         .map(({ fromItemSeq, throughItemSeq, sourceItemsDigest }) => ({ fromItemSeq, throughItemSeq, sourceItemsDigest })), handoffDigest: '' };
     expectedHandoff.handoffDigest = digestOmitting(expectedHandoff, 'handoffDigest');
     const earlierUse = await fixture.store.artifacts.publishCanonical(expectedHandoff, expectedHandoff.format);
@@ -78,40 +80,41 @@ test('real terminal publication, whole compaction, retained context, immutable f
     const { requestDigest: _old, ...summaryCore } = summaryFork;
     const summaryReply = await fixture.store.sessionContinuity(mutation(summaryCore), identity); assert(summaryReply.result.method === 'session.fork');
     const summaryChild = summaryReply.result.snapshot.session;
-    const readSummary = await readSessionContextCut(driver, fixture.store.artifacts, identity.principalId, summaryChild.id);
-    assert.equal(readSummary.cut.items.length, 1, 'source compaction metadata beyond the fork cursor is not a logical child item');
+    const readSummary = await fixtureCurrentSessionContext(driver, fixture.store.artifacts, identity.principalId, summaryChild.id);
+    assert.equal(readSummary.cut.itemCount, 1, 'source compaction metadata beyond the fork cursor is not a logical child item');
     assert.deepEqual(readSummary.entries.map(entry => entry.sourceKind), ['summary', 'run_terminal']);
-    const projected = await readSessionContextEntries(fixture.store.artifacts, readSummary.projection,
+    const projected = await fixtureSessionContextEntries(fixture.store.artifacts, readSummary.projection,
       frozenSessionCompactionIndex(driver, summaryChild.id, 1));
     assert.deepEqual(projected, readSummary.entries);
     const currentChild = fixture.store.getSession(summaryChild.id);
     driver.transaction(connection => connection.prepare('UPDATE sessions SET context_revision=0,latest_item_seq=-1,context_projection_ref=? WHERE id=?').run('f'.repeat(64), summaryChild.id));
-    assert.deepEqual(await readSessionContextEntries(fixture.store.artifacts, readSummary.projection,
+    assert.deepEqual(await fixtureSessionContextEntries(fixture.store.artifacts, readSummary.projection,
       frozenSessionCompactionIndex(driver, summaryChild.id, 1)), projected,
       'admitted context depends only on immutable lineage/index, even when today mutable Session head cannot decode');
     assert.deepEqual(await fixture.store.sessionContinuity(mutation(summaryCore), identity), summaryReply,
       'historical first response is audited against its original graph, not today mutable child head');
     driver.transaction(connection => connection.prepare('UPDATE sessions SET context_revision=?,latest_item_seq=?,context_projection_ref=? WHERE id=?')
       .run(currentChild.contextRevision, currentChild.latestItemSeq, currentChild.contextProjectionRef, currentChild.id));
-    const summarySegment = readSummary.projection.segments[0]!; assert(summarySegment.kind === 'summary');
+    const summarySegment = readSummary.segments[0]!; assert(summarySegment.kind === 'summary');
     const compactionRow = driver.prepare('SELECT payload_ref FROM items WHERE item_id=?').get<{ payload_ref: string }>(summarySegment.compactionItemId)!;
     const justification = await fixture.store.artifacts.readCanonical<any>(compactionRow.payload_ref);
-    const previous = await fixture.store.artifacts.readCanonical<SessionContextProjection>(justification.previousProjectionRef);
-    const changedPrevious = structuredClone(previous); assert(changedPrevious.segments[0]!.kind === 'raw');
-    changedPrevious.segments[0]!.items[0]!.sourceSessionId = 'unrelated-same-bytes';
-    changedPrevious.projectionDigest = digestOmitting(changedPrevious, 'projectionDigest');
-    const changedPreviousArtifact = await fixture.store.artifacts.publishCanonical(changedPrevious, changedPrevious.format);
+    const previous = await readSessionContextGraphHead(fixture.store.artifacts, justification.previousProjectionRef);
+    const changedSegments = structuredClone(await fixtureSessionContextSegments(fixture.store.artifacts, previous));
+    const changedRaw = changedSegments[0]!; assert(changedRaw.kind === 'raw');
+    changedRaw.items[0]!.sourceSessionId = 'unrelated-same-bytes';
+    const changedPreviousArtifact = (await publishSessionContextGraph(fixture.store.artifacts, {
+      sessionId: previous.sessionId, contextRevision: previous.contextRevision, throughItemSeq: previous.throughItemSeq, segments: changedSegments })).artifact;
     const changedJustification = await fixture.store.artifacts.publishCanonical({ ...justification, previousProjectionRef: changedPreviousArtifact.ref }, 'cliq-session-compaction-v1');
     assert.throws(() => driver.transaction(connection => connection.prepare('UPDATE items SET payload_ref=? WHERE item_id=?').run(changedJustification.ref, summarySegment.compactionItemId)), /items are immutable/);
     const actualIndex = frozenSessionCompactionIndex(driver, summaryChild.id, 1);
     // Malformed data-candidate seam only: the real immutable index still checks
     // every supplied source tuple. No reducer, Run or native proof is minted.
-    await assert.rejects(readSessionContextEntries(fixture.store.artifacts, readSummary.projection,
+    await assert.rejects(fixtureSessionContextEntries(fixture.store.artifacts, readSummary.projection,
       (id, sources) => { const value = actualIndex(id, sources); return { ...value, item: { ...value.item, payloadRef: changedJustification.ref } }; }),
       { code: 'RECOVERY_REQUIRED' }, 'equal content cannot adopt an unrelated source Session');
-    assert.deepEqual(await readSessionContextEntries(fixture.store.artifacts, originalProjection), [], 'an old admitted projection remains unchanged');
-    const rawChild = await readSessionContextCut(driver, fixture.store.artifacts, identity.principalId, child.id);
-    assert.equal(rawChild.projection.segments[0]!.kind, 'raw'); assert.equal(rawChild.entries[0]!.sourceItemId, item.itemId);
+    assert.deepEqual(await fixtureSessionContextEntries(fixture.store.artifacts, originalProjection), [], 'an old admitted projection remains unchanged');
+    const rawChild = await fixtureCurrentSessionContext(driver, fixture.store.artifacts, identity.principalId, child.id);
+    assert.equal(rawChild.segments[0]!.kind, 'raw'); assert.equal(rawChild.entries[0]!.sourceItemId, item.itemId);
     const contenders = ['first', 'second'].map(summaryMarkdown => mutation({ protocolVersion: 1, method: 'session.compact', requestId: uuidv7(),
       sessionId: child.id, expectedContextRevision: 1, fromItemSeq: 1, throughItemSeq: 1, summaryMarkdown, retainedItemIds: [] }));
     const competed = await Promise.allSettled(contenders.map(request => fixture.store.sessionContinuity(request, identity)));

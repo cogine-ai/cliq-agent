@@ -895,9 +895,11 @@ async function readRecoveryProjection(
     await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
     try {
       const waiting=run.status==='waiting'&&run.waitingReason==='reconciliation'&&run.waitingOnRef
-        ?await artifacts.readCanonical<{subject?:{kind?:string}}>(run.waitingOnRef):undefined;
+        ?await artifacts.readCanonical<{subject?:{kind?:string;recovery?:string}}>(run.waitingOnRef):undefined;
       if(waiting?.subject?.kind==='invocation'){
-        await validateManualInvocationWait(driver,artifacts,closure);
+        if (waiting.subject.recovery === 'mcp_reconcile')
+          await (await import('./mcp-status-state.js')).validateMcpInvocationWait(driver, artifacts, closure);
+        else await validateManualInvocationWait(driver,artifacts,closure);
         await validateRetainedWorkerQuarantines(artifacts,{...databaseCut,workspaceGenerations:generationProofs},driver);
       }else await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver);
     }

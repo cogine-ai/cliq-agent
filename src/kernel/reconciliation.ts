@@ -72,7 +72,8 @@ export type ReconciliationProbeDispatchV1 = {
   owningSupervisorInstanceId: string;
   dispatchDigest: string;
 } & (
-  | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerRequestDigest: string; brokerTargetDigest: string; brokerFenceTokenDigest: string }
+  | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerRequestDigest: string; brokerTargetDigest: string; brokerFenceTokenDigest: string;
+      previousWaitingSubjectRef: ArtifactRef; preparationRef: ArtifactRef; preparationDigest: string }
   | { subjectKind: 'publication'; inspectorTaskId: string; inspectionTargetDigest: string; previousWaitingSubjectRef: ArtifactRef }
   | { subjectKind: 'worker_recovery'; inspectorTaskId: string; inspectionTargetDigest: string }
 );
@@ -96,7 +97,8 @@ export type ReconciliationProbeTimeoutClosureV1 = {
   closedAt: string;
   closureDigest: string;
 } & (
-  | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerTargetDigest: string; brokerFenceTokenDigest: string; noActiveReleaseForNonce: true }
+  | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerTargetDigest: string; brokerFenceTokenDigest: string; noActiveReleaseForNonce: true;
+      retirementRef: ArtifactRef; retirementDigest: string; lateStatusCaptureRef?: ArtifactRef; lateStatusCaptureDigest?: string }
   | { subjectKind: 'publication'; deliveryPlanRef: ArtifactRef; pathOperationId: string; attempt: number; inspectorTaskId: string; taskClosure: ReconciliationInspectorTaskClosureV1 }
   | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string; taskClosure: ReconciliationInspectorTaskClosureV1 }
 );
@@ -109,10 +111,13 @@ export type ReconciliationProbeCancellationClosureV1 = {
   probeNonceDigest: string; probeDispatchDigest: string; probeDeadlineAt: string;
   inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; closedAt: string; closureDigest: string;
   reason: 'owning_supervisor_shutdown';
-  taskClosure: Extract<ReconciliationInspectorTaskClosureV1, { closureKind: 'cancelled_and_joined' }>;
 } & (
-  | { subjectKind: 'publication'; deliveryPlanRef: ArtifactRef; pathOperationId: string; attempt: number; inspectorTaskId: string }
-  | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string }
+  | { subjectKind: 'publication'; deliveryPlanRef: ArtifactRef; pathOperationId: string; attempt: number; inspectorTaskId: string;
+      taskClosure: Extract<ReconciliationInspectorTaskClosureV1, { closureKind: 'cancelled_and_joined' }> }
+  | { subjectKind: 'worker_recovery'; oldWorkerLaunchId: string; processContainmentRef: ArtifactRef; inspectorTaskId: string;
+      taskClosure: Extract<ReconciliationInspectorTaskClosureV1, { closureKind: 'cancelled_and_joined' }> }
+  | { subjectKind: 'mcp_recovery'; brokerDispatchId: string; brokerTargetDigest: string; brokerFenceTokenDigest: string; noActiveReleaseForNonce: true;
+      retirementRef: ArtifactRef; retirementDigest: string; lateStatusCaptureRef?: ArtifactRef; lateStatusCaptureDigest?: string }
 );
 
 export type ReconciliationProbeEvidenceV1 = {

@@ -160,6 +160,7 @@ export type AdminProbeClosureEvidenceV1 = Readonly<{
   nativeLifecycleRef?: ArtifactRef; nativeLifecycleDigest?: string;
   nativeLifecycleProjectionRef?: ArtifactRef; nativeLifecycleProjectionDigest?: string;
   nativeCleanupRef?: ArtifactRef; nativeCleanupDigest?: string;
+  nativeCurrentRetirement?: Readonly<{ kind: 'original_same_owner'; rawRef: ArtifactRef; projectionRef: ArtifactRef }>;
 }> & (Readonly<{ closureKind: 'no_spawn'; noSpawnEvidenceRef: ArtifactRef; noSpawnEvidenceDigest: string }> |
   Readonly<{ closureKind: 'containment_dead'; processContainmentRef: ArtifactRef; dispatchId?: string;
     probeRequestDigest?: string; deathEvidenceRef: ArtifactRef; deathEvidenceDigest: string }>);
@@ -685,7 +686,7 @@ export function decodeAdminProbeClosureEvidence(value: unknown): AdminProbeClosu
     'plannedContainmentRef', 'plannedContainmentDigest', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'inspectorIdentityRef',
     'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'closureKind',
     ...(kind === 'no_spawn' ? ['noSpawnEvidenceRef', 'noSpawnEvidenceDigest'] : ['processContainmentRef', 'deathEvidenceRef', 'deathEvidenceDigest'])],
-  ['nativeLifecycleRef', 'nativeLifecycleDigest', 'nativeLifecycleProjectionRef', 'nativeLifecycleProjectionDigest', 'nativeCleanupRef', 'nativeCleanupDigest',
+  ['nativeLifecycleRef', 'nativeLifecycleDigest', 'nativeLifecycleProjectionRef', 'nativeLifecycleProjectionDigest', 'nativeCleanupRef', 'nativeCleanupDigest', 'nativeCurrentRetirement',
     ...(kind === 'containment_dead' ? ['dispatchId', 'probeRequestDigest'] : [])]);
   if (data.schemaVersion !== 1 || data.format !== 'cliq-admin-probe-closure-evidence-v1' || !['no_spawn', 'containment_dead'].includes(kind as string))
     throw new TypeError('invalid MCP admin resource closure');
@@ -699,6 +700,13 @@ export function decodeAdminProbeClosureEvidence(value: unknown): AdminProbeClosu
   if (Object.hasOwn(data, 'nativeLifecycleRef') !== Object.hasOwn(data, 'nativeLifecycleProjectionRef') ||
       Object.hasOwn(data, 'nativeCleanupRef') && !Object.hasOwn(data, 'nativeLifecycleRef'))
     throw new TypeError('MCP native cleanup audit requires the complete original raw lifecycle and canonical projection');
+  if (Object.hasOwn(data, 'nativeCurrentRetirement')) {
+    const current = controlWireRecord(data.nativeCurrentRetirement, ['kind', 'rawRef', 'projectionRef']);
+    if (current.kind !== 'original_same_owner' || kind !== 'containment_dead' || !Object.hasOwn(data, 'dispatchId') ||
+        !Object.hasOwn(data, 'nativeLifecycleRef') || Object.hasOwn(data, 'nativeCleanupRef'))
+      throw new TypeError('MCP current original-owner retirement cannot borrow a no-spawn, unclaimed or successor cleanup branch');
+    controlWireRef(current.rawRef); controlWireRef(current.projectionRef);
+  }
   if (Object.hasOwn(data, 'dispatchId')) controlWireText(data.dispatchId);
   digest(data, 'evidenceDigest');
   return immutableSnapshot(data) as AdminProbeClosureEvidenceV1;

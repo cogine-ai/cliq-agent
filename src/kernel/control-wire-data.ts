@@ -358,10 +358,15 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
   }
 
   if (phase === 'prepared') {
-    rejectUnknownKeys(record, JOURNAL_BASE_KEYS, 'Journal(prepared)');
-    requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS], 'Journal(prepared)');
+    const retryClosure = record.opKind === 'mcp' && record.replayClass === 'retry' && (record.attempt as number) > 0;
+    const birthKeys = (record.opKind === 'mcp-server' || retryClosure) &&
+      (has(record, 'evidenceRef') || has(record, 'evidenceDigest')) ? ['evidenceRef', 'evidenceDigest'] : [];
+    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...birthKeys], 'Journal(prepared)');
+    requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS.filter(key => !birthKeys.includes(key))], 'Journal(prepared)');
+    if (birthKeys.length) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(prepared MCP original resource/dispatch closure)');
   } else if (phase === 'dispatch_claimed') {
-    const birthKeys = record.opKind === 'publish' ? ['evidenceRef', 'evidenceDigest'] : [];
+    const birthKeys = record.opKind === 'publish' || (record.opKind === 'mcp' || record.opKind === 'mcp-server') &&
+      (has(record, 'evidenceRef') || has(record, 'evidenceDigest')) ? ['evidenceRef', 'evidenceDigest'] : [];
     rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, ...birthKeys], 'Journal(dispatch_claimed)');
     requireClaimIdentity(record);
     if (!isZeroBudget(decodeWireBudget(record.budgetDelta, 'Journal.budgetDelta'))) {
@@ -370,14 +375,18 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
     requireAbsent(record, JOURNAL_TERMINAL_KEYS.filter(key => !birthKeys.includes(key)), 'Journal(dispatch_claimed)');
     if (record.opKind === 'publish' && (!has(record, 'evidenceRef') || !has(record, 'evidenceDigest')))
       invalid('publication dispatch requires its complete original arena birth evidence');
+    if (birthKeys.length) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(dispatch claim original evidence)');
   } else if (phase === 'completed') {
+    const birthKeys = record.opKind === 'publish' || (record.opKind === 'mcp' || record.opKind === 'mcp-server') &&
+      (has(record, 'evidenceRef') || has(record, 'evidenceDigest')) ? ['evidenceRef', 'evidenceDigest'] : [];
     rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'resultRef', 'receiptRef', 'budgetSettlementRef',
-      ...(record.opKind === 'publish' ? ['evidenceRef', 'evidenceDigest'] : [])], 'Journal(completed)');
+      ...birthKeys], 'Journal(completed)');
     requireClaimIdentity(record);
     requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
     if (!has(record, 'resultRef') && !has(record, 'receiptRef')) invalid('completed requires a result or receipt');
     if (has(record, 'resultRef')) requireArtifactRef(record.resultRef, 'Journal.resultRef');
     if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
+    if (birthKeys.length) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(completed original evidence)');
     if (record.opKind === 'publish' && (!has(record, 'receiptRef') || !has(record, 'evidenceRef') ||
         record.receiptRef !== record.evidenceRef)) invalid('completed publication requires its identical terminal receipt and evidence');
   } else if (phase === 'unknown') {

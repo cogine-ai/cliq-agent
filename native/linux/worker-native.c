@@ -21,6 +21,7 @@
 #include "verifier-setup.h"
 #include "worker-sha256.h"
 #include "mcp-http-admin-protocol.h"
+#include "mcp-stdio-owner-bridge.h"
 #include <linux/magic.h>
 #include <linux/sched.h>
 #include <poll.h>
@@ -35,7 +36,7 @@
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
 /* Private wire8/ACK scope layouts never unwrap an older loaded module's
  * controller or scope object, even when both live images share one Node VM. */
-static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0xb49c442ec8a94f24), UINT64_C(0x8402dec45192c417) };
+static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0xb49c442ec8a94f24), UINT64_C(0x8402dec45192c418) };
 static const napi_type_tag SCOPE_TAG = { UINT64_C(0xe162b285570c4c44), UINT64_C(0xab9d62c76fbaf11e) };
 static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
 
@@ -53,6 +54,9 @@ struct native_scope;
 struct controller;
 struct source_native_scope;
 struct mcp_admin_native_scope;
+struct mcp_stdio_native_scope;
+static void mcp_stdio_native_joined(struct controller *controller);
+static void mcp_stdio_native_complete(napi_env env, struct controller *controller);
 static void mcp_admin_native_joined(struct controller *controller);
 static void mcp_admin_native_complete(napi_env env,struct controller *controller);
 static void source_native_revoke(struct controller *controller);
@@ -75,7 +79,8 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     bool preparation_started, preparation_finished, preparation_joined;
     struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
     bool reservation_bound, inspection_only, retained_observed, reservation_observed;
-    napi_env env; pid_t creator_pid; struct mcp_admin_native_scope *mcp_admin; napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
+    napi_env env; pid_t creator_pid; struct mcp_admin_native_scope *mcp_admin; struct mcp_stdio_native_scope *mcp_stdio;
+    napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
     napi_deferred close_deferred; napi_ref close_promise;
 };
 struct native_scope { struct controller *controller; struct native_scope *next, *parent; unsigned int id, references;
@@ -373,6 +378,7 @@ static void reap_controller(napi_env env, void *data) {
     controller->reaped = reaped;
     if (reaped) source_native_joined(controller);
     if (reaped) mcp_admin_native_joined(controller);
+    if (reaped) mcp_stdio_native_joined(controller);
     if (reaped) retire_controller_leaf(controller);
 }
 
@@ -414,6 +420,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
     controller->cleanup_done = true;
     source_native_complete(env, controller);
     mcp_admin_native_complete(env, controller);
+    mcp_stdio_native_complete(env, controller);
     if (!controller->reaped || controller->retirement_failed) atomic_store(&native_retirement_failed, true);
     settle_controller_close(env, controller);
     controller_release(controller);
@@ -1923,7 +1930,9 @@ static bool prepare_controller_io(struct controller *controller) {
 #include "source-git-native.h"
 #include "preparation-git-native.h"
 #include "dependency-npm-native.h"
+#include "mcp-admin-original-retirement-native.h"
 #include "mcp-http-admin-native.h"
+#include "mcp-stdio-native.h"
 
 /* Read-only arena inventory. It grants no spawn/lease/release and never
  * reuses an old id. The original create guard remains authoritative. */
@@ -1968,6 +1977,12 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "createBuiltinTool", NULL, create_builtin_tool, NULL, NULL, NULL, napi_default, NULL },
         { "createDependencyNpm", NULL, create_dependency_npm, NULL, NULL, NULL, napi_default, NULL },
         { "reserveMcpHttpAdmin", NULL, reserve_mcp_admin, NULL, NULL, NULL, napi_default, NULL },
+        { "reserveMcpStdioAdmin", NULL, reserve_mcp_stdio_admin, NULL, NULL, NULL, napi_default, NULL },
+        { "reserveMcpStdioRun", NULL, reserve_mcp_stdio_run, NULL, NULL, NULL, napi_default, NULL },
+        { "reserveMcpStdioRecovery", NULL, reserve_mcp_stdio_recovery, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRetainedMcpStdioAdmin", NULL, cleanup_mcp_stdio_admin, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRetainedMcpStdioRun", NULL, cleanup_mcp_stdio_run, NULL, NULL, NULL, napi_default, NULL },
+        { "cleanupRetainedMcpStdioRecovery", NULL, cleanup_mcp_stdio_recovery, NULL, NULL, NULL, napi_default, NULL },
         { "cleanupRetainedMcpHttpAdmin", NULL, cleanup_retained_mcp_admin, NULL, NULL, NULL, napi_default, NULL },
         { "reserveSourceGit", NULL, reserve_source_git, NULL, NULL, NULL, napi_default, NULL },
         { "reservePreparationGit", NULL, reserve_preparation_git, NULL, NULL, NULL, napi_default, NULL },
@@ -2040,12 +2055,14 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealDependencyNpmScript", NULL, seal_dependency_script, NULL, NULL, NULL, napi_default, NULL },
         { "sealDependencyNpmData", NULL, seal_dependency_data, NULL, NULL, NULL, napi_default, NULL },
         { "sealMcpHttpAdminProbe", NULL, seal_mcp_admin_script, NULL, NULL, NULL, napi_default, NULL },
+        { "sealMcpStdioServer", NULL, seal_mcp_stdio_server, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
         { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
     set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
-    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); set_number(env, exports, "dependencyInterfaceVersion", 1); set_number(env,exports,"mcpAdminInterfaceVersion",1); return exports;
+    set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); set_number(env, exports, "dependencyInterfaceVersion", 1); set_number(env,exports,"mcpAdminInterfaceVersion",1);
+    set_number(env, exports, "mcpStdioInterfaceVersion", 1); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

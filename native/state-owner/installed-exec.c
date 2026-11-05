@@ -128,6 +128,7 @@ static napi_value execute_installed_image(napi_env env, napi_callback_info info)
         (strcmp(role, "keeper") != 0 && strcmp(role, "supervisor") != 0 && strcmp(role, "endpoint") != 0 && strcmp(role, "credential") != 0))
         return installed_exec_error(env, "invalid fixed installed image exec input", 0);
     int credential_role = strcmp(role, "credential") == 0;
+    int supervisor_role = strcmp(role, "supervisor") == 0;
     if (credential_role ? argc != 9 || !installed_string(env, args[8], command, sizeof(command)) ||
         strspn(command, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != strlen(command) : argc != 8)
         return installed_exec_error(env, "invalid fixed installed credential metadata", 0);
@@ -184,10 +185,18 @@ static napi_value execute_installed_image(napi_env env, napi_callback_info info)
 done:
     retire_process_fd(&independent_image, &retirement_failed);
     retire_process_fd(&named_image, &retirement_failed);
-    retire_process_fd(&root, &retirement_failed);
+    /* Only the terminal Supervisor launch retains the already checked root
+     * through exec. Client/daily and all other installed roles keep their CWD. */
+    if (error || !supervisor_role) retire_process_fd(&root, &retirement_failed);
     if (!close_current_process_image(&bootstrap)) retirement_failed = 1;
-    if (retirement_failed || atomic_load(&current_process_retirement_failed)) return current_process_retirement_error(env);
-    if (error) return native_error(env, error);
+    if (retirement_failed || atomic_load(&current_process_retirement_failed)) {
+        retire_process_fd(&root, &retirement_failed);
+        return current_process_retirement_error(env);
+    }
+    if (error) {
+        retire_process_fd(&root, &retirement_failed);
+        return installed_exec_error(env, error, retirement_failed);
+    }
 
     /* Close the cut after every temporary resource has been consumed. The
      * final process sample retires its own temporary descriptor before return.
@@ -204,14 +213,22 @@ done:
         final_real_gid == real_gid && final_effective_gid == effective_gid && final_saved_gid == saved_gid &&
         observe_process_with_retirement(bootstrap.pid, final_start, &retirement_failed) == 1 &&
         strcmp(final_start, bootstrap.start_token) == 0 &&
-        fstat(image_fd, &held) == 0 && installed_executable(&held) && installed_image_matches(&held, &image_expected);
-    if (!valid || retirement_failed || atomic_load(&current_process_retirement_failed))
+        fstat(image_fd, &held) == 0 && installed_executable(&held) && installed_image_matches(&held, &image_expected) &&
+        (!supervisor_role || (root >= 0 && fstat(root, &actual) == 0 && installed_root_matches(&actual, root_expected)));
+    if (!valid || retirement_failed || atomic_load(&current_process_retirement_failed)) {
+        retire_process_fd(&root, &retirement_failed);
         return installed_exec_error(env, "installed exec final process, root, or held image identity changed", retirement_failed);
+    }
 
     char *const arguments[] = {target_path, strcmp(role, "keeper") == 0 ? "--installed-keeper" :
         strcmp(role, "endpoint") == 0 ? "--installed-endpoint" : credential_role ? "--installed-credential" : "--installed-supervisor",
         root_path, bundle, root_locator, credential_role ? command : NULL, NULL};
     char *const environment[] = {"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", NULL};
+    /* Establish the fixed private backup URI-literal rejection domain only
+     * for the cold Supervisor. From this point onward never return to Node:
+     * no running Owner or client workspace can observe a temporary chdir. */
+    if (supervisor_role && (fchdir(root) != 0 || stat(".", &actual) != 0 ||
+        !installed_root_matches(&actual, root_expected))) _exit(70);
     /* This is a terminal FD whitelist, not a per-FD successful-close proof.
      * After unsharing/changing the table, never resume Node or run finalizers. */
     if (syscall(SYS_close_range, 3u, UINT_MAX, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0) _exit(70);

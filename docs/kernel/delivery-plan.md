@@ -16,8 +16,8 @@ that exact result. Continue completing this journey while CI runs alongside
 independent implementation work.
 
 At the last inspected remote source,
-`38a41fe890d343b5a2a5dae2f15566c41c84ab9c`, the
-[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916699)
+`49a42ccaa029e84774645f24c8ee2450f491d3da`, the
+[Linux daily campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41561190721)
 passes signed `setup`, `models`, `run`, `result` and `apply`, including an actual
 required-check failure, one repair and the final applied changes. Its four
 model POSTs use the owned HTTPS endpoint and the fixed `yolo`/Node verifier
@@ -25,19 +25,18 @@ profile. This qualifies that controlled workflow; real-provider requests and
 billing remain unverified, with zero paid calls made. All four Linux/macOS and
 Node 22/24 test jobs pass at that source.
 
-That run has seventeen successful jobs, seven failures and one cancellation.
-The verifier campaign passes its first five cases, including ordinary Git,
-but misses the ordinary-tools source window and does not meet Stop2 there.
-Received-model and startup shutdown pass; the received-tool successor reaches
-queued finalization but exceeds its original thirty-second observation window.
-The normal Delivery campaign is cancelled at its original twenty-minute
-workflow limit. Delayed-storage campaigns still fail before their intended
-physical publication cuts. Upgrade reaches schema 8 and reads the original Run
-and CAS, then its original endpoint read refuses with the cause unconfirmed.
-Retain all of this evidence;
-neither diagnostics nor a different passing cut close those gaps. Subsequent
-candidates still require the complete campaigns at the original 90/30/2/5-second
-limits. These remote results do not qualify the later local candidates.
+That run has nineteen successful jobs and six failures, with no cancelled jobs.
+The received-tool campaign now passes original Stop2 and actual successor
+completion; original-claim settlement after real CAS refusal also passes.
+The verifier campaign still misses the ordinary-tools source window and lacks
+original shutdown proof there. Git Delivery remains queued on its original
+publication claim at the fixed ninety-second terminal bound. Delayed storage
+misses READY5s; the original publication-stop and late-result campaigns miss a
+request30s before their intended physical cuts. Upgrade reaches its retained
+receipt replay case but fails output selection. Keep the source-bound bounded
+JSON reports, their independent cleanup and the unexecuted cuts explicit.
+Neither diagnostics nor a passing different cut closes these gaps. These
+remote results do not qualify the later local candidates.
 
 The ordinary-permission implementation adds fixed Node checks under `default` and
 `accept-edits`, using exact worker-free candidate approvals or explicitly
@@ -46,9 +45,10 @@ complete-plan approval, source-bound fresh grants, required-denial cancellation,
 advisory skips, counted repair candidates and original claimed/UNKNOWN limits.
 Shared CLI/TUI/SDK consumers use the existing v1 methods. Focused component
 regressions are not the real installed permission, preclaim shutdown or upgrade
-qualification. The [permission campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916990)
-misses the original five-second client READY limit before exercising its cases;
-all original timing limits and those qualification gaps remain open.
+qualification. The latest
+[permission campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/41561190612)
+also fails; its full installed permission qualification remains open. All
+original timing limits and those qualification gaps remain unchanged.
 
 The MCP implementation connects authenticated discovery, frozen provider-safe tool
 contracts, one claimed stateless HTTP call, received-result retention or
@@ -56,21 +56,48 @@ full-once UNKNOWN, worker retirement and explicit manual abandonment through
 the existing terminal writer. Its installed campaign includes code modification,
 required Node checks, result review/application, reconnect and restart. Pinned
 component tests and compiled Linux C data checks do not qualify that installed
-campaign. Its [first installed run](https://github.com/cogine-ai/cliq-agent/actions/runs/41526916880)
-fails at registration before its first case. Follow-up repairs keep asynchronous
-refusals inside the original control error boundary and revoke the dedicated
-Admin controller before joining its pending scope; real Linux lifecycle
-validation remains required. Authenticated Bearer, active Admin shutdown, retry/backoff, zero-I/O
-failure, known-unusable results and precise crash cuts still need their real
-campaigns. An Admin persistence outage beyond its five-second retirement
-freshness window remains fenced with its original owner; it has no native
-fresh-observation continuation yet.
+campaign. Its latest
+[installed run](https://github.com/cogine-ai/cliq-agent/actions/runs/41561190796)
+passes the authenticated preclaim refusal with zero registrations, claims or
+endpoint traffic, then closes the original peer during registration and lacks
+original Stop2 proof. The closed exchange substage is observed; the underlying
+Admin lifecycle failure is not yet attributed. Follow-up diagnostics preserve
+the original failure and cannot supply retirement evidence.
 
-I4 import/rollback/GC implementation advances independently in a private complete
-package. Legacy history projection passes its focused Node 22/24 data suites;
-the physical backup, fenced import, marker recovery, rollback and typed GC roots
-still require integrated implementation and real qualification. No preview,
-SQLite row or copied pathname supplies migration or execution authority.
+The complete private stdio implementation separates server launch from effect
+claims and charges, uses an isolated empty root without workspace or network
+access, and retains actual native input/controller/pipe joins. Same-owner Admin
+fresh observation follows the original retired identity instead of rewriting
+old closure times; successor cleanup never borrows an old join. Current
+component coverage includes both Node versions, Linux StateOwner/worker/broker
+compilation and forty-one compiled native data checks. Signed installed stdio,
+retry/reconcile, authenticated Bearer, active Admin shutdown, zero-I/O failure,
+known-unusable results and precise crash cuts still need their real campaigns.
+
+I4 advances as one private migration/rollback/GC package. Complete source passes,
+paged five-kind legacy context, strict candidate comparison, owned import,
+linked marker history and startup fencing share the original lifecycle. Session
+show/fork/compact/handoff and model consumers retain full boundaries; an
+oversized request asks for explicit compaction without creating a Run or
+silently truncating context. [Bounded Run scheduling](bounded-run-scheduling.md)
+uses one account preference,
+FIFO driver lanes and the original preparing transaction's physical-capacity
+check. Lowering capacity does not discard retained resources. Component tests
+are not installed concurrency or thousand-Run qualification.
+
+Node's genuine online-backup engine selects the fixed named VFS in a Linux
+experiment. Original-FD archive custody, real old-lock ownership, present-auth
+import, restart/rollback and complete typed GC still need their connected
+implementation and physical verification. No preview, SQLite row, copied path
+or purpose vocabulary supplies migration, execution authority or GC coverage.
+
+Real-provider qualification has not reached enrollment or a model call. The
+latest four-CPU x64 TCG attempt passes package construction but exceeds the
+unchanged normal setup30s bound. All original process/pipe and outer-account
+cleanup joins complete, baselines match, and its reservation is released:
+zero paid calls and zero spend. Do not repeat an identical slow-VM attempt or
+relax the limit. Continue shared implementation while retaining the need for
+sufficiently fast native Linux, macOS, reboot and scale environments.
 
 Remaining implementation includes the other MCP transport/recovery profiles,
 managed local inference, configurable bounded concurrency, complete state

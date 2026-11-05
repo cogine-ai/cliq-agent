@@ -185,7 +185,7 @@ test('only current installed single-verifier admission uses the new quartet afte
   const transaction = source.indexOf('  driver.transaction((connection) => {', ordinary);
   const fresh = source.indexOf('const freshNow = sampleCanonicalNow();', transaction), consume = source.indexOf('verifierConsumption?.commit(connection, freshNow)', fresh);
   assert(transaction > ordinary && fresh > transaction && consume > fresh);
-  for (const check of ['assertSessionContextCut(connection, sessionContext.cut)', 'assertActiveStateOwner(connection, owner)',
+  for (const check of ['assertCurrentSessionContextGraph(connection, sessionContext.cut)', 'assertActiveStateOwner(connection, owner)',
     'assertCurrentControlFrame(owner, installed.identity)', 'recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity, connection)'])
     assert(source.slice(transaction, consume).includes(check), check);
 });

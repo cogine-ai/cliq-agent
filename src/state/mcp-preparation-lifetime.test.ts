@@ -41,7 +41,7 @@ test('all four direct asynchronous control producers await inside the original r
     while (boundary && !ts.isTryStatement(boundary)) boundary = boundary.parent;
     assert(boundary && ts.isTryStatement(boundary) && boundary.catchClause);
     assert(boundary.tryBlock.pos < call.pos && call.end < boundary.tryBlock.end);
-    assert.match(boundary.catchClause.getText(parsed), /error: errorResult\(error, method === 'credential\.finalize'\)/u,
+    assert.match(boundary.catchClause.getText(parsed), /error: (?:sessionContextRequestLimitRefusal\(knownMethod,\s*error\) \?\? )?errorResult\(error, method === 'credential\.finalize'\)/u,
       'preserve the closed original error mapper instead of retiring the connection on an ordinary refusal');
     if (name === 'mutateMcpRegistration' || name === 'listMcpRegistrations')
       assert.match(call.arguments[0]!.getText(parsed), /^decodeInstalledControlRequest\(request\) as /u);

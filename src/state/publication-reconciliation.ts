@@ -37,6 +37,7 @@ import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
 import { WORKER_PROBE_BACKOFF_MS } from './worker-recovery.js';
+import { readReconciliationProbeCapacity } from './reconciliation-capacity.js';
 
 type TaskInput = { runId: string; expectedRunRevision: number; execution: unknown; task: DeliveryPublicationReconciliationTask };
 type Mutation = { request: RunReconcileRequestV1; identity: AuthenticatedControlIdentity };
@@ -398,6 +399,7 @@ export const beginPublicationReconciliationProbe = stateOperation('RECOVERY_REQU
     responseArtifact = await artifacts.publishCanonical(response, 'cliq-control-response-v1'); metadata.push(coreArtifact, responseArtifact);
   }
   const accept = bindCut(driver, owner, cut, prefix.admission.source);
+  const capacity = await readReconciliationProbeCapacity(driver, reads);
   let outcome: TimeFenceAdvance | undefined, committed = false;
   driver.transaction(connection => {
     if (mutation) {
@@ -405,7 +407,8 @@ export const beginPublicationReconciliationProbe = stateOperation('RECOVERY_REQU
       if (readControlRequest(connection, mutation.identity.principalId, 'run.reconcile', mutation.request.requestId)) return;
     }
     resources.signal.throwIfAborted(); assertDeliveryPublicationReconciliationExecution(driver, owner, input.execution, input.task, artifacts, connection);
-    accept(connection); const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+    accept(connection); capacity.assertAvailable(connection);
+    const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
     if (now < at || now >= dispatch.probeDeadlineAt) fail('publication probe expired or regressed before dispatch commit');
     for (const artifact of metadata) insertArtifactMetadata(connection, artifact, at);

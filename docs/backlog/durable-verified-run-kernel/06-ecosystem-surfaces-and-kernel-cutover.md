@@ -175,7 +175,7 @@ Implementation notes:
    [RFC 15. Surfaces And Ecosystem Thin Waist](../../rfcs/2026-08-11-durable-verified-run-kernel.md#15-surfaces-and-ecosystem-thin-waist).
    This package enforces that contract without a second schema copy.
 
-   The same generated source imports verbatim the RFC's `ControlQueryRequestV1|ControlMutationRequestV1|ControlRequestV1`, discriminated `AuthorizationCreateRequest|AuthorizationRevokeRequest`, `McpRecoveryRequest|McpRegisterRequest|McpRefreshRequest`, and the complete result side: `ArtifactDescriptorV1`, `SessionSnapshotV1`, `SessionSummaryV1`, `RunSnapshotV1`, `RunItemReferenceV1`, `AuthorizationGrantSummaryV1`, `McpRegistrySummaryV1`, `RuntimeBundlePublicSummaryV1`, the method-discriminated `ControlResultV1`, `ControlErrorV1`, and `ControlApplicationResponseV1`. Those unions are the only public request/result/error source: every method maps to exactly one listed variant; query filters/cursors and list/get/attach arrays retain the RFC bounds; authorization/MCP summaries use its redaction; consumed authorization revoke is the exact `already_consumed` no-op variant. It must not expose an ArtifactRef where the public request uses an opaque grant/registration id. `run.get/list/attach`, `session.get/list`, `authorization.list`, `mcp.list`, `artifact.get`, `run.diff/result`, `session.handoff.create`, and `supervisor.status` are read-only and reject `requestId`. Handoff imports exact `SessionHandoffEntryV1|SessionHandoffV1`: omitted cursor means the captured projection cut; explicit cursor is zero or a current segment end; one snapshot walks visible run-terminal/summary entries and excluded ranges. JSON is exact JCS and Markdown uses the fixed LF/indented-entry renderer with no time/random/path option. Both descriptors rehash those bytes, so identical Session/revision/cursor returns identical CAS refs.
+   The same generated source imports verbatim the RFC's `ControlQueryRequestV1|ControlMutationRequestV1|ControlRequestV1`, discriminated `AuthorizationCreateRequest|AuthorizationRevokeRequest`, `McpRecoveryRequest|McpRegisterRequest|McpRefreshRequest`, and the complete result side: `ArtifactDescriptorV1`, `SessionSnapshotV1`, `SessionSummaryV1`, `RunSnapshotV1`, `RunItemReferenceV1`, `AuthorizationGrantSummaryV1`, `McpRegistrySummaryV1`, `RuntimeBundlePublicSummaryV1`, the method-discriminated `ControlResultV1`, `ControlErrorV1`, and `ControlApplicationResponseV1`. Those unions are the only public request/result/error source: every method maps to exactly one listed variant; query filters/cursors and list/get/attach arrays retain the RFC bounds; authorization/MCP summaries use its redaction; consumed authorization revoke is the exact `already_consumed` no-op variant. It must not expose an ArtifactRef where the public request uses an opaque grant/registration id. `run.get/list/attach`, `session.get/list`, `authorization.list`, `mcp.list`, `artifact.get`, `run.diff/result`, `session.handoff.create`, and `supervisor.status` are read-only and reject `requestId`. Handoff imports exact `SessionHandoffEntryV1|SessionHandoffV1`: omitted cursor means the captured projection cut; explicit cursor is zero or a current segment end; one snapshot walks visible run-terminal, validated context-only legacy and summary entries plus excluded ranges. Legacy entries use only the same fixed historical user-context projection as the model/Session-compaction reader; raw legacy files, old tool/permission/configuration authority and control payloads remain excluded. JSON is exact JCS and Markdown uses the fixed LF/indented-entry renderer with no time/random/path option. Both descriptors rehash those bytes, so identical Session/revision/cursor returns identical CAS refs.
 
    `session.get` and `run.get` implement the RFC snapshot-pagination algorithm, not adapter-local cursor conventions. One SQLite snapshot captures the returned snapshot and all sequence/Checkpoint high-waters; numeric cursors default to zero and are exclusive, rows are strict `(after,highWater]`, and `next` is the last returned cursor or the supplied cursor for an empty stream. Session items and Run items/Journal facts are sequence ordered; Checkpoints are `(createdAt,id)` ordered and use the exact unpadded-base64url canonical-JCS cursor bound to the Run and a retained row. Future, malformed, wrong-Run, or nonexistent cursors are `INVALID_REQUEST`. `session.get` applies its 1 MiB JCS-array cap; `run.get` applies the combined cap to `JCS({items,journal,checkpoints})` in deterministic items-then-Journal-then-Checkpoint priority while retaining independent next cursors. Equality to the captured high-water means caught up through that cut; a later read captures new rows. No client infers end-of-stream from an optional field, treats `next` as next-unread, or invents a Checkpoint token.
 
@@ -489,6 +489,13 @@ Implementation notes:
            sizeBytes: number
          }
        | {
+           kind: 'model_signature'
+           logicalPath: 'model-signature'
+           artifactRef: ArtifactRef
+           artifactDigest: string
+           sizeBytes: 64
+         }
+       | {
            kind: 'tokenizer'
            logicalPath: 'tokenizer'
            artifactRef: ArtifactRef
@@ -649,6 +656,8 @@ Implementation notes:
      activationCycleId: string
      ownerPrincipalId: string
      serviceId: string
+     localModelRegistrationRef: ArtifactRef
+     localModelRegistrationDigest: string
      serviceSpecRef: ArtifactRef
      serviceSpecDigest: string
      cycleOrdinal: number
@@ -818,6 +827,8 @@ Implementation notes:
      ownerPrincipalId: string
      provider: 'ollama'
      model: string
+     localModelRegistrationRef: ArtifactRef
+     localModelRegistrationDigest: string
      serviceSpecRef: ArtifactRef
      serviceSpecDigest: string
      stableServiceIdentityDigest: string
@@ -1064,7 +1075,7 @@ Implementation notes:
      protocol: 'cliq-mcp-reconcile-v1'
      profiles: Array<{
        profileId: string
-       serverExecutionIdentityDigest: string
+    profileSigningIdentityDigest: string
        serverToolName: string
        initializeDigest: string
        capabilityDigest: string
@@ -1103,6 +1114,7 @@ Implementation notes:
      probeResultDigest: string
      serverToolName: string
      serverExecutionIdentityDigest: string
+  profileSigningIdentityDigest: string
      initializeDigest: string
      capabilityDigest: string
      probedToolsListDigest: string
@@ -1249,9 +1261,9 @@ Implementation notes:
 
    On Run admission or MCP administration, only the Supervisor resolves an id, canonicalizes the record, publishes exact secret-free `EndpointRegistrationV1`/`EndpointCredentialGrantBinding` artifacts through work package 01, and retains those refs in the admitted closure. `purposes` and pins are nonempty, unique, byte-sorted; HTTPS host/server name/path/port use the RFC normalization and `redirectPolicy` is literal `reject_all`. `tlsPolicyDigest = SHA-256(JCS(tls))`, `endpointIdentityDigest = SHA-256(JCS({target,tlsPolicyDigest}))`, `registrationDigest` and `bindingDigest` each omit only themselves. Every provider, capability-query, dependency, and Streamable-HTTP MCP client disables redirect following; a `300..399` response is a typed terminal response/error and the broker never resolves `Location` or resends credentials/body. Owner, purpose, endpoint ref/identity/TLS, handle identity, authority/service revisions, secret generation, external subject, expiry, and revocation are rechecked before every redemption. Only the exact frozen-generation item crosses the broker boundary; rotation or subject/scope/audience drift makes an older binding authorization-required with no I/O, and new work must publish a new binding instead of inheriting current bytes.
 
-   `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` is the sole local-model producer. It performs no download/network I/O and accepts only the RFC package layout: literal manifest basename plus sibling `objects/<64-lower-case-hex-ArtifactRef>` files. It holds the package root, manifest, object directory, and every same-owner regular file by no-follow descriptor; rejects link/special/owner/mode/replacement/extra/missing/ref/digest/size drift; and imports each exact object to `${stateRoot}/local-models/objects/<ArtifactRef>` with object and directory fsync. It first holds the Kernel global/cutover gate shared and then the external local-model registry/object-store lock through the final registry commit. Migration/rollback owns the global gate exclusively before that lock, so enrollment cannot cross inventory, archive, or authority publication.
+   `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` is the sole local-model producer. It performs no download/network I/O and accepts only the RFC package layout: literal manifest basename plus sibling `objects/<64-lower-case-hex-ArtifactRef>` files. It holds the package root, manifest, object directory, and every same-owner regular file by no-follow descriptor; rejects link/special/owner/mode/replacement/extra/missing/ref/digest/size drift; and requires and verifies the detached raw64-byte signature at `objects/<signatureRef>` under the original bundled model-trust key and imports each exact object to `${stateRoot}/local-models/objects/<ArtifactRef>` with object and directory fsync. It first holds the Kernel global/cutover gate shared and then the external local-model registry/object-store lock through the final registry commit. Migration/rollback owns the global gate exclusively before that lock, so enrollment cannot cross inventory, archive, or authority publication.
 
-   The transaction publishes exact `LocalModelObjectClosureV1`: current StateRoot identity, literal target-store path, signed manifest pair, and the all-and-only manifest/tokenizer/byte-sorted-model-file object sequence. Every object ref equals its full-byte digest, paths/sizes equal the manifest, counts/totals use checked arithmetic, and the closure self-digest plus expected closure ref rehash. Source descriptors are transient after the copy; an opaque source store id or pathname is never durable authority. The service producer selects only current signed RuntimeBundle entry `ollama_local_inference` with role `local_inference`; chooses the one probed strong platform backend; publishes the sole-owner local-inference sandbox profile with fixed default resource values; and chooses IPv4 loopback plus the smallest never-retained port in `49152..65535` under the registry lock. Callers choose none of these fields. Registration/service ids/digests and expected manifest/service/closure refs follow the RFC equations; one active revision exists per owner/provider/model, and changed model/spec creates a new immutable service id. Run submission resolves that row, has the Supervisor copy/verify the complete closure into WP01 CAS, and rejects missing/retired/digest-mismatched models before a launch or Run row. This minimal enrollment is not the broader download/catalog manager.
+   The fixed external `local-models/registry.sqlite3` contains only the RFC six-field immutable-head pointer table under its original model-store lock/VFS; immutable history and all model objects remain in the same model store, with no new Kernel business table. The transaction publishes exact `LocalModelObjectClosureV1`: current StateRoot identity, literal target-store path, signed manifest pair, and the all-and-only manifest/detached-signature/tokenizer/byte-sorted-model-file object sequence. Every object ref equals its full-byte digest, paths/sizes equal the manifest, counts/totals use checked arithmetic, and the closure self-digest plus expected closure ref rehash. Source descriptors are transient after the copy; an opaque source store id or pathname is never durable authority. The service producer selects only current signed RuntimeBundle entry `ollama_local_inference` with role `local_inference`; chooses the one probed strong platform backend; publishes the sole-owner local-inference sandbox profile with fixed default resource values; and chooses IPv4 loopback plus the smallest never-retained port in `49152..65535` under the registry lock. Callers choose none of these fields. Registration/service ids/digests and expected manifest/service/closure refs follow the RFC equations; one active revision exists per owner/provider/model, and changed model/spec creates a new immutable service id. Run submission holds the original model-store lock/current-head CAS through final admission, freezes the original registration ref/digest in `LocalZeroCostProvenanceV1`, has the Supervisor copy/verify the complete closure into WP01 CAS, and rejects missing/retired/digest-mismatched models before a launch or Run row. This minimal enrollment is not the broader download/catalog manager.
 
    Current selection is the immutable `LocalModelRegistryHeadV1` named by one mutable `(owner,provider,model)` pointer row, not the `state` spelling on every historical artifact. Initial publication has head/registration revision one and no predecessor. Replacement atomically publishes an exact retired copy of the predecessor active registration, the next active registration, and a `replace` head whose revision is old head plus one; retirement publishes that same closed retired projection and a no-active head; reenrollment is legal only from that retired head and publishes the next registration revision. Every predecessor/head/registration ref and digest rehashes, and artifact publication plus pointer CAS occurs under the same registry lock. Admission follows only a current active head. Old active bytes remain immutable/rooted for admitted Runs but become unselectable, so replacement never creates two current actives or rewrites a retained Run artifact.
 
@@ -1723,6 +1735,14 @@ Rollback (only for hard-to-reverse changes):
 ### Open Questions
 
 None. Adding another runtime owner, widening the Session method surface, adding product deletion, weakening the one-shot cut, retaining dual write, broadening MCP/plugin scope, or changing the support matrix requires a new RFC.
+
+### Signed MCP recovery completion contract
+
+CLI/SDK use the existing generated v1 `run.reconcile(probe_now)` contract for the exact exhausted signed MCP wait, with durable first-response replay and the same worker/publication/MCP global ceiling of 16. Fixed inspection backpressure is `RESOURCE_EXHAUSTED(resourceKind='reconciliation_probes',messageCode='run.reconciliation_capacity',retryAfterMs=1000)` and carries no retry authority. Registration keeps explicit retry risk consent and original signed reconcile profile identity; an installed gate cannot open from decoder/compiler tests alone.
+
+The signed read-only status receiver uses actual native purpose 3, complete original source intent and original nonce/deadline, real process/pipe/output retirement, raw protocol replay, output schema and signed predicates. A completed status whose effect payload is unavailable records the original Journal as completed, reuses the unchanged full-once settlement and publishes only truthful local `TOOL_RESULT_UNAVAILABLE`/`confirmed_completed`/`originalResponse='unavailable'`. A signed failed status uses its real proof, never a no-release/rollback fiction. Late data is audit-only. The original task or strict successor actual retained-birth/death cleanup closes its own nonce; neither creates a second effect, ledger, terminal writer or generic retry.
+
+Release qualification must include genuine installed UNKNOWN→retirement→independent signed status, completed/failed/unresolved predicates, malicious/malformed/raw-refused responses, exact old-nonce successor cleanup, user replay, cancellation and Stop2, original HTTP retry deadline/cap3, stdio launch cap2, full history/reopen and all typed retention edges. The candidate exercises these contracts through ordinary closed production admission, never a test-only runtime bypass: HTTP remains manual or explicitly risk-consented retry, while reconcile requires the complete exact signed stdio profile. Existing data, SDK, design and controlled process passes are labelled separately; any unverified physical case stays explicit and release/default-cutover gates remain closed.
 
 ### GitHub Issue Body
 

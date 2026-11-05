@@ -1,3 +1,5 @@
+import { readCurrentSessionContextGraph, assertCurrentSessionContextGraph } from './session-context-stream.js';
+import { publishSessionContextAppend } from './session-context-publication.js';
 import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
@@ -162,15 +164,14 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     if (!prepared.terminalArtifact || run.parentRunId) throw new TypeError('only a root result may prepare a Session terminal');
     phase('result_session');
     const session = readSession(driver, run.sessionId);
-    const projection = decodeSessionProjection(await readCanonicalArtifact(reads, session.contextProjectionRef));
-    if (projection.sessionId !== session.id || projection.contextRevision !== session.contextRevision || projection.throughItemSeq !== session.latestItemSeq)
-      throw new TypeError('result Session projection is not current');
+    const context = await readCurrentSessionContextGraph(driver, reads, principalId, session.id, session.contextRevision);
+    if (canonicalSha256(context.cut.session) !== canonicalSha256(session))
+      throw new KernelStorageError('REVISION_CONFLICT', 'result Session changed during its complete graph read');
     const seq = session.latestItemSeq + 1;
-    projection.contextRevision++; projection.throughItemSeq = seq;
-    projection.segments.push({ kind: 'raw', fromItemSeq: seq, throughItemSeq: seq,
-      items: [{ sourceSessionId: session.id, itemSeq: seq, itemId: prepared.itemId, kind: 'run_terminal', payloadRef: prepared.terminalArtifact.ref }] });
-    projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
-    return { session, seq, projectionArtifact: await artifacts.publishCanonical(projection, projection.format) };
+    const appended = await publishSessionContextAppend(driver, reads, owner, context.projection,
+      { kind: 'raw', fromItemSeq: seq, throughItemSeq: seq,
+        items: [{ sourceSessionId: session.id, itemSeq: seq, itemId: prepared.itemId, kind: 'run_terminal', payloadRef: prepared.terminalArtifact.ref }] });
+    return { session, seq, sessionCut: context.cut, projectionArtifact: appended.artifact };
   }
   // The sole RunResult/Session terminal writer. Inputs are prepared after the full
   // original finalization read; none are exported as future-cut authority.
@@ -180,6 +181,7 @@ export function loadRunResult(driver: SqliteDriver, artifacts: ArtifactCatalog, 
     if (!terminalArtifact || cut.run.parentRunId) throw new TypeError('only a root result may append a Session terminal');
     if (canonicalSha256(readSession(connection, session.id)) !== canonicalSha256(session))
       throw new KernelStorageError('REVISION_CONFLICT', 'result Session changed during artifact registration');
+    assertCurrentSessionContextGraph(connection, sessionPlan.sessionCut);
     const final = time(connection, prepared.createdAt, cut.run);
     if (final.outcome !== 'healthy') throw new KernelStorageError('RECOVERY_REQUIRED', 'result clock changed during artifact registration');
     const committedAt = acceptedAt ?? final.committedAt;

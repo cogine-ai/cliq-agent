@@ -4,6 +4,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { assertArtifactRef, digestOmitting } from './identity.js';
 import { controlWireInteger, controlWireRecord, controlWireText } from './control-wire-data.js';
 import type { SessionContextProjection } from './types.js';
+import { isLegacySessionContextKind } from './legacy-context.js';
 function corrupt(): never { throw new TypeError('Session context projection is not a closed contiguous graph'); }
 
 export function decodeSessionContextData(value: unknown): SessionContextProjection {
@@ -25,7 +26,8 @@ export function decodeSessionContextData(value: unknown): SessionContextProjecti
       for (const [index, rawItem] of segment.items.entries()) {
         const source = controlWireRecord(rawItem, ['sourceSessionId', 'itemSeq', 'itemId', 'kind', 'payloadRef']);
         controlWireText(source.sourceSessionId); controlWireText(source.itemId); assertArtifactRef(source.payloadRef as string);
-        if (source.itemSeq !== (segment.fromItemSeq as number) + index || source.kind !== 'run_terminal') return corrupt();
+        if (source.itemSeq !== (segment.fromItemSeq as number) + index ||
+            source.kind !== 'run_terminal' && !isLegacySessionContextKind(source.kind)) return corrupt();
       }
     } else {
       assertArtifactRef(segment.sourceItemsDigest as string);

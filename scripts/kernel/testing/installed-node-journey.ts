@@ -48,7 +48,12 @@ import { createInstalledPermissionResponder, runInstalledPermissionCases } from 
 import { INSTALLED_PERMISSION_PROFILE } from './installed-permission-result.js';
 import { createInstalledMcpHttpHandler } from './installed-mcp-http.js';
 import { createInstalledMcpModelResponder } from './installed-mcp-model.js';
-import { runInstalledMcpCases, INSTALLED_MCP_PROFILE } from './installed-mcp-journey.js';
+import { runInstalledMcpCases, INSTALLED_MCP_PROFILE, type InstalledMcpContext } from './installed-mcp-journey.js';
+import { runInstalledMcpStdioCases, INSTALLED_MCP_STDIO_PROFILE } from './installed-mcp-stdio-journey.js';
+import { createInstalledMcpStdioModelResponder, INSTALLED_MCP_STDIO_MODEL_POSTS } from './installed-mcp-stdio-model.js';
+import { runInstalledMcpRecoveryCases, INSTALLED_MCP_RECOVERY_PROFILE } from './installed-mcp-recovery-journey.js';
+import { createInstalledMcpRecoveryModelResponder, INSTALLED_MCP_RECOVERY_MODEL_POSTS } from './installed-mcp-recovery-model.js';
+import { createInstalledMcpRetryHttpHandler, MCP_RETRY_HTTP_PATH } from './installed-mcp-retry-http.js';
 import { INSTALLED_MCP_CASES, type InstalledMcpCase } from './installed-mcp-responder.js';
 import { assertInstalledUnusedDeliveryGrant, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
 import { inspectInstalledPermissionRecord, inspectInstalledMcpPreclaimRefusal } from './installed-worker-lease.js';
@@ -74,6 +79,7 @@ import type { InstalledPublicationStopResult } from './installed-publication-sto
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
 import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
   createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
@@ -199,13 +205,14 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission' || journeyKind === 'mcp');
+  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission' || journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery');
+  const mcpJourney = journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery';
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
-  if (journeyKind === 'mcp') assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
+  if (mcpJourney) assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
   if (journeyKind === 'daily') assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
@@ -253,6 +260,19 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_PROFILE,
       scope: 'actual signed Linux isolated Admin discovery, frozen stateless HTTP MCP, JSON/SSE and ping, one permanent claim, private edit and Node verification, exact result review/apply, full-once UNKNOWN and explicit manual abandonment through reconnect and restart; owned public HTTPS only, not authenticated Bearer, stdio, paid provider, precise crash cuts or complete I1',
       authenticatedBearerQualified: false, stdioQualified: false, retryRiskQualified: false, reconcileAdapterQualified: false });
+  }
+  if (journeyKind === 'mcp-stdio') {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_STDIO_PROFILE,
+      scope: 'actual signed Linux static stdio MCP Admin and independent server/effect claims, ping, descendant join, natural result/exit, deadline/cancel UNKNOWN and manual acknowledgement, private edit and required Node verification, exact result review/apply and reconnect/restart; owned HTTPS model only, not paid provider, retry/reconcile, precise crash cuts, publication-failure cuts or complete I1/I2',
+      authenticatedBearerQualified: false, stdioQualified: false, retryRiskQualified: false, reconcileAdapterQualified: false });
+  }
+  if (journeyKind === 'mcp-recovery') {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_RECOVERY_PROFILE,
+      scope: 'actual signed Linux original full-charge UNKNOWN, independently signed immutable no-op target status, unavailable original payload, truthful model continuation, private edit, required Node verification, exact result review/apply, natural-EOF stdio retry launch-cap2 terminal closure, public HTTPS UNKNOWN/UNKNOWN/known three-attempt retry with one original key/deadline and later true claimed result, and owning active status cancel-and-join under original Stop2 with preserved nonce/count/deadline/backoff through reconnect/restart; not prior no-op effect execution, arbitrary status failure/unresolved, old-nonce successor cleanup, exhausted-state user replay, precise crash cuts, typed retention or complete I1-I4',
+      originalEffectExecutionQualified: false, originalEffectPayloadRecovered: false, reconcileAdapterQualified: false,
+      statusOldNonceSuccessorCleanupQualified: false, typedRetentionQualified: false });
   }
   if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
@@ -361,7 +381,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(options.provider || dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       openScan: () => scanner.openStream(), onJoined: () => { report.originalPublicClientJoined = true; } });
     assert(Array.isArray(client.hello.enabledFeatureIds) && client.hello.enabledFeatureIds.includes('artifact.get'));
-    if (journeyKind === 'mcp') for (const method of ['mcp.register', 'mcp.list'])
+    if (mcpJourney) for (const method of ['mcp.register', 'mcp.list'])
       assert(client.hello.enabledFeatureIds.includes(method), 'the actual authenticated Hello did not enable the complete MCP recipe');
     return client;
   };
@@ -502,6 +522,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const permissionResponder = createInstalledPermissionResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
   const mcpHandler = createInstalledMcpHttpHandler(scanBytes);
   const mcpModelResponder = createInstalledMcpModelResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
+  const mcpStdioModelResponder = createInstalledMcpStdioModelResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
+  const mcpRecoveryModelResponder = createInstalledMcpRecoveryModelResponder(model, () => { assert(expectedToolNames); return expectedToolNames; });
+  const mcpRecoveryHttpResponder = createInstalledMcpRetryHttpHandler(scanBytes);
+  const mcpRecoveryHttpEndpointId = 'installed-mcp-recovery-http-three-attempts';
   const mcpEndpointIds = new Map<InstalledMcpCase, string>();
   let daemonPid: number | undefined, daemonStart: string | undefined;
   let services: { supervisorUnit: string; keeperUnit: string } | undefined;
@@ -680,6 +704,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     server = createServer({ key, cert, minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', maxHeaderSize: 65536 }, async (incoming, outgoing) => {
       try {
         if (journeyKind === 'mcp' && await mcpHandler.handle(incoming, outgoing)) return;
+        if (journeyKind === 'mcp-recovery' && await mcpRecoveryHttpResponder.handle(incoming, outgoing)) return;
         assert.equal(incoming.method, 'POST'); assert.equal(incoming.url, '/v1/chat/completions');
         assert.equal(incoming.headers.authorization, 'Bearer ' + secret.toString('utf8'));
         assert.equal(incoming.headers['content-type'], 'application/json');
@@ -709,8 +734,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
           report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
         }
-        if (journeyKind === 'mcp') {
-          const payload = mcpModelResponder.respond(body); assert(payload, 'the MCP model endpoint accepts only its fixed owned objectives');
+        if (mcpJourney) {
+          const payload = (journeyKind === 'mcp-recovery' ? mcpRecoveryModelResponder : journeyKind === 'mcp-stdio' ? mcpStdioModelResponder : mcpModelResponder).respond(body);
+          assert(payload, 'the MCP model endpoint accepts only its fixed owned objectives');
           postCount++; const response = Buffer.from(JSON.stringify(payload)); scanBytes(response);
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' });
           outgoing.end(response); return;
@@ -856,7 +882,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       resourceDiagnostics: true as const,
       ...(dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
-      ...(journeyKind === 'mcp' ? { mcpHttp: true as const } : {}),
+      ...(journeyKind === 'mcp' || journeyKind === 'mcp-recovery' ? { mcpHttp: true as const } : {}),
+      ...(journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery' ? { mcpStdio: true as const } : {}),
+      ...(journeyKind === 'mcp-recovery' ? { mcpRecovery: true as const } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
       ...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {}) };
     const signed = options.provider
@@ -981,6 +1009,19 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
       assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
       mcpEndpointIds.set(kind, endpointRegistrationId);
+    }
+    if (journeyKind === 'mcp-recovery') {
+      const target = { ...registration.target, basePath: MCP_RETRY_HTTP_PATH };
+      const endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+        endpointRegistrationId: mcpRecoveryHttpEndpointId, registrationKind: 'user', ownerPrincipalId: principal, purposes: ['mcp_streamable_http'], target,
+        tls: registration.tls, tlsPolicyDigest: registration.tlsPolicyDigest,
+        endpointIdentityDigest: canonicalSha256({ target, tlsPolicyDigest: registration.tlsPolicyDigest }), createdAt: new Date().toISOString(), registrationDigest: '' };
+      endpoint.registrationDigest = digestOmitting(endpoint, 'registrationDigest');
+      const core = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration: endpoint,
+        expectedRegistrationArtifactRef: canonicalSha256(endpoint), commandDigest: '' };
+      const committed = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
+        schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
+      assert.equal(decodeEndpointAuthorityOperation(success(committed, 'operation')).disposition, 'registered');
     }
     const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
@@ -1127,8 +1168,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }
     report.cases = [];
     await mkdir(recipe.workspace, { mode: 0o700 }); await chown(recipe.workspace, ledger.uid, ledger.gid);
-    if (journeyKind === 'mcp') {
+    if (mcpJourney) {
       assert(client);
+      if (journeyKind === 'mcp') {
       const missingEndpoint = request({ protocolVersion: 1, method: 'mcp.register', requestId: nextId(),
         registrationId: 'owned-mcp-missing-endpoint', target: { kind: 'streamable_http',
           endpointRegistrationId: 'installed-mcp-missing-endpoint', credentialGrantIds: [] },
@@ -1150,6 +1192,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       report.mcpPreclaimRefusal = { diagnosticOnly: true, code: 'INVALID_REQUEST', sameAuthenticatedConnection: true,
         attempts: afterRefusal.attempts, claims: afterRefusal.claims, registrations: afterRefusal.registrations,
         endpointPosts: mcpHandler.posts(), acceptedTcp, acceptedTls };
+      }
       const sendMcp = async (frame: Record<string, any>, timeout = 30_000) => {
         assert(client); const response = await client.send(frame, timeout); recordRefusal(response, frame.method); return response;
       };
@@ -1158,12 +1201,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         try { assert.notEqual(await processStart(pid), start, 'the exact original process lifetime remains live'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       };
-      report.mcp = await runInstalledMcpCases({ workspaceRoot: recipe.workspace, cliqHome, uid: ledger.uid, gid: ledger.gid,
+      const mcpContext: Omit<InstalledMcpContext, 'endpointIds' | 'responder' | 'modelResponder' | 'assertEndpointJoined'> = {
+        workspaceRoot: recipe.workspace, cliqHome, uid: ledger.uid, gid: ledger.gid,
         model: { provider: 'openai-compatible', model, endpoint: { kind: 'registered', endpointRegistrationId: registration.endpointRegistrationId },
           modelCredentialGrantIds: [credentialId] }, guestToolchainManifestId: signed.guestToolchain.manifestId,
-        endpointIds: mcpEndpointIds, send: sendMcp, nextId, readCas, download: readPublicArtifact, mark,
-        responder: mcpHandler.responder, modelResponder: mcpModelResponder, assertOriginalProcessAbsent: absent,
-        assertEndpointJoined: (kind, deadlineAt) => mcpHandler.waitForCaseJoined(kind, deadlineAt),
+        send: sendMcp, nextId, readCas, download: readPublicArtifact, mark, assertOriginalProcessAbsent: absent,
         async assertWorkerFree(runId, cut) {
           assert.equal(cut.snapshot.run.id, runId); assert.equal(cut.snapshot.run.activeWorkerLaunchId, undefined);
           assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
@@ -1213,10 +1255,18 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(owners.owners.at(-1)!.state, 'active'); assert.equal(owners.owners.at(-1)!.runtimeBundleRef, bundleDigest);
           assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
           assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
-        } });
+        } };
+      report.mcp = journeyKind === 'mcp-recovery'
+        ? await runInstalledMcpRecoveryCases({ ...mcpContext, runtimeBundleId: bundleDigest, modelResponder: mcpRecoveryModelResponder,
+          httpEndpointRegistrationId: mcpRecoveryHttpEndpointId, httpResponder: mcpRecoveryHttpResponder })
+        : journeyKind === 'mcp-stdio'
+        ? await runInstalledMcpStdioCases({ ...mcpContext, runtimeBundleId: bundleDigest, modelResponder: mcpStdioModelResponder })
+        : await runInstalledMcpCases({ ...mcpContext, endpointIds: mcpEndpointIds, responder: mcpHandler.responder,
+          modelResponder: mcpModelResponder, assertEndpointJoined: (kind, deadlineAt) => mcpHandler.waitForCaseJoined(kind, deadlineAt) });
       report.cases = report.mcp.cases;
-      assert.equal(postCount, 11); assert.equal(acceptedTcp, postCount + mcpHandler.posts());
-      assert.equal(acceptedTls, acceptedTcp); mcpHandler.assertJoined(); assert(!responderFailure);
+      assert.equal(postCount, journeyKind === 'mcp-recovery' ? INSTALLED_MCP_RECOVERY_MODEL_POSTS : journeyKind === 'mcp-stdio' ? INSTALLED_MCP_STDIO_MODEL_POSTS : 11);
+      assert.equal(acceptedTcp, postCount + mcpHandler.posts() + mcpRecoveryHttpResponder.posts());
+      assert.equal(acceptedTls, acceptedTcp); mcpHandler.assertJoined(); mcpRecoveryHttpResponder.assertJoined(); assert(!responderFailure);
     } else if (journeyKind === 'permission') {
       const controls = new Map<string, { request: Record<string, any>; response: Record<string, any> }>();
       const permission: InstalledPermissionEvidence = { controls,
@@ -2525,6 +2575,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable',
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
+              if (mcpJourney) report.mcpAdminLifecycleDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+                reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               if (storeFailureBinding && String(storeFailureBinding.pid) === before[0]!.MainPID &&
                   storeFailureBinding.invocationId === before[0]!.InvocationID) try {
                 assertRetained();
@@ -2535,7 +2587,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 const until = Date.now(), logBy = until + 5000;
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
-                  '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
+                  mcpJourney
+                    ? '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:|CLIQ_MCP_ADMIN_LIFECYCLE_V1:)'
+                    : '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
                   `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
                   `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
@@ -2548,6 +2602,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 const stopPhase = readInstalledStoreStopPhaseJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 assert(Date.now() < logBy, 'actual publication-stage journal exceeded five seconds'); assertRetained();
+                if (mcpJourney) try {
+                  const lifecycle = readInstalledMcpAdminJournal(text,
+                    { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                  if (lifecycle) report.mcpAdminLifecycleDiagnostics = { diagnosticOnly: true, kind: 'observed',
+                    source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                    originalInvocationBound: true, originalPidObservedAbsent: true, originalStopSucceeded: !originalStopFailed, ...lifecycle };
+                } catch { /* A malformed passive marker cannot discard original stage/Stop observations or imply a join. */ }
                 if (observation) report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalPidObservedAbsent: true, phases: observation.phases };
@@ -2658,7 +2719,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     if (primary) {
       report.qualified = false;
       if (report.permission) report.permission.qualified = false;
-      if (report.mcp) report.mcp.qualified = false;
+      if (report.mcp) { report.mcp.qualified = false;
+        if ('staticStdioProfileQualified' in report.mcp) report.mcp.staticStdioProfileQualified = false; }
       if (options.publicationRetirementStop) {
         report.preciseInFlightPublicationStopQualified = false;
         if (report.delivery) report.delivery.preciseInFlightPublicationStopQualified = false;
@@ -2692,7 +2754,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (error instanceof AggregateError) errors.unshift(...error.errors.slice(0, 4));
       }
       report.error = { diagnosticOnly: true, kind: dailyJourney ? 'installed_daily_journey_failed' : options.provider ? 'installed_provider_journey_failed'
-        : journeyKind === 'mcp' ? 'installed_mcp_journey_failed' : journeyKind === 'permission' ? 'installed_permission_journey_failed'
+        : mcpJourney ? 'installed_mcp_journey_failed' : journeyKind === 'permission' ? 'installed_permission_journey_failed'
         : journeyKind === 'verifier' ? 'installed_verifier_journey_failed' : 'installed_delivery_journey_failed', sourceFrames: frames, failureKinds };
     }
     let publication: Buffer;
@@ -2714,7 +2776,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     try { await writeFile(recipe.reportFile, publication, { flag: 'wx', mode: 0o644 }); } finally { publication.fill(0); }
   }
   if (primary) throw new Error(dailyJourney ? 'actual normal installed daily journey failed; inspect the closed diagnostic report' : options.provider ? 'actual installed provider journey failed; inspect the closed diagnostic report'
-    : journeyKind === 'mcp' ? 'actual installed MCP journey failed; inspect the closed diagnostic report'
+    : mcpJourney ? 'actual installed MCP journey failed; inspect the closed diagnostic report'
     : journeyKind === 'permission' ? 'actual installed ordinary permission journey failed; inspect the closed diagnostic report'
     : journeyKind === 'verifier' ? 'actual installed verifier journey failed; inspect the closed diagnostic report'
     : 'actual installed Delivery journey failed; inspect the closed diagnostic report');

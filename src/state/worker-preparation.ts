@@ -18,6 +18,7 @@ import { advanceTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { decodeRunSpec, decodeWorkspaceEntries, decodeWorkspaceGenerationIdentity, decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState, decodeStateOwnerRecord, decodePlatformProcessIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { installedWorkerSlotAvailable, InstalledWorkerCapacityError } from './worker-capacity.js';
 import { readPublicationPrefix } from './delivery-publication-progress.js';
 import { decodeWorkerLaunch, decodeWorkspaceGenerationState } from './invariants.js';
 import { borrowWorkerReservationForExecution, readWorkerReservationRetirement, type GenerationQuarantineMove,
@@ -224,7 +225,7 @@ function preparationSqlCut(connection: SqliteConnection, runId: string) {
 export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: {
   runId: string; expectedRunRevision: number; launchId: string; spawnNonceDigest: string;
   activationNonceDigest: string; generationCreationNonceDigest: string;
-}): Promise<PreparingWorkerLaunch> {
+}, installedConcurrency?: number): Promise<PreparingWorkerLaunch> {
   input = immutableSnapshot(input);
   if (!exactKeys(input, ['runId', 'expectedRunRevision', 'launchId', 'spawnNonceDigest', 'activationNonceDigest', 'generationCreationNonceDigest']) ||
       !/^[A-Za-z0-9_-]{43}$/u.test(input.launchId)) throw new KernelStorageError('INVALID_REQUEST', 'worker preparation requires its exact logical intent');
@@ -278,6 +279,8 @@ export async function beginWorkerPreparation(driver: SqliteDriver, artifacts: Ar
       fail('worker preparation retains an original launch or unpaired generation');
     const checkpoint = readCheckpoint(connection, run.latestCheckpointId);
     requireEqual(checkpoint, cut.latestCheckpoint, 'worker preparation source Checkpoint');
+    if (installedConcurrency !== undefined && !installedWorkerSlotAvailable(connection, run.id, installedConcurrency))
+      throw new InstalledWorkerCapacityError();
     result = { schemaVersion: 1, launchId: input.launchId, runId: run.id, plannedRunRevision: run.revision,
       supervisorInstanceId: owner.supervisorInstanceId, spawnNonceDigest: input.spawnNonceDigest,
       activationNonceDigest: input.activationNonceDigest, phase: 'preparing', createdAt: now,

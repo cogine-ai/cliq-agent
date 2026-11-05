@@ -24,6 +24,7 @@ import { LINUX_WORKER_RECIPE } from '../sandbox/linux-worker.js';
 import { buildInstalledToolContracts } from '../tools/installed-contracts.js';
 import { assertBuiltinScriptResources } from './tool-runtime-authority.js';
 import { loadToolContracts } from '../tools/input-contract.js';
+import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { readChildAdmission, type ChildAdmissionData } from './child-admission.js';
 import { readRun } from './rows.js';
@@ -409,7 +410,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
       if (!contract || contract.inputSchemaRef !== entry.inputSchemaRef || contract.inputSchemaDigest !== entry.inputSchemaDigest ||
           canonicalSha256(schema) !== contract.inputSchemaDigest)
         mismatch('installed MCP schema is outside its exact authenticated frozen discovery');
-      return { ...entry, inputSchema: schema };
+      return readMcpInputAuthority(artifacts, { ...entry, inputSchema: schema });
     }
     const signedSchema = installed.bundle.entries.find(candidate => candidate.digest === entry.inputSchemaRef);
     if (!signedSchema || signedSchema.role !== 'schema' || signedSchema.executable ||
@@ -681,6 +682,8 @@ export async function assembleInstalledRun(input: {
       retry: { model: { maxDispatchedAttempts: 3, maxZeroByteTransportRetriesPerAttempt: 0, postAttemptDelaysMs: [500, 2000] },
         tools: tools.entries.map(entry => {
           if (entry.replayClass === 'retry') return { toolName: entry.name, replayClass: 'retry', maxDispatchedAttempts: 3, postAttemptDelaysMs: [500, 2000] };
+          if (entry.replayClass === 'reconcile' && entry.execution.kind === 'mcp')
+            return { toolName: entry.name, replayClass: 'reconcile', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] };
           if (entry.replayClass !== 'manual') mismatch('installed tool uses an unsupported recovery contract');
           return { toolName: entry.name, replayClass: 'manual', maxDispatchedAttempts: 1, postAttemptDelaysMs: [] };
         }) },

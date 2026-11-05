@@ -21,7 +21,7 @@ export function installedClientDataPath(accountHome: string, stateRoot: PendingR
 /** One actual installed host owns these files through the complete client join.
  * Preferences and original requests are private data, never StateOwner, Trust,
  * credentials or a permission to retry. No environment home override exists. */
-export async function openInstalledClientData(selected: HeldInstalledRuntime) {
+export async function openInstalledClientDirectory(selected: HeldInstalledRuntime, options: Readonly<{ create?: boolean }> = { create: true }) {
   const { context, native } = await withHeldInstalledRuntime(selected, async installed => {
     const roots = guestToolchainRoots(installed.bundle);
     return { native: await installed.loadStateOwner(),
@@ -31,14 +31,19 @@ export async function openInstalledClientData(selected: HeldInstalledRuntime) {
   const user = os.userInfo();
   if (process.platform !== 'linux' || process.geteuid?.() !== user.uid || context.stateRoot.ownerUid !== user.uid)
     throw new TypeError('installed client data belongs to another operating-system account');
-  const directory = await openPrivateClientDirectory(installedClientDataPath(user.homedir, context.stateRoot), { create: true, native });
+  const directory = await openPrivateClientDirectory(installedClientDataPath(user.homedir, context.stateRoot), { create: options.create, native });
+  return { directory, context, accountHome: user.homedir };
+}
+
+export async function openInstalledClientData(selected: HeldInstalledRuntime) {
+  const { directory, context, accountHome } = await openInstalledClientDirectory(selected);
   let pending: Awaited<ReturnType<typeof openPendingRequests>> | undefined;
   try {
     pending = await openPendingRequests(directory, context);
     const requests = pending;
     let closing: Promise<void> | undefined;
     return Object.freeze({ directory, requests, stateRoot: context.stateRoot, sourceBundleDigest: context.sourceBundleDigest,
-      accountHome: user.homedir,
+      accountHome,
       async commandDefaults() {
         return { preferences: await readClientPreferences(directory),
           ...(context.guestToolchainManifestId ? { guestToolchainManifestId: context.guestToolchainManifestId } : {}) };

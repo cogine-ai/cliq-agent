@@ -73,3 +73,64 @@ jobs:
           name: installed-mcp-journey-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/cliq-installed-mcp-journey/*.json
           if-no-files-found: warn
+
+  linux-installed-mcp-recovery:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.run != 'false') }}
+    name: Linux signed MCP status, retry and owning shutdown
+    # Public repository: standard free runner, with the original production
+    # build, lifecycle, billing and deadline assertions left intact.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check the actual installed campaign import closure
+        run: >-
+          node node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck
+          --target ES2022 --module NodeNext --moduleResolution NodeNext
+          --esModuleInterop --jsx react-jsx
+          scripts/kernel/testing/postject.d.ts
+          scripts/kernel/qualify-installed-mcp-recovery-journey.ts
+      - name: Check original status, retry and complete Session data contracts
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          src/kernel/mcp-status.test.ts
+          src/state/mcp-status-proof.test.ts
+          src/state/mcp-recovery-admission.test.ts
+          src/state/mcp-status-projection.test.ts
+          src/state/reconciliation-capacity.test.ts
+          scripts/kernel/testing/installed-session-segments.test.ts
+          scripts/kernel/testing/installed-mcp-retry-http.test.ts
+      - name: Install original native, systemd and credential prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Check actual C recipe and natural lost responses
+        run: node --test --test-concurrency=1 --import tsx scripts/kernel/testing/mcp-stdio-native-data.test.ts
+      - name: Exercise the complete signed installation and original v1 entry
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-mcp-recovery-journey "$probe_node" "$RUNNER_TEMP/cliq-installed-mcp-recovery"
+      - name: Preserve fixed JSON scope and actual cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-mcp-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cliq-installed-mcp-recovery/installed-run-journey.json
+            ${{ runner.temp }}/cliq-installed-mcp-recovery/runner-baseline-before.json
+            ${{ runner.temp }}/cliq-installed-mcp-recovery/runner-baseline-after.json
+            ${{ runner.temp }}/cliq-installed-mcp-recovery/cleanup.json
+            ${{ runner.temp }}/cliq-installed-mcp-recovery/run-filesystem.json
+          if-no-files-found: warn
+          retention-days: 7

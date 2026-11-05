@@ -82,7 +82,8 @@ test('cancel retires an unstarted candidate without executing a verifier or publ
     const session = fixture.store.getSession(candidate.run.sessionId);
     await assert.rejects(fixture.agent.stopForResourceFailure({ expectedRunRevision: revision(fixture) }),
       { code: 'STATE_TRANSITION_INVALID' });
-    await assert.rejects(fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) }), /persisted StopIntent/);
+    await assert.rejects(fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) }),
+      { code: 'STATE_TRANSITION_INVALID' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     await reopen(fixture);
     const command = await cancelCommand(fixture), stopped = await fixture.agent.cancelRun(command);

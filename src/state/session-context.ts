@@ -3,6 +3,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { Session, SessionContextProjection, SessionContextSegment, SessionItem } from '../kernel/types.js';
 import type { SessionCompactionItem, SessionHandoffEntryV1 } from '../kernel/session-continuity.js';
+import { decodeLegacyContextPayload, isLegacySessionContextKind, legacyContextVisibleText, legacySessionItemId } from '../kernel/legacy-context.js';
 import { decodeWireSession, decodeWireSessionItem, decodeWirePublicState, controlWireInteger, controlWireRecord, controlWireText } from '../kernel/control-wire-data.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { verifyModelText } from '../model/attempt.js';
@@ -187,12 +188,16 @@ export async function readFrozenSessionContextCut(driver: SqliteDriver, artifact
 /** A later compaction changes context visibility, never the atomic terminal
  * item. Keep the original exact one-item raw proof, through its immutable
  * compaction justification when that range is now summarized. */
-export async function assertSessionTerminalProjection(driver: SqliteDriver, artifacts: Reader, sessionId: string,
+export async function assertSessionTerminalProjection(driver: SqliteDriver, artifacts: ArtifactCatalog, sessionId: string,
   expected: { itemSeq: number; itemId: string; payloadRef: string }): Promise<void> {
   const selected = driver.readSnapshot(connection => {
     const row = connection.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId);
     if (!row) return corrupt(); return { session: decodeWireSession(sessionFromRow(row)), principalId: String(row.principal_id) };
   });
+  const graph = await import('./session-context-stream.js');
+  const head = await graph.readSessionContextGraphHead(artifacts, selected.session.contextProjectionRef);
+  if (head.schemaVersion === 2)
+    return graph.assertPagedSessionTerminalContext(driver, artifacts, selected.principalId, selected.session, expected);
   const context = await readFrozenSessionContextCut(driver, artifacts, selected.principalId, selected.session);
   const actual = context.cut.items[expected.itemSeq - 1];
   if (!actual || actual.sessionId !== sessionId || actual.kind !== 'run_terminal' || actual.itemId !== expected.itemId || actual.payloadRef !== expected.payloadRef) return corrupt();
@@ -226,8 +231,18 @@ async function terminalEntry(artifacts: Reader, source: { sourceSessionId: strin
   return { index, sourceItemId: source.itemId, sourceKind: 'run_terminal', fromItemSeq: source.itemSeq, throughItemSeq: source.itemSeq,
     sourceRef: source.payloadRef, sourceDigest: canonicalSha256(data), contentUtf8: canonicalJsonBytes(visible).toString('utf8') };
 }
+export async function readSessionContextSourceEntry(artifacts: Reader, source: RawSource, index: number): Promise<SessionContextEntry> {
+  if (source.kind === 'run_terminal') return terminalEntry(artifacts, source, index);
+  if (!isLegacySessionContextKind(source.kind)) return corrupt();
+  const payload = decodeLegacyContextPayload(await read(artifacts, source.payloadRef));
+  if (payload.kind !== source.kind || payload.legacySessionId !== source.sourceSessionId ||
+      legacySessionItemId(payload) !== source.itemId) return corrupt('Legacy context lost its original Session item binding');
+  return { index, sourceItemId: source.itemId, sourceKind: payload.kind, fromItemSeq: source.itemSeq, throughItemSeq: source.itemSeq,
+    sourceRef: source.payloadRef, sourceDigest: canonicalSha256(payload), contentUtf8: legacyContextVisibleText(payload) };
+}
 /** Original immutable projection + committed immutable compaction index.
- * Legacy/control payloads are never read as model/handoff prose. */
+ * Only closed context-only legacy projections may become historical prose;
+ * raw legacy files and control/authority payloads remain ineligible. */
 export async function readSessionContextEntries(artifacts: Reader, projection: SessionContextProjection,
   compactionIndex?: SessionCompactionIndex, cut?: SessionContextCut): Promise<readonly SessionContextEntry[]> {
   const entries: SessionContextEntry[] = [];
@@ -237,7 +252,7 @@ export async function readSessionContextEntries(artifacts: Reader, projection: S
       for (const source of segment.items) {
         const actual = rows?.find(row => row.itemSeq === source.itemSeq);
         if (actual && (actual.sessionId !== source.sourceSessionId || actual.itemId !== source.itemId || actual.kind !== source.kind || actual.payloadRef !== source.payloadRef)) return corrupt();
-        entries.push(await terminalEntry(artifacts, source, entries.length));
+        entries.push(await readSessionContextSourceEntry(artifacts, source, entries.length));
       }
     } else if (segment.kind === 'excluded_control') {
       if (rows && (rows.some(row => row.kind === 'run_terminal') || sessionSourceItemsDigest(rows) !== segment.sourceItemsDigest)) return corrupt();
@@ -266,7 +281,7 @@ export async function readSessionContextEntries(artifacts: Reader, projection: S
       if (text.textDigest !== segment.summaryDigest || text.byteCount < 1 || text.byteCount > 262_144) return corrupt();
       entries.push({ index: entries.length, sourceKind: 'summary', fromItemSeq: segment.fromItemSeq, throughItemSeq: segment.throughItemSeq,
         sourceRef: metadata.payloadRef, sourceDigest: segment.summaryDigest, sourceItemId: segment.compactionItemId, contentUtf8: text.utf8 });
-      for (const source of retained) entries.push(await terminalEntry(artifacts, source, entries.length));
+      for (const source of retained) entries.push(await readSessionContextSourceEntry(artifacts, source, entries.length));
     }
   }
   return immutableSnapshot(entries);

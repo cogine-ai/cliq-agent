@@ -1,3 +1,4 @@
+import type { NativeLocalModelStore } from './local-model-store-native.js';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { setTimeout as upgradeDelay } from 'node:timers/promises';
@@ -9,7 +10,7 @@ import type { PublishedArtifact } from './artifacts.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { readLatestStateOwner } from './state-owner.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
-import { openSqliteDriver, openReadOnlySqliteDriver } from './sqlite-driver.js';
+import { openSqliteDriver, openReadOnlySqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import { decodeRuntimeUpgradeReceipt } from './runtime-upgrade-history.js';
 import { assertKernelSchemaVersion } from './schema.js';
 import { sampleCanonicalNow } from './canonical-time.js';
@@ -50,6 +51,14 @@ import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH, MCP_ADMIN_HELP
   type NativeMcpHttpBrokerBinding, type NativeMcpRunHttpOwner, type NativeMcpAdminHttpOwner,
   type RunMcpHttpBinding, type AdminMcpHttpBinding, type NativeMcpRunJoined, type NativeMcpAdminJoined,
   type NativeMcpNoReleaseFence, type NativeMcpReceipt, type NativeMcpRawResponse, type NativeMcpUnusableResponse, type NativeMcpAdminProbeImage } from './mcp-broker-native.js';
+import { MCP_STDIO_BROKER_ENTRY_ID, MCP_STDIO_BROKER_RELATIVE_PATH, type NativeMcpStdioBrokerBinding,
+  type NativeMcpStdioProtocolOwner, type NativeMcpStdioRunOwner, type NativeMcpStdioAdminOwner, type RunMcpStdioLaunchBinding,
+  type RunMcpStdioCallBinding, type AdminMcpStdioBinding, type NativeMcpStdioRunJoined, type NativeMcpStdioAdminJoined,
+  type NativeMcpStdioReceipt, type NativeMcpStdioRawResponse, type NativeMcpStdioUnusableResponse, type NativeMcpStdioEffectFence,
+  type NativeMcpStdioServerImage } from './mcp-stdio-broker-native.js';
+import type { NativeMcpStdioRecoveryOwner, NativeMcpStdioRecoveryJoined, McpStdioRecoveryBinding,
+  NativeMcpStdioProbeFence, FrozenMcpStdioInput } from './mcp-stdio-broker-native.js';
+import { encodeMcpStdioRecipe } from './mcp-stdio-recipe.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH, type DependencyBrokerBinding,
   type NativeDependencyBrokerBinding, type NativeDependencyTransport, type NativeDependencySettlementFence, type NativeDependencyClosed } from './dependency-broker-native.js';
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
@@ -61,8 +70,18 @@ import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferen
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
   type RetainedVerifierToolchain } from './guest-toolchain.js';
 import { acquireHeldInstalledAnchor, checkHeldInstalledUpgradeKeeper, executeHeldInstalledImage, initializeHeldInstalledKeeper, loadHeldStateOwnerImage,
-  stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
-  type NativeStateOwner, type NativeInstalledUpgradeKeeperCheck } from './native-owner.js';
+  stateRootIdentityFromDescriptor, withHeldCredentialNativeScope, withHeldLocalModelStoreScope, STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH,
+  type NativeStateOwner, type NativeInstalledUpgradeKeeperCheck, type HeldMigrationCredentialGate,
+  buildHeldPreparedImportCandidate, beginHeldPreparedImportWriter, type PreparedImportStageSink, type PreparedImportWriterSummary,
+  assertHeldMigrationFilesystemRoot, assertHeldMigrationCredentialFilesystem, inspectHeldKernelMigrationBeforeOwner,
+  assertHeldMigrationGateRoot,
+  type HeldKernelGlobalGate, type KernelMigrationEntryObservation,
+  type HeldStateOwnerLock, type HeldMigrationFilesystem, type PreparedImportImageObservation } from './native-owner.js';
+import { archiveOriginalKernel, type KernelArchiveProjection, type CompleteOriginalKernelArchive } from './kernel-archive.js';
+import { decodeKernelRollbackDrainingControl, type KernelRollbackDrainingControlV1 } from '../kernel/kernel-archive-data.js';
+import { withPreparedImportProjection, assertPreparedImportPreview, assertPreparedImportStageCounts, type PreparedImportProjection,
+  type PreparedImportBaseline, type PreparedLegacyImportRows } from './prepared-import-candidate.js';
+import type { SignedKernelSchemaV1 } from '../kernel/runtime-upgrade.js';
 import { joinInstalledUpgradeSourceControl } from './installed-upgrade-source-control.js';
 import { openHeldInstalledControlClient, type HeldInstalledControlClient } from './native-owner.js';
 import { noteInstalledWorkRead, observeInstalledWork, noteInstalledInstallPhase } from './installed-work-diagnostics.js';
@@ -100,7 +119,7 @@ type CredentialPhysicalBinding = { native: NativeStateOwner;
     observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
   assertSelection(): void;
   pid: number; processStartToken: string; generation: string; active: boolean;
-  provenance: InstalledCredentialProvenance };
+  provenance: InstalledCredentialProvenance; migrationGate?: HeldMigrationCredentialGate };
 const credentialPhysicalScopes = new WeakMap<InstalledCredentialScope, CredentialPhysicalBinding>();
 const installedModelNoReleaseFences = new WeakMap<NativeModelNoReleaseFence, {
   native: NativeModelNoReleaseFence; bindingDigest: string; active: boolean; processId: number;
@@ -109,6 +128,83 @@ const installedModelNoReleaseFences = new WeakMap<NativeModelNoReleaseFence, {
 type InstalledMcpOwnerBinding = { native: NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner; purpose: 'run' | 'admin';
   processId: number; selected: HeldInstalledRuntime; assertSelection(): void };
 const installedMcpOwners = new WeakMap<object, InstalledMcpOwnerBinding>();
+type RawStdioAdminOwner = NativeMcpStdioProtocolOwner<Buffer, Buffer, NativeMcpStdioAdminJoined>;
+type RawStdioRunOwner = NativeMcpStdioProtocolOwner<Buffer, Buffer, NativeMcpStdioRunJoined> & Readonly<{
+  releaseFenceTokenDigest: string; bindCall(binding: Buffer): void; assertCallBinding(binding: Buffer): void;
+  acquireEffectFence(binding: Buffer): NativeMcpStdioEffectFence;
+}>;
+type RawStdioRecoveryOwner = Omit<NativeMcpStdioProtocolOwner<Buffer, Buffer, NativeMcpStdioRecoveryJoined>, 'bindLaunch' | 'assertLaunchBinding'> & Readonly<{
+  releaseFenceTokenDigest: string; bindProbe(binding: Buffer): void; assertProbeBinding(binding: Buffer): void;
+  acquireProbeFence(binding: Buffer): NativeMcpStdioProbeFence;
+}>;
+type StdioOwnerBinding = { processId: number; assertSelection(): void } &
+  ({ purpose: 'run'; native: RawStdioRunOwner } | { purpose: 'admin'; native: RawStdioAdminOwner } | { purpose: 'recovery'; native: RawStdioRecoveryOwner });
+const stdioBindingBytes = (binding: unknown) => canonicalJsonBytes(immutableSnapshot(binding));
+const installedStdioOwners = new WeakMap<object, StdioOwnerBinding>();
+const installedStdioFences = new WeakMap<NativeMcpStdioEffectFence, { native: NativeMcpStdioEffectFence; owner: StdioOwnerBinding;
+  bindingDigest: string; processId: number; active: boolean }>();
+const installedStdioProbeFences = new WeakMap<NativeMcpStdioProbeFence, { native: NativeMcpStdioProbeFence;
+  owner: Extract<StdioOwnerBinding, {purpose: 'recovery'}>; bindingDigest: string; processId: number; active: boolean }>();
+function stdioOwner(owner: object) {
+  const held = installedStdioOwners.get(owner);
+  if (!held || held.processId !== process.pid) mismatch('stdio proof is not its original selected native owner');
+  held.assertSelection(); return held;
+}
+export function assertInstalledMcpStdioRunOwner(owner: NativeMcpStdioRunOwner, binding: RunMcpStdioLaunchBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'run') mismatch('stdio Run proof substitutes an Admin owner');
+  assertMcpNativeProof(() => held.native.assertLaunchBinding(stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioAdminOwner(owner: NativeMcpStdioAdminOwner, binding: AdminMcpStdioBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'admin') mismatch('stdio Admin proof substitutes a Run owner');
+  assertMcpNativeProof(() => held.native.assertLaunchBinding(stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioCallOwner(owner: NativeMcpStdioRunOwner, binding: RunMcpStdioCallBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'run') mismatch('stdio effect proof substitutes an Admin owner');
+  assertMcpNativeProof(() => held.native.assertCallBinding(stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioRunJoined(owner: NativeMcpStdioRunOwner, joined: NativeMcpStdioRunJoined, binding: RunMcpStdioLaunchBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'run') mismatch('stdio Run closure substitutes an Admin owner');
+  assertMcpNativeProof(() => held.native.assertJoined(joined, stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioAdminJoined(owner: NativeMcpStdioAdminOwner, joined: NativeMcpStdioAdminJoined, binding: AdminMcpStdioBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'admin') mismatch('stdio Admin closure substitutes a Run owner');
+  assertMcpNativeProof(() => held.native.assertJoined(joined, stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioRecoveryOwner(owner: NativeMcpStdioRecoveryOwner, binding: McpStdioRecoveryBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'recovery') mismatch('stdio recovery proof substitutes a productive/Admin owner');
+  assertMcpNativeProof(() => held.native.assertProbeBinding(stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioRecoveryJoined(owner: NativeMcpStdioRecoveryOwner, joined: NativeMcpStdioRecoveryJoined, binding: McpStdioRecoveryBinding): void {
+  const held = stdioOwner(owner); if (held.purpose !== 'recovery') mismatch('stdio recovery closure substitutes a productive/Admin owner');
+  assertMcpNativeProof(() => held.native.assertJoined(joined, stdioBindingBytes(binding)));
+}
+export function assertInstalledMcpStdioRawResponse(owner: NativeMcpStdioRunOwner | NativeMcpStdioAdminOwner | NativeMcpStdioRecoveryOwner, receipt: NativeMcpStdioReceipt, response: NativeMcpStdioRawResponse): void {
+  const held = stdioOwner(owner); assertMcpNativeProof(() => held.native.assertRawResponse(receipt, response));
+}
+export function assertInstalledMcpStdioUnusableResponse(owner: NativeMcpStdioRunOwner | NativeMcpStdioAdminOwner | NativeMcpStdioRecoveryOwner, receipt: NativeMcpStdioReceipt, response: NativeMcpStdioUnusableResponse): void {
+  const held = stdioOwner(owner); assertMcpNativeProof(() => held.native.assertUnusableResponse(receipt, response));
+}
+/** Exact original fixed input data, already C-owned and validated. This
+ * friend works before binding and returns no fd or executable authority. */
+export function readInstalledMcpStdioRecipeData(owner: NativeMcpStdioRunOwner | NativeMcpStdioAdminOwner | NativeMcpStdioRecoveryOwner): Buffer {
+  const held = stdioOwner(owner); let bytes!: Buffer;
+  assertMcpNativeProof(() => { bytes = held.native.recipe.copyData(); });
+  return Buffer.from(bytes);
+}
+export function assertInstalledMcpStdioProbeFence(fence: NativeMcpStdioProbeFence, binding: McpStdioRecoveryBinding): void {
+  const held = installedStdioProbeFences.get(fence);
+  if (!held || !held.active || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding))
+    mismatch('stdio recovery nonce fence is not its original continuously held native guard');
+  held.owner.assertSelection();
+  assertMcpNativeProof(() => { held.owner.native.assertProbeBinding(stdioBindingBytes(binding)); held.native.assertHeld(); });
+}
+export function assertInstalledMcpStdioEffectFence(fence: NativeMcpStdioEffectFence, binding: RunMcpStdioCallBinding): void {
+  const held = installedStdioFences.get(fence);
+  if (!held || !held.active || held.processId !== process.pid || held.bindingDigest !== canonicalSha256(binding) || held.owner.purpose !== 'run')
+    mismatch('stdio release-domain fence is not the original continuously held native guard');
+  held.owner.assertSelection();
+  assertMcpNativeProof(() => { if (held.owner.purpose === 'run') held.owner.native.assertCallBinding(stdioBindingBytes(binding)); held.native.assertHeld(); });
+}
 const installedMcpNoReleaseFences = new WeakMap<NativeMcpNoReleaseFence, { native: NativeMcpNoReleaseFence;
   bindingDigest: string; processId: number; active: boolean; owner: InstalledMcpOwnerBinding }>();
 function mcpOwner(owner: object, purpose?: 'run' | 'admin'): InstalledMcpOwnerBinding {
@@ -203,6 +299,14 @@ export function assertInstalledCredentialScope(physical: InstalledCredentialScop
 export function installedCredentialProvenance(physical: InstalledCredentialScope): InstalledCredentialProvenance {
   return checkedCredentialPhysicalScope(physical).provenance;
 }
+/** Branded original EX-borrow only, including an empty credential migration.
+ * No public object field or callback can assert migration participation. */
+export function assertInstalledMigrationCredentialScope(physical: InstalledCredentialScope,
+  filesystem: HeldMigrationFilesystem, owner: HeldStateOwnerLock): void {
+  const held = checkedCredentialPhysicalScope(physical);
+  if (!held.migrationGate) mismatch('ordinary credential scope cannot stand in for an owned migration borrow');
+  assertHeldMigrationCredentialFilesystem(held.migrationGate, filesystem, owner);
+}
 /** Ordinary recovery only. Retained lifetime input is read by the private
  * business owner; missing executable paths or caller PIDs never prove death. */
 export function observeInstalledCredentialProducer(physical: InstalledCredentialScope,
@@ -265,6 +369,7 @@ type InstalledRuntimeBinding = {
   assertManagerObservationAvailable(): void;
   loadModelBroker(preparationSignal?: AbortSignal): Promise<NativeModelBrokerBinding>;
   loadMcpHttpBroker(preparationSignal?: AbortSignal): Promise<NativeMcpHttpBrokerBinding>;
+  loadMcpStdioBroker(preparationSignal?: AbortSignal): Promise<NativeMcpStdioBrokerBinding>;
   loadDependencyBroker(): Promise<NativeDependencyBrokerBinding>;
   openControlClient(): Promise<HeldInstalledControlClient>;
   sealWorkerImage(entryId: string): Promise<NativeWorkerImage>;
@@ -273,13 +378,49 @@ type InstalledRuntimeBinding = {
   startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   sealMcpAdminProbe(signal?: AbortSignal): Promise<NativeMcpAdminProbeImage>;
+  sealMcpStdioServer(entryId: string, signal?: AbortSignal): Promise<NativeMcpStdioServerImage>;
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   retainMcpAdminRecipe(signal?: AbortSignal): Promise<void>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
-  credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal): Promise<T>;
+  credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal,
+    migrationGate?: HeldMigrationCredentialGate): Promise<T>;
+  kernelArchiveProjection<T>(driver: SqliteDriver, gate: HeldMigrationCredentialGate, control: KernelRollbackDrainingControlV1,
+    schema: SignedKernelSchemaV1, operation: (projection: KernelArchiveProjection) => Promise<T>, signal?: AbortSignal):
+    Promise<CompleteOriginalKernelArchive<T>>;
+  preparedImportProjection<T>(filesystem: HeldMigrationFilesystem, schema: SignedKernelSchemaV1,
+    operation: (projection: PreparedImportProjection) => T | Promise<T>, signal?: AbortSignal): Promise<T>;
+  buildPreparedImportCandidate(filesystem: HeldMigrationFilesystem, schema: SignedKernelSchemaV1,
+    baseline: PreparedImportBaseline, imported: PreparedLegacyImportRows, signal?: AbortSignal):
+    Promise<Readonly<{ image: PreparedImportImageObservation; projectionDigest: string }>>;
+  stagePreparedImportCandidate<T>(filesystem: HeldMigrationFilesystem, schema: SignedKernelSchemaV1, baseline: PreparedImportBaseline,
+    stage: (writer: PreparedImportStageSink, signal: AbortSignal) => Promise<T>, signal?: AbortSignal):
+    Promise<Readonly<{ source: T; staged: PreparedImportWriterSummary; image: PreparedImportImageObservation; projectionDigest: string }>>;
 };
+const installedBorrowMigrationReaders = new WeakMap<InstalledRuntimeBorrow,
+  (gate: HeldKernelGlobalGate, signal?: AbortSignal) => Promise<KernelMigrationEntryObservation>>();
+/** Fixed readonly friend of an active original borrow; structural objects and
+ * ended callbacks cannot select another root or expose its descriptor. */
+export function inspectInstalledBorrowMigrationEntry(borrow: InstalledRuntimeBorrow, gate: HeldKernelGlobalGate,
+  signal?: AbortSignal): Promise<KernelMigrationEntryObservation> {
+  const reader = installedBorrowMigrationReaders.get(borrow);
+  if (!reader) throw new TypeError('pre-Owner migration entry requires its genuine active installed borrow');
+  return reader(gate, signal);
+}
+type InstalledModelStoreOperation = <T>(operation: (scope: NativeLocalModelStore,
+  origin: Readonly<{ rootIdentity: StateRootIdentityV1; ownerPrincipalId: string }>) => Promise<T>, signal?: AbortSignal) => Promise<T>;
+const installedBorrowModelStores = new WeakMap<InstalledRuntimeBorrow, InstalledModelStoreOperation>();
+/** Private fixed data-store friend of the original verified selection. The
+ * callback owns the entire lock/pager/source lifetime; neither a structural
+ * borrow nor copied installation metadata can acquire it. */
+export function withInstalledLocalModelStore<T>(borrow: InstalledRuntimeBorrow,
+  operation: (scope: NativeLocalModelStore, origin: Readonly<{ rootIdentity: StateRootIdentityV1;
+    ownerPrincipalId: string }>) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  const owner = installedBorrowModelStores.get(borrow);
+  if (!owner) throw new TypeError('local model store requires its genuine active installed borrow');
+  return owner(operation, signal);
+}
 const heldInstalledRuntimes = new WeakMap<HeldInstalledRuntime, InstalledRuntimeBinding>();
 const installedRuntimeTrust = new WeakMap<InstalledRuntime, readonly ReleaseTrustKey[]>();
 const installedDependencyTransports = new WeakMap<NativeDependencyTransport, {
@@ -382,6 +523,11 @@ export function loadInstalledMcpHttpBroker(selected: HeldInstalledRuntime, prepa
   if (!binding) mismatch('MCP transport requires a genuine held installed selection');
   return binding.loadMcpHttpBroker(preparationSignal);
 }
+export function loadInstalledMcpStdioBroker(selected: HeldInstalledRuntime, preparationSignal?: AbortSignal): Promise<NativeMcpStdioBrokerBinding> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('stdio broker requires its genuine selected installed runtime');
+  return binding.loadMcpStdioBroker(preparationSignal);
+}
 export function assertInstalledMcpBrokerProcess(): void {
   if (!isMainThread || !isSea() || process.platform !== 'linux' || process.arch !== 'x64' || process.versions.node !== '24.21.0')
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP broker requires the fixed signed Linux Supervisor process');
@@ -423,6 +569,13 @@ export function sealInstalledMcpAdminProbe(selected: HeldInstalledRuntime, signa
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('MCP Admin probing requires a genuine held installed selection');
   return binding.sealMcpAdminProbe(signal);
+}
+/** The entry id selects only a held member of the current verified bundle.
+ * The purpose-specific native seal repeats the complete static ELF check. */
+export function sealInstalledMcpStdioServer(selected: HeldInstalledRuntime, entryId: string, signal?: AbortSignal): Promise<NativeMcpStdioServerImage> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('MCP stdio requires a genuine held installed selection');
+  return binding.sealMcpStdioServer(entryId, signal);
 }
 /** Audit data only, through the same original installed scope. The two fixed
  * recipe members remain separate host files; CAS bytes cannot execute them. */
@@ -534,6 +687,20 @@ export class CredentialScopeBusyError extends TypeError {
  * This token carries physical ownership, not an authentication decision. */
 export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
   operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal): Promise<T> {
+  return withCredentialAuthorityScope(held, operation, preparationSignal);
+}
+/** Fenced-import composition only. This reuses the existing physical scope,
+ * pager/credential owner and business finalizer; it does not start a second
+ * Supervisor, supply a time sample or grant execution/admission authority.
+ * Native rejects a structural token, unbound EX or a different selected root. */
+export function withMigrationCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
+  migrationGate: HeldMigrationCredentialGate, operation: (token: HeldCredentialAuthorityLock) => Promise<T>,
+  preparationSignal?: AbortSignal): Promise<T> {
+  return withCredentialAuthorityScope(held, operation, preparationSignal, migrationGate);
+}
+function withCredentialAuthorityScope<T>(held: HeldInstalledRuntime,
+  operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal,
+  migrationGate?: HeldMigrationCredentialGate): Promise<T> {
   const binding = heldInstalledRuntimes.get(held);
   if (!binding) mismatch('installed runtime is not a verified held selection');
   healthy();
@@ -542,8 +709,45 @@ export function withCredentialAuthorityLock<T>(held: HeldInstalledRuntime,
   credentialScopeReserved = true;
   const release = () => { if (!retirementFailure) credentialScopeReserved = false; };
   try {
-    return binding.credentialScope(operation, preparationSignal).finally(release);
+    return binding.credentialScope(operation, preparationSignal, migrationGate).finally(release);
   } catch (error) { release(); throw error; }
+}
+/** Original selected image/driver friend for the complete rollback producer.
+ * No public path/URI/SQL or structurally supplied native backup is accepted. */
+export function withInstalledKernelArchiveProjection<T>(selected: HeldInstalledRuntime, driver: SqliteDriver,
+  gate: HeldMigrationCredentialGate, control: KernelRollbackDrainingControlV1, schema: SignedKernelSchemaV1,
+  operation: (projection: KernelArchiveProjection) => Promise<T>, signal?: AbortSignal):
+  Promise<CompleteOriginalKernelArchive<T>> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) throw new TypeError('Kernel archive requires its genuine installed selection');
+  healthy(); return binding.kernelArchiveProjection(driver, gate, decodeKernelRollbackDrainingControl(control), schema, operation, signal);
+}
+
+/** Fixed actual-image projection only; no SQL/driver/path/FD is returned. */
+export function withInstalledPreparedImportProjection<T>(selected: HeldInstalledRuntime, filesystem: HeldMigrationFilesystem,
+  schema: SignedKernelSchemaV1, operation: (projection: PreparedImportProjection) => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('prepared import requires its genuine installed selection');
+  healthy(); return binding.preparedImportProjection(filesystem, schema, operation, signal);
+}
+/** Complete fixed candidate build/closed-image/readback. This does not commit
+ * an import, manufacture creator evidence or open ordinary Run admission. */
+export function buildAndVerifyInstalledImportCandidate(selected: HeldInstalledRuntime, filesystem: HeldMigrationFilesystem,
+  schema: SignedKernelSchemaV1, baseline: PreparedImportBaseline, imported: PreparedLegacyImportRows, signal?: AbortSignal):
+  Promise<Readonly<{ image: PreparedImportImageObservation; projectionDigest: string }>> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('prepared import requires its genuine installed selection');
+  healthy(); return binding.buildPreparedImportCandidate(filesystem, schema, baseline, imported, signal);
+}
+/** The source producer receives only append of bounded fixed typed rows.
+ * No SQL/driver/path callback is exposed and no full Session arrays are needed.
+ * Native final seal also requires actual backup/context EOF and joins. */
+export function stageAndVerifyInstalledImportCandidate<T>(selected: HeldInstalledRuntime, filesystem: HeldMigrationFilesystem,
+  schema: SignedKernelSchemaV1, baseline: PreparedImportBaseline, stage: (writer: PreparedImportStageSink, signal: AbortSignal) => Promise<T>, signal?: AbortSignal):
+  Promise<Readonly<{ source: T; staged: PreparedImportWriterSummary; image: PreparedImportImageObservation; projectionDigest: string }>> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('prepared import requires its genuine installed selection');
+  healthy(); return binding.stagePreparedImportCandidate(filesystem, schema, baseline, stage, signal);
 }
 
 type InstalledRuntime = Readonly<{
@@ -561,6 +765,15 @@ type VerifiedPackage = { root: Directory; manifest: InstalledFile; bundle: Runti
   singleCasPaths: ReadonlySet<string>; delegatedPaths: ReadonlySet<string>; delegatedRefs: ReadonlySet<string>;
   structured: InstalledStructuredArtifacts; modelAuthority?: VerifiedInstalledModelAuthority;
   companionFiles: InstalledFile[] };
+function assertPreparedImportSchema(signed: VerifiedPackage, schema: SignedKernelSchemaV1): void {
+  const entry = kernelSchemaEntries(signed.bundle).find(value => value.entryId === 'kernel_schema');
+  const bytes = entry && signed.roots.get(entry.digest);
+  if (!entry || !bytes || bytes.length !== entry.byteCount || sha256Bytes(bytes) !== entry.digest ||
+      canonicalSha256(decodeSignedKernelSchema(checkCanonicalBytes(bytes))) !== entry.digest ||
+      canonicalSha256(decodeSignedKernelSchema(schema)) !== entry.digest ||
+      signed.bundle.stateSchemaRange.min > 8 || signed.bundle.stateSchemaRange.max < 8)
+    mismatch('prepared import schema is not the original current signed installed profile');
+}
 function streamedInstalledSchemaKind(signed: VerifiedPackage, ref: string): string {
   const declared = signed.structured.objects.filter(object => object.artifactRef === ref);
   if (declared.length !== 1 || !['cliq-guest-image-raw-ext4-v1', 'cliq-skill-source-file-v1', 'cliq-npm-data-image-v1'].includes(declared[0]!.schemaKind))
@@ -1236,7 +1449,7 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
       mismatch('skill textual resource has no unique original signed member');
     return readSmall(entries.get(entry.entryId)!, SKILL_RESOURCE_BYTES, signal);
   });
-  const structured = validateInstalledStructuredArtifacts(bundle, roots);
+  const structured = validateInstalledStructuredArtifacts(bundle, roots, releaseKeys);
   for (const guest of guests) {
     const signature = roots.get(guest.manifest.signatureRef);
     if (!signature || !streamedRoots.has(guest.manifest.guestImageRef)) mismatch('installed guest closure is incomplete');
@@ -1533,6 +1746,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         const guestShutdown = new AbortController();
         const observationShutdown = new AbortController();
         const observationJobs = new Set<Promise<InstalledRuntimeObservation>>();
+        const migrationCredentialJobs = new Set<Promise<unknown>>();
+        const kernelArchiveJobs = new Set<Promise<unknown>>();
         let observationRetirement: ResourceRetirementError | undefined;
         let poisoned: unknown, hasPoisoned = false;
         let tail = Promise.resolve();
@@ -1543,10 +1758,11 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         let managerObserver: InstalledManagerObserver | undefined;
         let modelBroker: NativeModelBrokerBinding | undefined;
         let mcpHttpBroker: NativeMcpHttpBrokerBinding | undefined;
+        let mcpStdioBroker: NativeMcpStdioBrokerBinding | undefined;
         let dependencyBroker: NativeDependencyBrokerBinding | undefined;
         let guestExtractor: NativeGuestExtractorBinding | undefined;
         const platformJobs = new Set<Promise<unknown>>();
-        const brokerTransports = new Set<NativeModelTransport | NativeDependencyTransport | NativeMcpRunHttpOwner | NativeMcpAdminHttpOwner>();
+        const brokerTransports = new Set<Readonly<{ close(): Promise<unknown> }>>();
         const guestJobs = new Set<NativeGuestToolchain>();
         const guestJoins = new Map<NativeGuestToolchain, Promise<void>>();
         const retiredGuestJobs = new WeakSet<NativeGuestToolchain>();
@@ -1708,12 +1924,13 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               // credential lock those pending producers may still hold.
               const transportJoins = [...brokerTransports].map(transport => transport.close());
               const guestClosures = [...guestJobs].map(closeGuestToolchain);
-              const [transports, guests, observations] = await Promise.all([Promise.allSettled(transportJoins),
-                Promise.allSettled(guestClosures), Promise.allSettled([joinObservations()])]);
+              const [transports, guests, observations, migrations] = await Promise.all([Promise.allSettled(transportJoins),
+                Promise.allSettled(guestClosures), Promise.allSettled([joinObservations()]),
+                Promise.allSettled([...migrationCredentialJobs, ...kernelArchiveJobs])]);
               await tail;
               const producers = await Promise.allSettled([...platformJobs]);
               const remaining = await Promise.allSettled([...platformJobs]);
-              const failed = [...producers, ...transports, ...guests, ...observations, ...remaining].find(result => result.status === 'rejected' &&
+              const failed = [...producers, ...transports, ...guests, ...observations, ...migrations, ...remaining].find(result => result.status === 'rejected' &&
                 result.reason instanceof ResourceRetirementError);
               if (failed?.status === 'rejected') throw failed.reason;
               if (brokerTransports.size !== 0) {
@@ -1730,6 +1947,76 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         });
         heldInstalledRuntimes.set(selected, {
           factory: runtime,
+          kernelArchiveProjection(driver, gate, control, schema, operation, signal) {
+            const readSignal = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
+            const pending = enqueue(async () => {
+              await checkedRevalidate(readSignal);
+              if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'archive requires its fixed signed installed role');
+              assertPreparedImportSchema(signed, schema);
+              const native = await loadSelectedNative(readSignal), image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+              assertHeldMigrationGateRoot(native, gate, stateRootIdentityFromDescriptor(stateRoot, identity(state)));
+              const result = await archiveOriginalKernel(native, gate, image.handle, control, driver, schema, operation, readSignal);
+              await checkedRevalidate(readSignal); return result;
+            }).catch(error => { rememberRetirement(error); throw error; });
+            kernelArchiveJobs.add(pending);
+            void pending.then(() => kernelArchiveJobs.delete(pending), error => {
+              if (!(error instanceof ResourceRetirementError)) kernelArchiveJobs.delete(pending);
+            }); return pending;
+          },
+          preparedImportProjection(filesystem, schema, operation, signal) {
+            const readSignal = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
+            return enqueue(async () => {
+              await checkedRevalidate(readSignal);
+              if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate reader requires its fixed signed installed role');
+              assertPreparedImportSchema(signed, schema);
+              const native = await loadSelectedNative(readSignal), image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+              assertHeldMigrationFilesystemRoot(native, filesystem, stateRootIdentityFromDescriptor(stateRoot, identity(state)));
+              return withPreparedImportProjection(native, { image: image.handle, filesystem, schema, signal: readSignal }, async projection => {
+                const result = await operation(projection); await checkedRevalidate(readSignal); projection.assertHeld(); return result;
+              });
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
+          buildPreparedImportCandidate(filesystem, schema, baseline, imported, signal) {
+            const readSignal = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
+            return enqueue(async () => {
+              await checkedRevalidate(readSignal);
+              if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate build requires its fixed signed installed role');
+              assertPreparedImportSchema(signed, schema);
+              const native = await loadSelectedNative(readSignal), image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+              assertHeldMigrationFilesystemRoot(native, filesystem, stateRootIdentityFromDescriptor(stateRoot, identity(state)));
+              await buildHeldPreparedImportCandidate(filesystem, { schema, baseline, imported, signal: readSignal });
+              return withPreparedImportProjection(native, { image: image.handle, filesystem, schema, signal: readSignal }, projection => {
+                assertPreparedImportPreview(projection, baseline, imported);
+                return Object.freeze({ image: projection.image, projectionDigest: projection.digest() });
+              });
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
+          stagePreparedImportCandidate(filesystem, schema, baseline, stage, signal) {
+            const readSignal = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
+            return enqueue(async () => {
+              await checkedRevalidate(readSignal);
+              if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'candidate stage requires its fixed signed installed role');
+              assertPreparedImportSchema(signed, schema);
+              const native = await loadSelectedNative(readSignal), image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+              assertHeldMigrationFilesystemRoot(native, filesystem, stateRootIdentityFromDescriptor(stateRoot, identity(state)));
+              const writer = beginHeldPreparedImportWriter(filesystem, { schema, baseline, signal: readSignal });
+              try {
+                const sink: PreparedImportStageSink = Object.freeze({ append: batch => writer.append(batch),
+                  sessionItems: sessionId => writer.sessionItems(sessionId), sessions: () => writer.sessions(),
+                  session: sessionId => writer.session(sessionId), sessionItemTail: sessionId => writer.sessionItemTail(sessionId),
+                  finalizeSession: (original, projection) => writer.finalizeSession(original, projection) });
+                const source = await stage(sink, readSignal), staged = await writer.finish();
+                return await withPreparedImportProjection(native, { image: image.handle, filesystem, schema, signal: readSignal }, projection => {
+                  assertPreparedImportStageCounts(projection, baseline, staged);
+                  return Object.freeze({ source, staged, image: projection.image, projectionDigest: projection.digest() });
+                });
+              } finally { await writer.close(); }
+            }).catch(error => { rememberRetirement(error); throw error; });
+          },
           observe(signal) {
             if (closed) mismatch('installed runtime handle is closed');
             const combined = signal ? AbortSignal.any([signal, observationShutdown.signal]) : observationShutdown.signal;
@@ -1752,8 +2039,8 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
             if (closed) mismatch('installed runtime handle is closed');
             assertSelection();
           },
-          credentialScope(operation, preparationSignal) {
-            return enqueue(async () => {
+          credentialScope(operation, preparationSignal, migrationGate) {
+            const perform = async () => {
               preparationSignal?.throwIfAborted();
               if (!isMainThread || !isSea() || process.versions.node !== '24.21.0')
                 throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'credential authority requires the fixed signed installed backend');
@@ -1814,6 +2101,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               return withHeldCredentialNativeScope(native, {
                 image: image.handle, root: state.handle, rootIdentity: state.info, stateRoot,
+                migrationGate,
               }, async credential => {
                 // Cancellation ends only preparation. The original callback,
                 // postvalidation and native scope close retain their raw owner.
@@ -1823,7 +2111,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   assertInstalledCredentialScope(physical);
                 } });
                 const binding: CredentialPhysicalBinding = { native, scope: credential, assertSelection, pid: process.pid,
-                  processStartToken: native.processStartToken(), generation: credential.generation, active: true,
+                  processStartToken: native.processStartToken(), generation: credential.generation, active: true, migrationGate,
                   provenance: Object.freeze({ selected, ownerPrincipalId, rootIdentity, processIdentity,
                     principalIdentity, channelIdentity, objects, releaseKeys }) };
                 credentialPhysicalScopes.set(physical, binding);
@@ -1833,7 +2121,22 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   return result;
                 } finally { binding.active = false; }
               });
-            }).catch(error => { rememberRetirement(error); throw error; });
+            };
+            if (migrationGate === undefined)
+              return enqueue(perform).catch(error => { rememberRetirement(error); throw error; });
+            if (closed) mismatch('installed runtime handle is closed');
+            // The genuine migration scope is checked by the same original
+            // native factory before any pager/business callback. Join work
+            // already queued, but do not make this job the queue tail: its
+            // fixed import callback must itself borrow the candidate reader.
+            // Ordinary credential entry retains its non-reentrant queue and
+            // the process-wide credential reservation remains unchanged.
+            const pending = tail.then(perform).catch(error => { rememberRetirement(error); throw error; });
+            migrationCredentialJobs.add(pending);
+            void pending.then(() => migrationCredentialJobs.delete(pending), error => {
+              if (!(error instanceof ResourceRetirementError)) migrationCredentialJobs.delete(pending);
+            });
+            return pending;
           },
           loadWorkerNative(signal) {
             return enqueue(async () => {
@@ -2111,6 +2414,152 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 });
               }
               await checkedRevalidate(); return dependencyBroker;
+            });
+          },
+          loadMcpStdioBroker(preparationSignal) {
+            return enqueue(async () => {
+              assertInstalledMcpBrokerProcess(); await checkedRevalidate(preparationSignal);
+              if (!mcpStdioBroker) {
+                const entry = signed.bundle.entries.find(value => value.entryId === MCP_STDIO_BROKER_ENTRY_ID), file = signed.entries.get(MCP_STDIO_BROKER_ENTRY_ID);
+                if (!entry || !file || entry.role !== 'platform_helper' || entry.executable !== true || entry.version !== '1' || entry.relativePath !== MCP_STDIO_BROKER_RELATIVE_PATH)
+                  mismatch('fixed signed MCP stdio broker image is missing');
+                const loaded = new Module('cliq-installed-linux-mcp-stdio-broker'); process.dlopen(loaded, `/proc/self/fd/${file.handle.fd}`);
+                type NativeImage = Readonly<{ interfaceVersion: 1;
+                  prepareAdminStdio(bytes: Buffer, remainingDeadlineMs: number): RawStdioAdminOwner;
+                  prepareRunStdio(bytes: Buffer, remainingDeadlineMs: number): RawStdioRunOwner;
+                  prepareRecoveryStdio?(bytes: Buffer, remainingDeadlineMs: number): RawStdioRecoveryOwner }>;
+                const native = loaded.exports as NativeImage;
+                const recoveryPresent = Object.hasOwn(native, 'prepareRecoveryStdio');
+                if (Reflect.ownKeys(native).length !== (recoveryPresent ? 4 : 3) ||
+                    !['interfaceVersion', 'prepareAdminStdio', 'prepareRunStdio'].every(key => Object.hasOwn(native, key)) ||
+                    native.interfaceVersion !== 1 || typeof native.prepareAdminStdio !== 'function' || typeof native.prepareRunStdio !== 'function' ||
+                    recoveryPresent && typeof native.prepareRecoveryStdio !== 'function') mismatch('unsupported installed MCP stdio broker interface');
+                const refused = (error: unknown): never => {
+                  if ((error as { code?: unknown } | null)?.code === 'ERR_CLIQ_RESOURCE_RETIREMENT') {
+                    const failure = new ResourceRetirementError('MCP stdio broker resources did not retire', undefined); rememberRetirement(failure); throw failure;
+                  }
+                  if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MCP_BROKER' &&
+                      (error as { brokerCode?: unknown }).brokerCode === 'mcp_response_refused') throw new InstalledMcpBrokerRefusalError();
+                  throw new KernelStorageError('RECOVERY_REQUIRED', 'installed MCP stdio broker refused an operation');
+                };
+                const protocol = <L, C, J extends NativeMcpStdioRunJoined | NativeMcpStdioAdminJoined | NativeMcpStdioRecoveryJoined>(
+                  original: Omit<NativeMcpStdioProtocolOwner<Buffer, Buffer, J>, 'bindLaunch' | 'assertLaunchBinding'>,
+                  purpose: 'run' | 'admin' | 'recovery', token: string | undefined,
+                  binding: Readonly<{ bind(bytes: Buffer): void; assert(bytes: Buffer): void }>) => {
+                  let owner!: Pick<NativeMcpStdioProtocolOwner<L, C, J>, 'close' | 'releaseDomain'>, retained = false, joined = false, retirement: Promise<J> | undefined;
+                  const guards = new Set<NativeMcpStdioEffectFence | NativeMcpStdioProbeFence>();
+                  const check = () => { if (closed) mismatch('installed runtime handle is closed'); assertSelection(); };
+                  const sync = <T>(operation: () => T): T => { check(); try { return operation(); } catch (error) { return refused(error); } };
+                  const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {
+                    if (!retiring) check();
+                    let pending: Promise<T>; try { pending = operation(); } catch (error) { pending = Promise.reject(error); }
+                    const job = pending.then(value => { if (!retiring) check(); return value; }, refused);
+                    platformJobs.add(job); void job.finally(() => platformJobs.delete(job)).catch(() => {}); return job;
+                  };
+                  const close = () => retirement ??= invoke(async () => {
+                    const value = await original.close();
+                    if (value.kind !== (purpose === 'recovery' ? 'mcp_stdio_recovery_owner_joined' : 'mcp_stdio_owner_joined') ||
+                        value.purpose !== purpose || value.tokenRevoked !== true || value.matchingActiveReleaseCount !== 0 ||
+                        value.processJoined !== true || value.pipesJoined !== true || value.tasksJoined !== true || value.outputCustodyRetired !== true ||
+                        value.purpose !== 'admin' && value.releaseFenceTokenDigest !== token) {
+                      const failure = new ResourceRetirementError('MCP stdio owner closure is incomplete', undefined); rememberRetirement(failure); throw failure;
+                    }
+                    joined = true; if (!retained) brokerTransports.delete(owner); return value;
+                  }, true);
+                  const ready = original.ready.then(check, refused).catch(async error => { await close(); throw error; });
+                  platformJobs.add(ready); void ready.finally(() => platformJobs.delete(ready)).catch(() => {});
+                  const common: NativeMcpStdioProtocolOwner<L, C, J> = Object.freeze({ ready, recipe: original.recipe,
+                    attachProtocolPeer: peer => sync(() => original.attachProtocolPeer(peer)), bindLaunch: value => sync(() => binding.bind(stdioBindingBytes(value))),
+                    releaseExec: binding => sync(() => original.releaseExec(stdioBindingBytes(binding))), releaseStage: (binding, phase) => sync(() => original.releaseStage(stdioBindingBytes(binding), phase)),
+                    releasePing: (binding, receipt) => sync(() => original.releasePing(stdioBindingBytes(binding), receipt)), nextMessage: () => invoke(() => original.nextMessage()),
+                    advanceResponse: receipt => sync(() => original.advanceResponse(receipt)), finishResponse: receipt => invoke(() => original.finishResponse(receipt)),
+                    readUnusableResponse: receipt => sync(() => original.readUnusableResponse(receipt)), assertLaunchBinding: value => sync(() => binding.assert(stdioBindingBytes(value))),
+                    assertJoined: (observation, binding) => { assertSelection(); assertMcpNativeProof(() => original.assertJoined(observation, stdioBindingBytes(binding))); },
+                    assertRawResponse: (receipt, response) => { assertSelection(); assertMcpNativeProof(() => original.assertRawResponse(receipt, response)); },
+                    assertUnusableResponse: (receipt, response) => { assertSelection(); assertMcpNativeProof(() => original.assertUnusableResponse(receipt, response)); },
+                    retainDomain: () => sync(() => { original.retainDomain(); retained = true; }),
+                    releaseDomain: () => {
+                      if (guards.size) { const failure = new ResourceRetirementError('MCP stdio original domain still has an owning release guard', undefined); rememberRetirement(failure); throw failure; }
+                      try { original.releaseDomain(); } catch (error) { return refused(error); }
+                      retained = false; if (joined) brokerTransports.delete(owner);
+                    }, close });
+                  return { common, guards, sync, joined: () => joined, retained: () => retained,
+                    setOwner(value: Pick<NativeMcpStdioProtocolOwner<L, C, J>, 'close' | 'releaseDomain'>) { owner = value; } };
+                };
+                const prepareRecovery = native.prepareRecoveryStdio;
+                mcpStdioBroker = Object.freeze({ interfaceVersion: 1 as const,
+                  prepareAdminStdio(input) {
+                    if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                    try {
+                      const recipe = encodeMcpStdioRecipe(input, 'admin'), original = native.prepareAdminStdio(recipe.bytes, recipe.remainingDeadlineMs);
+                      const wrapped = protocol<AdminMcpStdioBinding, never, NativeMcpStdioAdminJoined>(original, 'admin', undefined,
+                        { bind: bytes => original.bindLaunch(bytes), assert: bytes => original.assertLaunchBinding(bytes) }), owner = wrapped.common;
+                      wrapped.setOwner(owner); installedStdioOwners.set(owner, { purpose: 'admin', native: original, processId: process.pid, assertSelection });
+                      brokerTransports.add(owner); return owner;
+                    } catch (error) { return refused(error); }
+                  },
+                  prepareRunStdio(input) {
+                    if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                    try {
+                      const recipe = encodeMcpStdioRecipe(input, 'run'), original = native.prepareRunStdio(recipe.bytes, recipe.remainingDeadlineMs);
+                      const wrapped = protocol<RunMcpStdioLaunchBinding, RunMcpStdioCallBinding, NativeMcpStdioRunJoined>(original, 'run', original.releaseFenceTokenDigest,
+                        { bind: bytes => original.bindLaunch(bytes), assert: bytes => original.assertLaunchBinding(bytes) });
+                      const held: StdioOwnerBinding = { purpose: 'run', native: original, processId: process.pid, assertSelection };
+                      const owner: NativeMcpStdioRunOwner = Object.freeze({ ...wrapped.common, releaseFenceTokenDigest: original.releaseFenceTokenDigest,
+                        bindCall: binding => wrapped.sync(() => original.bindCall(stdioBindingBytes(binding))), assertCallBinding: binding => wrapped.sync(() => original.assertCallBinding(stdioBindingBytes(binding))),
+                        acquireEffectFence(binding) {
+                          if (!wrapped.joined() || !wrapped.retained()) mismatch('stdio release-domain fence lacks its original joined retained owner');
+                          const copy = immutableSnapshot(binding), nativeFence = original.acquireEffectFence(stdioBindingBytes(copy));
+                          const state = { native: nativeFence, owner: held, processId: process.pid, active: true, bindingDigest: canonicalSha256(copy) };
+                          const methods: Pick<NativeMcpStdioEffectFence, 'assertHeld' | 'close'> = {
+                            assertHeld() { assertInstalledMcpStdioEffectFence(fence, copy); },
+                            close() {
+                              if (this !== fence || state.processId !== process.pid) mismatch('invalid stdio release-domain fence receiver');
+                              if (!state.active) return;
+                              try { nativeFence.close(); } catch (error) { return refused(error); }
+                              state.active = false; wrapped.guards.delete(fence);
+                            }
+                          };
+                          const fence = Object.freeze(methods) as NativeMcpStdioEffectFence;
+                          installedStdioFences.set(fence, state); wrapped.guards.add(fence); return fence;
+                        } });
+                      wrapped.setOwner(owner); installedStdioOwners.set(owner, held); brokerTransports.add(owner); return owner;
+                    } catch (error) { return refused(error); }
+                  },
+                  ...(prepareRecovery ? { prepareRecoveryStdio(input: FrozenMcpStdioInput): NativeMcpStdioRecoveryOwner {
+                    if (closed) mismatch('installed runtime handle is closed'); assertSelection();
+                    try {
+                      const recipe = encodeMcpStdioRecipe(input, 'recovery'), original = prepareRecovery.call(native, recipe.bytes, recipe.remainingDeadlineMs);
+                      const wrapped = protocol<McpStdioRecoveryBinding, never, NativeMcpStdioRecoveryJoined>(original, 'recovery', original.releaseFenceTokenDigest,
+                        { bind: bytes => original.bindProbe(bytes), assert: bytes => original.assertProbeBinding(bytes) });
+                      const held: Extract<StdioOwnerBinding, {purpose: 'recovery'}> = { purpose: 'recovery', native: original, processId: process.pid, assertSelection };
+                      // The two generic binding methods are internal reuse
+                      // only. The recovery facade exposes solely probe binding.
+                      const { bindLaunch: _bindLaunch, assertLaunchBinding: _assertLaunchBinding, ...common } = wrapped.common;
+                      const owner: NativeMcpStdioRecoveryOwner = Object.freeze({ ...common, releaseFenceTokenDigest: original.releaseFenceTokenDigest,
+                        bindProbe: binding => wrapped.sync(() => original.bindProbe(stdioBindingBytes(binding))),
+                        assertProbeBinding: binding => wrapped.sync(() => original.assertProbeBinding(stdioBindingBytes(binding))),
+                        acquireProbeFence(binding) {
+                          if (!wrapped.joined() || !wrapped.retained()) mismatch('stdio probe fence lacks its original joined retained recovery owner');
+                          const copy = immutableSnapshot(binding), nativeFence = original.acquireProbeFence(stdioBindingBytes(copy));
+                          const state = { native: nativeFence, owner: held, processId: process.pid, active: true, bindingDigest: canonicalSha256(copy) };
+                          const methods: Pick<NativeMcpStdioProbeFence, 'assertHeld' | 'close'> = {
+                            assertHeld() { assertInstalledMcpStdioProbeFence(fence, copy); },
+                            close() {
+                              if (this !== fence || state.processId !== process.pid) mismatch('invalid stdio probe fence receiver');
+                              if (!state.active) return;
+                              try { nativeFence.close(); } catch (error) { return refused(error); }
+                              state.active = false; wrapped.guards.delete(fence);
+                            }
+                          };
+                          const fence = Object.freeze(methods) as NativeMcpStdioProbeFence;
+                          installedStdioProbeFences.set(fence, state); wrapped.guards.add(fence); return fence;
+                        } });
+                      wrapped.setOwner(owner); installedStdioOwners.set(owner, held); brokerTransports.add(owner); return owner;
+                    } catch (error) { return refused(error); }
+                  } } : {}) });
+              }
+              await checkedRevalidate(preparationSignal); return mcpStdioBroker;
             });
           },
           loadMcpHttpBroker(preparationSignal) {
@@ -2433,6 +2882,29 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 signal?.throwIfAborted(); assertSelection();
               }
               await checkedRevalidate(signal);
+            });
+          },
+          sealMcpStdioServer(entryId, signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const entry = signed.bundle.entries.find(value => value.entryId === entryId), file = signed.entries.get(entryId);
+              if (!workerNative || workerNative.mcpStdioInterfaceVersion !== 1 || typeof workerNative.sealMcpStdioServer !== 'function' ||
+                  !entry || !file || entry.role !== 'mcp_server' || entry.executable !== true || entry.byteCount < 1 || entry.byteCount > 268_435_456)
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the exact signed static MCP server is not installed');
+              signal?.throwIfAborted(); assertSelection();
+              const sealed = workerNative.sealMcpStdioServer(file.handle.fd);
+              try {
+                if (sealed.identity.sha256 !== entry.digest || sealed.identity.byteCount !== entry.byteCount)
+                  mismatch('sealed MCP server differs from its exact current signed bytes');
+                await checkedRevalidate(signal); return sealed;
+              } catch (error) {
+                try { sealed.close(); }
+                catch (failure) {
+                  const retirement = new ResourceRetirementError('installed MCP server seal did not retire', new AggregateError([error, failure]));
+                  rememberRetirement(retirement); throw retirement;
+                }
+                throw error;
+              }
             });
           },
           sealMcpAdminProbe(signal) {
@@ -2901,9 +3373,54 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                   return pending;
                 },
               });
+              installedBorrowMigrationReaders.set(installed, (gate, checkSignal) => {
+                if (!active) mismatch('installed runtime borrow has ended');
+                const readSignal = signal && checkSignal ? AbortSignal.any([signal, checkSignal]) : signal ?? checkSignal;
+                // Same tracked original borrow, not enqueue on our own tail.
+                const pending = (async () => {
+                  await checkedRevalidate(readSignal); gate.assertHeld();
+                  const native = await loadSelectedNative(readSignal);
+                  if (!active) mismatch('installed runtime borrow has ended');
+                  const value = inspectHeldKernelMigrationBeforeOwner(native, gate, state.handle, state.info);
+                  await checkedRevalidate(readSignal); gate.assertHeld();
+                  if (!active) mismatch('installed runtime borrow has ended');
+                  return value;
+                })();
+                const joined = pending.then(() => undefined); revalidations.push(joined);
+                void joined.catch(() => undefined); return pending;
+              });
+              installedBorrowModelStores.set(installed, async (modelOperation, checkSignal) => {
+                if (!active) mismatch('installed model-store borrow has ended');
+                const modelSignal = signal && checkSignal ? AbortSignal.any([signal, checkSignal]) : signal ?? checkSignal;
+                const pending = (async () => {
+                  if (!isMainThread || !isSea() || process.platform !== 'linux' || process.versions.node !== '24.21.0')
+                    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'model-store producer requires the signed Linux installed backend');
+                  await checkedRevalidate(modelSignal);
+                  const native = await loadSelectedNative(modelSignal), image = signed.entries.get(STATE_OWNER_NATIVE_ENTRY_ID)!;
+                  const processImage = await native.observeCurrentProcess();
+                  const rootIdentity = stateRootIdentityFromDescriptor(stateRoot, {
+                    deviceId: state.info.dev.toString(), fileId: state.info.ino.toString(), ownerUid: Number(state.info.uid),
+                  });
+                  if (processImage.pid !== process.pid || processImage.processStartToken !== native.processStartToken() ||
+                      processImage.uid !== rootIdentity.ownerUid || BigInt(processImage.uid) !== effectiveUid() ||
+                      processImage.executableImageDigest !== supervisor.digest)
+                    mismatch('model-store producer differs from its original signed same-user process');
+                  const ownerPrincipalId = identityHash('cliq-local-principal-v1', rootIdentity.identityDigest, 'linux', processImage.uid);
+                  return withHeldLocalModelStoreScope(native, { image: image.handle, root: state.handle,
+                    rootIdentity: state.info, stateRoot }, async scope => {
+                    if (!active) mismatch('installed model-store borrow ended before acquisition');
+                    await checkedRevalidate(modelSignal); scope.assertHeld();
+                    const value = await modelOperation(scope, Object.freeze({ rootIdentity, ownerPrincipalId }));
+                    await checkedRevalidate(); scope.assertHeld();
+                    return value;
+                  });
+                })();
+                const joined = pending.then(() => undefined); revalidations.push(joined);
+                void joined.catch(() => undefined); return pending;
+              });
               const result = Promise.resolve().then(() => operation(installed));
               await result.then(() => undefined, () => undefined);
-              active = false;
+              active = false; installedBorrowMigrationReaders.delete(installed); installedBorrowModelStores.delete(installed);
               // Join every check, preserving retirement uncertainty over an
               // ordinary callback or validation error.
               return (await joinResourceOperations([result, ...revalidations] as const))[0];

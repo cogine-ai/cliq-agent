@@ -41,7 +41,8 @@ async function buildFixedProbe(fixture: string, nodeRoot: string, sourceLeaf: st
   const sources = [source, ...(sourceLeaf === 'credential-vfs-retirement-probe.c'
     ? [fileURLToPath(new URL('credential-vfs-probe.c', import.meta.url))] : []),
   ...(sourceLeaf.startsWith('credential-vfs-')
-    ? [fileURLToPath(new URL('../../../native/state-owner/credential-vfs.h', import.meta.url))] : [])];
+    ? [fileURLToPath(new URL('../../../native/state-owner/credential-vfs.h', import.meta.url)),
+       fileURLToPath(new URL('../../../native/state-owner/fixed-fd-sqlite-io.h', import.meta.url))] : [])];
   const sourceDigests = await Promise.all(sources.map(async sourcePath => ({
     path: path.relative(fileURLToPath(new URL('../../..', import.meta.url)), sourcePath),
     sha256: createHash('sha256').update(await readFile(sourcePath)).digest('hex'),

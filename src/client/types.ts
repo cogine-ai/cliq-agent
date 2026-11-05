@@ -1,7 +1,8 @@
 import type { InstalledControlFeature, InstalledControlRequestV1, InstalledControlResponseFor,
   InstalledControlResultFor, HeadlessRunEventV3 } from '../control/v1.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
-import type { RunSpec, Session, SessionContextProjection } from '../kernel/types.js';
+import type { RunSpec, Session } from '../kernel/types.js';
+import type { InstalledSessionContextPresentation } from '../control/session-context.js';
 import type { ClientRequests } from './request-data.js';
 
 /** Copied user choices only; no filesystem factory or authority is part of
@@ -20,7 +21,7 @@ export type ClientCommand = Readonly<{ kind: 'request'; request: InstalledContro
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
 export type ClientUpdate = Readonly<{ kind: 'response'; origin: 'command' | 'follow' | 'presentation'; request: InstalledControlRequestV1; response: Response }>
   | Readonly<{ kind: 'event'; event: HeadlessRunEventV3 }>
-  | Readonly<{ kind: 'context'; session: Session; projection: SessionContextProjection }>
+  | Readonly<{ kind: 'context'; session: Session; context: InstalledSessionContextPresentation }>
   | Readonly<{ kind: 'transcript'; runId: string; itemId: string; itemSeq: number; text: string }>
   | Readonly<{ kind: 'connection'; state: 'connected' | 'disconnected' | 'closed' }>
   | Readonly<{ kind: 'pending'; method: string; requestId: string; admissionKey?: string }>;

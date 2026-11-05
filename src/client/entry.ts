@@ -93,7 +93,7 @@ export async function runClientInvocation(session: InstalledControlSession, invo
     if (update.kind === 'connection') return;
     if (update.kind === 'context') {
       if (!rendering && !('json' in invocation && invocation.json))
-        for (const text of sessionContextLines(update.projection)) await output.write(Buffer.from(terminalText(text) + '\n'));
+        for (const text of sessionContextLines(update.context)) await output.write(Buffer.from(terminalText(text) + '\n'));
       return;
     }
     if (update.kind === 'transcript') {

@@ -145,10 +145,22 @@ for (const stage of ['request', 'grant', 'spec'] as const) for (const fault of [
   });
 
 test('installed admission scopes only its read-only CAS work and retains original publication and transaction boundaries', () => {
-  const submit = between(source('./store.ts'), 'private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  const storeSource = ts.createSourceFile('store.ts', source('./store.ts'), ts.ScriptTarget.Latest, true);
+  const submits: ts.MethodDeclaration[] = [];
+  const findSubmit = (node: ts.Node): void => {
+    if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'submitInstalledRunOwned') submits.push(node);
+    ts.forEachChild(node, findSubmit);
+  };
+  findSubmit(storeSource);
+  assert.equal(submits.length, 1, 'inspect the complete original installed submit method');
+  assert(submits[0]!.body); const submit = submits[0]!.body.getText(storeSource);
   assert.match(submit, /const reads = this\.artifacts\.withReadSignal\(signal\)/u);
   assert.doesNotMatch(submit, /validateControlChannelClosure\(this\.artifacts|readSourceInspectionErrorResponse\(this\.artifacts/u);
-  const assembly = between(source('./installed-run.ts'), 'export async function assembleInstalledRun(', '/** Genuine-brand-first admission friend.');
+  const installedSource = ts.createSourceFile('installed-run.ts', source('./installed-run.ts'), ts.ScriptTarget.Latest, true);
+  const assemblies = installedSource.statements.filter((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'assembleInstalledRun');
+  assert.equal(assemblies.length, 1, 'inspect only the complete original installed assembly function');
+  assert(assemblies[0]!.body); const assembly = assemblies[0]!.body.getText(installedSource);
   assert.match(assembly, /const reads = signal \? artifacts\.withReadSignal\(signal\) : artifacts/u);
   assert.doesNotMatch(assembly, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|validateControlChannelClosure\(artifacts|materialFor\(installed, artifacts/u);
   assert.match(assembly, /captureInstalledWorkspaceInstructions\(root, artifacts,/u);
@@ -490,8 +502,11 @@ test('MCP preparation scopes grant and credential reads without replacing receiv
   visit(parsed);
   assert.equal(branches.length, 1, 'inspect the original MCP tool execution branch');
   const branch = branches[0]!.thenStatement.getText(parsed);
-  const preparation = branch.slice(0, branch.indexOf("operationPhase = 'claimed';"));
-  assert(preparation.length > 0 && preparation.length < branch.length, 'the original claim boundary must remain explicit');
+  const httpStart = branch.indexOf('const transport = frozen.registry.transport;');
+  const httpClaim = branch.indexOf("operationPhase = 'claimed';", httpStart);
+  assert(httpStart >= 0 && httpClaim > httpStart && httpClaim < branch.length,
+    'the original HTTP claim boundary must follow its complete transport preparation; a separate stdio launch callback is not that boundary');
+  const preparation = branch.slice(0, httpClaim);
   const execute = between(execution, 'executeCurrentTool: async value =>', "if (prepared.target.execution.kind === 'mcp')");
   assert.match(execute, /const signal = abort\.signal;\s*const reads = artifacts\.withReadSignal\(signal\);\s*operationPhase = 'preparing';/u);
   assert.match(preparation, /const grant = await reads\.readCanonical<import\('\.\.\/kernel\/tool-authorization\.js'\)\.ToolOperationGrantV1>\(prepared\.entry\.grantRef!\)/u);

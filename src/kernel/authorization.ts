@@ -80,6 +80,12 @@ export type VerifierIdentityCreateRequest = {
   decision: { kind: 'execution_identity_read'; purpose: 'verifier';
     target: { kind: 'guest_toolchain'; guestToolchainManifestId: string; toolId: string } };
 };
+export type McpIdentityCreateRequest = {
+  protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
+  decision: { kind: 'execution_identity_read'; purpose: 'mcp_stdio'; target:
+    | { kind: 'guest_toolchain'; guestToolchainManifestId: string; toolId: string }
+    | { kind: 'runtime_bundle_executable'; runtimeBundleId: string; executableId: string } };
+};
 export type VerifierExecutionCreateRequest = {
   protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
   decision: { kind: 'verifier_execution'; verifierId: string; verifierRequestDigest: string;
@@ -103,7 +109,7 @@ export type DependencyInstallScriptsCreateRequest = {
   protocolVersion: 1; method: 'authorization.create'; requestId: string; requestDigest: string; ttlMs?: number;
   decision: DependencyInstallScriptsDecisionV1;
 };
-export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | VerifierExecutionCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest | DependencyInstallScriptsCreateRequest;
+export type AuthorizationCreateRequest = VerifierIdentityCreateRequest | McpIdentityCreateRequest | VerifierExecutionCreateRequest | SourceGitInspectionCreateRequest | SourceReadScopeCreateRequest | DependencyInstallScriptsCreateRequest;
 export type AuthorizationRevokeRequest = {
   protocolVersion: 1; method: 'authorization.revoke'; requestId: string; requestDigest: string; grantId: string;
 };

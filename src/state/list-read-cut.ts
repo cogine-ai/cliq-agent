@@ -13,7 +13,7 @@ import { createExtraListSource } from './list-read-source.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { advanceTimeFence, readTimeFence } from './canonical-time.js';
 import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeWorkspaceIdentity } from './decoders.js';
+import { decodeRetainedWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -396,7 +396,7 @@ function sessionListSource(driver: SqliteDriver, artifacts: ArtifactCatalog, own
             current();
             if (!/^[0-9a-f]{64}$/u.test(row.ref) || row.ref <= after) return corrupt();
             const value = await artifacts.readCanonical(row.ref); if (canonicalSha256(value) !== row.ref) return corrupt();
-            const workspace = decodeWorkspaceIdentity(value);
+            const workspace = decodeRetainedWorkspaceIdentity(value);
             if (workspace.ownerPrincipalId !== principalId) return corrupt();
             const locator = workspace.kind === 'live' ? workspace.canonicalRootPath : workspace.legacyCanonicalRootPath;
             if (locator === normalizeAbsolutePath(request.workspacePath)) matching.push(row.ref);

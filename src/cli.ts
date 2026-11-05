@@ -2317,6 +2317,19 @@ async function promptProviderApiKey(provider: ProviderName) {
 
 export async function runCli(argv: string[]) {
   const parsed = parseArgs(argv);
+  if (process.platform !== 'linux' || parsed.cmd === 'help' || parsed.cmd === 'version') return runLegacyCli(parsed);
+  // Only the supported Linux compatibility cohort changes here. This guard
+  // precedes provider auth, workspace config, Session and runtime loading. A
+  // custom CLIQ_HOME never supplies a second account lock domain.
+  const [{ loadNativeStateOwner }, { holdLegacyStateEntry }] = await Promise.all([
+    import('./state/native-owner.js'), import('./state/legacy-entry.js')
+  ]);
+  const entry = holdLegacyStateEntry(await loadNativeStateOwner(), resolveCliqHome());
+  try { return await runLegacyCli(parsed); }
+  finally { entry.close(); }
+}
+
+async function runLegacyCli(parsed: ParsedArgs) {
   const { cmd, prompt, skills, model: cliModel } = parsed;
   // policy starts as whatever parseArgs computed (default / env / CLI flag);
   // workspace `permissions.preset` may override below if no CLI/env was set.

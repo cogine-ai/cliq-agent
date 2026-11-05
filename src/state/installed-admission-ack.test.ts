@@ -141,7 +141,10 @@ test('both admission replays retain the existing load only for nonterminal Runs 
     const registration = text.indexOf('this.retainInstalledAgent(runId,');
     assert(registration >= 0 && registration < text.indexOf('const result = await admission;', registration));
   }
-  const queue = method('scheduleInstalledRun').getText(file);
+  const schedule = method('scheduleInstalledRun').getText(file);
+  assert.match(schedule, /this\.enqueueInstalledRun\(runId\)/u);
+  const queue = method('enqueueInstalledRun').getText(file);
+  assert.match(queue, /this\.installedQueue\.run\(async \(\) =>/u);
   assert.match(queue, /await this\.driveInstalledRun\(runId\)/u);
   assert.match(queue, /this\.installedRunFailures\.set\(runId, error\)/u);
   assert.match(queue, /if \(error instanceof ResourceRetirementError\) this\.schedulerFailure \?\?= error/u);

@@ -4,7 +4,6 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { decodeInstalledControlRequest, type InstalledControlRequestV1, type InstalledControlResponseFor,
   type InstalledControlFeature, type HeadlessRunEventV3 } from '../control/v1.js';
 import { ControlRefusal, readInstalledSessionContext, type InstalledControlSession, type SessionResumeInput } from '../control/session.js';
-import type { Session, SessionContextProjection } from '../kernel/types.js';
 import { ResourceRetirementError } from '../state/errors.js';
 import { isInstalledControlCloseError } from '../state/installed-control-close-error.js';
 import { readRunItemPresentation } from './artifacts.js';
@@ -76,8 +75,8 @@ export function createClientApplication(session: InstalledControlSession,
     await emit({ kind: 'response', origin: 'command', request, response });
     if (response.ok && response.result.method === 'session.get' && session.hello.enabledFeatureIds.includes('artifact.get')) {
       const original = response.result.snapshot.session;
-      const projection = await readInstalledSessionContext(session, original, local.signal);
-      await emit({ kind: 'context', session: original, projection });
+      for await (const context of readInstalledSessionContext(session, original, local.signal))
+        await emit({ kind: 'context', session: original, context });
     }
     return response;
   }

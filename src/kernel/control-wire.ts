@@ -1,5 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from './canonical.js';
-import { assertAdmissionKey, assertRequestId, normalizeAbsolutePath, normalizeBoundedText, parseCanonicalTime } from './identity.js';
+import { sha256Bytes, assertAdmissionKey, assertRequestId, normalizeAbsolutePath, normalizeBoundedText, parseCanonicalTime } from './identity.js';
+import { SESSION_CONTEXT_PAGE_BYTES, SESSION_CONTEXT_TREE_HEIGHT, SESSION_CONTEXT_PAGE_CHILDREN } from './session-context-pages.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ControlResultV1, RunEvent, RunSnapshotV1, SessionSnapshotV1 } from './types.js';
 import type { UserInputValue } from './user-input.js';
@@ -8,7 +9,7 @@ import { assertBoundedJsonValue, parseJsonStrict } from './json.js';
 import { decodeWireRun, decodeWireSession, decodeWireCheckpoint, decodeWireEvent, decodeWireJournal,
   decodeWireArtifactDescriptor, decodeWireGrantSummary, decodeWireRuntimeBundleSummary, decodeWireRunItemReference, decodeWireSessionItem } from './control-wire-data.js';
 import type { AuthorizationCreateRequest, AuthorizationRevokeRequest, SourceGitInspectionCreateRequest, SourceReadScopeCreateRequest, VerifierIdentityCreateRequest,
-  DependencyInstallScriptsCreateRequest, DependencyInstallScriptsDecisionV1, VerifierExecutionCreateRequest } from './authorization.js';
+  DependencyInstallScriptsCreateRequest, DependencyInstallScriptsDecisionV1, VerifierExecutionCreateRequest, McpIdentityCreateRequest } from './authorization.js';
 import { decodeDependencyScriptConditions } from './dependency.js';
 import { normalizeSourceReadScopePath } from './source-read-scope.js';
 import { decodeSandboxResourceOptions, normalizeRunSubmitRequest, type RunSubmitRequest } from './control-submit.js';
@@ -89,7 +90,7 @@ type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
 export type InstalledControlErrorV1 = InvalidError
   | (ErrorBase & { code: 'AUTHORIZATION_REQUIRED'; retryable: false; errorId: string; requiredAuthorization: DependencyInstallScriptsDecisionV1 })
   | import('../kernel/types.js').ResultUnavailableControlErrorV1
-  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue' | 'state_storage'; retryAfterMs: 1000 })
+  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue' | 'state_storage' | 'reconciliation_probes'; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'RATE_LIMITED'; retryable: true; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: ControlRangeV1;
@@ -126,8 +127,14 @@ export function decodeControlFrame(bytes: Uint8Array): unknown {
   return value;
 }
 
+export type SessionContextPageQuery = Readonly<{ contextProjectionRef: string; expectedContextRevision: number; path: readonly number[] }>;
+function contextPagePath(value: unknown): readonly number[] {
+  json(value);
+  if (!Array.isArray(value) || value.length > SESSION_CONTEXT_TREE_HEIGHT) throw new TypeError('Session page path exceeds its fixed tree height');
+  return Object.freeze(value.map(index => controlWireInteger(index, 0, SESSION_CONTEXT_PAGE_CHILDREN - 1)));
+}
 export type ReadControlRequest =
-  | { protocolVersion: 1; method: 'session.get'; sessionId: string; afterItemSeq?: number; limit?: number }
+  | { protocolVersion: 1; method: 'session.get'; sessionId: string; afterItemSeq?: number; limit?: number; contextPage?: SessionContextPageQuery }
   | { protocolVersion: 1; method: 'run.get'; runId: string; afterItemSeq?: number; afterJournalSeq?: number;
       checkpointCursor?: string; itemLimit?: number; journalLimit?: number; checkpointLimit?: number }
   | { protocolVersion: 1; method: 'run.result'; runId: string }
@@ -138,7 +145,7 @@ export type ReadControlRequest =
 const limit = (value: unknown) => controlWireInteger(value === undefined ? 100 : value, 1, 1000);
 export function decodeReadControlRequest(value: unknown): ReadControlRequest {
   const source = controlWireRecord(value, ['protocolVersion', 'method'], ['sessionId', 'runId', 'digest', 'offset', 'length',
-    'afterItemSeq', 'afterJournalSeq', 'checkpointCursor', 'itemLimit', 'journalLimit', 'checkpointLimit', 'afterEventSeq', 'limit']);
+    'afterItemSeq', 'afterJournalSeq', 'checkpointCursor', 'itemLimit', 'journalLimit', 'checkpointLimit', 'afterEventSeq', 'limit', 'contextPage']);
   if (source.protocolVersion !== 1) throw new TypeError('control protocol version must be 1');
   const method = source.method;
   if (method === 'artifact.get') {
@@ -151,7 +158,14 @@ export function decodeReadControlRequest(value: unknown): ReadControlRequest {
     return { protocolVersion: 1, method, runId: controlWireText(source.runId) };
   }
   if (method === 'session.get') {
-    controlWireRecord(source, ['protocolVersion', 'method', 'sessionId'], ['afterItemSeq', 'limit']);
+    controlWireRecord(source, ['protocolVersion', 'method', 'sessionId'], ['afterItemSeq', 'limit', 'contextPage']);
+    if (Object.hasOwn(source, 'contextPage')) {
+      controlWireRecord(source, ['protocolVersion', 'method', 'sessionId', 'contextPage']);
+      const page = controlWireRecord(source.contextPage, ['contextProjectionRef', 'expectedContextRevision', 'path']);
+      return { protocolVersion: 1, method, sessionId: controlWireText(source.sessionId), contextPage: {
+        contextProjectionRef: controlWireRef(page.contextProjectionRef), expectedContextRevision: controlWireInteger(page.expectedContextRevision, 1),
+        path: contextPagePath(page.path) } };
+    }
     return { protocolVersion: 1, method, sessionId: controlWireText(source.sessionId),
       afterItemSeq: controlWireInteger(source.afterItemSeq === undefined ? 0 : source.afterItemSeq), limit: limit(source.limit) };
   }
@@ -213,6 +227,7 @@ export function decodeAuthorizationCreateRequest(value: unknown): AuthorizationC
     return immutableSnapshot(data) as VerifierExecutionCreateRequest;
   }
   const decision = controlWireRecord(data.decision, ['kind', 'purpose', 'target']);
+  if (decision.kind === 'execution_identity_read' && decision.purpose === 'mcp_stdio') return decodeMcpIdentityCreateRequest(data);
   if (decision.kind === 'dependency_install_scripts') {
     if (data.protocolVersion !== 1 || data.method !== 'authorization.create') throw new TypeError('invalid dependency authorization method');
     decodeDependencyInstallScriptsDecision(decision);
@@ -279,6 +294,28 @@ export function decodeVerifierIdentityCreateRequest(value: unknown): VerifierIde
   controlWireText(target.guestToolchainManifestId); controlWireText(target.toolId);
   if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
   return immutableSnapshot(data) as VerifierIdentityCreateRequest;
+}
+/** The bundle selector is the complete-byte digest already advertised by
+ * supervisor.status. It never authorizes loading a caller-selected artifact. */
+export function decodeMcpIdentityCreateRequest(value: unknown): McpIdentityCreateRequest {
+  json(value);
+  const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'decision'], ['ttlMs']);
+  if (data.protocolVersion !== 1 || data.method !== 'authorization.create') throw new TypeError('invalid MCP identity authorization');
+  assertRequestId(data.requestId as string); controlWireRef(data.requestDigest);
+  const { requestDigest, ...core } = data;
+  if (canonicalSha256(core) !== requestDigest) throw new TypeError('MCP identity authorization digest does not rehash');
+  const decision = controlWireRecord(data.decision, ['kind', 'purpose', 'target']);
+  if (decision.kind !== 'execution_identity_read' || decision.purpose !== 'mcp_stdio') throw new TypeError('foreign MCP identity authorization');
+  const target = controlWireRecord(decision.target, ['kind'], ['runtimeBundleId', 'executableId', 'guestToolchainManifestId', 'toolId']);
+  if (target.kind === 'runtime_bundle_executable') {
+    controlWireRecord(target, ['kind', 'runtimeBundleId', 'executableId']);
+    controlWireRef(target.runtimeBundleId); controlWireText(target.executableId);
+  } else if (target.kind === 'guest_toolchain') {
+    controlWireRecord(target, ['kind', 'guestToolchainManifestId', 'toolId']);
+    controlWireText(target.guestToolchainManifestId); controlWireText(target.toolId);
+  } else throw new UnsupportedExecutionIdentityRequestError('unsupported MCP execution identity');
+  if (Object.hasOwn(data, 'ttlMs')) controlWireInteger(data.ttlMs, 1, 86_400_000);
+  return immutableSnapshot(data) as McpIdentityCreateRequest;
 }
 export function decodeAuthorizationRevokeRequest(value: unknown): AuthorizationRevokeRequest {
   json(value);
@@ -484,7 +521,17 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
     if (bytes.toString('base64') !== data.bytesBase64 || bytes.length > 64 * 1024 || next !== offset + bytes.length || next > artifact.sizeBytes ||
         data.eof !== (next === artifact.sizeBytes) || (!data.eof && bytes.length === 0)) throw new TypeError('invalid bounded artifact page');
   } else if (method === 'session.get') {
-    controlWireRecord(data, ['method', 'snapshot', 'items', 'highWaterItemSeq', 'nextItemSeq']);
+    controlWireRecord(data, ['method', 'snapshot', 'items', 'highWaterItemSeq', 'nextItemSeq'], ['contextPage']);
+    if (Object.hasOwn(data, 'contextPage')) {
+      const page = controlWireRecord(data.contextPage, ['contextProjectionRef', 'contextRevision', 'path', 'artifact', 'bytesBase64']);
+      controlWireRef(page.contextProjectionRef); controlWireInteger(page.contextRevision, 1); contextPagePath(page.path);
+      const artifact = decodeWireArtifactDescriptor(page.artifact);
+      if (typeof page.bytesBase64 !== 'string' || artifact.sizeBytes < 1 || artifact.sizeBytes > SESSION_CONTEXT_PAGE_BYTES)
+        throw new TypeError('Session context page exceeds its fixed read profile');
+      const bytes = Buffer.from(page.bytesBase64, 'base64');
+      if (bytes.toString('base64') !== page.bytesBase64 || bytes.length !== artifact.sizeBytes || sha256Bytes(bytes) !== artifact.digest)
+        throw new TypeError('Session context page bytes differ from their full descriptor');
+    }
     const snapshot = sessionSnapshot(data.snapshot); array(data.items).forEach(decodeWireSessionItem);
     if (controlWireInteger(data.highWaterItemSeq) !== snapshot.session.latestItemSeq || controlWireInteger(data.nextItemSeq) > snapshot.session.latestItemSeq)
       throw new TypeError('Session page exceeds its high-water');
@@ -571,7 +618,7 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       throw new TypeError('expired cursor refusal differs from requested interval');
     if (error.code === 'REVISION_CONFLICT') {
       const conflict = error.conflict;
-      if ((request.method === 'run.submit' || request.method === 'session.fork' || request.method === 'session.compact' || request.method === 'session.handoff.create') && conflict.resourceKind === 'session') {
+      if ((request.method === 'run.submit' || request.method === 'session.get' && request.contextPage !== undefined || request.method === 'session.fork' || request.method === 'session.compact' || request.method === 'session.handoff.create') && conflict.resourceKind === 'session') {
         if (conflict.currentSnapshot.session.id !== request.sessionId) throw new TypeError('revision conflict differs from requested Session');
       } else if ((request.method === 'run.cancel' || request.method === 'run.approve' || request.method === 'run.input' || request.method === 'run.reconcile') && conflict.resourceKind === 'run') {
         if (conflict.currentSnapshot.run.id !== request.runId) throw new TypeError('revision conflict differs from requested Run');
@@ -632,7 +679,17 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
       throw new TypeError('authorization revocation differs from original grant');
   } else if (request.method === 'session.get' && data.method === request.method) {
     if (data.snapshot.session.id !== request.sessionId) throw new TypeError('Session page differs from request');
-    contiguous(data.items, request.afterItemSeq!, data.highWaterItemSeq, request.limit!, data.nextItemSeq, item => item.itemSeq);
+    if (request.contextPage) {
+      const page = data.contextPage, snapshot = data.snapshot.session;
+      if (!page || data.items.length !== 0 || data.nextItemSeq !== snapshot.latestItemSeq ||
+          snapshot.contextRevision !== request.contextPage.expectedContextRevision || snapshot.contextProjectionRef !== request.contextPage.contextProjectionRef ||
+          page.contextRevision !== snapshot.contextRevision || page.contextProjectionRef !== snapshot.contextProjectionRef ||
+          !canonicalJsonBytes(page.path).equals(canonicalJsonBytes(request.contextPage.path)))
+        throw new TypeError('Session context page differs from its captured head/path');
+    } else {
+      if (data.contextPage) throw new TypeError('ordinary Session items cannot include an unsolicited context page');
+      contiguous(data.items, request.afterItemSeq!, data.highWaterItemSeq, request.limit!, data.nextItemSeq, item => item.itemSeq);
+    }
   } else if (request.method === 'run.get' && data.method === request.method) {
     if (data.snapshot.run.id !== request.runId || data.journal.some(entry => entry.runId !== request.runId) ||
         data.checkpoints.some(checkpoint => checkpoint.runId !== request.runId)) throw new TypeError('Run page differs from request');
@@ -670,9 +727,9 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
   if (error.schemaVersion !== 1) throw new TypeError('invalid control error schema');
   controlWireText(error.messageCode);
   if (code === 'REVISION_CONFLICT') {
-    if (error.retryable !== true || !['run.submit', 'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) throw new TypeError('unexpected revision conflict');
+    if (error.retryable !== true || !['run.submit', 'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'session.get', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) throw new TypeError('unexpected revision conflict');
     const conflict = controlWireRecord(error.conflict, ['resourceKind', 'currentSnapshot']), revision = controlWireInteger(error.currentRevision, 1);
-    if (conflict.resourceKind === 'session' && ['run.submit', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) {
+    if (conflict.resourceKind === 'session' && ['run.submit', 'session.get', 'session.fork', 'session.compact', 'session.handoff.create'].includes(method)) {
       if (sessionSnapshot(conflict.currentSnapshot).session.contextRevision !== revision) throw new TypeError('Session conflict revision differs');
     } else if (conflict.resourceKind === 'run' && (method === 'run.cancel' || method === 'run.approve' || method === 'run.input' || method === 'run.reconcile')) {
       if (runSnapshot(conflict.currentSnapshot).run.revision !== revision) throw new TypeError('Run conflict revision differs');
@@ -694,6 +751,9 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     } else if (method === 'mcp.list' && code === 'RESOURCE_EXHAUSTED') {
       if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'state_storage' ||
           error.messageCode !== 'mcp.registry_list_capacity') throw new TypeError('invalid MCP registry list capacity refusal');
+    } else if (method === 'run.reconcile' && code === 'RESOURCE_EXHAUSTED') {
+      if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'reconciliation_probes' ||
+          error.messageCode !== 'run.reconciliation_capacity') throw new TypeError('invalid reconciliation probe capacity refusal');
     } else if (error.retryable !== true || error.retryAfterMs !== 1000 || (method !== 'run.submit' &&
         !(method === 'run.apply' && code === 'RESOURCE_EXHAUSTED') && (code !== 'RATE_LIMITED' || method !== 'credential.finalize')) ||
         (code === 'RATE_LIMITED' ? error.messageCode !== 'run.credential_scope_busy' : error.messageCode !== 'run.queue_capacity' || error.resourceKind !== 'run_queue'))

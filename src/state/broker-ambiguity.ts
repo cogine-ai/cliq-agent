@@ -271,7 +271,8 @@ export type InstalledBrokerTerminalClosurePlan = Readonly<{
  * clock, credential, or proof. Generic loaded Runs cannot mint this branch. */
 export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, selected: HeldInstalledRuntime | undefined, cut: RecoveryClosureV1,
-  operation: (plan: InstalledBrokerTerminalClosurePlan) => Promise<T>): Promise<T> {
+  operation: (plan: InstalledBrokerTerminalClosurePlan) => Promise<T>,
+  terminalProposal?: import('./manual-reconciliation.js').ManualInvocationFinalization | import('./mcp-retry-terminal.js').McpRetryFinalization): Promise<T> {
   if (cut.runSpec.operation === 'delivery') {
     assertDeliveryModelFreeCut(cut);
     assertActiveStateOwner(driver, owner);
@@ -293,7 +294,18 @@ export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver
   if (!unusedUnknowns(cut.journal).length) return operation(Object.freeze({
     metadata: [], abandonedRetryInvocations: [], reobserve() {}, validate() {}
   }));
-  if (!selected || process.platform !== 'linux' || !cut.run.stopIntentRef) terminalFailure();
+  if (!selected || process.platform !== 'linux') terminalFailure();
+  if (!cut.run.stopIntentRef) {
+    if (!terminalProposal) terminalFailure();
+    const retry = await import('./mcp-retry-terminal.js');
+    const original = retry.isMcpRetryFinalization(terminalProposal)
+      ? retry.readMcpRetryFinalization(driver, artifacts, owner, terminalProposal, cut.run.id)
+      : (await import('./manual-reconciliation.js')).readManualInvocationFinalization(driver, owner, terminalProposal, cut.run.id);
+    // Only the existing unique terminal writer may stage its first Stop in
+    // this same original transaction. The brand does not replace any native
+    // model-token/death, process, owner, root, Journal or fresh-time check.
+    if (!same(original.cut, cut)) terminalFailure();
+  }
   return withHeldInstalledRuntime(selected, async installed => {
     assertInstalledModelBrokerProcess();
     // Brand lookup precedes caller properties. The native lock has its own

@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
-  Run, RunSpec, RunAssemblyV1, ContextManifest, ContinuationItem, SessionContextProjection,
+  Run, RunSpec, RunAssemblyV1, ContextManifest, ContinuationItem,
   ToolResultPayloadV1, ToolResultModelContentV1
 } from '../kernel/types.js';
 import type { AgentModelTurn, ModelTextV1, ToolCallInputV1, ObservedToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -15,9 +15,13 @@ import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } fr
 import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
   decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
-import { decodeSessionContext, readSessionContextEntries, type SessionCompactionIndex } from './session-context.js';
+import { type SessionCompactionIndex, type SessionContextEntry } from './session-context.js';
+import type { SessionContextHead } from '../kernel/session-context-pages.js';
+import { readSessionContextGraphHead, readSessionContextEntryStream } from './session-context-stream.js';
+import { MODEL_REQUEST_BODY_LIMIT_BYTES, sessionContextUserWireByteLowerBound } from '../model/request.js';
 import { childResultModelContent } from './child-result-artifacts.js';
 import { readAssemblySkills } from './skill-data.js';
+import { isLegacySessionContextKind } from '../kernel/legacy-context.js';
 
 export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
@@ -77,12 +81,24 @@ export async function loadInstructionText(artifacts: ArtifactCatalog,
 type ContextProjectionInput = {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; assembly: RunAssemblyV1;
   context: ContextManifest; systemInstruction: string; tools: RunAssemblyToolAuthority[];
-  sessionCompactionIndex?: (projection: SessionContextProjection) => SessionCompactionIndex;
+  sessionCompactionIndex?: (projection: SessionContextHead) => SessionCompactionIndex;
 };
 
 /** Model-visible context, shared by request projection and resource-stop recovery. */
 export async function readModelContext(input: ContextProjectionInput): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
   return readModelContextProjection(input);
+}
+
+/** Shared normal/Run-compaction prefix. Historical legacy roles remain user
+ * data and never enter the current assistant/tool continuation sequence. */
+type SessionContextModelMessage = Extract<NormalPromptMessageV1, { role: 'system' | 'user' }> & { role: 'user' };
+export function sessionContextModelMessages(entries: readonly SessionContextEntry[], firstIndex = 0): SessionContextModelMessage[] {
+  return entries.map((entry, offset) => {
+    const message = { index: firstIndex + offset, role: 'user' as const, sourceId: entry.sourceItemId, contentUtf8: entry.contentUtf8 };
+    if (entry.sourceKind === 'summary') return { ...message, sourceKind: 'session_summary' as const };
+    if (isLegacySessionContextKind(entry.sourceKind)) return { ...message, sourceKind: 'session_legacy' as const };
+    return { ...message, sourceKind: 'session_terminal' as const };
+  });
 }
 
 /** Fixed child capture only. Normal model requests still require a closed
@@ -105,12 +121,22 @@ async function readModelContextProjection(input: ContextProjectionInput, childPe
   };
   messages.push({ index: 0, role: 'system', sourceKind: 'assembly_instructions', sourceId: spec.assemblyRef, contentUtf8: input.systemInstruction });
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  const session = decodeSessionContext(await readCanonicalArtifact(artifacts, admitted.sessionProjectionRef));
+  const session = await readSessionContextGraphHead(artifacts, admitted.sessionProjectionRef);
   if (session.sessionId !== admitted.sessionId || session.contextRevision !== admitted.sessionContextRevision ||
       session.throughItemSeq !== admitted.throughSessionItemSeq || session.sessionId !== run.sessionId) throw new TypeError('admitted Session context mismatch');
-  const index = session.segments.some(segment => segment.kind === 'summary') ? input.sessionCompactionIndex?.(session) : undefined;
-  for (const entry of await readSessionContextEntries(artifacts, session, index))
-    user(entry.sourceKind === 'summary' ? 'session_summary' : 'session_terminal', entry.sourceItemId, entry.contentUtf8);
+  const index = input.sessionCompactionIndex?.(session);
+  let sessionMinimumBodyBytes = 0;
+  for await (const entry of readSessionContextEntryStream(artifacts, session, { compactionIndex: index })) {
+    sessionMinimumBodyBytes += sessionContextUserWireByteLowerBound(assembly.provider.name, assembly.provider.model, entry.contentUtf8);
+    if (!Number.isSafeInteger(sessionMinimumBodyBytes)) throw new RangeError('Session context exceeds the exact model byte counter');
+    // Complete every original typed edge, but never cache prose already proven
+    // impossible to dispatch. New Runs are refused earlier by the same complete
+    // admission reader; this also bounds an older frozen/admitted source.
+    if (sessionMinimumBodyBytes <= MODEL_REQUEST_BODY_LIMIT_BYTES)
+      messages.push(sessionContextModelMessages([entry], messages.length)[0]!);
+  }
+  if (sessionMinimumBodyBytes > MODEL_REQUEST_BODY_LIMIT_BYTES)
+    throw new RangeError('Session context cannot fit the fixed model request limit');
   for (const ref of admitted.parentContextRefs) user('parent_context', ref, (await readText(artifacts, ref)).utf8);
   for (const ref of admitted.additionalArtifactRefs) user('additional_context', ref, (await readText(artifacts, ref)).utf8);
   user('run_objective', spec.objectiveRef, decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef)).utf8);

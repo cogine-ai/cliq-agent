@@ -2,9 +2,10 @@
 #define CLIQ_MCP_HTTP_ADMIN_INPUT_BRIDGE_H
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/stat.h>
-#define CLIQ_MCP_ADMIN_INPUT_ABI 1u
+#define CLIQ_MCP_ADMIN_INPUT_ABI 2u
 #define CLIQ_MCP_ADMIN_BIRTH_MAGIC UINT32_C(0x434d4231)
 #if defined(NAPI_VERSION)
 static const napi_type_tag CLIQ_MCP_ADMIN_INPUT_TAG = { UINT64_C(0x1890b2da9fec4cd6), UINT64_C(0xadc24a573badf1fe) };
@@ -28,5 +29,8 @@ struct cliq_mcp_admin_input {
     struct cliq_mcp_admin_birth binding;
     bool (*assert_current)(struct cliq_mcp_admin_input *);
     int (*retire)(struct cliq_mcp_admin_input *);
+    /* Same original StateOwner only, after actual input close. Reopens and
+     * completely compares its original birth; no execution/cleanup power. */
+    bool (*assert_retired_snapshot)(struct cliq_mcp_admin_input *, const unsigned char *, size_t);
 };
 #endif

@@ -20,6 +20,7 @@ export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-
 
 export const SUPERVISOR_SEA_NODE_VERSION = '24.21.0';
 export const INSTALLED_RESOURCE_SUBSCRIBER = fileURLToPath(new URL('./installed-resource-subscriber.ts', import.meta.url));
+export const INSTALLED_MCP_ADMIN_SUBSCRIBER = fileURLToPath(new URL('./installed-mcp-admin-subscriber.ts', import.meta.url));
 export const SUPERVISOR_SEA_CARRIER_CHECKSUMS: Readonly<Record<string, string>> = {
   'linux-x64': 'fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6',
   'darwin-arm64': '6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe',
@@ -300,12 +301,16 @@ void import('data:text/javascript;base64,' + application.toString('base64')).cat
 export async function buildSupervisorSeaApplication(input: {
   fixture: string; entryPoint: string; variant: string; defines?: Record<string, string>;
   resourceDiagnostics?: true;
+  mcpAdminDiagnostics?: true;
 }): Promise<{file: string; bytes: number; imports: readonly string[]; sources: readonly string[]}> {
   const file = path.join(input.fixture, `${input.variant}.mjs`);
   const result = await build({ entryPoints: [input.entryPoint], outfile: file,
     bundle: true, platform: 'node', format: 'esm', target: 'node24.21', metafile: true, write: false,
     plugins: installedClientBuildOptions().plugins,
-    ...(input.resourceDiagnostics ? { inject: [INSTALLED_RESOURCE_SUBSCRIBER] } : {}),
+    ...(input.resourceDiagnostics || input.mcpAdminDiagnostics ? { inject: [
+      ...(input.resourceDiagnostics ? [INSTALLED_RESOURCE_SUBSCRIBER] : []),
+      ...(input.mcpAdminDiagnostics ? [INSTALLED_MCP_ADMIN_SUBSCRIBER] : []),
+    ] } : {}),
     banner: { js: "import {createRequire as cliqSeaCreateRequire} from 'node:module';\nconst require = cliqSeaCreateRequire(process.execPath);" },
     // Preserve the original SEA-only native/helper branch selection. The
     // fixed require above resolves Node builtins, never an ambient package.
@@ -328,12 +333,14 @@ export async function buildSupervisorSeaImage(input: {
   serverAuthenticationDiagnostics?: true;
   storeFailureDiagnostics?: true;
   resourceDiagnostics?: true;
+  mcpAdminDiagnostics?: true;
 }): Promise<string> {
   assert(input.credentialPhaseDiagnostics === undefined || input.credentialPhaseDiagnostics === true);
   assert(input.publicationRetirementDiagnostics === undefined || input.publicationRetirementDiagnostics === true);
   assert(input.serverAuthenticationDiagnostics === undefined || input.serverAuthenticationDiagnostics === true);
   assert(input.storeFailureDiagnostics === undefined || input.storeFailureDiagnostics === true);
   assert(input.resourceDiagnostics === undefined || input.resourceDiagnostics === true);
+  assert(input.mcpAdminDiagnostics === undefined || input.mcpAdminDiagnostics === true);
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +

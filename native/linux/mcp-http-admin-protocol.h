@@ -61,7 +61,7 @@ static inline bool cliq_mcp_admin_digest(const char *text);
 static inline bool
 cliq_mcp_admin_packet_closed(const struct cliq_worker_packet *packet)
 {
-    if (packet->magic != CLIQ_WORKER_MAGIC || packet->version != CLIQ_WORKER_VERSION || packet->status || packet->command < CLIQ_MCP_ADMIN_RESERVE || packet->command > CLIQ_MCP_ADMIN_CLEANUP_RETAINED || packet->scope || packet->parent)
+    if (packet->magic != CLIQ_WORKER_MAGIC || (packet->version != UINT32_C(8) && packet->version != UINT32_C(9)) || packet->status || packet->command < CLIQ_MCP_ADMIN_RESERVE || packet->command > CLIQ_MCP_ADMIN_CLEANUP_RETAINED || packet->scope || packet->parent)
         return false;
     struct cliq_worker_packet canonical = {0};
 #define MCP_ADMIN_NUMBER(name) canonical.name=packet->name
@@ -187,7 +187,7 @@ cliq_mcp_admin_history_bytes(const unsigned char *bytes, size_t size, struct cli
             return false;
         unsigned        previous = history->last.kind;
         bool            transition = !i ? frame.kind == 1 : previous == 1 ? frame.kind == 2 : previous == 2 ? frame.kind == 3 : previous == 3 ? (frame.kind == 4 || frame.kind == 8) : previous == 4 ? (frame.kind == 4 || frame.kind == 5 || frame.kind == 8) : previous == 5 ? (frame.kind == 6 || frame.kind == 8) : previous == 6 ? (frame.kind == 7 || frame.kind == 8) : previous == 7 ? frame.kind == 8 : previous == 8 ? frame.kind == 9 : false;
-        if (!transition || (i && (frame.controller_pid != history->first.controller_pid || strcmp(frame.controller_start_token, history->first.controller_start_token) || strcmp(frame.controller_leaf_name, history->first.controller_leaf_name) ||
+        if (!transition || (i && (frame.packet.version != history->first.packet.version || frame.controller_pid != history->first.controller_pid || strcmp(frame.controller_start_token, history->first.controller_start_token) || strcmp(frame.controller_leaf_name, history->first.controller_leaf_name) ||
                                   memcmp(&frame.controller_root, &history->first.controller_root, sizeof(frame.controller_root)) || memcmp(&frame.controller_parent, &history->first.controller_parent, sizeof(frame.controller_parent)) || memcmp(&frame.controller_leaf, &history->first.controller_leaf, sizeof(frame.controller_leaf)))))
             return false;
         if (frame.kind == 3 && (!frame.packet.cgroup_device || !frame.packet.cgroup_inode))

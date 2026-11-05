@@ -173,7 +173,7 @@ test('closing before the first frame joins the original accepted-connection publ
 });
 
 test('the first real frame waits for the complete original publication and rejects a mismatched result', async t => {
-  const fixture = await createQueuedFixture('wire-auth-result');
+  const fixture = await createQueuedFixture('wire-auth');
   t.after(() => disposeFixture(fixture));
   const artifacts = fixture.store.artifacts, publish = artifacts.publishCanonicalFour, readHello = fixture.store.readSupervisorHello;
   let entered!: () => void, release!: () => void, publications = 0, helloReads = 0;

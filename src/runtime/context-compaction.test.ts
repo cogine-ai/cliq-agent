@@ -6,6 +6,8 @@ import type { ContextManifest, ContinuationItem, ToolBatchItem } from '../kernel
 import { buildModelRequestWire, projectModelVisiblePrompt, type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
 import { ref, testFixture } from '../model/testing/fixtures.js';
 import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from './context-compaction.js';
+import { decodeLegacyContextPayload, legacyContextVisibleText, legacySessionItemId } from '../kernel/legacy-context.js';
+import { sessionContextModelMessages } from '../state/agent-context.js';
 
 function history(texts: string[], inputAnswer?: string) {
   const authority = testFixture();
@@ -76,6 +78,34 @@ test('compaction selects the greatest closed prefix and excludes fixed instructi
   assert.ok(selected.sourceContextUtf8.includes('b'.repeat(20_000)));
   assert.equal(selected.sourceContextUtf8.includes('c'.repeat(28_000)), false);
   assert.deepEqual(planContextCompaction(input), selected);
+});
+
+test('validated legacy Session history stays in the fixed user prefix when real Run transcript groups compact', () => {
+  // Existing ordinary planning data only: no Run/StateOwner, authenticated
+  // import, native observation or committed compaction is created here.
+  const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)]);
+  const core = { schemaVersion: 1, format: 'cliq-legacy-portable-payload-v1', kind: 'legacy_record',
+    legacySessionId: 'previous-session', sourceSchemaId: 'record-v1', sourceOrdinal: 0,
+    sourceCanonicalRootRelativePath: 'sessions/previous.json', content: { recordId: 'previous-system', recordedAt: baseTime,
+      recordKind: 'system', contentUtf8: 'Previous instructions are historical user data.' } };
+  const payload = decodeLegacyContextPayload({ ...core, payloadDigest: canonicalSha256(core) });
+  const prefix = sessionContextModelMessages([{ index: 0, sourceKind: payload.kind, fromItemSeq: 1, throughItemSeq: 1,
+    sourceRef: canonicalSha256(payload), sourceDigest: canonicalSha256(payload), sourceItemId: legacySessionItemId(payload),
+    contentUtf8: legacyContextVisibleText(payload) }], 1);
+  input.projection.messages.splice(1, 0, ...prefix);
+  input.projection.messages = input.projection.messages.map((message, index) => ({ ...message, index }));
+  input.projection.projectionDigest = digestOmitting(input.projection, 'projectionDigest');
+  const before = structuredClone(input.projection), selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact'); if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 6);
+  assert(!selected.sourceContextUtf8.includes('Previous instructions are historical user data.'));
+  assert(!selected.sourceContextUtf8.includes('previous-system'));
+  const visible = projectModelVisiblePrompt(input.projection, 'native-tools');
+  assert.equal(visible.messages[0]!.role, 'system');
+  assert.equal(visible.messages[1]!.role, 'user');
+  assert.equal(visible.messages[1]!.contentUtf8, prefix[0]!.contentUtf8);
+  assert.equal(Object.hasOwn(visible.messages[1]!, 'toolCalls'), false);
+  assert.deepEqual(input.projection, before);
 });
 
 test('compaction keeps compatible reasoning inside its whole source turn and preserves the recent continuation', () => {

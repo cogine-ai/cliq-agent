@@ -32,7 +32,7 @@ import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { assertCurrentControlFrame, readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity } from '../control-channel.js';
-import { readSessionContextCut, assertSessionContextCut } from '../session-context.js';
+import { readCurrentSessionContextGraph, assertCurrentSessionContextGraph } from '../session-context-stream.js';
 import {
   decodeAdmittedContext,
   decodeContextManifest,
@@ -533,7 +533,14 @@ async function admitRunInternal(
   const channelClosure = await validateControlChannelClosure(reads, owner, input);
   const channel = channelClosure.channel;
 
-  const sessionContext = await readSessionContextCut(driver, reads, input.principalId, input.sessionId, input.expectedContextRevision);
+  const sessionContext = await readCurrentSessionContextGraph(driver, reads, input.principalId, input.sessionId, input.expectedContextRevision,
+    { signal, modelProfile: async () => {
+      // Empty/control-only Session graphs emit no model messages, so their
+      // context contribution is exactly zero without reading an assembly.
+      // The first actual visible entry requires the complete original shape.
+      const profile = decodeRetainedRunAssembly(await readCanonicalArtifact(reads, input.assemblyRef)).provider;
+      return { provider: profile.name, model: profile.model };
+    } });
   const session = sessionContext.cut.session;
   if (readSessionPrincipalId(driver, input.sessionId) !== input.principalId) {
     throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
@@ -553,7 +560,7 @@ async function admitRunInternal(
   if (installed) recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity);
   else await recaptureLiveWorkspaceIdentity(workspaceIdentity, workspacePath);
 
-  const projection = decodeSessionProjection(await reads.readCanonical(session.contextProjectionRef));
+  const projection = sessionContext.projection;
   if (
     projection.sessionId !== session.id ||
     projection.contextRevision !== session.contextRevision ||
@@ -914,7 +921,7 @@ async function admitRunInternal(
     }
 
     const lockedSession = readSession(connection, input.sessionId);
-    assertSessionContextCut(connection, sessionContext.cut);
+    assertCurrentSessionContextGraph(connection, sessionContext.cut);
     if (readSessionPrincipalId(connection, input.sessionId) !== input.principalId) {
       throw new KernelStorageError('INVALID_REQUEST', 'session does not belong to the calling principal');
     }

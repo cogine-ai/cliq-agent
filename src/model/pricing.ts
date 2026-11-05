@@ -30,6 +30,8 @@ export type LocalZeroCostProvenanceV1 = {
   ownerPrincipalId: string;
   provider: 'ollama';
   model: string;
+  localModelRegistrationRef: ArtifactRef;
+  localModelRegistrationDigest: string;
   serviceSpecRef: ArtifactRef;
   serviceSpecDigest: string;
   stableServiceIdentityDigest: string;
@@ -110,6 +112,8 @@ const LOCAL_PROVENANCE_KEYS = [
   'ownerPrincipalId',
   'provider',
   'model',
+  'localModelRegistrationRef',
+  'localModelRegistrationDigest',
   'serviceSpecRef',
   'serviceSpecDigest',
   'stableServiceIdentityDigest',
@@ -293,6 +297,8 @@ function validLocalProvenanceSchema(value: unknown): value is LocalZeroCostProve
   if (!isRecord(value) || !hasExactKeys(value, LOCAL_PROVENANCE_KEYS)) return false;
   if (!isRecord(value.endpoint) || !hasExactKeys(value.endpoint, LOCAL_ENDPOINT_KEYS)) return false;
   const refs = [
+    value.localModelRegistrationRef,
+    value.localModelRegistrationDigest,
     value.serviceSpecRef,
     value.serviceSpecDigest,
     value.stableServiceIdentityDigest,

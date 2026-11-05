@@ -267,6 +267,7 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   parseCanonicalTime(preparedAt);
   if (preparedAt < intent.createdAt || preparedAt > run.updatedAt) throw new TypeError('terminal preparation time is outside its intent and committed Checkpoint');
   const abandoned = [...await validateInstalledBrokerTerminalHistory(driver, artifacts, closure, detail),
+    ...await (await import('./mcp-retry-admission.js')).validateMcpRetryTerminalHistory(driver, artifacts, closure, detail),
     ...await validateVerifierUnknownTerminalHistory(driver, artifacts, closure, detail),
     ...await (await import('./dependency-unknown-retirement.js')).validateDependencyUnknownTerminalHistory(driver, artifacts, closure, detail)]
     .sort((left, right) => left.unknownJournalSeq - right.unknownJournalSeq ||
@@ -306,10 +307,11 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   for (const { entry, hasClaim } of stopInvocationHistory(journal).values()) {
     if(manual&&entry.phase==='abandoned'&&entry.opId===manual.opId&&entry.attempt===manual.attempt&&entry.seq===manual.abandonedJournalSeq)continue;
     if (entry.opKind === 'publish' && (publication?.closedPublicationJournalSeqs.has(entry.seq) || unclaimedPublications.has(entry.seq))) continue;
-    if ((['model', 'verifier'].includes(entry.opKind) && entry.replayClass === 'retry' || entry.opKind === 'tool' &&
+    if ((['model', 'verifier', 'mcp'].includes(entry.opKind) && entry.replayClass === 'retry' || entry.opKind === 'tool' &&
         entry.target === 'builtin:dependency-acquire' && entry.replayClass === 'workspace-rollback-retry') && entry.phase === 'unknown' && abandoned.some(closed =>
       closed.opId === entry.opId && closed.attempt === entry.attempt && closed.unknownJournalSeq === entry.seq &&
       closed.budgetSettlementRef === entry.budgetSettlementRef)) continue;
+    if (entry.opKind === 'mcp-server' && ['completed', 'failed'].includes(entry.phase) && mcpNoRelease.has(entry.seq)) continue;
     if (entry.phase === 'failed' && (entry.opKind === 'model' && modelNoRelease.has(entry.seq) || entry.opKind==='mcp'&&mcpNoRelease.has(entry.seq)||
         entry.opKind === 'tool' && (privateRollbacks.has(entry.seq) || dependencyClosed.has(entry.seq)) || entry.opKind === 'verifier' && verifierStops.has(entry.seq))) continue;
     if (!['model', 'tool', 'mcp', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (entry.phase !== 'completed' &&
@@ -319,6 +321,10 @@ async function validateStopRecoveryData(driver: SqliteDriver, artifacts: Artifac
   const items = await artifacts.mapReads(closure.items, (row) => readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef));
   if (openStopBatch(items)) throw new TypeError('terminal stop retains an unclosed tool batch');
   for (const item of items) if (item.kind === 'tool_result' && item.outcome === 'cancelled') {
+    if (item.opId && abandoned.some(entry => entry.opId === item.opId && journal.find(row => row.seq === entry.unknownJournalSeq)?.opKind === 'mcp')) {
+      await (await import('./mcp-retry-terminal.js')).validateMcpRetryCancelledItem(driver, artifacts, closure, detail, item);
+      continue;
+    }
     const batch = items.find((candidate) => candidate.kind === 'assistant_tool_batch' && candidate.itemId === item.batchItemId);
     if (batch?.kind !== 'assistant_tool_batch' || item.createdAt !== preparedAt || journal.some((row) =>
         row.opId === toolOperationId(run.id, item.batchItemId, item.callId) && row.phase === 'dispatch_claimed')) throw new TypeError('cancelled result does not prove an undispatched call');

@@ -25,6 +25,7 @@ import { assertInstalledDeliveryPublication } from './installed-delivery-publica
 import { assertInstalledVerifierParentRetirement, type InstalledVerifierParentRetirementIdentity } from './installed-verifier-parent-evidence.js';
 import type { InstalledVerifierParentRetirementBinding, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 import { assertInstalledInteractivePermission, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
+import { installedSessionSegmentsAt } from './installed-session-segments.js';
 
 const ZERO = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
 const ONE_TOOL = { ...ZERO, toolCalls: 1 };
@@ -516,7 +517,9 @@ export async function assertInstalledDeliveryOutcome(input: {
     const sessionProjection = decodeSessionProjection(await object(session.contextProjectionRef));
     check(sessionProjection.sessionId === run.sessionId && sessionProjection.contextRevision === session.contextRevision &&
       sessionProjection.throughItemSeq === session.latestItemSeq);
-    same(sessionProjection.segments.filter(segment => segment.fromItemSeq <= terminal.row.itemSeq && segment.throughItemSeq >= terminal.row.itemSeq),
+    same(await installedSessionSegmentsAt(sessionProjection, terminal.row.itemSeq, async (ref, maximum) => {
+      const value = await bytes(ref); check(value.length <= maximum); return value;
+    }),
       [{ kind: 'raw', fromItemSeq: terminal.row.itemSeq, throughItemSeq: terminal.row.itemSeq, items: [{ sourceSessionId: run.sessionId,
         itemSeq: terminal.row.itemSeq, itemId: terminal.row.itemId, kind: 'run_terminal', payloadRef: terminal.row.payloadRef }] }]);
     return { qualified: true as const, kind, runId: run.id, resultRef: run.resultRef as string,

@@ -65,6 +65,7 @@ static bool preparation_birth_step(uint32_t kind, const struct cliq_worker_packe
 static bool preparation_record_result(const struct cliq_worker_packet *packet);
 static bool worker_preparation_final_binding(const struct cliq_worker_packet *request, int passed[CLIQ_WORKER_MAX_FDS], size_t count);
 static void mcp_admin_note_reaped(pid_t pid,int status);
+static void mcp_stdio_note_reaped(pid_t pid,int status);
 static volatile sig_atomic_t shutdown_requested;
 
 static void request_shutdown(int signal_number) {
@@ -210,6 +211,7 @@ static bool close_above_channel(void) { return cliq_close_range(4, UINT_MAX); }
 #include "source-git-init.h"
 #include "dependency-npm-init.h"
 #include "mcp-http-admin-init.h"
+#include "mcp-stdio-init.h"
 
 /* Same installed controller image, executed as PID 1 by --as-pid-1. No user
  * source is loaded until all host generation/cgroup/runtime FDs are closed. */
@@ -220,12 +222,13 @@ static int namespace_init(void) {
     int passed[CLIQ_WORKER_MAX_FDS]; size_t count;
     if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count) ||
         (request.command != CLIQ_CREATE_WORKER && request.command != CLIQ_CREATE_WRITE && request.command != CLIQ_CREATE_VERIFIER &&
-            request.command != CLIQ_SOURCE_CREATE_BLOCKED && request.command != CLIQ_CREATE_BUILTIN_READ && request.command != CLIQ_CREATE_BUILTIN_BASH && request.command != CLIQ_CREATE_DEPENDENCY_NPM && request.command != CLIQ_MCP_ADMIN_CREATE_BLOCKED) ||
+            request.command != CLIQ_SOURCE_CREATE_BLOCKED && request.command != CLIQ_CREATE_BUILTIN_READ && request.command != CLIQ_CREATE_BUILTIN_BASH && request.command != CLIQ_CREATE_DEPENDENCY_NPM && request.command != CLIQ_MCP_ADMIN_CREATE_BLOCKED && request.command != CLIQ_MCP_STDIO_CREATE_BLOCKED) ||
         count != (request.command == CLIQ_CREATE_WORKER ? 0U : request.command == CLIQ_CREATE_BUILTIN_READ ? 2U :
-            request.command == CLIQ_CREATE_BUILTIN_BASH || request.command == CLIQ_CREATE_DEPENDENCY_NPM || request.command == CLIQ_MCP_ADMIN_CREATE_BLOCKED ? 3U : request.command == CLIQ_SOURCE_CREATE_BLOCKED ?
+            request.command == CLIQ_CREATE_BUILTIN_BASH || request.command == CLIQ_CREATE_DEPENDENCY_NPM || request.command == CLIQ_MCP_ADMIN_CREATE_BLOCKED ? 3U : request.command == CLIQ_MCP_STDIO_CREATE_BLOCKED ? 2U : request.command == CLIQ_SOURCE_CREATE_BLOCKED ?
             (request.preparation_input_intent_ref[0] ? 2U : 3U) : 1U)) return 70;
     if (request.command == CLIQ_CREATE_DEPENDENCY_NPM) return dependency_namespace(request, passed);
     if (request.command == CLIQ_MCP_ADMIN_CREATE_BLOCKED) return mcp_admin_namespace(request, passed);
+    if (request.command == CLIQ_MCP_STDIO_CREATE_BLOCKED) return mcp_stdio_namespace(request, passed);
     if (request.command == CLIQ_CREATE_BUILTIN_READ || request.command == CLIQ_CREATE_BUILTIN_BASH) return builtin_namespace(request, passed);
     if (request.command == CLIQ_CREATE_VERIFIER) return verifier_namespace(request, passed[0]);
     if (request.command == CLIQ_SOURCE_CREATE_BLOCKED) return source_namespace(request, passed);
@@ -917,7 +920,7 @@ static bool stop_scope(unsigned int id, struct cliq_worker_packet *response) {
     for (;;) {
         int64_t now = milliseconds(); if (now < 0 || now > deadline) break;
         int status; pid_t reaped;
-        do { reaped = waitpid(-1, &status, WNOHANG); if(reaped>0)mcp_admin_note_reaped(reaped,status); } while (reaped > 0);
+        do { reaped = waitpid(-1, &status, WNOHANG); if(reaped>0){mcp_admin_note_reaped(reaped,status);mcp_stdio_note_reaped(reaped,status);} } while (reaped > 0);
         if (held_scope_dead(scope) && tracked_absent(&tracked)) {
             scope->stopped = true;
             scope->identity.populated = 0;
@@ -1065,9 +1068,12 @@ static bool inspect_worker_reservation(struct cliq_worker_packet *request, int p
 #include "source-git-recovery.h"
 #include "preparation-git-recovery.h"
 #include "mcp-http-admin-controller.h"
+#include "mcp-stdio-controller.h"
 
 static void stop_everything(void) {
-    if (mcp_admin_scope.created && !mcp_admin_scope.acked) (void)write_control(mcp_admin_scope.cgroup,"cgroup.kill","1");
+    if (mcp_admin_scope.resource.created && !mcp_admin_scope.resource.acked) (void)write_control(mcp_admin_scope.resource.cgroup,"cgroup.kill","1");
+    if (mcp_stdio_scope.resource.created && !mcp_stdio_scope.resource.acked && !mcp_stdio_scope.resource.blocked)
+        (void)write_control(mcp_stdio_scope.resource.cgroup,"cgroup.kill","1");
     /* Kill all populated roots first; cleanup is not serial productive work. */
     for (unsigned int id = 1; id < CLIQ_WORKER_MAX_SCOPES; id++) {
         if (scopes[id].created) (void)write_control(scopes[id].cgroup, "cgroup.kill", "1");
@@ -1085,7 +1091,20 @@ static void stop_everything(void) {
         struct cliq_worker_packet ignored;
         (void)source_retire(&ignored);
     }
-    if (mcp_admin_scope.attempted && !mcp_admin_scope.acked) { struct cliq_worker_packet stopped; if (mcp_admin_stop(&stopped)) (void)mcp_admin_ack(&stopped); }
+    if (mcp_admin_scope.resource.attempted && !mcp_admin_scope.resource.acked) { struct cliq_worker_packet stopped; if (mcp_admin_stop(&stopped)) (void)mcp_admin_ack(&stopped); }
+    if (mcp_stdio_scope.resource.attempted && !mcp_stdio_scope.resource.acked) {
+        struct cliq_worker_packet stopped;
+        /* Without the original executable release the exact signed init
+         * keeps the server behind its barrier. Closing a lost CREATE reply
+         * must still kill/join its real domain and every owned descriptor;
+         * no server stream bytes or received-result fact are invented. */
+        if (!mcp_stdio_scope.resource.released) {
+            mcp_stdio_scope.resource.identity.stdio_owner_drained = 1;
+            mcp_stdio_scope.resource.unreleased_stdio_shutdown = true;
+        }
+        if (mcp_contained_stop(&mcp_stdio_scope.resource, &stopped, CLIQ_MCP_STDIO_STOP))
+            (void)mcp_contained_ack(&mcp_stdio_scope.resource, &stopped, CLIQ_MCP_STDIO_ACK);
+    }
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
     if (worker_reservation.fd >= 0) { close(worker_reservation.fd); worker_reservation.fd = -1; }
 }
@@ -1094,6 +1113,7 @@ static int controller(void) {
     umask(0077);
     source_controller_init();
     mcp_admin_controller_init();
+    mcp_stdio_controller_init();
     for (size_t i = 0; i < CLIQ_WORKER_MAX_SCOPES; i++) {
         scopes[i].cgroup = -1; scopes[i].process_group = -1; scopes[i].channel = -1;
         scopes[i].builtin_git_fd = -1; scopes[i].dependency_modules_fd = -1;
@@ -1116,7 +1136,8 @@ static int controller(void) {
             if (scopes[i].verifier && scopes[i].released && !scopes[i].stopped) verifier_running = true;
         struct pollfd control = { .fd = 3, .events = POLLIN };
         bool source_running = source_scope.blocked && !source_scope.dead && !source_scope.failed;
-        int available = poll(&control, 1, verifier_running || source_running || (mcp_admin_scope.released && !mcp_admin_scope.dead) ? 10 : -1);
+        int available = poll(&control, 1, verifier_running || source_running || (mcp_admin_scope.resource.released && !mcp_admin_scope.resource.dead) ||
+            (mcp_stdio_scope.resource.blocked && !mcp_stdio_scope.resource.dead) ? 10 : -1);
         if (available < 0 && errno == EINTR) continue;
         if (available < 0 || (available > 0 && !(control.revents & POLLIN))) break;
         if (available == 0) continue;
@@ -1124,9 +1145,12 @@ static int controller(void) {
         if (!cliq_receive(3, &request, passed, sizeof(passed) / sizeof(passed[0]), &count)) break;
         response = cliq_packet(request.command); response.scope = request.scope;
         bool ok = false; int outputs[CLIQ_SOURCE_TRANSFER_OUTPUTS]; size_t output_count = 0;
-        if (request.command >= CLIQ_MCP_ADMIN_RESERVE && request.command <= CLIQ_MCP_ADMIN_CLEANUP_RETAINED) {
+        if (request.command >= CLIQ_MCP_STDIO_RESERVE && request.command <= CLIQ_MCP_STDIO_CLEANUP_RETAINED) {
+            ok = mcp_stdio_command(&request, passed, count, &response, outputs, &output_count);
+        } else if (mcp_stdio_scope.resource.attempted && request.command != CLIQ_STOP_CONTROLLER) ok = false;
+        else if (request.command >= CLIQ_MCP_ADMIN_RESERVE && request.command <= CLIQ_MCP_ADMIN_CLEANUP_RETAINED) {
             ok = mcp_admin_command(&request, passed, count, &response, outputs, &output_count);
-        } else if (mcp_admin_scope.attempted && !mcp_admin_scope.acked &&
+        } else if (mcp_admin_scope.resource.attempted && !mcp_admin_scope.resource.acked &&
             (request.command==CLIQ_PREPARATION_RESERVE || request.command==CLIQ_SOURCE_RESERVE || request.command==CLIQ_SOURCE_CLEANUP_RETAINED || request.command==CLIQ_PREPARATION_CLEANUP_RETAINED || request.command==CLIQ_SOURCE_CHECK_REGISTERED_ABSENT)) ok=false;
         else if (request.command == CLIQ_PREPARATION_RESERVE) {
             ok = preparation_reserve(&request, passed, count, &response);
@@ -1217,7 +1241,8 @@ static int controller(void) {
         response.status = ok ? 0 : (response.status != 0 ? response.status : 1);
         response.scope = request.scope;
         if (!cliq_send(3, &response, output_count ? outputs : NULL, output_count)) break;
-        if (request.command == CLIQ_MCP_ADMIN_POLL) for (size_t i = 0; i < output_count; i++) if (close(outputs[i]) != 0) shutdown_requested = 1;
+        if (request.command == CLIQ_MCP_ADMIN_POLL || request.command == CLIQ_MCP_STDIO_CREATE_BLOCKED)
+            for (size_t i = 0; i < output_count; i++) if (close(outputs[i]) != 0) shutdown_requested = 1;
     }
     stop_everything();
     return 0;

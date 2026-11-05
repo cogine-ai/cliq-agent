@@ -225,95 +225,106 @@ SQLite recovery reducer, and does not advance this work package's completion.
     }
 
     type SandboxProcessInvocationV1 =
+  | {
+      kind: 'worker_entrypoint'
+      purpose: 'worker_activation'
+      recipe: 'cliq-worker-entrypoint-v1'
+      runtimeSource: 'launch_runtime'
+      executableSource: 'launch_executable'
+      argvSource: 'fixed_empty'
+      cwdSource: 'generation_root'
+      stdio: {
+        stdin: 'closed'
+        stdout: 'captured'
+        stderr: 'captured'
+        extraFileDescriptors: 'authenticated_worker_channel_only'
+      }
+    }
+  | {
+      kind: 'source_inspection'
+      purpose: 'source_inspection'
+      recipe: 'cliq-source-git-inspection-v1'
+      targetRef: ArtifactRef
+      targetDigest: string
+      inputRef: ArtifactRef
+      inputDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+      stdio: SandboxCapturedStdioV1
+    }
+  | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: { stdin: 'mcp_framed'; stdout: 'mcp_framed'; stderr: 'captured'; extraFileDescriptors: 'none' }
+    }
+  | {
+      kind: 'local_inference_entrypoint'
+      purpose: 'local_inference_service'
+      recipe: 'cliq-local-inference-entrypoint-v1'
+      runtimeSource: 'launch_runtime'
+      executableSource: 'launch_executable'
+      modelManifestSource: 'service_spec'
+      argvSource: 'trusted_recipe_decode_of_service_spec'
+      cwdSource: 'isolated_root'
+      stdio: SandboxCapturedStdioV1
+    }
+  | ({
+      kind: 'run_request'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
+    } & (
+      | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
       | {
-          kind: 'worker_entrypoint'
-          purpose: 'worker_activation'
-          recipe: 'cliq-worker-entrypoint-v1'
-          runtimeSource: 'launch_runtime'
-          executableSource: 'launch_executable'
-          argvSource: 'fixed_empty'
-          cwdSource: 'generation_root'
+          purpose: 'tool'
+          recipe: 'cliq-builtin-tools-v1'
+          privateGitProtection: 'existing_read_only'
+          stdio: SandboxCapturedStdioV1
+        }
+      | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
+      | {
+          purpose: 'mcp_stdio'
+          recipe: 'cliq-mcp-stdio-launch-v1'
           stdio: {
-            stdin: 'closed'
-            stdout: 'captured'
+            stdin: 'mcp_framed'
+            stdout: 'mcp_framed'
             stderr: 'captured'
-            extraFileDescriptors: 'authenticated_worker_channel_only'
+            extraFileDescriptors: 'none'
+          }
+        }
+      | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
+    ))
+  | ({
+      kind: 'admin_probe'
+      targetRef: ArtifactRef
+      targetDigest: string
+      probePayloadCoreRef: ArtifactRef
+      argvCwdSource: 'trusted_recipe_decode_of_admin_target_and_probe_core'
+    } & (
+      | {
+          purpose: 'admin_mcp_stdio_probe'
+          recipe: 'cliq-admin-mcp-stdio-probe-v1'
+          stdio: {
+            stdin: 'mcp_framed'
+            stdout: 'mcp_framed'
+            stderr: 'captured'
+            extraFileDescriptors: 'none'
           }
         }
       | {
-          kind: 'source_inspection'
-          purpose: 'source_inspection'
-          recipe: 'cliq-source-git-inspection-v1'
-          targetRef: ArtifactRef
-          targetDigest: string
-          inputRef: ArtifactRef
-          inputDigest: string
-          argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+          purpose: 'admin_mcp_http_probe'
+          recipe: 'cliq-admin-mcp-http-probe-v1'
           stdio: SandboxCapturedStdioV1
         }
-      | {
-          kind: 'local_inference_entrypoint'
-          purpose: 'local_inference_service'
-          recipe: 'cliq-local-inference-entrypoint-v1'
-          runtimeSource: 'launch_runtime'
-          executableSource: 'launch_executable'
-          modelManifestSource: 'service_spec'
-          argvSource: 'trusted_recipe_decode_of_service_spec'
-          cwdSource: 'isolated_root'
-          stdio: SandboxCapturedStdioV1
-        }
-      | ({
-          kind: 'run_request'
-          requestRef: ArtifactRef
-          requestDigest: string
-          targetRef: ArtifactRef
-          targetDigest: string
-          argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
-        } & (
-          | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
-          | {
-              purpose: 'tool'
-              recipe: 'cliq-builtin-tools-v1'
-              privateGitProtection: 'existing_read_only'
-              stdio: SandboxCapturedStdioV1
-            }
-          | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
-          | {
-              purpose: 'mcp_stdio'
-              recipe: 'cliq-mcp-stdio-launch-v1'
-              stdio: {
-                stdin: 'mcp_framed'
-                stdout: 'mcp_framed'
-                stderr: 'captured'
-                extraFileDescriptors: 'none'
-              }
-            }
-          | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
-          | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
-        ))
-      | ({
-          kind: 'admin_probe'
-          targetRef: ArtifactRef
-          targetDigest: string
-          probePayloadCoreRef: ArtifactRef
-          argvCwdSource: 'trusted_recipe_decode_of_admin_target_and_probe_core'
-        } & (
-          | {
-              purpose: 'admin_mcp_stdio_probe'
-              recipe: 'cliq-admin-mcp-stdio-probe-v1'
-              stdio: {
-                stdin: 'mcp_framed'
-                stdout: 'mcp_framed'
-                stderr: 'captured'
-                extraFileDescriptors: 'none'
-              }
-            }
-          | {
-              purpose: 'admin_mcp_http_probe'
-              recipe: 'cliq-admin-mcp-http-probe-v1'
-              stdio: SandboxCapturedStdioV1
-            }
-        ))
+    ))
     type SanitizedSandboxEnvironmentV1 = {
       schemaVersion: 1
       format: 'cliq-sanitized-sandbox-environment-v1'
@@ -404,84 +415,104 @@ SQLite recovery reducer, and does not advance this work package's completion.
     }
 
     type SandboxLaunchSpecV1 =
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'worker_activation' }>
-          purpose: 'worker_activation'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'worker_entrypoint' }>
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'run_invocation' }>
-          purpose: 'tool' | 'verifier' | 'mcp_stdio' | 'dependency' | 'publication'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'run_request' }>
-          operationGrantRef: ArtifactRef
-          requestRef: ArtifactRef
-          requestDigest: string
-          targetRef: ArtifactRef
-          targetDigest: string
-          parentWorkerContainmentRef: ArtifactRef
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
-          purpose: 'admin_mcp_stdio_probe' | 'admin_mcp_http_probe'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'admin_probe' }>
-          adminTargetRef: ArtifactRef
-          adminTargetDigest: string
-          probePayloadCoreRef: ArtifactRef
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
-          purpose: 'source_inspection'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
-          sourceInspectionTargetRef: ArtifactRef
-          sourceInspectionTargetDigest: string
-          sourceInspectionInputRef: ArtifactRef
-          sourceInspectionInputDigest: string
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-          serviceSpecRef?: never
-          serviceSpecDigest?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
-          purpose: 'local_inference_service'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'local_inference_entrypoint' }>
-          serviceSpecRef: ArtifactRef
-          serviceSpecDigest: string
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'worker_activation' }>
+      purpose: 'worker_activation'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'worker_entrypoint' }>
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'run_invocation' }>
+      purpose: 'tool' | 'verifier' | 'mcp_stdio' | 'dependency' | 'publication'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'run_request' }>
+      operationGrantRef: ArtifactRef
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      parentWorkerContainmentRef: ArtifactRef
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
+      purpose: 'admin_mcp_stdio_probe' | 'admin_mcp_http_probe'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'admin_probe' }>
+      adminTargetRef: ArtifactRef
+      adminTargetDigest: string
+      probePayloadCoreRef: ArtifactRef
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
+      purpose: 'source_inspection'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
+      sourceInspectionTargetRef: ArtifactRef
+      sourceInspectionTargetDigest: string
+      sourceInspectionInputRef: ArtifactRef
+      sourceInspectionInputDigest: string
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
+      purpose: 'local_inference_service'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'local_inference_entrypoint' }>
+      serviceSpecRef: ArtifactRef
+      serviceSpecDigest: string
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
     ```
 
    `runtimeDigest = SHA-256(JCS(runtime with runtimeDigest omitted))`, `environmentDigest = SHA-256(JCS(environment with environmentDigest omitted))`, `mountsDigest = SHA-256(JCS(mounts))`, `resourcesDigest = SHA-256(JCS(resources))`, and `launchSpecDigest = SHA-256(JCS(the complete launch spec, including processInvocation, with launchSpecDigest omitted))`. `containmentPlanDigest` and `sandboxProfileDigest` equal the decoded referenced artifacts. Mounts are unique, byte-sorted by `targetPath`, nonoverlapping, and sourced only from verified CAS, the exact named Run generation, or a Supervisor-created private ephemeral root. Targets are absolute canonical guest/sandbox paths; generation source selectors are `cliq-exact-path-v1`. There is no raw host path, symlink-following source, writable runtime/CAS mount, persistent admin/MCP mount, ambient credential root, device, socket, or untyped mount.
@@ -797,47 +828,62 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
     ```ts
     type ProcessContainmentOwner =
-      | {
-          kind: 'worker_activation'
-          runId: string
-          intendedLeaseEpoch: number
-          workerLaunchId: string
-        }
-      | {
-          kind: 'run_invocation'
-          runId: string
-          intendedLeaseEpoch: number
-          workerLaunchId: string
-          opId: string
-          attempt: number
-          dispatchId: string
-        }
-      | {
-          kind: 'admin_probe'
-          adminOperationId: string
-          attempt: number
-          principalId: string
-          method: 'mcp.register' | 'mcp.refresh'
-          originalRequestDigest: string
-          targetRef: ArtifactRef
-          supervisorInstanceId: string
-        }
-      | {
-          kind: 'local_inference_service'
-          serviceId: string
-          serviceLaunchId: string
-          ownerPrincipalId: string
-          serviceSpecRef: ArtifactRef
-          supervisorInstanceId: string
-        }
-      | {
-          kind: 'source_inspection'
-          inspectionId: string
-          attempt: 1
-          principalId: string
-          targetRef: ArtifactRef
-          supervisorInstanceId: string
-        }
+  | {
+      kind: 'worker_activation'
+      runId: string
+      intendedLeaseEpoch: number
+      workerLaunchId: string
+    }
+  | {
+      kind: 'run_invocation'
+      runId: string
+      intendedLeaseEpoch: number
+      workerLaunchId: string
+      opId: string
+      attempt: number
+      dispatchId: string
+    }
+  | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
+    }
+  | {
+      kind: 'admin_probe'
+      adminOperationId: string
+      attempt: number
+      principalId: string
+      method: 'mcp.register' | 'mcp.refresh'
+      originalRequestDigest: string
+      targetRef: ArtifactRef
+      supervisorInstanceId: string
+    }
+  | {
+      kind: 'local_inference_service'
+      serviceId: string
+      serviceLaunchId: string
+      ownerPrincipalId: string
+      serviceSpecRef: ArtifactRef
+      supervisorInstanceId: string
+    }
+  | {
+      kind: 'source_inspection'
+      inspectionId: string
+      attempt: 1
+      principalId: string
+      targetRef: ArtifactRef
+      supervisorInstanceId: string
+    }
     type SandboxRootProfileV1 = {
       schemaVersion: 1
       format: 'cliq-sandbox-root-profile-v1'
@@ -1858,6 +1904,14 @@ Rollback (only for hard-to-reverse changes):
 ### Open Questions
 
 - None. Platform support, mandatory strong backend for every Git/non-Git Run, signed guest identity, locked dependency acquisition, call-scoped stdio MCP, tools-disabled durable compaction brokering, canonical five-owner containment, non-adoptable worker/admin/local-service preactivation, local no-spawn/death retirement and stable replacement identity, Run and embedded-admin dual authority gates, admin HTTP secret placement, all-descendant/no-live-I/O proof, quiescent Checkpoint publication, workspace/result separation, durable dispatch singleflight, grant expiry, and fail-closed behavior are closed by this Kernel Cut. Changing one requires a new RFC.
+
+### Signed MCP read-only recovery domain
+
+The RFC `reconciliation_probe` containment owner uses the fixed Linux native purpose 3 and `cliq-mcp-readonly-status-v1` recipe. Its exact original signed server/profile/template, distinct status operation, stable logical key, original nonce/deadline and full source intent must be reproduced before every release. It has no Worker parent, Run/Admin effect grant, credential, network or persistent writable mount. Only initialize, initialized, complete tools/list and the distinct signed read-only status call are allowed; the original effect is never resent.
+
+A closeable receiver is registered before the first await and owns every issued image/controller/native job. READY remains five seconds, stop remains two seconds and the probe's original deadline remains thirty seconds. Safe responses enter original custody before projection; all process/pipe/output/FD jobs join before release. A missing/partial/replaced original birth cannot be adopted by path, content or absence. Same-owner closure requires its original irreversible native fence plus zero matching releases and complete join. A strictly newer StateOwner may instead prove actual original PID/start domain death and perform the dedicated real retained-input cleanup; separate current-checker raw/projection records never mutate the old lifecycle or manufacture its mutex/join receipt. An old creator still alive leaves recovery waiting.
+
+These rules apply only to the MCP status domain. The independent model UNKNOWN broker fence/death checks, original charges, HTTP three-dispatch ceiling, stdio two-launch ceiling and original native call deadline are unchanged. Static/native-data/compiler tests do not qualify installed probe creation, successor cleanup, cancellation or Stop2; missing real Linux campaign evidence remains explicit and keeps the feature gate closed.
 
 ### GitHub Issue Body
 

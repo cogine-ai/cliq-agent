@@ -13,6 +13,7 @@ import { configureInstalledModel } from './model-settings.js';
 import type { ModelSetupProfileV1 } from './model-setup-profile.js';
 import { openPrivateClientDirectory } from './private-files.js';
 import { readClientPreferences } from './preferences.js';
+import { readRunScheduling, schedulingCommand, writeRunScheduling } from './run-scheduling.js';
 import { terminalText } from './view.js';
 import { installServices, observeInstalledCredentialSupervisor } from '../state/installed-services.js';
 import type { createInstalledRuntime } from '../state/installed-runtime.js';
@@ -115,7 +116,9 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
   profiles: readonly ModelSetupProfileV1[]): Promise<number> {
   if (argv.length > 1000 || argv.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0) > 1_048_576)
     throw new TypeError('daily client arguments exceed the existing control bound');
-  if (!argv.length || ['help', '--help'].includes(argv[0]!)) { await write(io, HELP); return 0; }
+  if (!argv.length || ['help', '--help'].includes(argv[0]!)) {
+    await write(io, HELP + '\nsettings [--run-concurrency <1..32>]  Configure Run capacity for the next Supervisor start.\n'); return 0;
+  }
   const locations = dailyInstalledLocations(), command = argv[0]!;
   if (command === 'setup') {
     if (argv.length !== 1) throw new TypeError('setup has no root, key or package override');
@@ -142,7 +145,7 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
   const failures: unknown[] = [];
   let stdio: Awaited<ReturnType<typeof openInstalledClientStdio>> | undefined;
   try {
-    if (command === 'models' || command === 'requests' && argv[1] !== 'replay' || command === 'supervisor' && argv[1] === 'start') {
+    if (command === 'models' || command === 'settings' || command === 'requests' && argv[1] !== 'replay' || command === 'supervisor' && argv[1] === 'start') {
       stdio = await openInstalledClientStdio(selected, io); io = stdio.io;
     }
     if (command === 'supervisor' && argv[1] === 'start') {
@@ -152,6 +155,12 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
     const data = await openInstalledClientData(selected);
     const dataFailures: unknown[] = [];
     try {
+      if (command === 'settings') {
+        const change = schedulingCommand(argv);
+        const settings = change === undefined ? await readRunScheduling(data.directory) : await writeRunScheduling(data.directory, change);
+        await write(io, { ...settings, applies: 'on_supervisor_restart' });
+        return 0;
+      }
       if (command === 'models') {
         const request = modelCommand(argv);
         if (request.kind === 'list') {

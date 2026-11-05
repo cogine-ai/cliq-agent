@@ -25,6 +25,7 @@ import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from 
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from '../store.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 import { prepareWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import { readReconciliationProbeCapacity } from '../reconciliation-capacity.js';
 import { hasOnlySettledPrivateToolUnknowns } from '../private-tool-rollback.js';
 import { hasOnlySettledVerifierUnknowns } from '../verifier-unknown-retirement.js';
 
@@ -133,21 +134,22 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
 
 export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  onCommitted?: (run: Run, wait: WorkerDeathWait) => void
+  onCommitted?: (run: Run, wait: WorkerDeathWait) => void, readSignal?: AbortSignal
 ): Promise<Run> => {
+  const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts; reads.assertReadActive();
   input = immutableSnapshot(input);
   if (!exactKeys(input, ['runId', 'expectedRunRevision']) || typeof input.runId !== 'string' || !input.runId ||
       !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker inspection requires a Run id and expected revision only');
   }
   assertActiveStateOwner(driver, owner);
-  const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  const cut = await readRecoveryClosure(driver, reads, input.runId);
   const { run } = cut;
   if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection Run revision changed');
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection requires the installed worker wait');
   }
-  const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
+  const wait = await reads.readCanonical<WorkerDeathWait>(run.waitingOnRef);
   if (wait.subject.kind !== 'worker_death' || wait.probeState.phase !== 'automatic_pending') {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection cannot replace an in-flight dispatch');
   }
@@ -161,7 +163,7 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   const probeNonceDigest = sha256Bytes(randomBytes(32));
   const anchorArtifact = wait.probeState.automaticProbeCount === 0
     ? await artifacts.publishCanonical(generation, 'cliq-workspace-generation-state-v1') : undefined;
-  const inspectionTargetDigest = anchorArtifact?.ref ?? canonicalSha256((await readWorkerRecoveryAnchor(artifacts, wait, generation)).anchor);
+  const inspectionTargetDigest = anchorArtifact?.ref ?? canonicalSha256((await readWorkerRecoveryAnchor(reads, wait, generation)).anchor);
   const dispatch = { schemaVersion: 1 as const, format: 'cliq-reconciliation-probe-dispatch-v1' as const, runId: run.id,
     reconciliationSubjectDigest, probeKind: 'automatic' as const, probeOrdinal, probeNonceDigest, probeStartedAt,
     probeDeadlineAt: addCanonicalDuration(probeStartedAt, 30_000), owningSupervisorInstanceId: owner.supervisorInstanceId,
@@ -174,8 +176,10 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   const metadata = [...(anchorArtifact ? [anchorArtifact] : []), ...await joinResourceOperations([artifacts.publishCanonical(dispatch, dispatch.format),
     artifacts.publishCanonical(nextWait, 'cliq-waiting-subject-v1')])];
   const waitingOnRef = canonicalSha256(nextWait);
+  const capacity = await readReconciliationProbeCapacity(driver, reads);
   let outcome: TimeFenceAdvance | undefined, updated!: Run;
   driver.transaction(connection => {
+    reads.assertReadActive();
     assertActiveStateOwner(connection, owner);
     if (canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
@@ -183,6 +187,7 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
         nextJournalSequence(connection, run.id) !== cut.journal.length + 1) {
       throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection cut changed before dispatch publication');
     }
+    capacity.assertAvailable(connection);
     const now = sampleCanonicalNow();
     outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;

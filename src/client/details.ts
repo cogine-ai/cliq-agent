@@ -1,7 +1,6 @@
 import { canonicalJsonBytes } from '../kernel/canonical.js';
-import { digestOmitting } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
-import { controlWireRecord } from '../kernel/control-wire-data.js';
+import { verifySessionHandoffPair } from '../kernel/session-handoff-data.js';
 import type { InstalledControlRequestV1, InstalledControlResponseFor, InstalledControlFeature } from '../control/v1.js';
 // These original closed result decoders are pure data functions. They load no
 // Store, SQL connection, native handle, permission or recovery service.
@@ -82,14 +81,11 @@ export async function presentControlArtifacts(app: Pick<ClientApplication, 'arti
     await present({ label: 'Result review', artifactRef: result.result.ref, text: lines.join('\n') });
   } else if (result.method === 'session.handoff.create') {
     if (request.method !== result.method) throw new TypeError('handoff differs from its original request');
-    const raw = await json(result.json.ref, result.json.sizeBytes);
-    // The owning server validates the complete immutable lineage. The display
-    // binds the exact captured identity/digest; it cannot import a handoff.
-    const value = controlWireRecord(raw.value, ['schemaVersion', 'format', 'sessionId', 'workspaceIdentityRef', 'workspaceIdentityDigest',
-      'contextRevision', 'throughItemSeq', 'contextProjectionRef', 'contextProjectionDigest', 'entries', 'excludedRanges', 'handoffDigest']);
-    if (value.schemaVersion !== 1 || value.format !== 'cliq-session-handoff-v1' || value.sessionId !== request.sessionId ||
-        value.contextRevision !== request.expectedContextRevision || request.throughItemSeq !== undefined && value.throughItemSeq !== request.throughItemSeq ||
-        value.handoffDigest !== digestOmitting(value, 'handoffDigest')) throw new TypeError('handoff differs from its original cut');
+    const raw = await read(result.json.ref, result.json.sizeBytes);
+    // The original artifact consumer checks all bytes/hash/EOF/join. The fixed
+    // portable envelope is then verified entry by entry, without rebuilding a
+    // giant array or borrowing today's Session to replace the captured cut.
+    await verifySessionHandoffPair(raw, request, result.markdown, signal);
     const markdown = await read(result.markdown.ref, result.markdown.sizeBytes);
     await present({ label: 'Session handoff', artifactRef: result.markdown.ref, text: utf8(markdown) });
   }

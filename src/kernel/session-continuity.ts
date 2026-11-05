@@ -3,6 +3,7 @@ import { assertAdmissionKey, assertRequestId, assertArtifactRef, normalizeAbsolu
 import { controlWireInteger, controlWireRecord, controlWireText, assertControlWireJson } from './control-wire-data.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ArtifactDescriptorV1, Session } from './types.js';
+import type { LegacySessionContextKind } from './legacy-context.js';
 
 export type SessionForkRequestV1 = Readonly<{ protocolVersion: 1; method: 'session.fork'; requestId: string; requestDigest: string;
   admissionKey: string; sessionId: string; expectedContextRevision: number; throughItemSeq: number; name?: string }>;
@@ -15,7 +16,7 @@ export type SessionContinuityRequestV1 = SessionForkRequestV1 | SessionCompactRe
 export type SessionSummaryV1 = Omit<Session, 'contextProjectionRef' | 'forkedThroughItemSeq'>;
 export type SessionCompactionItem = Readonly<{ schemaVersion: 1; kind: 'compaction'; fromItemSeq: number; throughItemSeq: number;
   sourceItemsDigest: string; summaryRef: string; summaryDigest: string; retainedItemIds: readonly string[]; previousProjectionRef: string; createdAt: string }>;
-export type SessionHandoffEntryV1 = Readonly<{ index: number; sourceKind: 'run_terminal' | 'summary'; fromItemSeq: number;
+export type SessionHandoffEntryV1 = Readonly<{ index: number; sourceKind: 'run_terminal' | 'summary' | LegacySessionContextKind; fromItemSeq: number;
   throughItemSeq: number; sourceRef: string; sourceDigest: string; contentUtf8: string }>;
 export type SessionHandoffV1 = Readonly<{ schemaVersion: 1; format: 'cliq-session-handoff-v1'; sessionId: string;
   workspaceIdentityRef: string; workspaceIdentityDigest: string; contextRevision: number; throughItemSeq: number;

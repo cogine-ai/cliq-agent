@@ -699,6 +699,25 @@ static napi_value mcp_admin_snapshot_call(napi_env env, napi_callback_info info)
     napi_value      result;
     return napi_create_buffer_copy(env, scope->snapshot_size, scope->snapshot, NULL, &result) == napi_ok ? result : NULL;
 }
+static napi_value mcp_admin_reobserve_retirement(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1], self;
+    struct mcp_admin_native_scope *scope = mcp_admin_scope_receiver(env, info, &argc, args);
+    if (!scope) return NULL;
+    if (argc || scope->retained || !scope->joined || !scope->acked || !scope->closed || scope->pending ||
+        scope->outgoing_fd >= 0 || scope->bridge.borrowed || !scope->released || !scope->snapshot ||
+        napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok)
+        return failure(env, "MCP Admin has no complete original retirement to reobserve");
+    return mcp_admin_original_value(env, self, scope, scope->controller, scope->input, scope->snapshot, scope->snapshot_size,
+        &scope->bridge.binding, CLIQ_MCP_ADMIN_ORIGINAL_HTTP);
+}
+static napi_value mcp_admin_assert_retirement(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2];
+    struct mcp_admin_native_scope *scope = mcp_admin_scope_receiver(env, info, &argc, args);
+    if (!scope) return NULL;
+    if (argc != 1 || scope->retained || !scope->joined || !scope->acked || !scope->closed || scope->pending || scope->outgoing_fd >= 0)
+        return failure(env, "MCP Admin original current observation is unavailable");
+    return mcp_admin_original_assert(env, scope, scope->controller, args[0], CLIQ_MCP_ADMIN_ORIGINAL_HTTP);
+}
 static void
 mcp_admin_native_finalize(napi_env env, void *data, void *hint)
 {
@@ -818,7 +837,7 @@ static napi_value reserve_mcp_admin(napi_env env, napi_callback_info info) {
                     recipe_fd = valid ? memfd_create("cliq-mcp-admin-recipe", MFD_CLOEXEC | MFD_ALLOW_SEALING) : -1;
     valid = valid && config_fd >= 0 && recipe_fd >= 0 && write(config_fd, config, sizeof(*config)) == (ssize_t) sizeof(*config) && write(recipe_fd, recipe, recipe_size) == (ssize_t) recipe_size && !fchmod(config_fd, 0400) && !fchmod(recipe_fd, 0400) && !fcntl(config_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) && !fcntl(recipe_fd, F_ADD_SEALS, F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL);
     free(config);
-    const           napi_property_descriptor methods[] = {{"pollReserved", NULL, mcp_admin_poll_reserved, NULL, NULL, NULL, napi_default, NULL}, {"createBlocked", NULL, mcp_admin_create_call, NULL, NULL, NULL, napi_default, NULL}, {"pollReady", NULL, mcp_admin_poll_ready, NULL, NULL, NULL, napi_default, NULL}, {"releaseRecipe", NULL, mcp_admin_release_call, NULL, NULL, NULL, napi_default, NULL}, {"pollStageRequested", NULL, mcp_admin_poll_stage, NULL, NULL, NULL, napi_default, NULL}, {"stop", NULL, mcp_admin_stop_call, NULL, NULL, NULL, napi_default, NULL}, {"pollJoined", NULL, mcp_admin_poll_join, NULL, NULL, NULL, napi_default, NULL}, {"assertJoined", NULL, mcp_admin_assert_join_call, NULL, NULL, NULL, napi_default, NULL}, {"beginOutputAck", NULL, mcp_admin_begin_ack_call, NULL, NULL, NULL, napi_default, NULL}, {"pollOutputAck", NULL, mcp_admin_poll_ack_call, NULL, NULL, NULL, napi_default, NULL}, {"pollLifecycleSnapshot", NULL, mcp_admin_snapshot_call, NULL, NULL, NULL, napi_default, NULL}};
+    const           napi_property_descriptor methods[] = {{"pollReserved", NULL, mcp_admin_poll_reserved, NULL, NULL, NULL, napi_default, NULL}, {"createBlocked", NULL, mcp_admin_create_call, NULL, NULL, NULL, napi_default, NULL}, {"pollReady", NULL, mcp_admin_poll_ready, NULL, NULL, NULL, napi_default, NULL}, {"releaseRecipe", NULL, mcp_admin_release_call, NULL, NULL, NULL, napi_default, NULL}, {"pollStageRequested", NULL, mcp_admin_poll_stage, NULL, NULL, NULL, napi_default, NULL}, {"stop", NULL, mcp_admin_stop_call, NULL, NULL, NULL, napi_default, NULL}, {"pollJoined", NULL, mcp_admin_poll_join, NULL, NULL, NULL, napi_default, NULL}, {"assertJoined", NULL, mcp_admin_assert_join_call, NULL, NULL, NULL, napi_default, NULL}, {"beginOutputAck", NULL, mcp_admin_begin_ack_call, NULL, NULL, NULL, napi_default, NULL}, {"pollOutputAck", NULL, mcp_admin_poll_ack_call, NULL, NULL, NULL, napi_default, NULL}, {"pollLifecycleSnapshot", NULL, mcp_admin_snapshot_call, NULL, NULL, NULL, napi_default, NULL}, {"reobserveRetirement", NULL, mcp_admin_reobserve_retirement, NULL, NULL, NULL, napi_default, NULL}, {"assertRetirementObservation", NULL, mcp_admin_assert_retirement, NULL, NULL, NULL, napi_default, NULL}};
     if (!valid || napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &CLIQ_MCP_ADMIN_PEER_TAG) != napi_ok || napi_define_properties(env, result, sizeof(methods) / sizeof(*methods), methods) != napi_ok || napi_create_reference(env, args[0], 1, &scope->input_ref) != napi_ok) {
         retire_descriptor(&config_fd);
         retire_descriptor(&recipe_fd);
@@ -1000,6 +1019,9 @@ static napi_value cleanup_retained_mcp_admin(napi_env env, napi_callback_info in
         for (size_t i = 0; i < 32; i++)
             snprintf(scope->original_digest + i * 2, 3, "%02x", digest[i]);
         scope->identity = scope->original_history.last.packet;
+        /* Current checker sends only current live wire. Original raw wire8/9
+         * birth/hashchain bytes remain unchanged in the retained snapshot. */
+        scope->identity.version = CLIQ_WORKER_VERSION;
         scope->identity.command = CLIQ_MCP_ADMIN_CLEANUP_RETAINED;
         scope->identity.admin_checker_owner_epoch = scope->checker_epoch;
         scope->identity.admin_checker_supervisor_pid = getpid();

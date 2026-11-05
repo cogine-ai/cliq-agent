@@ -19,6 +19,11 @@ export class VerifierAuthorizationError extends KernelStorageError {
     super('STATE_TRANSITION_INVALID', 'verifier identity authority is unavailable'); this.name = 'VerifierAuthorizationError';
   }
 }
+export class McpStdioAuthorizationError extends KernelStorageError {
+  constructor() {
+    super('STATE_TRANSITION_INVALID', 'MCP executable identity consent is unavailable'); this.name = 'McpStdioAuthorizationError';
+  }
+}
 const plain = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' &&
   !types.isProxy(value) && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value)) &&
   Reflect.ownKeys(value).every(key => typeof key === 'string' && (() => {
@@ -46,7 +51,8 @@ export function authorizationGrantCore(grant: AuthorizationGrantV1): Omit<Author
 export function authorizationSummary(grant: AuthorizationGrantV1): AuthorizationGrantSummaryV1 {
   return { schemaVersion: 1, grantId: grant.grantId, state: grant.state, targetKind: grant.target.kind,
     purpose: grant.target.kind === 'source_git_inspection' ? 'source_inspection' : grant.target.kind === 'read_scope' ? 'source' :
-      grant.target.kind === 'dependency_install_scripts' ? 'dependency_install_scripts' : 'verifier', targetDigest: grant.targetDigest, useCount: grant.useCount, rowVersion: grant.rowVersion,
+      grant.target.kind === 'dependency_install_scripts' ? 'dependency_install_scripts' : grant.target.kind === 'execution_identity_read'
+        ? grant.target.purpose : 'verifier', targetDigest: grant.targetDigest, useCount: grant.useCount, rowVersion: grant.rowVersion,
     createdAt: grant.createdAt, expiresAt: grant.expiresAt,
     ...(grant.state === 'consumed' ? { consumedAt: grant.consumedAt } : {}),
     ...(grant.state === 'revoked' ? { revokedAt: grant.revokedAt } : {}) };
@@ -102,6 +108,21 @@ export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
     if (Object.hasOwn(scope, 'expectedDigest')) ref(scope.expectedDigest);
     target = scope as AuthorizationGrantV1['target'];
   }
+  else if (value.target.kind === 'execution_identity_read' && value.target.purpose === 'mcp_stdio') {
+    const selected = exact(value.target, ['kind', 'purpose', 'identity']);
+    if (!plain(selected.identity)) throw new TypeError('MCP identity is not a record');
+    const runtime = selected.identity.kind === 'runtime_bundle_executable';
+    const identity = exact(selected.identity, runtime
+      ? ['kind', 'runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableId', 'executionPath', 'executableDigest']
+      : ['kind', 'guestToolchainManifestRef', 'manifestDigest', 'toolId', 'executionPath', 'executableDigest']);
+    if (!runtime && identity.kind !== 'guest_toolchain') throw new TypeError('unsupported retained MCP identity');
+    for (const member of runtime ? ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'executableDigest']
+      : ['guestToolchainManifestRef', 'manifestDigest', 'executableDigest']) ref(identity[member]);
+    text(identity[runtime ? 'executableId' : 'toolId']);
+    if (typeof identity.executionPath !== 'string' || normalizeAbsolutePath(identity.executionPath) !== identity.executionPath)
+      throw new TypeError('MCP execution path is not canonical');
+    target = selected as AuthorizationGrantV1['target'];
+  }
   else {
     const verifier = exact(value.target, ['kind', 'purpose', 'identity']);
     if (verifier.kind !== 'execution_identity_read' || verifier.purpose !== 'verifier') throw new TypeError('unsupported retained authorization purpose');
@@ -133,6 +154,15 @@ export function decodeAuthorizationGrant(value: unknown): AuthorizationGrantV1 {
 export function decodeAuthorizationConsumptionReceipt(value: unknown): AuthorizationConsumptionReceiptV1 {
   const data = exact(value, ['schemaVersion', 'grantId', 'ownerPrincipalId', 'targetDigest', 'consumer', 'consumedAt', 'receiptDigest']);
   if (!plain(data.consumer)) throw new TypeError('unsupported authorization consumer');
+  if (data.consumer.kind === 'mcp_registration') {
+    const consumer = exact(data.consumer, ['kind', 'registrationId', 'registryRevision']);
+    if (data.schemaVersion !== 1 || !Number.isSafeInteger(consumer.registryRevision) || (consumer.registryRevision as number) < 1)
+      throw new TypeError('invalid MCP registration authorization consumer');
+    text(data.grantId); text(data.ownerPrincipalId); text(consumer.registrationId); ref(data.targetDigest); ref(data.receiptDigest);
+    parseCanonicalTime(data.consumedAt as string);
+    if (data.receiptDigest !== digestOmitting(data, 'receiptDigest')) throw new TypeError('MCP authorization receipt digest does not rehash');
+    return data as AuthorizationConsumptionReceiptV1;
+  }
   if (data.consumer.kind === 'authorization_derivation') {
     const consumer = exact(data.consumer, ['kind', 'derivedGrantId']);
     if (data.schemaVersion !== 1) throw new TypeError('unsupported authorization consumer');

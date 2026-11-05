@@ -533,9 +533,16 @@ type SessionCompactionItem = {
   createdAt: string
 }
 
+type LegacySessionContextKind =
+  | 'legacy_record'
+  | 'legacy_compaction'
+  | 'legacy_plan'
+  | 'legacy_handoff'
+  | 'legacy_bookmark'
+
 type SessionHandoffEntryV1 = {
   index: number
-  sourceKind: 'run_terminal' | 'summary'
+  sourceKind: 'run_terminal' | 'summary' | LegacySessionContextKind
   fromItemSeq: number
   throughItemSeq: number
   sourceRef: ArtifactRef
@@ -571,11 +578,13 @@ A fork ending at a summary may exclude the later compaction control item from it
 
 Session first-response replay independently audits the original retained channel and current owner/frame/lifetime. Fork responses bind the original admission intent/control link, deterministic child id, immutable lineage/workspace/creation fields, revision one and complete frozen prefix. Compaction responses bind the exact original request, deterministic immutable compaction row, normalized summary/retained range, previous projection and deterministically reconstructed replacement projection. A different valid same-method response is not interchangeable. Later compaction also cannot make a terminal Run's history unreadable: the atomic terminal item and original exact one-item raw segment remain provable through the full immutable compaction graph even when current model visibility is a summary.
 
-Kernel Cut deliberately rejects ambiguous projection surgery. `session.compact` requires `fromItemSeq` and `throughItemSeq` to equal whole current segment boundaries, requires every selected segment to be `raw`, and requires retained ids to be unique logical source items inside that exact range; any summary, `excluded_control`, straddling, nested, or recompaction range returns `INVALID_REQUEST`. The public `summaryMarkdown` is normalized to NFC, rejects NUL/unpaired surrogates, and publishes exact `ModelTextV1` with UTF-8 bytes in `1..262144`; `summaryRef` names it and `summaryDigest` equals its `textDigest` in both the item and projection segment. It publishes summary/item/new-projection artifacts first and atomically appends one child-owned `SessionCompactionItem` at `latestItemSeq+1`, replaces the projection, increments `contextRevision`, and updates `latestItemSeq`. The new compaction item itself is always represented by an exact one-item `excluded_control` segment whose source digest binds its `{itemSeq,kind,payloadRef}` tuple; it is never model-visible or ambiguously raw. `session.fork throughItemSeq` must be zero or the `throughItemSeq` of a current segment; a cursor inside a summary/raw/control segment is rejected rather than re-expanded. One idempotent transaction creates the child with `parentSessionId`, `forkedThroughItemSeq`, `contextRevision=1`, and `latestItemSeq=throughItemSeq`, plus a new projection whose prefix entries keep exact source Session/item ids; it clones no item rows. The child's first local append uses `throughItemSeq+1`. Subsequent lookup validates the immutable ancestor chain, and a parent later append/compaction cannot enter the frozen child prefix. Legacy item kinds are retained for inspect/export only and must occur exclusively in `excluded_control` segments; they are never decoded as model context. A later RFC may add deterministic re-expansion/recompaction. Session contains no status, lease, wait, budget, worker, Journal, workspace generation, or Run frontier field.
+Kernel Cut deliberately rejects ambiguous projection surgery. `session.compact` requires `fromItemSeq` and `throughItemSeq` to equal whole current segment boundaries, requires every selected segment to be `raw`, and requires retained ids to be unique logical source items inside that exact range; any summary, `excluded_control`, straddling, nested, or recompaction range returns `INVALID_REQUEST`. The public `summaryMarkdown` is normalized to NFC, rejects NUL/unpaired surrogates, and publishes exact `ModelTextV1` with UTF-8 bytes in `1..262144`; `summaryRef` names it and `summaryDigest` equals its `textDigest` in both the item and projection segment. It publishes summary/item/new-projection artifacts first and atomically appends one child-owned `SessionCompactionItem` at `latestItemSeq+1`, replaces the projection, increments `contextRevision`, and updates `latestItemSeq`. The new compaction item itself is always represented by an exact one-item `excluded_control` segment whose source digest binds its `{itemSeq,kind,payloadRef}` tuple; it is never model-visible or ambiguously raw. `session.fork throughItemSeq` must be zero or the `throughItemSeq` of a current segment; a cursor inside a summary/raw/control segment is rejected rather than re-expanded. One idempotent transaction creates the child with `parentSessionId`, `forkedThroughItemSeq`, `contextRevision=1`, and `latestItemSeq=throughItemSeq`, plus a new projection whose prefix entries keep exact source Session/item ids; it clones no item rows. The child's first local append uses `throughItemSeq+1`. Subsequent lookup validates the immutable ancestor chain, and a parent later append/compaction cannot enter the frozen child prefix. Only the five closed context-only legacy projections defined below may enter raw historical context; raw legacy files and control payloads remain ineligible and may be retained only as excluded display/audit history. A later RFC may add deterministic re-expansion/recompaction. Session contains no status, lease, wait, budget, worker, Journal, workspace generation, or Run frontier field.
 
-`session.handoff.create` is one exact read projection. An omitted `throughItemSeq` means the captured projection's `throughItemSeq`; an explicit cursor must be zero or the end of a current segment and no greater than that cut. The server reads Session, lineage rows, and projection in one SQLite snapshot and rejects a revision mismatch. It walks the exact prefix: each raw `run_terminal` emits one entry with its payload ref, `sourceDigest=SHA-256(JCS(SessionRunTerminalItem))`, and the section 4.2 model-visible JCS string; each summary emits one entry with the compaction item ref, its `summaryDigest`, and decoded `ModelTextV1.utf8`; every `excluded_control` range is copied to `excludedRanges`; legacy kinds are control-only. Entries and excluded ranges are contiguous in their respective stored encounter order, indices start at zero, refs/digests rehash, and no current mutable path, checkpoint, principal, credential, grant, receipt body, or hidden Run transcript enters the handoff. `contextProjectionDigest` and workspace identity equal the captured Session; `handoffDigest = SHA-256(JCS(handoff with handoffDigest omitted))`.
+`session.handoff.create` is one exact read projection. An omitted `throughItemSeq` means the captured projection's `throughItemSeq`; an explicit cursor must be zero or the end of a current segment and no greater than that cut. The server reads Session, lineage rows, and projection in one SQLite snapshot and rejects a revision mismatch. It walks the exact prefix: each raw `run_terminal` emits one entry with its payload ref, `sourceDigest=SHA-256(JCS(SessionRunTerminalItem))`, and the section 4.2 model-visible JCS string; each closed legacy context item emits its original complete `LegacyPortablePayloadV1` ref/byte digest and only the fixed historical visible projection below; each summary emits one entry with the compaction item ref, its `summaryDigest`, and decoded `ModelTextV1.utf8`; every `excluded_control` range is copied to `excludedRanges`. Raw legacy files and control payloads remain excluded. Entries and excluded ranges are contiguous in their respective stored encounter order, indices start at zero, refs/digests rehash, and no current mutable source path, executable checkpoint, principal, credential, grant, receipt body, or hidden Run transcript enters the handoff. `contextProjectionDigest` and workspace identity equal the captured Session; `handoffDigest = SHA-256(JCS(handoff with handoffDigest omitted))`.
 
 The JSON artifact is exactly UTF-8 RFC 8785/JCS of `SessionHandoffV1`. The Markdown artifact is rendered from that decoded object only: start with `# Cliq Session Handoff\n\n`, then `Session: <JCS(sessionId)>\nContext revision: <base-10 contextRevision>\nThrough item: <base-10 throughItemSeq>\n`; for each entry append `\n## Entry <base-10 index+1>: <sourceKind>\n\n` followed by every LF-normalized content line prefixed with four ASCII spaces and one final LF; then append `\nExcluded control ranges: <base-10 excludedRanges.length>\n`. Input CRLF/CR in human text is normalized to LF when the originating `ModelTextV1` is published, so the renderer performs no platform newline choice. Markdown bytes are UTF-8, their artifact digest is SHA-256 of those exact bytes, and the result descriptors must rehash the JCS and Markdown artifacts. Identical Session/revision/cursor therefore returns identical refs; there is no creation timestamp, random id, ambient path, or renderer option.
+
+The [paged retained Session contract](../kernel/session-context-pages.md) specifies new v2 heads and bounded internal CAS pages. Pages are fully published and joined without SQL catalog writes; only the complete head enters the original unique Session/Run transaction. A failed final transaction changes no SQL metadata, while inert unreferenced CAS bytes may remain. Catalog membership never substitutes for full typed reachability or complete physical CAS inventory; an incomplete GC walk deletes nothing. Existing v1 history and all source/compaction/authority checks remain unchanged.
 
 ### 4.2 Session And Run Concurrency
 
@@ -602,6 +611,49 @@ type SessionRunTerminalItem = {
 ```
 
 The storage gate enforces the same status/result/detail matrix as the Run and uniqueness by Session plus `runId`; retry after a crash observes the existing item. The item is owned by the exact root Run's Session, `itemKey` is the literal ``run-terminal:${Run.id}``, `runId === Run.id`, `operation === decoded RunSpec.operation`, and `admittedSessionItemSeq === decoded AdmittedContextManifest.throughSessionItemSeq` reached through that RunSpec. Its status and terminal reason equal the terminal Run row; a failed/cancelled `terminalDetailRef` equals the Run's exact terminal-detail ref. `succeeded|completed_unverified` require the Run's exact `resultRef`, forbid `terminalDetailRef`, and require `summaryRef/summaryDigest` to equal the decoded `RunResult.summaryRef` and that exact `ModelTextV1.textDigest`. `failed|cancelled` require the exact detail and forbid result and summary fields. Concurrent roots receive Session sequence numbers in SQLite commit order. Each root-terminal append increments `latestItemSeq` and `contextRevision` once and extends the prior projection with a **new, never-coalesced, one-item `raw` segment** whose sole entry is the exact new `{sourceSessionId=sessionId,itemSeq,itemId,kind='run_terminal',payloadRef}` tuple and whose source digest is computed by the ordinary raw-segment rule. The model-visible rendering of that item is exactly UTF-8 RFC 8785/JCS of `{kind:'run_terminal',runId,operation,status,terminalReason,resultRef?,summaryRef?}` with absent optionals omitted; `admittedSessionItemSeq`, `terminalDetailRef`, and `summaryDigest` remain audit/control metadata and are not projected. This fixed segment and rendering rule makes later compaction/fork boundaries, projection digests, and admitted prompt bytes implementation-independent. A child never publishes directly into Session: its terminal transaction produces the parent-owned `ChildResultItem`/wake contract instead. Thus client `cliq resume` deterministically sees every committed root outcome without copying live Run transcripts or depending on an event spool.
+
+The five `LegacySessionContextKind` values enter raw Session context only through
+the complete closed `LegacyPortablePayloadV1` context projection. Its original
+`legacySessionId` equals the immutable source Session, its kind equals that
+Session item's kind, and its item id is
+`H('cliq-legacy-session-item-v1',legacySessionId,kind,sourceOrdinal,payloadDigest)`.
+The full artifact bytes rehash independently of `payloadDigest`, whose omission
+rule remains unchanged. Forks retain these original source Session/item
+identities. These bytes prove neither migration completion nor live workspace,
+StateOwner, tool, credential or recovery authority.
+
+The fixed context content is deliberately narrower than arbitrary portable JSON:
+
+| Kind / exact source schema | Required content | Optional content |
+| --- | --- | --- |
+| `legacy_record` / `record-v1` | `recordId`, `recordedAt`, `recordKind`, `contentUtf8` | Only a `recordKind='tool'` has required `toolName` and `toolStatus='ok'|'error'`; both are forbidden for other kinds |
+| `legacy_compaction` / `compaction-v1` | `compactionId`, `createdAt`, `status='active'|'superseded'`, `coveredRange={startIndexInclusive,endIndexExclusive}`, `firstKeptRecordId`, `summaryMarkdown` | None |
+| `legacy_plan` / `plan-v1` | `planId`, `title`, `contentMarkdown`, historical `status`, ordered `items=[{id,title,status,notes?}]` with unique ids | None |
+| `legacy_handoff` / `handoff-v1` | `handoffId`, `createdAt`, `summarySource='active-compaction'|'handoff-only'`, `summaryMarkdown` | None |
+| `legacy_bookmark` / `bookmark-v1` | `bookmarkId`, `createdAt`, `legacyKind='auto'|'manual'|'restore-safety'|'handoff'`, `recordIndex`, `turn` | `name` |
+
+Record kind is one exact historical `system|user|assistant|tool|tx-opened|tx-applied|tx-aborted`
+label. Plan status is `draft|finalized|approved|rejected|canceled`, and item status
+is `pending|in_progress|completed`. All records are finite, closed JSON with the
+original depth-32, 10,000-entry and 1 MiB payload ceilings. Text fields are bounded
+to 262,144 UTF-8 bytes, ids to 128, title/name to 256 and a plan-item title to
+4,096. Times are canonical; ordinals/ranges/indexes are safe nonnegative integers,
+and a covered end is strictly greater than its start. The envelope's source path
+is an exact canonical relative path and cannot name `auth.json`.
+
+Visible text is exact UTF-8 JCS of
+`{format:'cliq-legacy-context-prompt-v1',kind,content}`. The normal prompt source
+kind is `session_legacy` with **only** `role='user'`; old role labels, tool names,
+transaction events, plan approval status and bookmarks remain historical data.
+No old system message, tool frame/action, approved target mode, active skill,
+configuration, grant or restore coordinate is reinstated. Raw legacy files,
+source paths and credential/authority fields are not copied into this projection;
+literal user prose is preserved without claiming an arbitrary secret scan.
+The same fixed visible projection serves normal model requests, Session
+compaction/retained items, the Run-compaction prefix and Session handoff. Original
+terminal/summary proofs and excluded-control behavior remain unchanged. An old
+compaction is historical payload, not a fabricated Kernel summary proof; large
+history uses the existing authenticated Session compaction rather than truncation.
 
 ### 4.3 Physical Storage Is Not A Control Plane
 
@@ -1820,6 +1872,13 @@ type LocalModelObjectClosureV1 = {
         sizeBytes: number
       }
     | {
+        kind: 'model_signature'
+        logicalPath: 'model-signature'
+        artifactRef: ArtifactRef
+        artifactDigest: string
+        sizeBytes: 64
+      }
+    | {
         kind: 'tokenizer'
         logicalPath: 'tokenizer'
         artifactRef: ArtifactRef
@@ -2098,6 +2157,8 @@ type LocalInferenceActivationCycleBaseV1 = {
   activationCycleId: string
   ownerPrincipalId: string
   serviceId: string
+  localModelRegistrationRef: ArtifactRef
+  localModelRegistrationDigest: string
   serviceSpecRef: ArtifactRef
   serviceSpecDigest: string
   cycleOrdinal: number
@@ -2295,6 +2356,8 @@ type LocalZeroCostProvenanceV1 = {
   ownerPrincipalId: string
   provider: 'ollama'
   model: string
+  localModelRegistrationRef: ArtifactRef
+  localModelRegistrationDigest: string
   serviceSpecRef: ArtifactRef
   serviceSpecDigest: string
   stableServiceIdentityDigest: string
@@ -2645,6 +2708,13 @@ type NormalPromptMessageV1 =
     }
   | {
       index: number
+      role: 'user'
+      sourceKind: 'session_legacy'
+      sourceId: string
+      contentUtf8: string
+    }
+  | {
+      index: number
       role: 'assistant'
       sourceItemId: string
       contentUtf8: string
@@ -2978,29 +3048,29 @@ response claims, and capability evidence/assembly claims are exactly receipt
 claims. A raw provider body, mutable discovery cache, or adapter assertion
 cannot directly set a claim.
 
-Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its Ed25519 signature is from a bundled Cliq model trust key. Managed-local evidence repeats all six model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
+Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its detached 64-byte Ed25519 signature covers UTF-8 `cliq-local-model-manifest-v1\0` followed by the lower-case semantic digest and is from the original bundled Cliq publisher's Ed25519 model-trust key. Its `signatureRef` hashes those complete raw signature bytes, stored at the fixed package path `objects/<signatureRef>` and retained as the `model_signature` closure member; a ref without those bytes is not verifiable evidence. Managed-local evidence repeats all five model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
 
-Local model selection has one exact producer. The explicit same-user `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` command is outside the Run control protocol, performs no download/network access, and accepts only this fixed descriptor-relative package layout: the selected basename is literally `model-manifest.json`, its parent contains one same-owner directory named `objects`, and the tokenizer/model bytes are regular files named `objects/<64-lower-case-hex-ArtifactRef>`. The importer opens the package root, manifest, object directory, and every object by held no-follow descriptors; rejects symlinks, hardlinks, special files, owner/mode drift, duplicate refs, extra/missing manifest entries, replacement between reads, or any object whose exact size/SHA-256 differs; and never interprets a caller path from inside the manifest. It imports those verified bytes into descriptor-protected `${stateRoot}/local-models/objects/<ArtifactRef>` and fsyncs each new object plus the directory. Source descriptors are transient input evidence, not durable authority after the content-addressed copy.
+Local model selection has one exact producer. The explicit same-user `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` command is outside the Run control protocol, performs no download/network access, and accepts only this fixed descriptor-relative package layout: the selected basename is literally `model-manifest.json`, its parent contains one same-owner directory named `objects`, and the detached signature/tokenizer/model bytes are regular files named `objects/<64-lower-case-hex-ArtifactRef>`. The importer opens the package root, manifest, object directory, and every object by held no-follow descriptors; rejects symlinks, hardlinks, special files, owner/mode drift, duplicate refs, extra/missing manifest entries, replacement between reads, or any object whose exact size/SHA-256 differs; and never interprets a caller path from inside the manifest. It imports those verified bytes into descriptor-protected `${stateRoot}/local-models/objects/<ArtifactRef>` and fsyncs each new object plus the directory. Source descriptors are transient input evidence, not durable authority after the content-addressed copy.
 
-The importer first acquires the Kernel global/cutover gate in shared mode, then the exclusive local-model registry/object-store lock, and keeps both through object fsync and registry commit; an exclusive migration/rollback gate therefore blocks it before any publication. It publishes exact `LocalModelObjectClosureV1`: the decoded current `StateRootIdentityV1` pair; literal store-relative path; the signed model-manifest pair; and an all-and-only object sequence containing one manifest entry, one tokenizer entry, then the manifest's byte-sorted model-file entries. The manifest entry names the complete JCS artifact bytes, the tokenizer ref/digest equals its imported object SHA-256, and each model-file ref/digest/path/size equals its manifest member. Every `artifactRef === artifactDigest`; `objectCount === objects.length`; `totalBytes` is their checked sum; all sizes are positive safe integers; model-file logical paths are the manifest paths; and `closureDigest = SHA-256(JCS(closure with closureDigest omitted))`. Every object exists at the exact store path named by its ref and rehashes before commit. The embedded closure and `expectedObjectClosureRef` are byte-identical JCS and content-addressed; `registrationDigest` omits itself. No opaque source-store id, mutable lookup, download cache, or post-enrollment pathname is authority.
+The importer first acquires the Kernel global/cutover gate in shared mode, then the exclusive local-model registry/object-store lock, and keeps both through object fsync and registry commit; an exclusive migration/rollback gate therefore blocks it before any publication. It publishes exact `LocalModelObjectClosureV1`: the decoded current `StateRootIdentityV1` pair; literal store-relative path; the signed model-manifest pair; and an all-and-only object sequence containing one manifest entry, one detached 64-byte model-signature entry, one tokenizer entry, then the manifest's byte-sorted model-file entries. The manifest entry names the complete JCS artifact bytes, the tokenizer ref/digest equals its imported object SHA-256, and each model-file ref/digest/path/size equals its manifest member. Every `artifactRef === artifactDigest`; `objectCount === objects.length`; `totalBytes` is their checked sum; all sizes are positive safe integers; model-file logical paths are the manifest paths; and `closureDigest = SHA-256(JCS(closure with closureDigest omitted))`. Every object exists at the exact store path named by its ref and rehashes before commit. The embedded closure and `expectedObjectClosureRef` are byte-identical JCS and content-addressed; `registrationDigest` omits itself. No opaque source-store id, mutable lookup, download cache, or post-enrollment pathname is authority.
 
 Service construction is also fixed. Enrollment uses the currently selected signed RuntimeBundle and requires exactly one executable entry with `entryId='ollama_local_inference'`, role `local_inference`, and matching version/digest; chooses `macos_vm` on macOS or `linux_namespace` on Linux only after the strong backend probe; and publishes a `SandboxProfileV1` with sole owner `local_inference_service`, the fixed reachability policies, and the displayed default `SandboxResourceSpec`. Callers cannot select or raise those fields. The endpoint is exactly `{scheme:'http',host:'127.0.0.1',port}`; while holding the registry lock, `port` is the smallest integer in `49152..65535` not named by any retained registration and is never reused while that registration is retained. Exhaustion rejects enrollment. The trusted producer first canonicalizes every service field except identity/time/digests, then sets `serviceSpecCoreDigest = SHA-256(JCS(serviceSpec with serviceId,createdAt,serviceSpecCoreDigest,serviceSpecDigest omitted))`, `serviceId = H(ownerPrincipalId,'ollama',model,serviceSpecCoreDigest)`, one transaction timestamp, and finally `serviceSpecDigest = SHA-256(JCS(serviceSpec with serviceSpecDigest omitted))`. Same semantic core reuses the exact existing registration; changed endpoint/backend/resources/version/manifest/executable/profile or any other semantic service field changes the core and service id. Exactly one active revision exists for `(ownerPrincipalId,'ollama',model)`; a changed manifest/spec creates a higher revision/new service id and retirement never rewrites an old registration used by a Run. Broader download/catalog/update UX remains outside Kernel Cut.
 
-The registry implements that last invariant with an append-only head, never an in-place artifact rewrite. Its mutable SQLite pointer row is exactly `(ownerPrincipalId,provider,model,currentHeadRef,currentHeadDigest,headRevision)` and names one immutable `LocalModelRegistryHeadV1`; `headDigest` omits itself. `initial` requires no pointer/predecessor, head and registration revision one, and one exact active registration. `replace` CASes the current active head, publishes an immutable retired copy whose base fields are byte-identical to the predecessor active registration except `state/retiredAt/registrationDigest`, publishes the new active registration at old registration revision plus one, then advances the head by one with both refs. `retire` performs the same retired-copy projection and advances to a head with no active registration. `reenroll` is legal only from the current retired head and publishes the next active registration revision. Every noninitial predecessor pair rehashes the current head, every head revision is exactly predecessor plus one, and artifact publication plus pointer CAS is one lock-held registry transaction. Lookup/admission follows only the current active head; an old active artifact remains immutable and rooted for every admitted Run but is no longer selectable after head advance. Thus neither two current actives nor mutation of retained Run authority is possible.
+The registry implements that last invariant with an append-only head, never an in-place artifact rewrite. The fixed external model-store database is `${stateRoot}/local-models/registry.sqlite3`; it contains only the pointer table below and is opened by its original model-store lock and descriptor-bound VFS under the global shared gate. Immutable head, registration, closure and model objects reside in that same `local-models/objects/<ArtifactRef>` store. This registry is not a new Kernel business table or Run/execution ledger; migration/rollback locks and captures the complete model store before authority publication. Its mutable SQLite pointer row is exactly `(ownerPrincipalId,provider,model,currentHeadRef,currentHeadDigest,headRevision)` and names one immutable `LocalModelRegistryHeadV1`; `headDigest` omits itself. `initial` requires no pointer/predecessor, head and registration revision one, and one exact active registration. `replace` CASes the current active head, publishes an immutable retired copy whose base fields are byte-identical to the predecessor active registration except `state/retiredAt/registrationDigest`, publishes the new active registration at old registration revision plus one, then advances the head by one with both refs. `retire` performs the same retired-copy projection and advances to a head with no active registration. `reenroll` is legal only from the current retired head and publishes the next active registration revision. Every noninitial predecessor pair rehashes the current head, every head revision is exactly predecessor plus one, and artifact publication plus pointer CAS is one lock-held registry transaction. Lookup/admission follows only the current active head; an old active artifact remains immutable and rooted for every admitted Run but is no longer selectable after head advance. Thus neither two current actives nor mutation of retained Run authority is possible.
 
 `run.submit` with the Ollama model branch resolves that exact active registration, copies/verifies its objects and inline manifests into WP01 CAS, and requires the resulting refs equal the expected refs before any launch or Run row. Missing/retired/invalid registration returns `UNSUPPORTED_EXECUTION_IDENTITY` with no Run/launch. If a matching fresh active launch exists, admission uses it. Otherwise the Supervisor artifact-first publishes the validated secret-free submit request/admission intent and calls `ensureLocalInferenceActive`; this is a durable service activation cycle, not a private retry loop owned by whichever request arrived first.
 
 `activationCycleId = base64url(SHA-256(JCS({ownerPrincipalId,serviceId,serviceSpecDigest,cycleOrdinal})))`, where `cycleOrdinal` is the next contiguous positive integer for that owner/service. At most one cycle in `starting_launch|retry_wait` exists per owner/service, and at most one unretired launch exists. Before creating or joining a cycle, storage searches every retained participant for the same public request id: the same digest returns that participant's cycle/result and different bytes are `REQUEST_ID_CONFLICT`, so a request that joined another request's cycle can never replay into two fresh attempts. A new request with no prior participant joins the current nonterminal cycle when its exact service spec matches, or creates the next cycle only after the prior cycle is terminal and any blocking launch is positively retired. Participants are append-only in join order, unique by `(kind,requestId)` or `(kind,runId,frontierRef)`, bounded to 128, and `run_submission` names the exact retained request/admission bytes while `run_model_frontier` names the exact queued Run revision/frontier. Exceeding the bound returns `RESOURCE_EXHAUSTED` without joining or starting I/O. `cycleDigest = SHA-256(JCS(cycle with cycleDigest omitted))`; `failureDigest` uses the same rule for `LocalInferenceActivationFailureV1`. Service-spec digests, launch ids, participant order, and every ref are independently validated.
 
-One cycle owns a contiguous prefix of at most two launch rows. Attempt 1 has a fixed 120-second activation deadline. `starting_launch(1)` either reaches `active` or follows one mandatory failure matrix: if exact no-spawn/death retirement is obtained, it **must** become `retry_wait` with `retryNotBeforeAt = retirementTime + 1s`, and attempt 2 is the sole legal successor with another fixed 120-second deadline; if the attempt cannot be positively retired, the cycle fails immediately with `finalAttempt=1`, `failureKind='containment_unresolved'`, and the blocking launch remains fenced/unretired. Attempt 1 may not terminal-fail for timeout, launch, health, or capability mismatch after positive retirement, and may not retry without it. Any attempt-2 launch/timeout/health/capability failure is terminal after recording its positive retirement, or terminal as `containment_unresolved` if retirement cannot be proved. No third attempt, hidden background retry, request-specific counter, or counter reset after disconnect/restart is legal. Every failure publishes exact `LocalInferenceActivationFailureV1` whose final attempt/reason/retirement closure satisfies that matrix. The final cycle transaction is bounded and exhaustive over its participants. On success it requires the exact active launch/boundary, sets `phase='active'`, admits every still-valid `run_submission` (or stores its exact non-activation admission error) with the same-transaction `control_requests` response, and makes each still-matching queued `run_model_frontier` eligible without changing its frontier. On failure it sets `phase='failed'`, stores the same typed `RECOVERY_REQUIRED(recoveryKind='local_inference_service')` response for every joined submission without creating a Run, and for each still-matching existing Run proposes `runtime_failed/local_inference_unavailable` whose exact cycle/service/frontier fields carry that `failureDetailRef`; terminal `primaryEvidenceRef` equals it. A Run already stopped, terminal, or moved from that frontier is only recorded as an obsolete participant. Thus cycle completion and participant fanout cannot be split by a crash.
+Every service launch id is exactly `H('cliq-local-inference-launch-v1',activationCycleId,activationAttempt)`. One cycle owns a contiguous prefix of at most two launch rows. Attempt 1 has a fixed 120-second activation deadline. `starting_launch(1)` either reaches `active` or follows one mandatory failure matrix: if exact no-spawn/death retirement is obtained, it **must** become `retry_wait` with `retryNotBeforeAt = retirementTime + 1s`, and attempt 2 is the sole legal successor with another fixed 120-second deadline; if the attempt cannot be positively retired, the cycle fails immediately with `finalAttempt=1`, `failureKind='containment_unresolved'`, and the blocking launch remains fenced/unretired. Attempt 1 may not terminal-fail for timeout, launch, health, or capability mismatch after positive retirement, and may not retry without it. Any attempt-2 launch/timeout/health/capability failure is terminal after recording its positive retirement, or terminal as `containment_unresolved` if retirement cannot be proved. No third attempt, hidden background retry, request-specific counter, or counter reset after disconnect/restart is legal. Every failure publishes exact `LocalInferenceActivationFailureV1` whose final attempt/reason/retirement closure satisfies that matrix. The final cycle transaction is bounded and exhaustive over its participants. On success it requires the exact active launch/boundary, sets `phase='active'`, admits every still-valid `run_submission` (or stores its exact non-activation admission error) with the same-transaction `control_requests` response, and makes each still-matching queued `run_model_frontier` eligible without changing its frontier. On failure it sets `phase='failed'`, stores the same typed `RECOVERY_REQUIRED(recoveryKind='local_inference_service')` response for every joined submission without creating a Run, and for each still-matching existing Run proposes `runtime_failed/local_inference_unavailable` whose exact cycle/service/frontier fields carry that `failureDetailRef`; terminal `primaryEvidenceRef` equals it. A Run already stopped, terminal, or moved from that frontier is only recorded as an obsolete participant. Thus cycle completion and participant fanout cannot be split by a crash. The ordinary control exchange remains bounded by thirty seconds; its disconnect/timeout does not cancel a durable service cycle, reset an attempt, advance a deadline, or authorize a new request. The client retains and presents its original request identity when the send becomes uncertain. Only explicit replay of that same public request id/digest may retrieve the cycle participant's unique committed response; it may not create or join a second cycle. A longer cold-model activation therefore does not extend a control connection or permit an automatic re-send.
 
 An existing Run never chooses between waiting and failing. When its frozen local service is absent before the next model claim, the Supervisor first settles any prior model attempt, quiesces/checkpoints and retires its worker, then atomically leaves the Run `queued` at the same agent frontier and joins/creates the one service cycle; no model reservation or claim remains live. Service activation makes that exact queued frontier schedulable. Exhaustion of the cycle's bounded attempts proposes the typed failure above. A service death after admission therefore uses the same durable cycle/retry/fanout reducer as initial admission, without a new user request, ambient-endpoint fallback, or implementation-selected infinite queue.
 
-The managed local service has its own narrow durable activation and launch authority, not an untracked child process. `LocalInferenceServiceSpecV1.serviceSpecDigest` omits itself under JCS and resolves one signed RuntimeBundle `local_inference` entry, signed local model manifest, loopback endpoint, strong backend/profile, and bounded resources. The model must already be explicitly installed and trusted; `run.submit` never downloads weights or follows a workspace request. `local_inference_activation_cycles` stores exactly `LocalInferenceActivationCycleV1`; `local_inference_launches` stores exactly `LocalInferenceServiceLaunchV1`. Every launch names its owning cycle and attempt, the cycle's `launchIds` is the same contiguous ordered set, and the row/service/spec/owner identities match byte-for-byte. The launch table permits one unretired row per `(ownerPrincipalId,serviceId)`. Its productive spine is `reserved -> preactivated -> active -> revoking -> retired(death)`; recovery additionally permits `reserved -> retired(no_spawn)` and `preactivated -> retired(death)`. Reserved state durably names the containment plan and canonical SandboxLaunchSpec before spawn; preactivation is isolated, networkless, credentialless, and blocked from accepting model traffic. Activation requires an exact health/capability probe plus `LocalInferenceBoundaryEvidenceV1`, then a row CAS exposes the loopback endpoint. Heartbeat changes only `leaseVersion/leaseExpiresAt`. A reserved row that positively never spawned retires with `retirementKind='no_spawn'`, no process/boundary/quiesce fields, and exact `ProcessContainmentNoSpawnEvidenceV1`; any row that obtained a containment retires with `retirementKind='death'`, that containment, a quiesce id, and exact `ProcessContainmentDeathEvidenceV1` (boundary evidence is present iff activation reached it). A new Supervisor never adopts an old launch: it revokes, kills, proves the exact containment/spec closure dead, retires it, and advances only the owning cycle's legal next edge. No second launch or model request proceeds until that proof.
+The managed local service has its own narrow durable activation and launch authority, not an untracked child process. `LocalInferenceServiceSpecV1.serviceSpecDigest` omits itself under JCS and resolves one signed RuntimeBundle `local_inference` entry, signed local model manifest, loopback endpoint, strong backend/profile, and bounded resources. The model must already be explicitly installed and trusted; `run.submit` never downloads weights or follows a workspace request. Every activation cycle freezes `localModelRegistrationRef/localModelRegistrationDigest` before physical launch; this is the original active selection held under the model-store lock for a new submission, or the already admitted Run's frozen provenance pair for a Run-frontier participant. It reaches that exact original model object closure and detached signature without following a current registry head. Every launch/native birth repeats the same immutable source through its owning cycle, and recovery/GC require that complete original pair. The pair does not change the existing stable service identity projection. `local_inference_activation_cycles` stores exactly `LocalInferenceActivationCycleV1`; `local_inference_launches` stores exactly `LocalInferenceServiceLaunchV1`. Every launch names its owning cycle and attempt, the cycle's `launchIds` is the same contiguous ordered set, and the row/service/spec/owner identities match byte-for-byte. The launch table permits one unretired row per `(ownerPrincipalId,serviceId)`. Its productive spine is `reserved -> preactivated -> active -> revoking -> retired(death)`; recovery additionally permits `reserved -> retired(no_spawn)` and `preactivated -> retired(death)`. Reserved state durably names the containment plan and canonical SandboxLaunchSpec before spawn; preactivation is isolated, networkless, credentialless, and blocked from accepting model traffic. Activation requires an exact health/capability probe plus `LocalInferenceBoundaryEvidenceV1`, then a row CAS exposes the loopback endpoint. Heartbeat changes only `leaseVersion/leaseExpiresAt`. A reserved row that positively never spawned retires with `retirementKind='no_spawn'`, no process/boundary/quiesce fields, and exact `ProcessContainmentNoSpawnEvidenceV1`; any row that obtained a containment retires with `retirementKind='death'`, that containment, a quiesce id, and exact `ProcessContainmentDeathEvidenceV1` (boundary evidence is present iff activation reached it). A new Supervisor never adopts an old launch: it revokes, kills, proves the exact containment/spec closure dead, retires it, and advances only the owning cycle's legal next edge. No second launch or model request proceeds until that proof.
 
 Endpoint shape is also closed. `local_zero_cost` is permitted only for `LocalZeroCostProvenanceV1`: a Cliq-managed Ollama local-model service whose signed RuntimeBundle entry has role `local_inference`, whose exact service/model manifests and capability evidence are retained, and whose Supervisor-attested Linux namespace/macOS VM boundary denies external egress. Its port is an integer in `1..65535`, IPv4 and IPv6 loopback spellings are already canonical literals, and `endpointIdentityDigest = SHA-256(JCS(endpoint))`. `stableServiceIdentityDigest = SHA-256(JCS({ownerPrincipalId,serviceId,serviceSpecRef,serviceSpecDigest,runtimeBundleRef,runtimeBundleManifestDigest,executableId,executableDigest,modelManifestRef,modelManifestDigest,backend,externalNetworkEgress:'denied',loopbackOnly:true}))`; every boundary evidence and its provenance repeat it. `evidenceDigest` and `provenanceDigest` each omit only themselves under JCS.
 
-The provenance's `boundaryEvidenceRef` is the admission-time audit observation and its dynamic `serviceLaunchId`, containment, plan, SandboxLaunch, inspector, and observation fields are **not** stable service identity. Provenance binds the stable digest, service spec, provider/model, loopback endpoint, and capability evidence; both provenance and admission evidence validity cover `Run.deadlineAt`. Every boundary evidence's inspector ref/digest decodes the exact current `SupervisorInspectorIdentityV1`, repeats its instance id, and matches the active `StateOwnerRecordV1` under the ordinary five-second evidence freshness rule. A bare Supervisor id is not an attestation. RunAssembly `endpoint.localProvenanceRef` and `pricing.provenanceRef` are the same artifact, its endpoint identity equals the assembly, credential refs are empty, and `maxRunCostMicros=0`. Before every dispatch the broker reads the current active launch and fresh `LocalInferenceBoundaryEvidenceV1`, requires their service spec and stable identity digest equal the provenance, validates the current lease/dynamic containment closure, and rechecks model/capability/no-egress identity. A death-proven replacement may change only launch/containment/plan/SandboxLaunch/inspector/observation fields; it cannot change the stable projection. Mismatch reaches no provider and proposes generic `runtime_failed`. A third-party Ollama/OpenAI-compatible daemon, mere loopback URL, remote proxy, or mutable cloud-routing assertion is not zero-cost authority. Kernel Cut therefore includes only the minimal signed local-inference service/bootstrap needed for the Ollama provider contract; model download, catalog, routing, and the broader `cliq-models` product remain outside this RFC.
+The provenance's `localModelRegistrationRef/localModelRegistrationDigest` pair binds the original exact active registration selected under its original model-store lock through the final Run admission transaction. That immutable registration reaches the exact embedded/expected model object closure, manifest and detached signature. Admission and recovery validate the same original principal/runtime/model/service/closure and independently verify its original signing key. The current registry head selects only new admission; replacing or retiring it neither rebinds nor implicitly revokes an admitted Run's frozen registration. Missing original source is rejected rather than guessed from today's head. The provenance's `boundaryEvidenceRef` is the admission-time audit observation and its dynamic `serviceLaunchId`, containment, plan, SandboxLaunch, inspector, and observation fields are **not** stable service identity. Provenance binds the stable digest, service spec, provider/model, loopback endpoint, and capability evidence; both provenance and admission evidence validity cover `Run.deadlineAt`. Every boundary evidence's inspector ref/digest decodes the exact current `SupervisorInspectorIdentityV1`, repeats its instance id, and matches the active `StateOwnerRecordV1` under the ordinary five-second evidence freshness rule. A bare Supervisor id is not an attestation. RunAssembly `endpoint.localProvenanceRef` and `pricing.provenanceRef` are the same artifact, its endpoint identity equals the assembly, credential refs are empty, and `maxRunCostMicros=0`. Before every dispatch the broker reads the current active launch and fresh `LocalInferenceBoundaryEvidenceV1`, requires their service spec and stable identity digest equal the provenance, validates the current lease/dynamic containment closure, and rechecks model/capability/no-egress identity. A death-proven replacement may change only launch/containment/plan/SandboxLaunch/inspector/observation fields; it cannot change the stable projection. Mismatch reaches no provider and proposes generic `runtime_failed`. A third-party Ollama/OpenAI-compatible daemon, mere loopback URL, remote proxy, or mutable cloud-routing assertion is not zero-cost authority. Kernel Cut therefore includes only the minimal signed local-inference service/bootstrap needed for the Ollama provider contract; model download, catalog, routing, and the broader `cliq-models` product remain outside this RFC.
 
 Every billable standard or custom endpoint—including bundled OpenAI/Anthropic/OpenRouter defaults—is resolved to an immutable `registered` endpoint; `bundled_default` describes who enrolled the registration, not a weaker identity. Its assembly registration kind/ref/identity/TLS and model credential bindings must reproduce one `EndpointRegistrationV1` exactly. If a frozen binding is revoked or becomes unavailable after admission, no in-place rebind, approval loop, or free predispatch retry is permitted: a model call proposes generic `runtime_failed` with credential evidence; required dependency acquisition proposes generic `runtime_failed`; and an MCP tool call appends one identity-matched `ToolResultItem(outcome='error')` and continues the ordered batch. None reaches the target or changes immutable assembly/policy/registry refs; the user submits a new Run after repairing authority.
 
@@ -3160,9 +3230,9 @@ No streaming qualification is implied by the general provider contract.
 Normal prompt construction is a total stored projection, not adapter assembly. `NormalPromptProjectionV1.projectionDigest = SHA-256(JCS(projection with projectionDigest omitted))`; its Run/spec/assembly/context refs equal the current authoritative Run and ready Checkpoint, `contextManifestDigest` equals the decoded `ContextManifest.projectionDigest`, `basedOnRunRevision` is the revision being dispatched, and `frontierDigest = SHA-256(JCS(the exact current RunFrontier))`. Message indices and tool indices are contiguous from zero. The producer walks only the frozen artifacts in this order:
 
 1. Emit one system message from a closed instruction projection. The first, mandatory nonempty piece is the decoded signed-RuntimeBundle `RunAssembly.instructions.systemPromptRef` `ModelTextV1.utf8`. If the decoded workspace manifest has entries, the next piece is UTF-8 JCS of `{format:'cliq-workspace-instruction-prompt-v1',entries:[{order,canonicalRootRelativePath,appliesToSubtree:true,instructionUtf8}]}`, using every manifest entry in order and the exact decoded `ModelTextV1.utf8`; this preserves each nested scope instead of guessing one ambient target path. Each selected skill then contributes UTF-8 JCS of `{format:'cliq-skill-instruction-prompt-v1',skillId,sourceScope,instructionUtf8}` in the assembly's explicit skill order. Omit only the empty workspace block, require every skill instruction to be nonempty, and join the remaining exact pieces with two LF bytes. Every ref/digest, source identity, and text digest rehashes, and `sourceKind='assembly_instructions'`, `sourceId=assemblyRef`.
-2. Walk the admitted `SessionContextProjection` segments in order. A raw segment may project only `run_terminal` items and emits one user message per item using the exact JCS rendering in section 4.2. A summary emits one user message containing its decoded `ModelTextV1.utf8`. `excluded_control` emits none; every legacy kind must be there. Then emit one user message for each `AdmittedContextManifest.parentContextRefs` and `additionalArtifactRefs`, in their stored array order, each of which must decode a bounded `ModelTextV1`. Source kind/id identify the exact Session item, compaction item, or context artifact ref.
+2. Walk the admitted `SessionContextProjection` segments in order. Each raw `run_terminal` emits one user message using the exact JCS rendering in section 4.2 and `sourceKind='session_terminal'`. Each raw legacy context item must first pass the complete closed five-kind payload reader, full artifact/digest and original source-Session/item binding; it then emits exactly one `role='user',sourceKind='session_legacy'` message using only the fixed `cliq-legacy-context-prompt-v1` visible projection in section 4.2. Preserve stored item order and the original item id as `sourceId`; no old role/tool/permission/configuration is reinstated. A summary emits one user message containing its decoded `ModelTextV1.utf8`. `excluded_control` emits none; raw legacy files and control/authority payloads remain excluded and are never decoded as model prose. Then emit one user message for each `AdmittedContextManifest.parentContextRefs` and `additionalArtifactRefs`, in their stored array order, each of which must decode a bounded `ModelTextV1`. Source kind/id identify the exact Session item, compaction item, or context artifact ref.
 3. Emit one user message for the exact `RunObjectiveV1.utf8` named by `RunSpec.objectiveRef`, with `sourceKind='run_objective'` and that ref as `sourceId`.
-4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
+4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. This Run-local walk serializes no authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, raw legacy file or legacy control payload; the closed historical legacy Session prefix is supplied only by step 2.
 
 The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. Before dispatch the full model-visible projection passes both the admitted context estimate and the actual provider-native JCS body limit of 1,048,576 bytes, including adapter framing and JSON escaping. The same wire constructor determines eligibility and the retained outgoing bytes; an indivisible oversized message follows the context-window failure rule rather than truncation. This byte limit never reduces the signed request-token ceiling or the frozen context/output caps.
 
@@ -3195,6 +3265,36 @@ The assembly freezes one Kernel-Cut `ModelRetryPolicy`: exactly three dispatched
 The model delay is measured from the first durable `failed|unknown` settlement timestamp of the most recent dispatched attempt. The next preparation and claim both require canonical `now >= settledAt + delay`; later audit resolution or an intervening pre-dispatch failure cannot restart or shorten this delay. Pre-dispatch failures do not consume dispatched-attempt capacity. A retry preserves the original operation's exact native body, provider/model/mode, output bound, reservation and compaction plan; only its next contiguous attempt identity and audit projection may differ. These Journal-derived conditions are necessary but do not replace the dispatch-closure, live authority, stop/deadline or available-budget checks in section 8.1.
 
 It also freezes one non-configurable policy per executable tool: `retry` is exactly three dispatched attempts with `[500ms,2000ms]`; `workspace-rollback-retry` is exactly two with `[500ms]`; `reconcile|manual` have one productive dispatch and no redispatch delay because their recovery contracts are inspection/manual closure. No public field, repository config, adapter, or tool may raise or lower these values in Kernel Cut. A user grant's `maxAttempts` equals the applicable literal. Predispatch/no-I/O replacement attempts do not consume this dispatched-attempt bound, while every post-claim attempt does. Exhaustion is closed by op kind **and Journal truth**. If the final allowed attempt is positively `failed`, an ordinary tool or MCP call appends one identity-matched error `ToolResultItem` and continues the batch's normal ordered reducer; a child merge appends its structured merge-error result and returns the parent to an agent diagnostic frontier without applying later children; dependency acquisition proposes `runtime_failed` (or the higher-precedence dependency kernel-integrity StopIntent when source integrity failed); publication proposes typed `delivery_publication_failed` and switches to the abort/reconciliation contract. If the final allowed `retry` attempt remains `unknown`, positive dispatch/containment fencing permits conservative settlement but does not invent failure evidence: the reducer proposes `runtime_failed` and closes only through terminal detail plus `RetryUnknownCancelledResult`, never continues that batch or succeeds. Model and verifier attempts use their dedicated frozen policies. None may spin until wall/tool budget happens to expire or choose between error-return and terminal stop at implementation time.
+
+For the fixed MCP `retry` profile, the independent stdio server-launch ceiling
+remains the frozen lifecycle limit (default two); the three productive-effect
+attempts are an upper bound, not a guarantee that every transport can reach
+three. Count every actual launch claim across all replacements, grants and
+effect attempts for the same immutable call. After two initialized UNKNOWN
+servers have actually retired under the default limit, resource exhaustion is
+decided before a third worker, server preparation or effect preparation. Its
+runtime failure is exactly `mcp_call_resource_exhausted`,
+`resource='server_launch_capacity'`, with the real `used=limit=2`, and the
+same exact `RetryUnknownCancelledResult` pair. It neither reports three
+effect attempts nor fabricates a third failed/not-dispatched row. An actual
+final positively failed attempt instead produces its ordinary original error
+result, and does not use the UNKNOWN terminal carrier.
+
+A fixed HTTP post-claim no-release failure retains its exact positive failure
+and zero-consumption settlement. While literal retry capacity and the original
+call deadline remain, it does not prematurely append a ToolResult or advance
+the call frontier. Only after the original worker has actually retired may a
+new contiguous attempt re-evaluate its original policy and fresh grant. A
+later real stop, original call deadline, or actual attempt/launch exhaustion
+publishes one error result for that last positively failed productive attempt
+through the original continuation or unique terminal transaction, without a
+second settlement, refund or charge. The full history verifies that same
+irreversible original zero-release proof. Older UNKNOWN attempts remain
+audited with their own full-once charges and dispatch closures; their
+cancelled-ambiguity carrier cannot replace the result of any later real
+productive claim.
+
+
 
 All ceilings are mandatory `Number.isSafeInteger` values after normalization. Defaults are 24 hours elapsed wall time (including waits/reboots), 2,000,000 model input+output tokens, 10,000,000 cost micros (10 USD), 1,000 tool attempts, 2 repairs, child depth 2, and child concurrency 4. Accepted ranges are: `wallTimeMs` 1,000 through 2,592,000,000 (30 days); `modelTokens` 0 through 100,000,000; `costMicros` 0 through 10,000,000,000; `toolCalls` 0 through 1,000,000; `repairAttempts` 0 through 5; `childDepth` 0 through 8; and `childConcurrency` 0 through 32. Zero token/tool/repair/child values disable that action class; zero wall time is invalid. An `operation='agent'` Run whose assembly can dispatch a billable model cannot set `costMicros=0`; a local zero-price model may. An `operation='delivery'` Run inherits the source assembly only for exact provenance/runtime/verifier identity, fixes model tokens/cost/repair to zero, and is storage-forbidden from preparing a model call, so the inherited provider's billing class is irrelevant to its zero model budget. Pricing eligibility is independent of tool capability: any billable model actually dispatchable by a durable agent Run—including text-only mode—requires a bundled Cliq-signed `ModelPriceTableV1` evaluated only by `cliq-price-ceil-v1`. Kernel Cut exposes no provider-cap admission effect, user-defined pricing profile, executable calculator, or hidden config authority. A trusted table must cover the exact provider/model/input/output/cache units and satisfy `validThrough >= Run.deadlineAt`. Otherwise admission fails `MODEL_COST_UNKNOWN`, so a detached Run never outlives its cost authority or degrades into an unaccounted text-only call.
 
@@ -3423,6 +3523,8 @@ type McpRecoveryProbeEvidenceV1 = {
   brokerTargetDigest: string
   statusResponseRef: ArtifactRef
   statusResponseDigest: string
+  statusCaptureRef: ArtifactRef
+  statusCaptureDigest: string
   completedPredicateRef: ArtifactRef
   completedPredicateDigest: string
   failedPredicateRef: ArtifactRef
@@ -3431,6 +3533,26 @@ type McpRecoveryProbeEvidenceV1 = {
   observedAt: string
   evidenceDigest: string
 }
+
+type McpReconciledEffectResultV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-reconciled-effect-result-v1'; runId: string; opId: string; attempt: number;
+  originalDispatchId: string; unknownJournalSeq: number; budgetSettlementRef: string;
+  probeEvidenceRef: string; probeEvidenceDigest: string; originalResponse: 'unavailable'; observedAt: string; resultDigest: string;
+}> & (Readonly<{ disposition: 'completed'; code: 'TOOL_RESULT_UNAVAILABLE'; effect: 'confirmed_completed' }> |
+  Readonly<{ disposition: 'failed'; code: 'TOOL_EXECUTION_FAILED'; effect: 'confirmed_failed' }>);
+/** Original source intent before the in-flight wait. It contains no later
+ * wait ref or dispatch digest, and is never native birth/execution proof. */
+type McpStatusProbePreparationV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-status-probe-preparation-v1'; runId: string; principalId: string;
+  previousWaitingSubjectRef: string; reconciliationSubjectDigest: string; probeKind: 'automatic' | 'user_requested'; probeOrdinal: number;
+  probeNonceDigest: string; nonce: string; brokerDispatchId: string; brokerFenceTokenDigest: string;
+  brokerRequestRef: string; brokerRequestDigest: string; brokerTargetRef: string; brokerTargetDigest: string; nativeRecipeRef: string;
+  plannedContainmentRef: string; plannedContainmentDigest: string; sandboxLaunchSpecRef: string; sandboxLaunchSpecDigest: string;
+  inspectorSupervisorInstanceId: string; inspectorStateOwnerEpoch: number;
+  originalSupervisor: Readonly<{ pid: number; processStartToken: string }>;
+  controller: Readonly<{ pid: number; processStartToken: string }>;
+  createdAt: string; probeDeadlineAt: string; preparationDigest: string;
+}>;
 
 type WorkerRecoveryEvidenceBaseV1 = {
   schemaVersion: 1
@@ -3485,6 +3607,9 @@ type ReconciliationProbeDispatchV1 = {
       brokerRequestDigest: string
       brokerTargetDigest: string
       brokerFenceTokenDigest: string
+      previousWaitingSubjectRef: ArtifactRef
+      preparationRef: ArtifactRef
+      preparationDigest: string
     }
   | {
       subjectKind: 'publication'
@@ -3534,6 +3659,10 @@ type ReconciliationProbeTimeoutClosureV1 = {
       brokerTargetDigest: string
       brokerFenceTokenDigest: string
       noActiveReleaseForNonce: true
+      retirementRef: ArtifactRef
+      retirementDigest: string
+      lateStatusCaptureRef?: ArtifactRef
+      lateStatusCaptureDigest?: string
     }
   | {
       subjectKind: 'publication'
@@ -3567,7 +3696,6 @@ type ReconciliationProbeCancellationClosureV1 = {
   inspectorIdentityDigest: string
   closedAt: string
   closureDigest: string
-  taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
 } & (
   | {
       subjectKind: 'publication'
@@ -3575,12 +3703,25 @@ type ReconciliationProbeCancellationClosureV1 = {
       pathOperationId: string
       attempt: number
       inspectorTaskId: string
+      taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
     }
   | {
       subjectKind: 'worker_recovery'
       oldWorkerLaunchId: string
       processContainmentRef: ArtifactRef
       inspectorTaskId: string
+      taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
+    }
+  | {
+      subjectKind: 'mcp_recovery'
+      brokerDispatchId: string
+      brokerTargetDigest: string
+      brokerFenceTokenDigest: string
+      noActiveReleaseForNonce: true
+      retirementRef: ArtifactRef
+      retirementDigest: string
+      lateStatusCaptureRef?: ArtifactRef
+      lateStatusCaptureDigest?: string
     }
 )
 
@@ -3937,6 +4078,14 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       retryUnknownResultDigest: string
     }
   | {
+      failureKind: 'mcp_call_resource_exhausted'
+      resource: 'server_launch_capacity'
+      used: number
+      limit: number
+      retryUnknownResultRef: ArtifactRef
+      retryUnknownResultDigest: string
+    }
+  | {
       failureKind: 'dependency_acquisition_failed'
       dependencyPlanRef: ArtifactRef
       dependencyPlanDigest: string
@@ -4150,7 +4299,7 @@ The status/reason mapping is exact: `succeeded -> verified`; `completed_unverifi
 
 Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window/result-source, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
 
-`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `mcp_known_result_unusable` binds `toolObservationRef/toolObservationDigest` to the same original claim's completed `ToolObservationV1` with fixed `TOOL_PROTOCOL_ERROR`, and `captureRef/captureDigest` to its exact `cliq-mcp-known-unusable-run-capture-v1`. That capture roots two real setup captures, the independently screened matching event and exact `cliq-mcp-known-unusable-response-v1` audit of the original joined native refusal; unsafe prefix bytes are not retained or claimed re-readable. Storage reproduces the ordered result item, original ready Checkpoint/current next frontier, full-once completed settlement, claim and owner history before the existing sole Stop writer may terminalize; the durable scheduler and RunResult barriers forbid later productive work across restart. UNKNOWN, no-release, unsafe-event or missing-join data cannot satisfy this branch. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
+`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `mcp_known_result_unusable` binds `toolObservationRef/toolObservationDigest` to the same original claim's completed `ToolObservationV1` with fixed `TOOL_PROTOCOL_ERROR`, and `captureRef/captureDigest` to its exact `cliq-mcp-known-unusable-run-capture-v1`. That capture roots two real setup captures, the independently screened matching event and exact `cliq-mcp-known-unusable-response-v1` audit of the original joined native refusal; unsafe prefix bytes are not retained or claimed re-readable. Storage reproduces the ordered result item, original ready Checkpoint/current next frontier, full-once completed settlement, claim and owner history before the existing sole Stop writer may terminalize; the durable scheduler and RunResult barriers forbid later productive work across restart. UNKNOWN, no-release, unsafe-event or missing-join data cannot satisfy this branch. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `mcp_call_resource_exhausted` rehashes that same exact UNKNOWN result/claim/closure and additionally reproduces the whole original call's actual server launch count against its frozen limit; `used=limit` and both are safe integers in the accepted lifecycle range. This resource branch cannot claim literal three-attempt exhaustion, create a fictitious third attempt, reset server charges or use a positive-failure result as UNKNOWN. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
 
 Kernel-integrity stop evidence is one closed chain. `KernelIntegrityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its Run/source projection/generation/current inspector match the exact Journal claim and frozen RunSpec. Canonical target paths are NFC admitted-root-relative paths with no empty/`.`/`..` component. An `audited_write_attempt` is emitted only by the strong sandbox filesystem or trusted broker at the blocked syscall/request boundary, repeats the exact request/containment/SandboxLaunch, has `sourceBeforeRef === sourceAfterRef` and equal digests, and proves no byte changed. A `source_digest_drift` rehashes two exact SourceManifests, requires unequal digests and a nonempty unique byte-sorted list of the changed WorkspaceEntry digests. Its source XOR either forbids both containment/spec refs for a trusted Supervisor rehash outside a child process, or requires both and matches them to the same owning Journal claim and actual containment; ref-only or spec-only drift is invalid. The verifier subject matches one verifier Journal op/attempt/result source, while dependency matches the exact candidate plan and acquisition op/attempt. For both kernel-integrity StopIntent variants, branch `integrityEvidenceRef` and digest name this same artifact; `TerminalReasonDetail` and `primaryEvidenceRef` copy the identical ref/digest. A verifier `source_mutation` receipt requires both violation fields and the verifier form of this artifact; every other outcome forbids both. The audited branch requires equal receipt source digests, the drift branch requires unequal ones. Dependency completion/ready state is forbidden and its integrity StopIntent uses the dependency form. A generic CAS ref, verifier text, caught un-audited read-only error, or adapter assertion cannot win kernel-integrity precedence.
 
@@ -4905,8 +5054,8 @@ The store enforces uniqueness for `(runId, opId, attempt, phase)` and monotonic 
 
 Phase/op-kind validation is closed at storage, not left to adapters:
 
-- `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error evidence ref/digest and a settlement ref. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
-- `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields, evidence pair, or budget settlement.
+- `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error and a settlement ref. Evidence is absent except the exact purpose-bound original publication/server birth intent, or `opKind='mcp', replayClass='retry', attempt>0` whose immediately preceding attempt is wholly settled UNKNOWN and whose pair is the exact `McpRetryDispatchClosureV1` below. No other op/phase can borrow that retry pair. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
+- `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields or budget settlement. The exact original publication/server birth pair remains purpose-bound; an MCP call carries only its actual initialized stdio instance or its original HTTP retry-claim binding identity. A new retry claim drops its prepared predecessor-closure pair and can never present it as its own native identity. Other ordinary claims forbid an evidence pair.
 - `completed` requires the matching claim, exact `budgetSettlementRef`, plus an op-kind result: exact usable `AgentModelTurn` or exact `ModelUnusableResponseV1` for `model`, under their closed XOR; result artifact for `tool|mcp`; exact `McpServerInstanceIdentityV1` result plus `McpServerLaunchReceiptV1` for `mcp-server`; a passed/assertion/source-mutation verification receipt for `verifier`; or exact `PublicationProofV1(kind='terminal_receipt')` for `publish`.
 - `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged fixed private builtin unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
 - `unknown` requires the matching claim, an `evidenceRef/evidenceDigest` pair decoding exact `InvocationAmbiguityEvidenceV1`, and the exact conservative full `budgetSettlementRef`.
@@ -4938,6 +5087,78 @@ Every `completed|unknown|abandoned` row and every post-claim `failed` row binds 
 
 Attempts are contiguous from zero and at most one attempt per `opId` is current. Preparing attempt `n+1` is legal only when attempt `n` is fully settled and no prior dispatch remains live. A pre-dispatch `failed` attempt—local crash recovery, activation loss, or grant expiry after `prepared` but before any claim—always permits a replacement attempt for the same still-current frontier without consuming effect retry capacity. Its terminal transaction verifies that no claim row exists, releases the exact reservation, consumes the complete four-counter zero value, and records the deterministic local error; fresh authority, grant, budget, and deadline checks still apply to replacement. After a claim, a new attempt additionally requires either (a) `n` is `unknown` and its frozen ReplayClass authorizes retry after full pessimistic charge, or (b) `n` is positively `failed` and an explicit frozen same-op retry policy still has capacity. Case (b) includes same-digest verifier infrastructure retries and `workspace-rollback-retry` only after durable rollback/quarantine evidence; it never includes a completed attempt or an assertion repair against a new candidate, which receives a new opId. The new `prepared` row and reservation commit atomically, so recovery cannot schedule it twice. Once attempt `n+1` exists, a late resolution of attempt `n` may update audit/billing evidence but cannot append model/tool results, advance the typed frontier, or become the Run-visible result; only the highest prepared attempt is eligible to do so.
 
+
+A fixed MCP retry closure is a source witness in the existing Journal, not a
+second ledger or release capability. Its complete-byte ref and independent
+self-omitting digest bind the exact original prepared/claim/UNKNOWN sequences,
+request/target/grant/registry, original transport claim identity, broker token,
+whole-once settlement, claiming owner and current inspector. Its closed branch
+is either the actual original native domain irreversibly joined with its
+token revoked and zero matching active releases, or an actual strict successor
+which proves the original PID/start process domain dead under the installed
+native nontransferability rule. `transport.close`, a path, a caller boolean,
+or a digest-valid artifact cannot supply that physical fact. The original
+claimed worker/generation is already truly retired. Physical observations are
+repeated before the actual canonical transaction-time sample and retain the
+original five-second freshness, owner, installation, scope and complete join
+checks.
+
+For a later prepared MCP retry after UNKNOWN, the prior pair is committed
+with that new preparation and reservation. Historical validation follows the
+exact original claim and closure before treating the older UNKNOWN as fenced;
+acknowledging old live custody is permitted only after that actual commit.
+The original HTTP binding is published before its claim, then the same opaque
+native owner is reasserted inside that claim transaction. Neither its retained
+deadline nor a stdio instance deadline may extend the earliest actual native
+call deadline or the whole call's first prepared time plus original timeout.
+Server lifecycle history separately binds its nearest preceding effect
+preparation and exact worker lease; it never mistakes shared request bytes
+for ownership by attempt zero or resets the whole-call deadline. A historical
+before-effect local closure proves claim absence only for its exact owning
+effect attempt through its own terminal Journal sequence, not against future
+legitimate claims.
+
+A later replacement which has only prepared and positively failed without a
+claim cannot erase or resolve the last real productive attempt. In this
+closed MCP case the logical call's final visible outcome comes from the last
+actually claimed attempt: a still-unused UNKNOWN retains its exact terminal
+ambiguity carrier, while a genuinely positive failure retains its original
+error. Every intervening unclaimed attempt still requires its own exact
+no-dispatch failure/refund, and full literal history/deadline/capacity checks
+remain mandatory. A later actual claim instead supersedes that visible
+outcome, including when it has a known negative result; older UNKNOWNs remain
+audit-only. This is not permission to use a late result of a genuinely
+superseded productive claim.
+
+If that later replacement is still only prepared when its original native
+call deadline expires, or its actual local server closures prove launch
+capacity unavailable, it likewise cannot produce an ordinary not-dispatched
+result which masks the older UNKNOWN. After real current producer/server and
+worker retirement, the same unique terminal transaction refunds only that
+existing genuinely unclaimed preparation and emits the older exact unused
+ambiguity carrier. It invents no further attempt or claim. An open local
+server, live later claim, absent join or incomplete original closure forbids
+this terminal commit; an already initialized eligible server is not declared
+exhausted merely because its own launch reached the frozen ceiling.
+
+Terminal detail may name this same purpose-specific MCP closure only for its
+matching retry UNKNOWN. Earlier already-committed closures remain exact; the
+last unused UNKNOWN needs its actual current closure. The first generic
+runtime Stop, source registration, fixed result, terminal detail, ordered batch
+closure, Checkpoint and Session outcome commit in the one existing terminal
+transaction after genuine producer/worker retirement. An inert terminal
+proposal brand cannot waive the original full cut, owner, clock, original
+producer join or required successor death. Model, verifier and publication
+closure mechanisms remain independent: in particular a same-process model
+UNKNOWN still waits for its original strict model broker fence/death proof.
+
+An already committed irreversible closure keeps its original inspector and
+observation time. It is never rewritten or claimed freshly observed. A later
+exhaustion proposal separately samples its current real StateOwner inspector
+and the current full Journal/capacity decision, with the normal five-second
+freshness bound; its native closure is validated independently. The final
+transaction repeats that exact current cut and every required physical check.
+
 Before any model, tool, MCP, verifier, or semantic publication attempt, the transaction that appends `prepared` checks the frozen ceiling and moves a conservative upper bound from available budget into `Run.budgetReserved`. Immediately before I/O, the trusted DispatchArbiter appends the unique `dispatch_claimed` fact only through `claimDispatch`; only `releaseClaimedDispatch` may then release bytes/capability. The sole exception is the zero-budget abort-directory maintenance attempt governed by both recovery-maintenance checks above. A completed or positively failed attempt settles evidence-backed usage into `budgetConsumed` and releases the reservation. If usage is unknowable after timeout, disconnect, or death, Cliq charges the full reservation before any policy-authorized retry; crash recovery never refunds or resets it. Outstanding child allocations are also reservations on the parent, so concurrent child admission cannot oversubscribe a ceiling.
 
 Budget mapping is exact. A claimed `model` attempt consumes its measured or conservatively reserved `modelTokens` and `costMicros` but no `toolCalls`. Every claimed non-model **productive** attempt—`tool`, `mcp-server`, `mcp`, `verifier`, and each semantic `mkdir|create|replace|delete` publication envelope—consumes exactly one `toolCalls`; verifier retries and MCP relaunches are new attempts and count again. Exact cleanup inside an already-claimed publication envelope and an abort-only removal of a delivery-created empty directory are pre-reserved recovery maintenance, not another productive attempt, and add zero `toolCalls`. Kernel child admission and merge use the closed `child_admission`/`child_merge` local Journal branches; one explicit await registration uses the distinct no-grant `child_await` control accounting branch. Each committed triplet consumes exactly one tool call through its local claim and settlement, never a hidden counter or a physical execution grant. Waking an already registered wait, Stop cleanup and finalize settlement add no new await charge; a new explicit re-await is a new real call and registers once. `repairAttempts` increments only at the repair-authorization transaction. Supervisor-only no-new-effect recovery inspection is not a productive invocation and does not consume Run tool budget.
@@ -4946,9 +5167,9 @@ Reconciliation probing has no hidden infinite loop. The wait stores the exact `R
 
 At `automatic_exhausted`, authenticated `run.reconcile(probe_now)` is an enqueue mutation, not a synchronous inspection result. One CAS increments positive safe-integer `userProbeCount`, enters `user_in_flight`, and persists a complete dispatch whose `probeOrdinal` equals that count, nonce/deadline are fresh, and `controlRequestId/controlRequestDigest` equal the public mutation. In that same transaction it publishes/stores the deterministic `ControlResultV1.resolution={kind:'probe_enqueued',dispatchDigest,userProbeCount}` plus the post-enqueue snapshot and commits `control_requests`; only afterward may the no-new-effect probe perform I/O. Same request bytes replay that response and join the same dispatch without probing twice; different bytes conflict. Completion later stores evidence and advances the wait through the ordinary internal reducer, producing Run events/snapshot changes but no second public response. An unresolved response returns to `automatic_exhausted` with the evidence pair and unchanged automatic count. `probe_now` before automatic exhaustion or for `manual_only` is `INVALID_REQUEST`; manual permits only exact-risk abandonment, whose synchronous result instead uses `resolution={kind:'abandoned',evidenceRef}`.
 
-`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. For worker recovery, that target digest names the first retained fenced generation row and its fixed quarantine reservation described above; later dispatches retain this same immutable target but have fresh task/nonce/owner/time identities. It grants no authority to dispatch or mutate the generation. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
+`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H('cliq-mcp-readonly-status-dispatch-v1',runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. For worker recovery, that target digest names the first retained fenced generation row and its fixed quarantine reservation described above; later dispatches retain this same immutable target but have fresh task/nonce/owner/time identities. It grants no authority to dispatch or mutate the generation. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
 
-Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. MCP closure first atomically revokes the exact persisted fence token, waits for the broker's matching active-release count to become zero, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true`. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. A global Supervisor ceiling bounds all probes.
+Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. Same-owner MCP closure irreversibly revokes the exact persisted fence token, joins all matching native release/process/pipe/output tasks, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true` and the complete original retirement root. A strict successor instead uses the distinct creator-process-domain-death plus actual retained-birth cleanup branch described below; it never claims to act on the dead broker's mutex. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. One global Supervisor ceiling of 16 counts the current in-flight Run wait pointers across worker, publication and MCP probes. Each original dispatch transaction rechecks its complete previously read pointer snapshot and rejects a full or changed snapshot without nonce, attempt or budget mutation; it never proceeds using a stale count. Public `run.reconcile` returns only fixed `RESOURCE_EXHAUSTED(resourceKind='reconciliation_probes',messageCode='run.reconciliation_capacity',retryAfterMs=1000)`; this is backpressure, not automatic retry permission.
 
 Every publication dispatch additionally roots `previousWaitingSubjectRef`,
 the exact durable pending/exhausted wait selected by that revision CAS. The
@@ -4958,18 +5179,81 @@ contains only the UNKNOWN and optional progress visible when first selected;
 later cleanup progress cannot retroactively change that target. This edge
 grants no new cleanup or execution authority and introduces no separate ledger.
 
-Publication and automatic worker-recovery inspection have one additional authority-reducing closure for
+Signed MCP status uses the existing wait/dispatch/Continuation lifecycle. The
+complete original `McpStatusProbePreparationV1` roots the preceding wait,
+original signed registry/profile/template/predicates and logical key, exact
+status request/target and fixed native recipe bytes, plan/spec, original real
+Supervisor/controller identities, nonce and its unchanged 30-second deadline.
+These source artifacts contain no later in-flight wait ref or dispatch digest:
+the preparation is published first, the dispatch roots it, the in-flight wait
+roots that dispatch, and only after its original Run transaction commits may
+native purpose 3 create its exact bound input. A partial/missing/replaced birth
+continues recovery waiting; path absence or matching content cannot adopt it.
+No Worker parent, Run/Admin effect grant, network, credential or persistent
+writable mount is present. The fixed protocol permits only initialize,
+initialized, complete tools/list and the distinct signed read-only status call.
+
+Before the independent status query, a retained original effect owner may be
+released only after the complete original `UNKNOWN`, full-once settlement and
+actual native retirement have been validated against the durably committed
+exact `mcp_reconcile` wait. The same original owner closes its real effect fence,
+acknowledges the actual joined process/pipe/output/FD domain and closes its held
+input through the existing physical acknowledgement. A failed acknowledgement
+retains that original receiver for the next attempt to finish the same release;
+it does not create another wait, query, effect result, charge or execution
+permission. Absence of a current local owner creates no retirement evidence.
+
+`statusCaptureRef/statusCaptureDigest` separately root complete raw protocol
+captures and the exact safe response projection; `statusResponseRef/Digest`
+root the actual canonical status response, never the original effect payload.
+The capture also roots one exact `cliq-mcp-stdio-recovery-retirement-v1` record.
+Its closed XOR is (1) `linux_original_join`, the same original native owner
+join, full lifecycle bytes/projection, and real containment death/no-spawn; or
+(2) `linux_successor_cleanup`, the unchanged complete original birth/progress
+bytes, separate real current-checker cleanup bytes/projection, strictly newer
+StateOwner and actual original PID/start death, and explicit nontransferable
+`linux_installed_native_creator_process_v1` domain retirement. Branch (2)
+contains no fabricated old `joined` receipt and does not act on the old mutex.
+The original creator still alive, incomplete original records, raw refusal,
+unjoined descriptors/processes/output, or uncertain cleanup leaves the wait.
+Successor closure is unresolved-only, cannot precede the original deadline,
+and reobserves true original process death at the same unique close transaction.
+
+A safe actual response is retained before projection. Its full protocol,
+schema and independently signed predicates are reevaluated from complete raw
+bytes before resolution. Only a current same-nonce observation and final commit
+strictly before the original deadline may resolve the effect. A received result
+or actual join arriving later is rooted only as `lateStatusCaptureRef/Digest`
+on that same nonce's timeout/cancellation closure; it cannot use a new nonce,
+change charge/frontier or manufacture an old payload. Same-owner shutdown may
+close early only after actual native fence revocation plus complete join, using
+the distinct cancellation branch and a next backoff no earlier than
+`max(originalDeadline,closedAt)`. The eight automatic probes, seven backoffs,
+exhausted-state user probe/replay, READY 5 seconds and Stop 2 seconds are unchanged.
+This MCP probe-domain rule grants no exception to the separate model UNKNOWN
+broker fence/death rule: a still-live original model creator remains waiting.
+The candidate uses normal closed production admission for manual, explicitly
+risk-consented retry, and exact signed stdio reconciliation contracts; it has
+no qualification-only runtime bypass. HTTP cannot borrow a signed stdio status
+profile, and every selected contract retains its exact original signatures,
+claim, native purpose, owner, deadline, accounting and physical closure checks.
+Source/data/compiler tests do not qualify physical cleanup or open a release
+or default-cutover gate; complete installed Linux campaigns and typed retention
+closure must still pass, with every unverified physical case explicit.
+
+Publication, automatic worker-recovery, and MCP inspection have one additional authority-reducing closure for
 graceful Supervisor shutdown, not an early timeout. After synchronous
 cancellation and the actual original task/resource join, its still-owning
 Supervisor may publish `ReconciliationProbeCancellationClosureV1`, format
 `cliq-reconciliation-probe-cancellation-closure-v1`, reason
 `owning_supervisor_shutdown`, with the exact original Run/wait, probe
 kind/ordinal/nonce/dispatch/deadline, inspector, subject and task id. The closed
-subject XOR is either the original publication plan/path/attempt or the
-original worker launch/containment; neither branch accepts the other's fields.
+subject XOR names the original publication plan/path/attempt, original worker
+launch/containment, or exact MCP broker dispatch/target/fence and retirement
+root; no branch accepts another's fields. MCP carries no inspector task boolean.
 The worker branch permits only its existing automatic probe, not a new public
 user-requested worker inspection capability.
-Its `taskClosure` is only the genuine `cancelled_and_joined` branch; neither a
+For publication/worker only, `taskClosure` is the genuine `cancelled_and_joined` branch; neither a
 caller boolean nor successor death can mint it. `closedAt` is the actual joined
 time, which may precede the deadline, and its digest omits only `closureDigest`.
 The wrapper's disjoint `probe_cancelled` variant contains only
@@ -5791,6 +6075,21 @@ type ProcessContainmentOwner =
       dispatchId: string
     }
   | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
+    }
+  | {
       kind: 'admin_probe'
       adminOperationId: string
       attempt: number
@@ -5988,6 +6287,17 @@ type SandboxProcessInvocationV1 =
       stdio: SandboxCapturedStdioV1
     }
   | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: { stdin: 'mcp_framed'; stdout: 'mcp_framed'; stderr: 'captured'; extraFileDescriptors: 'none' }
+    }
+  | {
       kind: 'local_inference_entrypoint'
       purpose: 'local_inference_service'
       recipe: 'cliq-local-inference-entrypoint-v1'
@@ -6183,6 +6493,26 @@ type SandboxLaunchSpecV1 =
       targetRef?: never
       targetDigest?: never
       parentWorkerContainmentRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
     })
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
@@ -7027,7 +7357,7 @@ batches and uses this same model-message order, not audit-item order.
 
 `run.reconcile(resolution='probe_now')` only asks the trusted Supervisor to run the exact inspection contract already frozen by `ReconciliationSubject` and its immutable Journal/registry/DeliveryPlan/containment graph. It is legal only with no probe in flight. The invocation form exists only for `opKind='mcp'` with `recovery='mcp_reconcile'` and repeats the immutable registry/profile/template/predicate refs and digests; model, verifier, MCP-server, ordinary built-in tool, retry, and manual invocations cannot enter that branch. Model/verifier unknowns use their frozen retry-or-runtime-stop reducers, MCP-server uncertainty uses exact instance/containment lifecycle recovery, publication has its own subject, and worker loss has its own subject. The control request supplies no target, adapter, predicate, or response payload and cannot widen frozen bytes.
 
-An MCP subject observation contains only `McpRecoveryProbeEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Run/wait/op/attempt, automatic-or-user probe ordinal and in-flight nonce, registry/tool/profile/template/predicates, broker dispatch/target, and response ref/digest equal the current subject, outer probe wrapper, and exact secretless status request. The response is bounded canonical JSON under the registered status-output contract. `disposition` is `completed` iff only the completed predicate matches, `failed` iff only the failed predicate matches, otherwise `unresolved`; both/neither/schema failure is unresolved and cannot advance. A completed/failed disposition appends the matching Journal resolution plus normalized result/error and advances the exact tool frontier; unresolved only records the outer evidence and clears the nonce.
+An MCP subject observation contains only `McpRecoveryProbeEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Run/wait/op/attempt, automatic-or-user probe ordinal and in-flight nonce, registry/tool/profile/template/predicates, broker dispatch/target, and response ref/digest equal the current subject, outer probe wrapper, and exact secretless status request. The response is bounded canonical JSON under the registered status-output contract. `disposition` is `completed` iff only the completed predicate matches, `failed` iff only the failed predicate matches, otherwise `unresolved`; both/neither/schema failure is unresolved and cannot advance. A completed/failed disposition appends the matching zero-delta Journal resolution, retains the same original full-once UNKNOWN BudgetSettlement, publishes its dedicated `McpReconciledEffectResultV1` and truthful ordered local result, and advances only the exact original tool frontier. A completed effect whose original payload is unavailable remains Journal `completed` and uses fixed local `TOOL_RESULT_UNAVAILABLE`, `effect='confirmed_completed'`, `originalResponse='unavailable'`; a signed failed effect uses `TOOL_EXECUTION_FAILED`/`confirmed_failed`. Neither invents the old payload, downgrades a completed effect to a failed Journal, recharges/refunds the old UNKNOWN or resends its claim. Unresolved only records the outer evidence and clears the nonce.
 
 A publication subject observation wraps the exact appropriate `PublicationProofV1` branch and validates its path/operation/claim/inspector fields before appending a `PublicationPathResultItem` or retaining the wait. A worker subject observation wraps only `WorkerRecoveryEvidenceV1`; its omission digest, wait/launch/epoch/worker/containment/generation fields, exact `ProcessContainmentDeathEvidenceV1`, current `SupervisorInspectorIdentityV1`, and generation-disposition XOR must match. Its `generationTreeDigest` is the old generation row's last-verified tree, never a claim that unreadable dirty bytes were rehashed. `restored_from_checkpoint` requires `restoredCheckpointId`, `restoredWorkspaceStateRef`, and a distinct `replacementWorkspaceGenerationRef`; that id resolves the same Run's ready immutable Checkpoint, its workspace-state ref equals the evidence, and the replacement decodes an exact preactivated-readonly generation materialized from that Checkpoint. Both disposition branches publish a `WorkspaceGenerationQuarantineEvidenceV1(reason='worker_recovery')` that references this worker evidence and atomically CAS the old generation only from its exact `fenced_reconciling` wait to `quarantined`, retire the old launch, and clear the wait. `restored_from_checkpoint` additionally queues an unstopped Run against the exact replacement; `quarantined` forbids the three replacement fields and leaves the Run queued for later fresh materialization. No branch leaves the old dirty generation active, revoking, checkpointing, or selectable. Waiting `lastProbeEvidenceRef/digest` must decode to `ReconciliationProbeEvidenceV1`, whose wrapped branch is the sole one allowed by its subject. Positive evidence uses `assertEvidenceAuthority`; arbitrary schema-valid bytes, a public-client payload, or a worker assertion are not proof.
 
@@ -7098,7 +7428,7 @@ type SandboxProfileV1 = {
   format: 'cliq-sandbox-profile-v1'
   backend: 'macos_vm' | 'linux_namespace'
   allowedOwners: Array<
-    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection'
+    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection' | 'reconciliation_probe'
   >
   filesystemPolicy: 'typed_launch_spec_only'
   hostFilesystemReachability: 'none'
@@ -8148,6 +8478,7 @@ type ToolResultPayloadV1 = ToolResultPayloadBaseV1 & (
         | 'TOOL_EXECUTION_FAILED'
         | 'TOOL_PROTOCOL_ERROR'
         | 'TOOL_RESOURCE_EXHAUSTED'
+        | 'TOOL_RESULT_UNAVAILABLE'
       diagnosticRef: ArtifactRef
       diagnosticDigest: string
       opId?: string
@@ -8450,6 +8781,40 @@ type RetryUnknownCancelledResult = {
   dispatchFenceOrDeathEvidenceRef: ArtifactRef
   message: 'Run stopped without using the ambiguous result'
 }
+
+type McpHttpRetryClaimBindingData = Readonly<{
+  runId: string; opId: string; attempt: number; dispatchId: string; dispatchJournalSeq: number;
+  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string; grantRef: string; grantDigest: string;
+  registryRef: string; manifestDigest: string; toolContractDigest: string; batchItemId: string; callId: string; callIndex: number;
+  supervisorInstanceId: string; stateOwnerEpoch: number; workerLaunchId: string; leaseEpoch: number;
+  brokerFenceTokenDigest: string; deadlineMs: number;
+}>;
+type McpHttpRetryClaimIdentityV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-http-retry-claim-identity-v1'; binding: McpHttpRetryClaimBindingData; identityDigest: string;
+}>;
+
+type McpJoinedDispatchData = Readonly<{
+  kind: 'mcp_http_owner_joined'; purpose: 'run'; brokerFenceTokenDigest: string;
+  networkStarted: boolean; requestStarted: boolean; setupReleased: boolean; effectReleased: boolean;
+  completedStages: readonly string[]; tokenRevoked: true; matchingActiveReleaseCount: 0; networkJoined: true; tasksJoined: true;
+}> | Readonly<{
+  kind: 'mcp_stdio_owner_joined'; purpose: 'run'; releaseFenceTokenDigest: string;
+  execReleased: true; setupReleased: true; effectReleased: boolean; completedStages: readonly string[];
+  tokenRevoked: true; matchingActiveReleaseCount: 0; processJoined: true; pipesJoined: true; tasksJoined: true; outputCustodyRetired: true;
+}>;
+type McpRetryDispatchClosureV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-retry-dispatch-closure-v1'; runId: string; opId: string; attempt: number; nextAttempt: number;
+  preparedJournalSeq: number; dispatchId: string; dispatchJournalSeq: number; unknownJournalSeq: number;
+  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string; grantRef: string; grantDigest: string;
+  registryRef: string; manifestDigest: string; toolContractDigest: string; brokerFenceTokenDigest: string;
+  unknownEvidenceRef: string; unknownEvidenceDigest: string; budgetSettlementRef: string;
+  originalClaimIdentity: Readonly<{ kind: 'stdio_instance' | 'http_retry_binding'; ref: string; digest: string }>;
+  claimingSupervisorInstanceId: string; claimingStateOwnerEpoch: number;
+  inspectorIdentityRef: string; inspectorIdentityDigest: string; inspectorStateOwnerEpoch: number;
+  callDeadlineMs: number; observedAt: string; evidenceDigest: string;
+}> & (Readonly<{ kind: 'original_native_joined'; joined: McpJoinedDispatchData }> |
+  Readonly<{ kind: 'broker_process_domain_dead'; deathEvidenceRef: string; deathEvidenceDigest: string }>);
+
 
 type PolicyDenialOutcomeV1 =
   | {
@@ -11691,6 +12056,7 @@ type ControlErrorV1 =
         | 'worker_capacity'
         | 'admin_probe_capacity'
         | 'local_inference_activation_cycle'
+        | 'reconciliation_probes'
         | 'state_storage'
       retryAfterMs: number
     })
@@ -11912,7 +12278,7 @@ type McpRecoveryAdapterManifestV1 = {
   protocol: 'cliq-mcp-reconcile-v1'
   profiles: Array<{
     profileId: string
-    serverExecutionIdentityDigest: string
+    profileSigningIdentityDigest: string
     serverToolName: string
     initializeDigest: string
     capabilityDigest: string
@@ -11951,6 +12317,7 @@ type McpRecoveryStatusRequestTemplateV1 = {
   probeResultDigest: string
   serverToolName: string
   serverExecutionIdentityDigest: string
+  profileSigningIdentityDigest: string
   initializeDigest: string
   capabilityDigest: string
   probedToolsListDigest: string
@@ -12108,9 +12475,9 @@ Generic MCP metadata cannot make an operation queryable by assertion. Missing me
 
 `reconcile` is accepted only when `adapterRef` decodes to `McpRecoveryAdapterManifestV1` selected by the active RuntimeBundle's unique external `structuredArtifacts(kind='mcp_recovery_adapter',artifactId=adapterId)` record. The manifest deliberately contains no RuntimeBundle ref/digest: the outer signed record binds its complete-byte `adapterRef`, semantic `adapterDigest`, and `entryId/version/executableDigest` to one executable `mcp_recovery_adapter` entry, so the bundle never hashes an artifact that points back to itself. The profile catalog is independently release-signed: `adapterDigest = SHA-256(JCS(adapter with adapterDigest and signature omitted))`, `signature` signs the ASCII domain `cliq-mcp-recovery-adapter-v1\0` plus that digest, and `publisherKeyId` resolves through the same immutable Cliq release trust store as the RuntimeBundle. ArtifactRef still hashes the complete signed bytes. An authentic executable paired with unsigned, user-signed, unknown-key, digest-mismatched, later substituted, or differently bundle-bound profile metadata is invalid.
 
-Every profile, status template, and predicate otherwise uses the digest-member-omission JCS rule. Kernel Cut `reconcile` profiles apply only to stdio registrations whose server executable and exact normalized argv were known to the release publisher; streamable HTTP and an unprofiled stdio target may use only `manual|retry`. For a stdio admin target, `serverExecutionIdentityDigest = SHA-256(JCS({executable: resolvedTransport.executable, argv: resolvedTransport.argv}))`. Profiles are nonempty, byte-sorted, and unique by both profile id and the tuple `(serverExecutionIdentityDigest,serverToolName,effectToolInterfaceDigest)`. A profile repeats only pre-final facts: that execution identity, normalized initialize/capability/probed-list digests, the effecting interface digest, and a **distinct** status operation's interface/input/output schema digests. The named effect and status interfaces must exist in the raw probe result and rehash exactly. `statusOperationSemantics` is the release publisher's narrow assertion that this exact profiled status interface on that exact signed executable/argv identity is a no-new-effect query; server annotations cannot supply or widen it. Public `bundledAdapterId` must equal the manifest adapter id, and the probe selects exactly one signed profile. Absence, ambiguity, HTTP transport, execution-identity drift, raw-list drift, status-interface mismatch, or schema mismatch rejects `reconcile` rather than falling back to a name match.
+Every profile, status template, and predicate otherwise uses the digest-member-omission JCS rule. Kernel Cut `reconcile` profiles apply only to stdio registrations whose server executable and exact normalized argv were known to the release publisher; streamable HTTP and an unprofiled stdio target may use only `manual|retry`. The full per-registration `serverExecutionIdentityDigest = SHA-256(JCS({executable: resolvedTransport.executable, argv: resolvedTransport.argv}))` continues to retain the original outer `runtimeBundleRef`. The independently signed profile instead carries `profileSigningIdentityDigest`: hash the same exact runtime-bundle executable and argv with only the outer `runtimeBundleRef` selector omitted and the fixed executable role `mcp_server` included. Executable kind/id/path/full digest and every normalized argv literal remain present. This avoids the indirect Bundle -> adapter -> profile -> Bundle hash cycle. The selector-free projection grants no executable authority: selection must first verify the actual original Bundle's unique `mcp_recovery_adapter` structured root and exact signed `mcp_server` role/entry/digest; neither a later Bundle nor a same-named executable can adopt it. Profiles are nonempty, byte-sorted, and unique by both profile id and `(profileSigningIdentityDigest,serverToolName,effectToolInterfaceDigest)`. A profile repeats only pre-final facts: that signing identity, normalized initialize/capability/probed-list digests, the effecting interface digest, and a **distinct** status operation's interface/input/output schema digests. The named effect and status interfaces must exist in the raw probe result and rehash exactly. `statusOperationSemantics` is the release publisher's narrow assertion that this exact profiled status interface on that exact signed executable/argv identity is a no-new-effect query; server annotations cannot supply or widen it. Public `bundledAdapterId` must equal the manifest adapter id, and the probe selects exactly one signed profile. Absence, ambiguity, HTTP transport, execution-identity drift, raw-list drift, status-interface mismatch, or schema mismatch rejects `reconcile` rather than falling back to a name match.
 
-The Supervisor publishes the per-registration status template only after the raw result is durable. It copies every profile identity, operation, schema, static-argument, and predicate field exactly, adds the exact registration/revision, admin-target ref/digest, raw probe-result ref/digest, and public RFC-6901 idempotency pointer, then computes `templateDigest`. Those target and result refs rehash, `serverExecutionIdentityDigest` recomputes from the target, and initialize/capability/probed-list/effect/status interface digests equal the result. The template deliberately contains no registry ref, registry-core/manifest digest, final tool-contract/list digest, recovery-contract ref, or value derived from itself. The resulting final recovery contract names the adapter/profile/template/predicates, and only then does the reducer compute the final tool-contract/list/core/registry digests. This is the sole allowed publication direction: raw target/result -> signed profile -> per-registration template/final recovery contracts -> registry core/receipt/final revision.
+The Supervisor publishes the per-registration status template only after the raw result is durable. It copies every profile identity, operation, schema, static-argument, and predicate field exactly, adds the exact registration/revision, admin-target ref/digest, raw probe-result ref/digest, full `serverExecutionIdentityDigest`, and public RFC-6901 idempotency pointer, then computes `templateDigest`. Those target and result refs rehash, both the full execution digest and separate `profileSigningIdentityDigest` recompute from the target, and initialize/capability/probed-list/effect/status interface digests equal the result. The template deliberately contains no registry ref, registry-core/manifest digest, final tool-contract/list digest, recovery-contract ref, or value derived from itself. The resulting final recovery contract names the adapter/profile/template/predicates, and only then does the reducer compute the final tool-contract/list/core/registry digests. This is the sole allowed publication direction: raw target/result -> signed profile -> per-registration template/final recovery contracts -> registry core/receipt/final revision.
 
 The recovery contract repeats the same profile id/digest, and its injection pointer, the status template pointer, and the public per-tool request pointer are byte-identical. `recoveryRequestDigest` covers the normalized reconcile request `{kind,bundledAdapterId,idempotencyKeyJsonPointer}` and is included in the admin target/request digest; changed selection bytes cannot reuse the signed profile closure. The recovery contract's adapter/template/predicate refs/digests must equal that same signed profile, so no adapter iteration order or implementation default chooses semantics. The status template is bound to that adapter/profile/registration/revision/target/result/tool, one NFC operation name, one valid RFC-6901 key pointer, and bounded canonical JSON static arguments. Predicate expressions are the complete closed IR: maximum depth 8, maximum 64 nodes, nonempty `and|or`, finite safe-integer numbers, valid RFC-6901 pointers, and no script, regex, path, network target, or executable reference. Completed and failed predicates must be distinct, cannot both match a response, and any neither/both/schema-invalid result remains unresolved. At recovery time the invocation separately carries the immutable final registry ref/manifest digest and must equal the registration/revision/template target and tool; the signed adapter may issue only the template's exact no-new-effect status operation through that original stdio target. It cannot invoke the effecting tool, change executable/argv, use HTTP, call a same-named operation on another revision, or perform a conditional retry unless a separately Journaled retry transition is authorized. Repository or user executable bytes cannot define/load an adapter; the Kernel Cut has no trusted plugin ABI. Every MCP call freezes the exact `McpRegistryRevision` ref/manifest digest, tool contract, batch/call/index identity, and stable idempotency key into its request artifact.
 
@@ -13456,6 +13823,24 @@ artifact structure's literal `schemaVersion=1`. The current implementation's
 state schema is version 4; emitting 1 merely because this is a V1 artifact is
 invalid. This distinction does not change the separate migration/schema-profile
 types or qualify their unimplemented image/cutover closure.
+
+For new schema-eight installed Linux rollback archives, the fixed
+[original-connection archive profile](../kernel/original-connection-archive.md)
+is normative. It replaces the historical closed-main-file descriptor-copy and
+fanout-CAS archive recipe below for that profile: the one genuine original
+Node driver performs the fixed original-FD online backup; all twenty
+non-clock SQL families remain equal across the complete cut; the copied image
+still receives all twenty-one-table and physical integrity checks; and every
+actual flat-CAS name, including both temporary orphan classes, is captured.
+The fixed `cliq-owned-kernel-archive-v1` manifest binds those facts outside live
+CAS. It cannot be decoded, relabelled or cast as a historical
+`descriptor_copy_of_closed_checkpointed_source` image. Historical birth/archive
+formats retain their old exact checks, rather than rewriting their provenance.
+The local-model store must be actually observed absent under the same original
+Root/EX until its separately locked complete capture is implemented; an empty
+registry or missing path string is no substitute. The profile's native and
+encoded metadata ceilings are separate from actual peak JS/SQLite heap, and
+none of these bounds qualifies Stop2, full scale or marker-last restoration.
 
 Rollback archives are a second, acyclic snapshot closure rather than a reuse
 of the admission-time generation identity. After `rollback_draining` is

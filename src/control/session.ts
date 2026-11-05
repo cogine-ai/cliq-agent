@@ -1,9 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import type { ArtifactDescriptorV1, Session, SessionContextProjection } from '../kernel/types.js';
-import { decodeSessionContextData } from '../kernel/session-context-data.js';
-import { parseJsonStrict } from '../kernel/json.js';
+import type { Session, ArtifactDescriptorV1 } from '../kernel/types.js';
+export { readInstalledSessionContext } from './session-context.js';
 import type { RunSubmitRequest } from '../kernel/control-submit.js';
+import { SESSION_CONTEXT_PAGE_BYTES } from '../kernel/session-context-pages.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { openInstalledSupervisorClient, type InstalledSupervisorClient } from '../state/installed-control-client.js';
 import type { HeldInstalledRuntime } from '../state/installed-runtime.js';
@@ -36,6 +36,8 @@ export type InstalledControlSession = Readonly<{
   attach(request: Attach, signal?: AbortSignal): AsyncGenerator<Readonly<{
     request: Attach; response: InstalledControlResponseFor<'run.attach'>; events: readonly HeadlessRunEventV3[] }>>;
   artifact(digest: string, options: Readonly<{ maxBytes: number; signal?: AbortSignal }>): Promise<Buffer>;
+  contextPage(snapshot: Session, path: readonly number[], expectedRef: string,
+    options: Readonly<{ maxBytes: number; signal?: AbortSignal }>): Promise<Buffer>;
   reconnect(): Promise<void>;
   close(): Promise<void>;
 }>;
@@ -205,6 +207,23 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
         if (cursor === target) return;
       }
     },
+    async contextPage(snapshot: Session, path: readonly number[], expectedRef: string,
+      options: Readonly<{ maxBytes: number; signal?: AbortSignal }>) {
+      options.signal?.throwIfAborted();
+      if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0 || options.maxBytes > SESSION_CONTEXT_PAGE_BYTES)
+        throw new TypeError('Session page consumer requires its fixed bounded ceiling');
+      const original = immutableSnapshot(snapshot);
+      const response = await request({ protocolVersion: 1, method: 'session.get', sessionId: original.id,
+        contextPage: { contextProjectionRef: original.contextProjectionRef, expectedContextRevision: original.contextRevision, path } });
+      options.signal?.throwIfAborted();
+      if (!response.ok) throw new ControlRefusal(response);
+      if (response.result.method !== 'session.get' || !response.result.contextPage) throw new TypeError('Session page response differs');
+      const page = response.result.contextPage, bytes = Buffer.from(page.bytesBase64, 'base64');
+      if (page.artifact.digest !== expectedRef || page.artifact.sizeBytes > options.maxBytes ||
+          createHash('sha256').update(bytes).digest('hex') !== expectedRef)
+        throw new TypeError('Session page bytes differ from the captured ancestry or consumer ceiling');
+      return bytes;
+    },
     async artifact(digest: string, options: Readonly<{ maxBytes: number; signal?: AbortSignal }>) {
       if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 0 || options.maxBytes > 64 * 1024 * 1024)
         throw new TypeError('artifact consumer requires a byte ceiling up to 64 MiB');
@@ -266,19 +285,4 @@ export function createInstalledControlSession(initial: InstalledSupervisorClient
     }
   });
   return session;
-}
-
-/** Display data only, bound to the captured response and complete artifact bytes. */
-export async function readInstalledSessionContext(session: InstalledControlSession, snapshot: Session,
-  signal?: AbortSignal): Promise<SessionContextProjection> {
-      const original = immutableSnapshot(snapshot);
-      const bytes = await session.artifact(original.contextProjectionRef, { maxBytes: 64 * 1024 * 1024, signal });
-      signal?.throwIfAborted();
-      const value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-      if (!canonicalJsonBytes(value).equals(bytes)) throw new TypeError('Session projection bytes are not canonical');
-      const projection = decodeSessionContextData(value);
-      if (projection.sessionId !== original.id || projection.contextRevision !== original.contextRevision ||
-          projection.throughItemSeq !== original.latestItemSeq)
-        throw new TypeError('Session projection differs from its original captured snapshot');
-      return projection;
 }

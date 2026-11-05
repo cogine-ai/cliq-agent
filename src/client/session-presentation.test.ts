@@ -27,12 +27,14 @@ function fixture(wrongSession = false) {
 test('captured Session presentation preserves whole summary boundaries and refuses a foreign immutable graph', async () => {
   const f = fixture();
   try {
-    const projection = await readInstalledSessionContext(f.session, f.snapshot.session);
-    assert.equal(canonicalJsonBytes(projection).toString(), canonicalJsonBytes(f.projection).toString());
-    assert.match(sessionContextLines(projection).join('\n'), /1–2 · summary · 1 retained/u);
+    const updates = [];
+    for await (const value of readInstalledSessionContext(f.session, f.snapshot.session)) updates.push(value);
+    assert.deepEqual(updates.map(value => value.kind), ['head', 'boundary', 'complete']);
+    assert.match(updates.flatMap(sessionContextLines).join('\n'), /1–2 · summary · 1 retained/u);
+    assert.equal('segments' in updates[0]!, false);
   } finally { await f.session.close(); }
   const bad = fixture(true);
-  try { await assert.rejects(readInstalledSessionContext(bad.session, bad.snapshot.session), /captured snapshot/u); }
+  try { await assert.rejects(async () => { for await (const _ of readInstalledSessionContext(bad.session, bad.snapshot.session)) {} }, /captured snapshot/u); }
   finally { await bad.session.close(); }
 });
 
@@ -41,7 +43,7 @@ test('a Session show uses the same application connection and emits its referenc
   try {
     // Read only the head, with its exact source cut; no Session mutation or new Run.
     await app.execute({ kind: 'request', request: { protocolVersion: 1, method: 'session.get', sessionId: 'session', afterItemSeq: 2 } });
-    assert.equal(updates.filter(update => update.kind === 'context').length, 1);
+    assert.deepEqual(updates.flatMap(update => update.kind === 'context' ? [update.context.kind] : []), ['head', 'boundary', 'complete']);
     assert.deepEqual(f.calls.map(call => call.method), ['session.get', 'artifact.get']);
   } finally { await app.close(); }
 });

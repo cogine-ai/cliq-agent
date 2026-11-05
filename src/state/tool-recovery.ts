@@ -20,12 +20,15 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { mcpNoReleaseCheckpointId } from '../kernel/mcp.js';
 import { readBuiltinToolCapture, assertBuiltinCaptureObservation } from './builtin-tool-capture.js';
 import { readMcpRunCapture, assertMcpCaptureObservation, readMcpNoReleaseHistory, readMcpAmbiguityHistory } from './mcp-execution.js';
+import { readMcpStdioRunCapture, assertMcpStdioCaptureObservation } from './mcp-stdio-history.js';
 import { decodeSkillResourceReceipt, readSkillResourceValue, skillResourceCheckpointId, skillResourceDispatchId } from './skill-resource-data.js';
 import { decodeSkillResourceInput } from '../kernel/skill.js';
 import { decodeWireRun } from '../kernel/control-wire-data.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { validateManualAbandonmentHistory } from './manual-reconciliation.js';
+import { mcpRetryState, mcpRetryPositiveFailureAction } from '../kernel/mcp-retry.js';
+import { decodeAgentStop } from '../runtime/stop.js';
 
 /** Reachability and durable ownership. The loaded Run additionally verifies release signatures and replays the fixed evaluator. */
 export async function validateToolRecovery(input: {
@@ -35,6 +38,16 @@ export async function validateToolRecovery(input: {
   driver?: SqliteDriver;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
+  const retryHistories = new Map<string, Readonly<{ entries: readonly InvocationJournalEntry[];
+    policy: Readonly<{ maxDispatchedAttempts: number; postAttemptDelaysMs: readonly number[] }>;
+    deadline: number | undefined; launchCapacity?: Readonly<{ used: number; limit: number }> }>>();
+  if (journal.some(entry => entry.opKind === 'mcp' && entry.replayClass === 'retry')) {
+    if (!input.driver) throw new TypeError('MCP retry history requires its exact retained SQLite source');
+    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+    const operations = new Set(journal.filter(entry => entry.opKind === 'mcp' && entry.replayClass === 'retry').map(entry => entry.opId));
+    for (const opId of operations) retryHistories.set(opId,
+      await (await import('./mcp-retry-admission.js')).readMcpRetryJournalHistory(input.driver, artifacts, assembly, journal, opId, run.updatedAt));
+  }
   const abandonedItems = [...items.values()].filter(item => item.kind === 'tool_abandoned');
   const hasManualAbandonment = journal.some(entry => entry.phase === 'abandoned' && entry.replayClass === 'manual');
   const manual = hasManualAbandonment || abandonedItems.length ? await (async () => {
@@ -47,6 +60,12 @@ export async function validateToolRecovery(input: {
       throw new TypeError('terminal-only abandonment marker has no exact original manual disposition');
     return marker;
   })() : undefined;
+  if (journal.some(entry => entry.opKind === 'mcp-server') || [...items.values()].some(item => item.kind === 'mcp_server_stopped' ||
+      item.kind === 'policy_decision' && item.subjectKind === 'mcp_server_launch')) {
+    if (!input.driver) throw new TypeError('MCP server lifecycle history requires its exact retained SQLite source');
+    const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+    await (await import('./mcp-server-history.js')).validateMcpServerHistory(input.driver, artifacts, run, spec, assembly, items, journal);
+  }
   let dependencyHistory: Promise<unknown> | undefined;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
   const requests = new Map<string, ToolRequestV1>();
@@ -135,6 +154,17 @@ export async function validateToolRecovery(input: {
       const original = await history.readChildMergeApprovalWait(input.driver, artifacts, run.id, run.waitingOnRef);
       history.assertChildMergeApprovalWaitingRun(original.waitingRun, run);
       original.source.assertUnchanged(input.driver);
+    } else if (subject.subject?.kind === 'mcp_server_launch') {
+      if (!input.driver) throw new TypeError('MCP server approval requires its actual retained SQLite source');
+      const { decodeMcpServerApprovalWait, decodeMcpServerPolicyChannelEvidence } = await import('../kernel/mcp-server-authorization.js');
+      const wait = decodeMcpServerApprovalWait(await readCanonicalArtifact(artifacts, run.waitingOnRef));
+      const evidence = decodeMcpServerPolicyChannelEvidence(await readCanonicalArtifact(artifacts, wait.subject.policyChannelEvidenceRef));
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      const context = await (await import('./mcp-server-history.js')).readMcpServerPermissionContextData(input.driver, artifacts, run, spec, assembly, evidence.requestRef, evidence.targetRef);
+      const proof = await (await import('./mcp-server-permission.js')).readMcpServerApprovalWait(input.driver, artifacts, context, run.waitingOnRef);
+      if ((run.stopIntentRef ? run.revision < wait.createdFromRevision + 1 : run.revision !== wait.createdFromRevision + 1) ||
+          run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== proof.checkpoint.id)
+        throw new TypeError('MCP server approval wait substitutes its exact revision/frontier/checkpoint');
     } else {
     const { wait, checkpoint } = await approvalWait(run.waitingOnRef);
     if ((run.stopIntentRef ? run.revision < wait.createdFromRevision + 1 : run.revision !== wait.createdFromRevision + 1) || run.frontierRef !== wait.frontierRef || run.latestCheckpointId !== checkpoint.id) {
@@ -311,6 +341,15 @@ export async function validateToolRecovery(input: {
       const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
       await readMcpAmbiguityHistory(input.driver, artifacts, { prepared, claim: failedClaim, unknown, assembly });
     }
+    if (unknown && prepared.opKind === 'mcp' && prepared.replayClass === 'reconcile') {
+      const resolved = attempts.filter(entry => entry.attempt === prepared.attempt && ['completed', 'failed'].includes(entry.phase));
+      if (resolved.length) {
+        if (!input.driver || resolved.length !== 1) throw new TypeError('MCP signed status requires its sole actual retained resolution');
+        await (await import('./mcp-status-result-history.js')).validateMcpReconciledToolResult(input.driver, artifacts,
+          { run, runSpec: spec, journal }, prepared, resolved[0]!, items, input.checkpoints);
+        continue;
+      }
+    }
     if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
       const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, run.terminalDetailRef!);
       if (!['failed', 'cancelled'].includes(run.status) || failed.timestamp !== detail.createdAt || detail.createdAt > run.updatedAt ||
@@ -342,8 +381,24 @@ export async function validateToolRecovery(input: {
       const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
       await readMcpNoReleaseHistory(input.driver, artifacts, { prepared, claim: failedClaim, failed, assembly });
       const item = [...items.values()].find(value => value.kind === 'tool_result' && value.opId === prepared.opId);
+      if (prepared.replayClass === 'retry') {
+        const payload = item?.kind === 'tool_result' ? await readCanonicalArtifact<Record<string, unknown>>(artifacts, item.resultRef) : undefined;
+        if (!payload || payload.attempt !== prepared.attempt) {
+          if (payload && (!Number.isSafeInteger(payload.attempt) || (payload.attempt as number) <= prepared.attempt) ||
+              !payload && (['failed', 'cancelled', 'succeeded'].includes(run.status) || run.frontierRef !== request.frontierRef))
+            throw new TypeError('MCP earlier positive retry failure loses its still-open call or real later attempt result');
+          continue; // The original positive no-release settlement above remains independently verified.
+        }
+        const history = retryHistories.get(prepared.opId);
+        const stopped = run.stopIntentRef && decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run).createdAt <= item!.createdAt;
+        if (!history || history.deadline === undefined || history.entries.some(entry => entry.timestamp > item!.createdAt) ||
+            claims.some(claim => claim.attempt > prepared.attempt) || mcpRetryPositiveFailureAction(
+              mcpRetryState(history.policy, history.entries, item!.createdAt, history.deadline), 'failed', !!stopped, history.launchCapacity) !== 'result')
+          throw new TypeError('MCP positive result prematurely discards original retry capacity, deadline or a later real claim');
+      }
       if (item?.kind !== 'tool_result' || item.outcome !== 'error' || item.batchItemId !== request.batchItemId ||
-          item.callId !== request.callId || item.index !== request.callIndex || item.createdAt !== failed.timestamp)
+          item.callId !== request.callId || item.index !== request.callIndex || (prepared.replayClass === 'retry'
+            ? item.createdAt < failed.timestamp : item.createdAt !== failed.timestamp))
         throw new TypeError('MCP no-release failure has no exact ordered error item');
       const payload = await readCanonicalArtifact<ToolResultPayloadV1>(artifacts, item.resultRef);
       if (payload.outcome !== 'error' || payload.code !== 'TOOL_EXECUTION_FAILED' || payload.opId !== prepared.opId ||
@@ -352,10 +407,22 @@ export async function validateToolRecovery(input: {
         throw new TypeError('MCP no-release result changed its exact original closure');
       const model = await readCanonicalArtifact<ToolResultModelContentV1>(artifacts, payload.modelContentRef);
       requireEqual(model.content, { code: 'TOOL_EXECUTION_FAILED' }, 'MCP no-release model-safe failure');
-      const checkpoint = input.checkpoints.find(value => value.id === mcpNoReleaseCheckpointId(run.id, prepared.opId, prepared.attempt));
-      if (!checkpoint || checkpoint.journalSeq !== failed.seq || checkpoint.runItemSeq !== [...items.keys()].indexOf(item.itemId) + 1 ||
-          checkpoint.createdAt < failed.timestamp)
+      const checkpoint = input.checkpoints.find(value => value.id === mcpNoReleaseCheckpointId(run.id, prepared.opId, prepared.attempt)) ??
+        (prepared.replayClass === 'retry' && run.stopIntentRef && ['failed', 'cancelled'].includes(run.status)
+          ? input.checkpoints.find(value => value.id === run.latestCheckpointId) : undefined);
+      const itemSeq = [...items.keys()].indexOf(item.itemId) + 1;
+      if (!checkpoint || (prepared.replayClass === 'retry'
+        ? checkpoint.journalSeq < failed.seq || checkpoint.runItemSeq < itemSeq || checkpoint.createdAt < item.createdAt
+        : checkpoint.journalSeq !== failed.seq || checkpoint.runItemSeq !== itemSeq) || checkpoint.createdAt < failed.timestamp)
         throw new TypeError('MCP no-release result has no original ready Checkpoint');
+    } else if (failed && prepared.opKind === 'mcp' &&
+        ['mcp_server_launch_exhausted', 'mcp_call_deadline_exceeded'].includes((await readCanonicalArtifact<{ reason?: string }>(artifacts, failed.errorRef!)).reason ?? '')) {
+      // validateMcpServerHistory above owns the complete typed unavailable
+      // reason, every positive local closure, count and atomic result graph.
+      if (!input.driver || claims.some(entry => entry.attempt === prepared.attempt))
+        throw new TypeError('MCP local unavailable result cannot replace a permanent effect claim');
+      const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
+      await (await import('./mcp-server-history.js')).readMcpServerLocalUnavailableHistory(input.driver, artifacts, run, spec, assembly, items, journal, prepared, failed);
     } else if (failed) {
       const expiry = await readCanonicalArtifact<ToolGrantExpiryV1>(artifacts, failed.errorRef!);
       parseCanonicalTime(expiry.observedAt);
@@ -403,6 +470,7 @@ export async function validateToolRecovery(input: {
     const contract = manifest.entries.find((entry) => entry.name === request.toolName);
     if (!contract || canonicalSha256(contract) !== target.toolContractDigest || manifest.manifestDigest !== target.toolManifestDigest ||
         digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest) throw new TypeError('tool result contract substitution');
+    let completedJournalSeq = completion.seq;
     if (contract.execution.kind === 'builtin_script') {
       if (!input.driver || !result.captureRef || !result.captureDigest) throw new TypeError('script history requires its original complete native capture and SQL provenance');
       const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
@@ -414,9 +482,22 @@ export async function validateToolRecovery(input: {
       if (!input.driver || !result.captureRef || !result.captureDigest)
         throw new TypeError('MCP history requires its complete original capture and SQL registration provenance');
       const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
-      const captured = await readMcpRunCapture(input.driver, artifacts, { captureRef: result.captureRef,
-        captureDigest: result.captureDigest, prepared, claim, assembly });
-      await assertMcpCaptureObservation(artifacts, result, captured);
+      const capture = await readCanonicalArtifact<{ format: string }>(artifacts, result.captureRef);
+      if (['cliq-mcp-stdio-run-capture-v1', 'cliq-mcp-stdio-known-unusable-run-capture-v1'].includes(capture.format)) {
+        const captured = await readMcpStdioRunCapture(input.driver, artifacts, { captureRef: result.captureRef,
+          captureDigest: result.captureDigest, prepared, claim, assembly });
+        await assertMcpStdioCaptureObservation(artifacts, result, captured);
+        const launchTerminal = journal.find(entry => entry.seq === completion.seq + 1);
+        if (launchTerminal?.opKind !== 'mcp-server' || launchTerminal.opId !== captured.launch.launchOpId ||
+            launchTerminal.attempt !== captured.launch.attempt || launchTerminal.phase !== 'completed' ||
+            launchTerminal.timestamp !== completion.timestamp || launchTerminal.resultRef !== captured.binding.instanceIdentityRef)
+          throw new TypeError('MCP stdio effect lacks its same-transaction original local server completion');
+        completedJournalSeq = launchTerminal.seq;
+      } else {
+        const captured = await readMcpRunCapture(input.driver, artifacts, { captureRef: result.captureRef,
+          captureDigest: result.captureDigest, prepared, claim, assembly });
+        await assertMcpCaptureObservation(artifacts, result, captured);
+      }
     } else if (result.captureRef !== undefined || result.captureDigest !== undefined)
       throw new TypeError('non-script history cannot borrow a native script capture');
     if (result.outcome === 'executed') {
@@ -442,7 +523,7 @@ export async function validateToolRecovery(input: {
     if (!('opId' in payload) || payload.opId !== prepared.opId || payload.attempt !== prepared.attempt) throw new TypeError('tool payload operation identity mismatch');
     const checkpoint = input.checkpoints.find((checkpoint) => checkpoint.id === toolCheckpointId(run.id, prepared.opId, prepared.attempt));
     const itemSeq = [...items.keys()].indexOf(item.itemId) + 1;
-    if (!checkpoint || checkpoint.runId !== run.id || checkpoint.journalSeq !== completion.seq || checkpoint.runItemSeq !== itemSeq ||
+    if (!checkpoint || checkpoint.runId !== run.id || checkpoint.journalSeq !== completedJournalSeq || checkpoint.runItemSeq !== itemSeq ||
         checkpoint.createdAt < completion.timestamp) throw new TypeError('tool result has no atomically matching ready Checkpoint');
     if ((contract.access !== 'read') !== (result.postEffect !== undefined)) throw new TypeError('tool result post-effect proof does not match its access class');
     if (result.postEffect) {

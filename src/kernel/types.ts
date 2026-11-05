@@ -1720,6 +1720,8 @@ export type ControlResultV1 =
       items: SessionItem[];
       highWaterItemSeq: number;
       nextItemSeq: number;
+      contextPage?: Readonly<{ contextProjectionRef: ArtifactRef; contextRevision: number; path: readonly number[];
+        artifact: ArtifactDescriptorV1; bytesBase64: string }>;
     }
   | { method: 'run.submit'; snapshot: RunSnapshotV1 }
   | { method: 'run.apply'; snapshot: RunSnapshotV1 }
@@ -1758,8 +1760,10 @@ export type ControlResultV1 =
 
 export type { StopIntent, TerminalReasonDetail, TerminalDetail, SessionRunTerminalItem, RunCancel } from './stop.js';
 export type { WorkerRecoveryEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationInspectorTaskClosureV1,
-  ReconciliationProbeTimeoutClosureV1, ReconciliationProbeEvidenceV1, ReconciliationLastProbeEvidenceV1,
+  ReconciliationProbeTimeoutClosureV1, ReconciliationProbeCancellationClosureV1, ReconciliationProbeEvidenceV1, ReconciliationLastProbeEvidenceV1,
   ReconciliationProbeStateV1 } from './reconciliation.js';
+export type { McpReconciliationSubject, McpInvocationWaitV1, McpRecoveryProbeEvidenceV1, McpReconciledEffectResultV1,
+  McpStatusProbePreparationV1 } from './mcp-status.js';
 
 export type ControlApplicationResponseV1 =
   | { protocolVersion: 1; ok: true; result: ControlResultV1 }

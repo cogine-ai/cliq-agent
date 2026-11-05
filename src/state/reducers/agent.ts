@@ -154,7 +154,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   const { model, tools } = validateAgentRunAssembly(authority, material);
   const systemInstruction = await loadInstructionText(openingReads, assembly);
   const { resolveToolInput } = toolContracts;
-  const sessionCompactionIndex = (projection: import('../../kernel/types.js').SessionContextProjection) => frozenSessionCompactionIndex(driver,
+  const sessionCompactionIndex = (projection: import('../../kernel/session-context-pages.js').SessionContextHead) => frozenSessionCompactionIndex(driver,
     admittedRun.sessionId, projection.throughItemSeq);
   const project = (run: Run, context: ContextManifest, contextRef: string, reads = artifacts) => projectNormalContext({
     artifacts: reads, run, spec, assembly, context, contextRef, systemInstruction, tools, sessionCompactionIndex
@@ -227,7 +227,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
   }
 
   const { controlAuthority, ...toolContinuation } = await loadToolContinuation(driver, artifacts, owner, {
-    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys, recoveredItems: recovered.items
+    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys, recoveredItems: recovered.items, installedRuntime
   }, reobserve, signal);
   const continuation = await loadRunContinuation(driver, artifacts, owner, authority, reobserve, installedRuntime, controlAuthority);
   return Object.freeze({

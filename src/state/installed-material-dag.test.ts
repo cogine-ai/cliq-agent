@@ -166,7 +166,15 @@ test('source/native DAG keeps every original before/after R and does not move pu
   assert(text(mcpBody).includes('constreads=signal?artifacts.withReadSignal(signal):artifacts;'));
   assert.deepEqual(mcpGroup.arguments.map(text),['registrationIds','registrationId=>readMcpRegistry(driver,reads,principalId,registrationId)'],
     'MCP lazily joins full registry closures through the same bounded preparing view');
-  assert(call(mcpBody,'assertMcpHttpRecipe').end<mcpGroup.pos,'fixed installed recipe qualification precedes registry reads');
+  const selectedRecipes=call(mcpBody,'assertMcpSelectedRecipes');
+  assert(mcpGroup.end<selectedRecipes.pos,'recipe selection uses the complete original registry transport, not an assumed HTTP default');
+  assert.deepEqual(selectedRecipes.arguments.map(text),['bundle','selections']);
+  const recipeBody=fn(mcp,'assertMcpSelectedRecipes'),recipeChecks=calls(recipeBody,'hasInstalledMcpRecipe');
+  assert.deepEqual(recipeChecks.map(value=>value.arguments.map(text)),[['bundle',"'streamable_http'"],['bundle',"'stdio'"]],
+    'both original fixed native recipe sets remain mandatory for their exact selected transports');
+  assert(text(recipeBody).includes("selections.some(selection=>selection.registry.transport.kind==='streamable_http')"));
+  assert(text(recipeBody).includes("selections.some(selection=>selection.registry.transport.kind==='stdio')"));
+  assert(selectedRecipes.end<mcpBody.end,'fixed recipe qualification completes within the read-only MCP source preflight');
   assert(text(mcpBody).includes('reads.assertReadActive();signal?.throwIfAborted();'));
   assert(text(mcpBody).includes('for(constselectionofselections)selection.assertUnchanged(driver);'));
 

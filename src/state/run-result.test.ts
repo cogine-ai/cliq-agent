@@ -7,6 +7,7 @@ import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { FinalCandidateItem, RunResult, VerificationClosureV1 } from '../kernel/result.js';
 import type { DirectUnverifiedConsentV1, RunFrontier, RunSpec, SessionRunTerminalItem } from '../kernel/types.js';
+import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { ResultUnavailableError } from './control-read.js';
 import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
@@ -16,6 +17,12 @@ import { prepareDeliveryNoOpVerification, readDeliveryVerification, readDelivery
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
+import { createInstalledControlSession, readInstalledSessionContext } from '../control/session.js';
+import type { InstalledSupervisorClient } from './installed-control-client.js';
+import { hello as inertClientHello } from '../client/testing/protocol.js';
+import { walkSessionContextPageEdges } from '../kernel/session-context-page-reader.js';
+import { readSessionContextGraphHead } from './session-context-stream.js';
+import { fixtureSessionContextSegments } from './testing/session-context.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
@@ -46,7 +53,7 @@ async function reopen(fixture: Fixture) {
     releaseKeys: fixture.signed.releaseKeys });
 }
 
-test('explicitly consented empty verification publishes one unverified immutable result and Session outcome across reopen and replay', async () => {
+test('explicitly consented empty verification publishes one unverified immutable result and Session outcome across reopen and replay', async t => {
   const fixture = await createAgentFixture('run-result-empty', undefined, { mode: 'plan' });
   try {
     await candidate(fixture);
@@ -117,10 +124,66 @@ test('explicitly consented empty verification publishes one unverified immutable
     assert.deepEqual(after.run.budgetConsumed, before.run.budgetConsumed); assert.deepEqual(after.run.budgetReserved, before.run.budgetReserved);
     const terminalSession = fixture.store.getSession(session.id);
     assert.equal(terminalSession.latestItemSeq, session.latestItemSeq + 1); assert.equal(terminalSession.contextRevision, session.contextRevision + 1);
-    const projection = await fixture.store.artifacts.readCanonical<{ segments: Array<{ kind: string; items?: Array<{ payloadRef: string }> }> }>(terminalSession.contextProjectionRef);
-    const segment = projection.segments.at(-1)!;
-    assert.equal(segment.kind, 'raw'); assert.equal(segment.items!.length, 1);
-    const terminal = await fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items![0]!.payloadRef);
+    const head = await readSessionContextGraphHead(fixture.store.artifacts, terminalSession.contextProjectionRef);
+    for await (const edge of walkSessionContextPageEdges(fixture.store.artifacts, head)) {
+      assert.equal(held.driver.prepare('SELECT ref FROM artifacts WHERE ref=?').get(edge.ref), undefined);
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: edge.ref,
+        offset: 0, length: 65536 }, inspectionIdentity), { code: 'NOT_FOUND' }, 'internal reachability is not public catalog membership');
+    }
+    // Actual Store/CAS/SQL -> closed wire consumer -> real client page walker.
+    // Only the transport is in-process; this is not native/provider qualification.
+    const exchange = async (request: Parameters<typeof fixture.store.readControl>[0]) => ({ protocolVersion: 1, ok: true,
+      result: await fixture.store.readControl(request, inspectionIdentity) });
+    const client = createInstalledControlSession({ hello: inertClientHello, close: async () => {},
+      'artifact.get': exchange, 'session.get': exchange } as unknown as InstalledSupervisorClient);
+    try {
+      const output = [];
+      for await (const value of readInstalledSessionContext(client, terminalSession)) output.push(value);
+      assert.deepEqual(output.map(value => value.kind), ['head', 'boundary', 'complete']);
+      const query = { protocolVersion: 1 as const, method: 'session.get' as const, sessionId: terminalSession.id,
+        contextPage: { contextProjectionRef: terminalSession.contextProjectionRef, expectedContextRevision: terminalSession.contextRevision, path: [] } };
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, expectedContextRevision: terminalSession.contextRevision + 1 } }, inspectionIdentity),
+        { code: 'REVISION_CONFLICT' });
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, contextProjectionRef: session.contextProjectionRef } }, inspectionIdentity),
+        { code: 'REVISION_CONFLICT' });
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, path: [0] } }, inspectionIdentity),
+        { code: 'INVALID_REQUEST' }, 'a caller cannot continue beyond the real current leaf');
+      assert(head.schemaVersion === 2 && head.rootPageRef !== null);
+      const pageDeclaration = await fixture.store.artifacts.describe(head.rootPageRef, 'application/octet-stream', 'cliq-source-file-blob-v1');
+      const { insertArtifactMetadata } = await import('./artifacts.js');
+      held.driver.transaction(connection => insertArtifactMetadata(connection, pageDeclaration, terminalSession.updatedAt));
+      const firstDescriptor = held.driver.prepare('SELECT * FROM artifacts WHERE ref=?').get(head.rootPageRef);
+      const typedPage = await fixture.store.readControl(query, inspectionIdentity); assert(typedPage.method === 'session.get');
+      assert.equal(typedPage.contextPage!.artifact.mediaType, 'application/octet-stream');
+      assert.deepEqual(held.driver.prepare('SELECT * FROM artifacts WHERE ref=?').get(head.rootPageRef), firstDescriptor);
+      const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      const prototype = Object.getPrototypeOf(fixture.store.artifacts) as { readBoundedBytes: ArtifactCatalog['readBoundedBytes'] };
+      const read = prototype.readBoundedBytes, metadata = writer.prepare('SELECT * FROM artifacts ORDER BY ref').all();
+      let changed = false;
+      const changedHead = t.mock.method(prototype, 'readBoundedBytes', async function(this: ArtifactCatalog, ...args: Parameters<ArtifactCatalog['readBoundedBytes']>) {
+        const bytes = await Reflect.apply(read, this, args);
+        if (!changed && head.schemaVersion === 2 && args[0] === head.rootPageRef) {
+          changed = true;
+          // A real concurrent SQL change after complete page I/O. This is a
+          // refusal fixture, never a new committed Session/Run authority.
+          writer.prepare('UPDATE sessions SET context_revision=context_revision+1 WHERE id=?').run(terminalSession.id);
+        }
+        return bytes;
+      });
+      try {
+        await assert.rejects(fixture.store.readControl(query, inspectionIdentity), { code: 'REVISION_CONFLICT' });
+        assert.equal(changed, true, 'the actual page finished before the concurrent head change');
+        assert.deepEqual(writer.prepare('SELECT * FROM artifacts ORDER BY ref').all(), metadata);
+      } finally {
+        changedHead.mock.restore();
+        writer.prepare('UPDATE sessions SET context_revision=? WHERE id=?').run(terminalSession.contextRevision, terminalSession.id); writer.close();
+      }
+
+    } finally { await client.close(); }
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, terminalSession.contextProjectionRef);
+    const segment = segments.at(-1)!;
+    assert.equal(segment.kind, 'raw'); assert(segment.kind === 'raw'); assert.equal(segment.items.length, 1);
+    const terminal = await fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef);
     assert.equal(terminal.resultRef, committed.resultRef); assert.equal(terminal.summaryRef, item.summaryRef);
     assert.equal(terminal.status, 'completed_unverified'); assert.equal(terminal.terminalDetailRef, undefined);
     await reopen(fixture);
@@ -311,10 +374,11 @@ test('a result and an independent root stop share Session commit order without l
     assert.equal(completed.run.status, 'completed_unverified');
     const session = fixture.store.getSession(run.sessionId);
     assert.equal(session.latestItemSeq, 2); assert.equal(session.contextRevision, 3);
-    const projection = await fixture.store.artifacts.readCanonical<{ segments: Array<{ kind: string; fromItemSeq: number; throughItemSeq: number;
-      items: Array<{ payloadRef: string }> }> }>(session.contextProjectionRef);
-    assert.deepEqual(projection.segments.map(segment => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
-    const items = await Promise.all(projection.segments.map(segment => fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef)));
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, session.contextProjectionRef);
+    assert.deepEqual(segments.map(segment => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
+    const items = await Promise.all(segments.map(segment => {
+      assert(segment.kind === 'raw'); return fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef);
+    }));
     assert.deepEqual(items.map(item => item.runId).sort(), [run.id, second.run.id].sort());
     await fixture.store.readRecoveryClosure(second.run.id); await reopen(fixture);
     await fixture.store.readRecoveryClosure(second.run.id);

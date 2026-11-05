@@ -1,6 +1,9 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { closeSync, constants, fstatSync, lstatSync, openSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { channel } from 'node:diagnostics_channel';
+import { beginHeldKernelArchiveBackup, assertHeldKernelArchive, assertHeldKernelArchiveSource, type HeldKernelArchive, type KernelArchiveBackupJoin } from './native-owner.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
 export type SqliteInputValue = null | number | bigint | string | NodeJS.ArrayBufferView;
 export type SqliteOutputValue = null | number | bigint | string | Uint8Array;
@@ -51,6 +54,101 @@ export interface SqliteDriver extends SqliteConnection {
     operation: SynchronousOperation<Operation>
   ): ReturnType<Operation>;
   close(): void;
+}
+
+/** Actual Node backup page observations only. The diagnostic grants no
+ * authority, source handle, timing, cancellation permission or retry. Trusted
+ * subscribers catch their own errors, as with existing installed diagnostics. */
+export const KERNEL_ARCHIVE_PROGRESS_CHANNEL = 'cliq.installed.archive.progress.v1';
+const archiveProgress = channel(KERNEL_ARCHIVE_PROGRESS_CHANNEL);
+function observeArchiveSqliteStep(value: Readonly<{ totalPages: number; remainingPages: number }>): void {
+  if (!archiveProgress.hasSubscribers || !Number.isSafeInteger(value.totalPages) || !Number.isSafeInteger(value.remainingPages) ||
+      value.totalPages < 1 || value.remainingPages < 0 || value.remainingPages > value.totalPages) return;
+  try { archiveProgress.publish(Object.freeze({ phase: 'sqlite_step', totalPages: value.totalPages, remainingPages: value.remainingPages })); }
+  catch { /* Observation never changes the actual backup or its native join. */ }
+}
+
+type OriginalArchiveSource = { database: DatabaseSync; databasePath: string; readOnly: boolean; assertCurrent(): void; liveBackups: number };
+const originalArchiveSources = new WeakMap<SqliteDriver, OriginalArchiveSource>();
+// A failed actual native join must keep both the original source connection
+// and destination holder alive after the rejecting Promise has settled.
+const unretiredArchiveSources = new Set<Readonly<{ driver: SqliteDriver; source: OriginalArchiveSource; archive: HeldKernelArchive }>>();
+
+/** Source authentication shared by the complete productive-cut audit. It
+ * returns no handle and accepts only the same genuine original destination. */
+export function assertOriginalKernelArchiveSource(driver: SqliteDriver, archive: HeldKernelArchive): void {
+  const source = originalArchiveSources.get(driver);
+  if (!source || source.readOnly || connectionIssuers.get(driver)?.driver !== driver)
+    throw new TypeError('archive requires its genuine writable original source driver');
+  source.assertCurrent(); assertHeldKernelArchiveSource(archive, source.databasePath);
+}
+
+/** Fixed original-source friend, not a generic backup/path API. Only the
+ * genuine archive issuer can provide the one native nonce-bound destination.
+ * Node22 shared imports remain valid; builtin backup is resolved lazily only
+ * in the fixed installed Linux Node24 branch. */
+export async function backupOriginalSqliteToKernelArchive(driver: SqliteDriver, archive: HeldKernelArchive,
+  signal?: AbortSignal): Promise<KernelArchiveBackupJoin> {
+  const source = originalArchiveSources.get(driver);
+  if (!source || source.readOnly || source.liveBackups !== 0 || connectionIssuers.get(driver)?.driver !== driver)
+    throw new TypeError('archive source requires its genuine writable original driver without another backup');
+  source.assertCurrent(); assertHeldKernelArchiveSource(archive, source.databasePath); signal?.throwIfAborted();
+  if (process.platform !== 'linux' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original online archive requires the fixed installed Linux Node24 backend');
+  source.liveBackups++;
+  let target: Awaited<ReturnType<typeof beginHeldKernelArchiveBackup>> | undefined;
+  let joined: KernelArchiveBackupJoin | undefined, failure: unknown, failed = false, cancellationFailure: unknown;
+  const cancel = () => { try { target?.requestCancel(); } catch (error) { cancellationFailure ??= error; } };
+  try {
+    const sqlite = await import('node:sqlite');
+    const backup: unknown = Reflect.get(sqlite, 'backup');
+    if (typeof backup !== 'function') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed Node24 builtin online backup is unavailable');
+    source.assertCurrent(); signal?.throwIfAborted();
+    target = await beginHeldKernelArchiveBackup(archive);
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    if (!signal?.aborted) {
+      // No source reconnect/checkpoint/rename, caller progress callback/SQL,
+      // alternate path or timeout. Fixed progress only emits actual Node page
+      // observations; it never decides a backup outcome or replaces cancel/join.
+      // The actual live source remains available to
+      // its original maintenance/time-fence code, whose latency needs physical
+      // qualification under real backup-update/fsync contention.
+      await (backup as (source: DatabaseSync, path: string, options: Readonly<{
+        source: 'main'; target: 'main'; rate: 64;
+        progress(value: Readonly<{ totalPages: number; remainingPages: number }>): void;
+      }>) => Promise<unknown>)(source.database, target.uri,
+        { source: 'main', target: 'main', rate: 64, progress: observeArchiveSqliteStep });
+    }
+  } catch (error) { failed = true; failure = error; cancel(); }
+  finally {
+    // This finally runs only after the actual Node operation settled, never
+    // after a JS race/timeout. The native observation also requires every
+    // real xClose and retired journal. Keep source.close refused if uncertain.
+    signal?.removeEventListener('abort', cancel);
+    try { if (target) joined = target.join(); }
+    catch (error) {
+      unretiredArchiveSources.add({ driver, source, archive });
+      throw new ResourceRetirementError('original SQLite archive callbacks did not actually join',
+        failed ? new AggregateError([failure, error]) : error);
+    }
+    if (!target && failure instanceof ResourceRetirementError) {
+      unretiredArchiveSources.add({ driver, source, archive }); throw failure;
+    }
+    source.liveBackups--;
+  }
+  if (cancellationFailure !== undefined) throw new ResourceRetirementError('original archive cancellation was not observed', cancellationFailure);
+  // Only a real cancelled native join can classify a simultaneously
+  // rejected SQLite task as cancellation. Preserve both original reasons;
+  // transport close, signal state or SQLITE_IOERR alone proves no join.
+  if (failed && signal?.aborted && joined?.outcome === 'cancelled')
+    throw new AggregateError([signal.reason, failure], signal.reason instanceof Error ? signal.reason.message :
+      'Kernel archive cancellation joined', { cause: signal.reason });
+  if (failed) throw failure;
+  signal?.throwIfAborted(); source.assertCurrent(); assertHeldKernelArchive(archive);
+  if (!joined || joined.outcome !== 'commit_phase_two_observed' || joined.mainOpens !== 1 || joined.mainCloses !== 1)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'online archive lacks its actual single main lease and commit-phase-two observation');
+  return joined;
 }
 
 const rolledBackTransactionFailures = new WeakMap<SqliteDriver, WeakSet<Error>>();
@@ -276,6 +374,7 @@ class NodeSqliteDriver implements SqliteDriver {
       enableForeignKeyConstraints: true
     });
     connectionIssuers.set(this, { driver: this, assertUsable: this.requireNoActiveTransaction });
+    originalArchiveSources.set(this, { database: this.database, databasePath, readOnly, assertCurrent: this.requireNoActiveTransaction, liveBackups: 0 });
   }
 
   exec(sql: string): void {
@@ -347,7 +446,7 @@ class NodeSqliteDriver implements SqliteDriver {
         this.poisoned = true;
         rolledBackTransactionFailures.delete(this);
         try {
-          this.database.close();
+          if ((originalArchiveSources.get(this)?.liveBackups ?? 0) === 0) this.database.close();
         } catch {
           // The transaction outcome is already uncertain. Closing is best
           // effort; the public connection remains permanently unusable.
@@ -371,7 +470,8 @@ class NodeSqliteDriver implements SqliteDriver {
     catch (error) {
       this.poisoned = true;
       rolledBackTransactionFailures.delete(this);
-      try { this.database.close(); } catch { /* Permanently refuse the uncertain connection. */ }
+      try { if ((originalArchiveSources.get(this)?.liveBackups ?? 0) === 0) this.database.close(); }
+      catch { /* Permanently refuse the uncertain connection. */ }
       throw new AggregateError(primaryError === undefined ? [error] : [primaryError, error],
         'SQLite read snapshot could not restore connection settings');
     }
@@ -379,8 +479,10 @@ class NodeSqliteDriver implements SqliteDriver {
 
   close(): void {
     this.requireNoActiveTransaction();
+    if ((originalArchiveSources.get(this)?.liveBackups ?? 0) !== 0)
+      throw new ResourceRetirementError('original SQLite source has a live or unjoined archive backup', undefined);
     try { this.database.close(); }
-    finally { rolledBackTransactionFailures.delete(this); connectionIssuers.delete(this); }
+    finally { rolledBackTransactionFailures.delete(this); connectionIssuers.delete(this); originalArchiveSources.delete(this); }
   }
 
   private readonly requireNoActiveTransaction = (): void => {

@@ -10,6 +10,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { assertRunPolicySnapshot, modeDecisions } from '../policy/tool-policy.js';
 import { loadToolContracts } from '../tools/input-contract.js';
+import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { decodeDelegateRequest } from '../tools/child-inputs.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
@@ -30,7 +31,7 @@ export async function planChildComposition(artifacts: ArtifactCatalog, input: {
   if (manifest.schemaVersion !== 1 || manifest.format !== 'cliq-tool-contracts-v1' ||
       digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest || manifest.manifestDigest !== parent.tools.manifestDigest)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'child composition lost its complete original parent manifest');
-  loadToolContracts(await reads.mapReads(manifest.entries, async entry => ({ ...entry,
+  loadToolContracts(await reads.mapReads(manifest.entries, async entry => readMcpInputAuthority(reads, { ...entry,
     inputSchema: await readCanonicalArtifact(reads, entry.inputSchemaRef) })));
   const requestedNames = new Set(request.capabilities.builtinToolNames), requestedServers = new Set(request.capabilities.registeredMcpServerIds);
   const entries = manifest.entries.filter(entry => {

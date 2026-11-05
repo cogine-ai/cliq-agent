@@ -9,6 +9,7 @@ import { decodeToolExecutionIdentity } from '../tools/execution-identity.js';
 import { assertSupervisorControlIdentity, readToolRuntimeAuthority } from './tool-runtime-authority.js';
 import { assertRunPolicySnapshot } from '../policy/tool-policy.js';
 import { loadToolContracts } from '../tools/input-contract.js';
+import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeRunSpec, decodeVerifierSpec, decodeWorkspaceIdentity } from './decoders.js';
@@ -63,7 +64,7 @@ async function readRunAuthorityMaterial(
     if (canonicalSha256(schema) !== entry.inputSchemaDigest) throw new TypeError('tool input schema digest mismatch');
     if (output && canonicalSha256(await readCanonicalArtifact(openingReads, entry.outputSchemaRef!)) !== entry.outputSchemaDigest)
       throw new TypeError('tool output schema digest mismatch');
-    return { ...entry, inputSchema: schema };
+    return readMcpInputAuthority(openingReads, { ...entry, inputSchema: schema });
   }));
   const session = readSession(driver, run.sessionId), principalId = readSessionPrincipalId(driver, run.sessionId);
   const toolContracts = loadToolContracts(contracts);
@@ -82,7 +83,7 @@ async function readRunAuthorityMaterial(
     assertRunPolicySnapshot({ policy, policyRef: spec.policyRef, assembly, principalId, workspaceIdentityDigest: workspace.identityDigest });
     const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(reads, assembly.runtime.runtimeBundleRef);
     const profile = await readCanonicalArtifact<PolicyEngineProfileV1>(reads, policy.engine.profileRef);
-    const tools = contracts.map(({ inputSchema: _schema, ...entry }) => entry);
+    const tools = contracts.map(({ inputSchema: _schema, mcpRecovery: _mcpRecovery, ...entry }) => entry);
     const sandbox = decodeSandboxProfile(await readCanonicalArtifact(reads, spec.sandboxProfileRef));
     await readToolRuntimeAuthority(reads, { assembly, policy, bundle, profile, tools, releaseKeys, resources: sandbox.resources }, readSignal);
     assertSupervisorControlIdentity(assertActiveStateOwner(driver, owner), assembly, tools);

@@ -28,11 +28,14 @@ import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js'
 import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
 import { buildMcpHttpAdminProbeAsset } from '../mcp-package.js';
 import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH } from '../../../src/state/mcp-broker-native.js';
+import { MCP_STDIO_BROKER_ENTRY_ID, MCP_STDIO_BROKER_RELATIVE_PATH } from '../../../src/state/mcp-stdio-broker-native.js';
+import { inspectMcpStaticLinuxExecutable } from '../../../src/sandbox/mcp-stdio-executable.js';
+import { buildInstalledMcpRecoveryPackage } from './installed-mcp-recovery-package.js';
 import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './installed-skill-package.js';
 import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
 import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
 
-type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true }>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true; mcpStdio?: true; mcpRecovery?: true }>;
 import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
@@ -43,7 +46,7 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
   options: PackageBuildOptions = {}, diagnostics={phase:0}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp'));
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp' || key === 'mcpStdio' || key === 'mcpRecovery'));
   assert(!(modelFixture && options.providerModel), 'owned fixture and real provider definitions cannot be combined');
   const providerModel = options.providerModel === undefined ? undefined : providerModelDefinition(options.providerModel);
   if (providerModel) assert(variant === 'complete', 'real provider qualification requires the complete signed native package');
@@ -60,6 +63,12 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   assert(options.storeFailureDiagnostics === undefined || options.storeFailureDiagnostics === true);
   assert(options.resourceDiagnostics === undefined || options.resourceDiagnostics === true);
   assert(options.mcpHttp === undefined || options.mcpHttp === true);
+  assert(options.mcpStdio === undefined || options.mcpStdio === true);
+  assert(options.mcpRecovery === undefined || options.mcpRecovery === true);
+  if (options.mcpRecovery) assert(options.mcpStdio === true && options.source === undefined,
+    'the fixed recovery publisher requires its same current complete signed stdio image, never an augmented historical source');
+  if (options.mcpStdio) assert(variant === 'complete' && hasModel,
+    'MCP stdio requires the complete signed native and model package');
   if (options.mcpHttp) assert(variant === 'complete' && options.guestToolchain === 'node-test-v1' && hasModel,
     'MCP HTTP requires the complete signed native, fixed Admin helper and guest Node package');
   if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true,
@@ -84,6 +93,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
   if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
   if (options.mcpHttp && schemaVersion !== 8) throw new TypeError('MCP HTTP requires the current signed schema8 recipe');
+  if (options.mcpStdio && schemaVersion !== 8) throw new TypeError('MCP stdio requires the current signed schema8 recipe');
   // An explicit old source compiles with that original product's actual SEA
   // builder and its separately integrity-installed lock, never today's deps.
   const sea = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/supervisor-sea-builder.ts')).href) as
@@ -136,6 +146,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
     ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
     ...(options.resourceDiagnostics ? { resourceDiagnostics: true as const } : {}),
+    ...(options.mcpHttp || options.mcpStdio ? { mcpAdminDiagnostics: true as const } : {}),
     assets: { 'release-trust-roots.json': rootAsset, ...setupAssets } });
   const supervisorBytes = await readFile(supervisorFile);
   diagnostics.phase=5;
@@ -175,6 +186,8 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   }
   let dependencyBrokerBytes: Buffer | undefined;
   let mcpBrokerBytes: Buffer | undefined;
+  let mcpStdioBrokerBytes: Buffer | undefined, mcpStdioServerBytes: Buffer | undefined;
+  let mcpRecoveryData: Awaited<ReturnType<typeof buildInstalledMcpRecoveryPackage>> | undefined;
   let mcpAdminHelper: Awaited<ReturnType<typeof buildMcpHttpAdminProbeAsset>> | undefined;
   if (options.mcpHttp) {
     const brokerRoot = path.join(fixture, 'mcp-http-broker-image');
@@ -185,6 +198,25 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     assert.equal(broker.status, 0, 'production MCP HTTP broker construction refused');
     mcpBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-http-broker.node'));
     mcpAdminHelper = await buildMcpHttpAdminProbeAsset(repository);
+  }
+  if (options.mcpStdio) {
+    const brokerRoot = path.join(fixture, 'mcp-stdio-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-mcp-stdio-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production MCP stdio broker construction did not join');
+    assert.equal(broker.status, 0, 'production MCP stdio broker construction refused');
+    mcpStdioBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-stdio-broker.node'));
+    const server = path.join(fixture, 'mcp-static-server-fixture');
+    const compiled = spawnSync(process.env.CLIQ_WORKER_CC ?? 'musl-gcc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+      '-static', '-fno-ident', `-ffile-prefix-map=${repository}=.`, '-Wl,--build-id=none', '-s',
+      path.join(repository, 'native/linux/mcp-stdio-server-fixture.c'), '-o', server],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(compiled.error, undefined, 'actual static MCP server fixture compiler did not join');
+    assert.equal(compiled.status, 0, 'actual static MCP server fixture compilation refused');
+    await chmod(server, 0o500); mcpStdioServerBytes = await readFile(server);
+    inspectMcpStaticLinuxExecutable(mcpStdioServerBytes);
+    if (options.mcpRecovery) mcpRecoveryData = await buildInstalledMcpRecoveryPackage({ server, serverBytes: mcpStdioServerBytes, publisher });
   }
   if (npmData) {
     const brokerRoot = path.join(fixture, 'dependency-broker-image');
@@ -261,6 +293,13 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
       { entryId: mcpAdminHelper.entryId, role: mcpAdminHelper.role, relativePath: mcpAdminHelper.relativePath,
         version: mcpAdminHelper.version, executable: mcpAdminHelper.executable, bytes: mcpAdminHelper.bytes },
     ] : []),
+    ...(mcpStdioBrokerBytes && mcpStdioServerBytes ? [
+      { entryId: MCP_STDIO_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: MCP_STDIO_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: mcpStdioBrokerBytes },
+      { entryId: 'mcp-static-stdio-fixture-v1', role: 'mcp_server' as const, relativePath: 'mcp/static-stdio-fixture',
+        version: '1', executable: true, bytes: mcpStdioServerBytes },
+    ] : []),
+    ...(mcpRecoveryData?.contents ?? []),
     ...(npmAdapter && npmData && dependencyBrokerBytes ? [
       { entryId: DEPENDENCY_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: DEPENDENCY_BROKER_RELATIVE_PATH,
         version: '1', executable: true, bytes: dependencyBrokerBytes },
@@ -286,6 +325,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
       ...skillData.roots,
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
       ...(guest ? [guest.root] : []),
+      ...(mcpRecoveryData ? [mcpRecoveryData.root] : []),
       { kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
         artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] },
       ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'system_prompt') ?? []),

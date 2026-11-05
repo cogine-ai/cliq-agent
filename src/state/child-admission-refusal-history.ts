@@ -13,6 +13,7 @@ import { loadToolPolicy, planToolRequest } from '../policy/tool-policy.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { decodeDelegateRequest } from '../tools/child-inputs.js';
 import { loadToolContracts } from '../tools/input-contract.js';
+import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { readModelTurnMaterial } from './agent-context.js';
 import type { ModelRequestV1, NormalPromptProjectionV1 } from '../model/request.js';
@@ -63,7 +64,7 @@ export async function validateChildAdmissionRefusalHistory(driver: SqliteDriver,
       const inputSchema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
       if (canonicalSha256(inputSchema) !== entry.inputSchemaDigest || entry.outputSchemaRef !== undefined &&
           canonicalSha256(await readCanonicalArtifact(artifacts, entry.outputSchemaRef)) !== entry.outputSchemaDigest) invalid('changed an original tool schema');
-      return { ...entry, inputSchema };
+      return readMcpInputAuthority(artifacts, { ...entry, inputSchema });
     }),
     toolContracts = loadToolContracts(contracts), session = readSession(driver, run.sessionId), principalId = readSessionPrincipalId(driver, run.sessionId),
     sourceManifest = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef)),

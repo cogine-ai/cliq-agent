@@ -83,6 +83,8 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
   else if (evidence.failureKind === 'mcp_known_result_unusable') {
     fields.push('toolObservationRef', 'toolObservationDigest', 'captureRef', 'captureDigest');
   }
+  else if (evidence.failureKind === 'retry_unknown_exhausted') fields.push('retryUnknownResultRef', 'retryUnknownResultDigest');
+  else if (evidence.failureKind === 'mcp_call_resource_exhausted') fields.push('resource', 'used', 'limit', 'retryUnknownResultRef', 'retryUnknownResultDigest');
   else if (evidence.failureKind === 'credential_redemption_failed') {
     fields.push('credentialGrantRef', 'credentialGrantDigest', 'endpointRegistrationRef', 'endpointRegistrationDigest',
       'credentialAuthorityRecordDigest', 'authorityRevision', 'credentialServiceRevision', 'failureCode');
@@ -100,7 +102,10 @@ export async function validateModelFailureStop(driver: SqliteDriver, artifacts: 
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, cut.runSpec.assemblyRef);
   const mcpNoRelease = assembly.mcpServers.length || cut.journal.some(entry => entry.opKind === 'mcp' || entry.opKind === 'mcp-server')
     ? await validateMcpStopComposition(driver, artifacts, cut) : new Set<number>();
-  const cause = evidence.failureKind === 'mcp_known_result_unusable'
+  const cause = evidence.failureKind === 'retry_unknown_exhausted' || evidence.failureKind === 'mcp_call_resource_exhausted'
+    ? await (await import('./mcp-retry-terminal.js')).readMcpRetryExhaustionCause(driver, artifacts, cut, evidence.observedAt,
+      evidence.retryUnknownResultRef, evidence.retryUnknownResultDigest, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
+    evidence.failureKind === 'mcp_known_result_unusable'
     ? await readMcpKnownUnusableCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq) :
     evidence.failureKind === 'model_unusable_response' ? await readModelFailureCause(driver, artifacts, cut, evidence.observedAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq, mcpNoRelease) :
     evidence.failureKind === 'credential_redemption_failed' ?

@@ -712,3 +712,32 @@ boundaries. In-process execution passes typed values; assistant JSON-looking
 text is inert. Minimal core means removing unnecessary interpretation and
 authority layers, not eliminating a serialization format used by providers
 and durable storage.
+
+## MCP retry closure integration (qualification pending)
+
+The fixed retry data path now retains exact original HTTP native bindings and
+stdio instance provenance, closes each older UNKNOWN only with its actual
+irreversible joined domain or strict successor process-death proof, and admits
+a new contiguous attempt through the existing Journal/Run transaction. The
+whole call retains its earliest native deadline and literal 500/2000 ms delays;
+stdio's independent default two-launch ceiling is unchanged. Server history
+binds its own effect attempt and original worker separately from that whole-call
+deadline. Actual server capacity exhaustion creates no fictitious third worker,
+server or effect attempt.
+
+A genuinely positive HTTP no-release failure keeps its original zero-consumption
+settlement. Remaining retry capacity leaves the ordered call open. Its original
+error is published once when the literal policy, original deadline, capacity or
+real Stop closes that call. Earlier UNKNOWNs retain their full-once charges and
+cannot replace the result of a later real claim. UNKNOWN exhaustion instead
+uses the RFC's fixed terminal-only RetryUnknownCancelledResult and the same
+unique Stop transaction; the model's independent strict fence/death rule is
+unchanged. The normative types and transition rules live in the main durable
+kernel RFC, including the precise server-launch resource failure variant.
+
+These source changes do not qualify installed retry or signed status recovery.
+The production profile gates remain closed until positive-result/retry/history
+composition, signed read-only status producers, exact typed retention and the
+corresponding real Linux lifecycle campaigns pass. Pure data regressions prove
+no process death, native join, permission, credential release or physical
+shutdown; missing evidence remains an explicit recovery wait.

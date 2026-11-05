@@ -21,6 +21,9 @@ import { loadInstalledCredentialPlatform } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 import { installedRuntimeUpgradeFailureMarker, type InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
+import { openInstalledClientDirectory } from '../client/installed-data.js';
+import { readRunScheduling } from '../client/run-scheduling.js';
+import { DEFAULT_RUN_SCHEDULING, type RunSchedulingV1 } from '../kernel/run-scheduling.js';
 
 // Hidden Linux SEA entry. Default CLI startup is unchanged. Release roots are
 // embedded at image construction, never selected by argv/environment/control.
@@ -34,6 +37,7 @@ let anchor: HeldInstalledAnchor | undefined;
 let containmentHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
 let supervisorStopRequested = false;
+const supervisorStartupStop = new AbortController();
 let credentialRole = false;
 
 function stopSupervisorStartup(): boolean {
@@ -264,6 +268,7 @@ async function start(): Promise<void> {
   process.once('SIGTERM', () => {
     if (mode === '--installed-supervisor') {
       supervisorStopRequested = true;
+      supervisorStartupStop.abort();
       store?.beginClose();
     }
     // Final retirement still joins the original startup producer before
@@ -326,8 +331,20 @@ async function start(): Promise<void> {
   if (stopSupervisorStartup()) return;
   const actualUser = runProfile ? (await loadInstalledCredentialPlatform(selected)).currentUser() : undefined;
   if (stopSupervisorStartup()) return;
+  let scheduler: RunSchedulingV1 = DEFAULT_RUN_SCHEDULING;
+  if (runProfile) {
+    let data: Awaited<ReturnType<typeof openInstalledClientDirectory>> | undefined;
+    try { data = await openInstalledClientDirectory(selected, { create: false }); }
+    catch (error) { if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error; }
+    if (data) {
+      try { scheduler = await readRunScheduling(data.directory); }
+      finally { await data.directory.close(); }
+    }
+  }
+  if (stopSupervisorStartup()) return;
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys,
-    ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor);
+    scheduler,
+    ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor, supervisorStartupStop.signal);
   if (stopSupervisorStartup()) return;
   await store.startInstalledRuns();
   if (stopSupervisorStartup()) return;
@@ -339,4 +356,12 @@ async function start(): Promise<void> {
 }
 
 const starting = start();
-void starting.catch(fail);
+void starting.catch(async error => {
+  if (supervisorStopRequested && supervisorStartupStop.signal.aborted && error === supervisorStartupStop.signal.reason) {
+    // Only this exact original cancellation can be quiet. A replaced error or
+    // failed native/Owner retirement remains a real reported stop failure.
+    try { await close(); } catch (retirement) { report(retirement); process.exitCode = 1; }
+    return;
+  }
+  await fail(error);
+});

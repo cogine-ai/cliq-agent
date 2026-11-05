@@ -116,7 +116,7 @@ export type ToolResultPayloadV1 = {
       | { source: 'policy'; policyRef: ArtifactRef; decisionDigest: string }
       | { source: 'user'; approvalDecisionRef: ArtifactRef; approvalDecisionDigest: string } }
   | { outcome: 'error'; code: 'TOOL_NOT_FOUND' | 'TOOL_INPUT_INVALID' | 'TOOL_AUTHORITY_UNAVAILABLE'
-      | 'TOOL_EXECUTION_FAILED' | 'TOOL_PROTOCOL_ERROR' | 'TOOL_RESOURCE_EXHAUSTED';
+      | 'TOOL_EXECUTION_FAILED' | 'TOOL_PROTOCOL_ERROR' | 'TOOL_RESOURCE_EXHAUSTED' | 'TOOL_RESULT_UNAVAILABLE';
       diagnosticRef: ArtifactRef; diagnosticDigest: string;
       opId?: string; attempt?: number; journalErrorRef?: ArtifactRef; journalErrorDigest?: string }
   | { outcome: 'batch_not_executed'; code: 'BATCH_REJECTED_BEFORE_DISPATCH'; invalidCallIds: string[] }
@@ -159,6 +159,6 @@ export type RunContextCompactionItem = ItemIdentity & {
   sourceItemsDigest: string;
 };
 
-export type ContinuationItem = import('./dependency.js').DependencyReadyItem | import('./dependency.js').DependencyFailureItem | import('./dependency-script-approval.js').DependencyScriptDecisionItem | import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
+export type ContinuationItem = import('./mcp-server-authorization.js').McpServerPolicyDecisionItem | import('./mcp-stdio.js').McpServerStoppedItem | import('./dependency.js').DependencyReadyItem | import('./dependency.js').DependencyFailureItem | import('./dependency-script-approval.js').DependencyScriptDecisionItem | import('./child-merge.js').ChildMergePolicyDecisionItem | ChildHandleItem | ChildResultItem | ChildMergeBatchItem | ChildMergeResultItem | ModelTurnItem | ToolBatchItem | ToolResultItem | RunContextCompactionItem | ToolPolicyDecisionItem | InputRequestItem | UserInputItem | FinalCandidateItem |
   VerifierPolicyDecisionItem | VerifierResultItem | RepairDiagnosticItem | VerifierStopItem | VerifierSkipItem |
-  DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem | import('./mcp.js').ToolAbandonedItem;
+  DeliveryMergeItem | DeliveryMergeConflictItem | DeliveryDecisionItem | DeliveryPolicyDecisionItem | PublicationPathProgressItem | PublicationPathResultItem | PublicationLateObservationItem | import('./mcp.js').ToolAbandonedItem | import('./mcp-server-authorization.js').McpServerFailedStoppedItem;

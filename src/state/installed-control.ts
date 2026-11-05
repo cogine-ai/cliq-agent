@@ -14,8 +14,9 @@ import type { CredentialFinalizeRequest } from './installed-credential-client.js
 import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
-import { VerifierAuthorizationError } from './authorization-artifacts.js';
+import { VerifierAuthorizationError, McpStdioAuthorizationError } from './authorization-artifacts.js';
 import { ListCursorError, ListCutCapacityError, ListCutBusyError } from './list-read-cut.js';
+import { sessionContextRequestLimitRefusal } from './session-context-limit.js';
 
 export type InstalledControlService = Readonly<{ close(): Promise<void> }>;
 type InvalidError = Extract<InstalledControlErrorV1, { code: 'INVALID_REQUEST' }>;
@@ -106,6 +107,8 @@ export function openInstalledControl(store: StateStore,
       messageCode: 'control.run_terminal' };
     if (error instanceof VerifierAuthorizationError) return { schemaVersion: 1, code: error.refusalCode, retryable: false,
       messageCode: 'authorization.verifier_identity_refused' };
+    if (error instanceof McpStdioAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false,
+      messageCode: 'authorization.mcp_stdio_identity_refused' };
     if (error instanceof InstalledModelAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
       retryable: false, messageCode: 'run.model_authority_refused' };
     if (error instanceof InstalledRunAuthorityError) return { schemaVersion: 1,
@@ -207,7 +210,7 @@ export function openInstalledControl(store: StateStore,
           // Read a fresh authenticated authoritative snapshot, not the stale
           // producer cut or a fabricated metadata-only conflict response.
           try {
-            const observed = method === 'run.submit' || ['session.fork', 'session.compact', 'session.handoff.create'].includes(method)
+            const observed = method === 'run.submit' || method === 'session.get' && Object.hasOwn(request, 'contextPage') || ['session.fork', 'session.compact', 'session.handoff.create'].includes(method)
               ? await store.readControl({ protocolVersion: 1, method: 'session.get', sessionId: request.sessionId as string }, identity)
               : method === 'run.cancel' || method === 'run.approve' || method === 'run.input' || method === 'run.reconcile'
                 ? await store.readControl({ protocolVersion: 1, method: 'run.get', runId: request.runId as string }, identity) : undefined;
@@ -221,7 +224,8 @@ export function openInstalledControl(store: StateStore,
                 conflict: { resourceKind: 'run', currentSnapshot: observed.snapshot } } } satisfies InstalledControlResponseV1;
           } catch (snapshotFailure) { return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(snapshotFailure) } satisfies InstalledControlResponseV1; }
         }
-        return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
+        return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: sessionContextRequestLimitRefusal(knownMethod, error) ?? errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
       }
     });
     if (controlRetirementFailure) throw controlRetirementFailure;

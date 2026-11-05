@@ -29,6 +29,7 @@ import { verifierCheckpointId, verifierResultItemId, type VerifierProgress } fro
 import { planVerifierRepair } from '../../../src/state/verifier-repair.js';
 import { assertInstalledVerifierRetirement, readInstalledVerifierInputs, type InstalledVerifierRetirementPhase, type InstalledVerifierOwnerHistoryReader } from './installed-verifier-evidence.js';
 import { assertInstalledInteractivePermission, assertInstalledTemplatePermission, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
+import { installedSessionSegmentsAt } from './installed-session-segments.js';
 
 type CaseKind = 'required_pass' | 'required_repair' | 'required_provider' | 'advisory_failure' | 'required_timeout';
 type ProcessIdentity = { role: 'namespace_init' | 'monitor' | 'subreaper'; pid: number; startTicks: string };
@@ -491,7 +492,7 @@ export async function assertInstalledVerifierOutcome(input: {
       ...(resultRef ? { resultRef, summaryRef, summaryDigest } : { terminalDetailRef: run.terminalDetailRef }) });
     const projection = decodeSessionProjection(await object(session.contextProjectionRef));
     check(projection.sessionId === run.sessionId && projection.contextRevision === session.contextRevision && projection.throughItemSeq === session.latestItemSeq);
-    const segments = projection.segments.filter(segment => segment.fromItemSeq <= terminalRow.itemSeq && segment.throughItemSeq >= terminalRow.itemSeq);
+    const segments = await installedSessionSegmentsAt(projection, terminalRow.itemSeq, bytes);
     same(segments, [{ kind: 'raw', fromItemSeq: terminalRow.itemSeq, throughItemSeq: terminalRow.itemSeq,
       items: [{ sourceSessionId: run.sessionId, itemSeq: terminalRow.itemSeq, itemId: terminalRow.itemId, kind: 'run_terminal', payloadRef: terminalRow.payloadRef }] }]);
     return { caseKind, runId: run.id, sessionId: run.sessionId, status: run.status as InstalledVerifierOutcome['status'],

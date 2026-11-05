@@ -6,6 +6,8 @@ import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/iden
 import { decodeManualAbandonAttestation, decodeManualInvocationWait, decodeToolAbandonedItem, type ManualInvocationWaitV1, type ManualAbandonAttestationV1 } from '../kernel/mcp.js';
 import { decodeBrokerInvocationAmbiguity } from '../kernel/broker-ambiguity.js';
 import { decodeBrokerProcessDomainDeath, type BrokerProcessDomainDeathEvidenceV1 } from '../kernel/broker-process-domain-death.js';
+import { assertControlWireJson, controlWireRecord, controlWireRef, controlWireText, controlWireInteger } from '../kernel/control-wire-data.js';
+import { assertBoundedJsonValue } from '../kernel/json.js';
 import { decodeInstalledControlRequest, decodeInstalledControlResponse, type RunReconcileRequestV1 } from '../kernel/control-wire.js';
 import type { InvocationJournalEntry, RecoveryClosureV1, Run, TerminalDetail, ToolBatchItem, RunFrontier } from '../kernel/types.js';
 import type { ToolRequestV1, ToolTargetV1, ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
@@ -23,8 +25,11 @@ import { KernelStorageError } from './errors.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { assertInstalledMcpBrokerProcess, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH } from './mcp-broker-native.js';
-import { readMcpManualDispatchOwner, assertMcpRunQuiescence, readMcpNoReleaseHistory, readMcpSuccessorAmbiguityHistory } from './mcp-execution.js';
+import { MCP_STDIO_BROKER_ENTRY_ID, MCP_STDIO_BROKER_RELATIVE_PATH } from './mcp-stdio-broker-native.js';
+import { readMcpManualDispatchOwner, assertMcpRunQuiescence, readMcpNoReleaseHistory, readMcpAmbiguityHistory } from './mcp-execution.js';
 import { readMcpRegistryClosure } from './mcp-registration.js';
+import { readMcpServerClosedAttempt, validateMcpServerHistory } from './mcp-server-history.js';
+import { resumeOwnedMcpServerManualTerminal } from './mcp-server-retirement.js';
 import { stateRootIdentityForLock } from './native-owner.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readRun, readSessionPrincipalId, readControlRequest, ZERO_BUDGET, readCheckpoint } from './rows.js';
@@ -112,14 +117,15 @@ async function frame(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: Manu
     invalid('manual closure for this tool transport is not implemented');
   }
   const registry = await readMcpRegistryClosure(driver, artifacts, target.execution.registryRevisionRef, principalId);
-  if (registry.registry.transport.kind !== 'streamable_http' || !assembly.mcpServers.some(server => server.registryRevisionRef === registry.ref &&
+  if (!assembly.mcpServers.some(server => server.registryRevisionRef === registry.ref &&
     server.manifestDigest === registry.registry.manifestDigest) || target.execution.registryManifestDigest !== registry.registry.manifestDigest) {
     invalid();
   }
   const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
-  const images = bundle.entries.filter(entry => entry.entryId === MCP_HTTP_BROKER_ENTRY_ID);
+  const stdio = registry.registry.transport.kind === 'stdio';
+  const images = bundle.entries.filter(entry => entry.entryId === (stdio ? MCP_STDIO_BROKER_ENTRY_ID : MCP_HTTP_BROKER_ENTRY_ID));
   if (bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest || images.length !== 1 || images[0]!.role !== 'platform_helper' ||
-    images[0]!.version !== '1' || images[0]!.executable !== true || images[0]!.relativePath !== MCP_HTTP_BROKER_RELATIVE_PATH) {
+    images[0]!.version !== '1' || images[0]!.executable !== true || images[0]!.relativePath !== (stdio ? MCP_STDIO_BROKER_RELATIVE_PATH : MCP_HTTP_BROKER_RELATIVE_PATH)) {
     invalid();
   }
   const originalOwners = await readRetainedStateOwnerHistory(driver, artifacts, claim.stateOwnerEpoch!), claiming = originalOwners.entries.find(entry => entry.owner.ownerEpoch === claim.stateOwnerEpoch);
@@ -129,11 +135,7 @@ async function frame(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: Manu
       claiming.owner.releasedAt < (ambiguity.creatorProcessDeathEvidenceRef ? claim.timestamp : unknown.timestamp)) {
     invalid();
   }
-  if (ambiguity.creatorProcessDeathEvidenceRef) {
-    await readMcpSuccessorAmbiguityHistory(driver, artifacts, { prepared, claim, unknown, assembly });
-  } else {
-    await readSupervisorInspector(artifacts, claiming.owner, assembly, ambiguity);
-  }
+  await readMcpAmbiguityHistory(driver, artifacts, { prepared, claim, unknown, assembly });
   return {
     prepared,
     claim,
@@ -144,7 +146,8 @@ async function frame(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: Manu
     grant,
     ambiguity,
     assembly,
-    principalId
+    principalId,
+    stdio
   };
 }
 /** Uses the caller's actual selected recovery cut; never recursively reads it. */
@@ -260,6 +263,47 @@ type Physical = {
   deathEvidenceRef: string;
   deathEvidenceDigest: string;
 });
+/** Closed historical data only. A parsed joined projection never creates a
+ * current native owner, release fence, cleanup permission or process proof. */
+export function decodeManualDispatchClosureData(value: unknown): Physical {
+  assertControlWireJson(value); assertBoundedJsonValue(value, 'manual dispatch closure');
+  const base = controlWireRecord(value, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'dispatchId', 'dispatchJournalSeq',
+    'brokerFenceTokenDigest', 'unknownJournalSeq', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'inspectorStateOwnerEpoch', 'observedAt',
+    'evidenceDigest', 'kind'], ['joined', 'deathEvidenceRef', 'deathEvidenceDigest']);
+  if (base.schemaVersion !== 1 || base.format !== 'cliq-manual-dispatch-closure-v1' || base.evidenceDigest !== digestOmitting(base, 'evidenceDigest'))
+    throw new TypeError('manual dispatch closure changes its exact closed format or digest');
+  for (const key of ['runId', 'opId', 'dispatchId']) controlWireText(base[key]);
+  for (const key of ['brokerFenceTokenDigest', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'evidenceDigest']) controlWireRef(base[key]);
+  controlWireInteger(base.attempt); for (const key of ['dispatchJournalSeq', 'unknownJournalSeq', 'inspectorStateOwnerEpoch']) controlWireInteger(base[key], 1);
+  parseCanonicalTime(base.observedAt as string);
+  if (base.kind === 'broker_process_domain_dead') {
+    if (base.joined !== undefined) throw new TypeError('manual process death cannot borrow an original native join');
+    controlWireRef(base.deathEvidenceRef); controlWireRef(base.deathEvidenceDigest);
+  } else if (base.kind === 'original_native_joined') {
+    if (base.deathEvidenceRef !== undefined || base.deathEvidenceDigest !== undefined) throw new TypeError('manual original join cannot borrow a successor death');
+    const joined = controlWireRecord(base.joined, ['kind', 'purpose', 'setupReleased', 'effectReleased', 'completedStages', 'tokenRevoked',
+      'matchingActiveReleaseCount', 'tasksJoined'], ['brokerFenceTokenDigest', 'networkStarted', 'requestStarted', 'networkJoined',
+      'releaseFenceTokenDigest', 'execReleased', 'processJoined', 'pipesJoined', 'outputCustodyRetired']);
+    if (joined.purpose !== 'run' || joined.tokenRevoked !== true || joined.matchingActiveReleaseCount !== 0 || joined.tasksJoined !== true ||
+        typeof joined.setupReleased !== 'boolean' || typeof joined.effectReleased !== 'boolean' || !Array.isArray(joined.completedStages) || joined.completedStages.length > 4 ||
+        !same(joined.completedStages, ['initialize', 'initialized', 'tools_list', 'tools_call'].slice(0, joined.completedStages.length)))
+      throw new TypeError('manual original join has no exact finite revoked local projection');
+    if (joined.kind === 'mcp_http_owner_joined') {
+      controlWireRecord(base.joined, ['kind', 'purpose', 'brokerFenceTokenDigest', 'networkStarted', 'requestStarted', 'setupReleased', 'effectReleased',
+        'completedStages', 'tokenRevoked', 'matchingActiveReleaseCount', 'networkJoined', 'tasksJoined']);
+      if (joined.brokerFenceTokenDigest !== base.brokerFenceTokenDigest || joined.networkJoined !== true ||
+          typeof joined.networkStarted !== 'boolean' || typeof joined.requestStarted !== 'boolean' || joined.effectReleased && !joined.setupReleased || joined.requestStarted && !joined.networkStarted)
+        throw new TypeError('manual original HTTP projection changes its local release domain');
+    } else if (joined.kind === 'mcp_stdio_owner_joined') {
+      controlWireRecord(base.joined, ['kind', 'purpose', 'releaseFenceTokenDigest', 'execReleased', 'setupReleased', 'effectReleased', 'completedStages',
+        'tokenRevoked', 'matchingActiveReleaseCount', 'processJoined', 'pipesJoined', 'tasksJoined', 'outputCustodyRetired']);
+      if (joined.releaseFenceTokenDigest !== base.brokerFenceTokenDigest || joined.execReleased !== true || joined.setupReleased !== true ||
+          joined.processJoined !== true || joined.pipesJoined !== true || joined.outputCustodyRetired !== true)
+        throw new TypeError('manual original stdio projection changes its process/pipe release domain');
+    } else throw new TypeError('unsupported manual native join purpose');
+  } else throw new TypeError('unsupported manual closure kind');
+  return immutableSnapshot(base) as Physical;
+}
 declare const manualPlanBrand: unique symbol;
 export type ManualInvocationFinalization = Readonly<{
   readonly [manualPlanBrand]: true;
@@ -397,6 +441,7 @@ export async function prepareManualInvocationFinalization(driver: SqliteDriver, 
     ...kind
   } as Physical;
   physical.evidenceDigest = digestOmitting(physical, 'evidenceDigest');
+  decodeManualDispatchClosureData(physical);
   const closure = await artifacts.publishCanonical(physical, physical.format);
   metadata.push(closure);
   const handle = Object.freeze({}) as ManualInvocationFinalization;
@@ -545,8 +590,12 @@ export async function replayManualReconciliation(driver: SqliteDriver, artifacts
     invalid();
   }
   const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, input.request.runId);
-  await validateManualAbandonmentHistory(driver, artifacts, cut);
+  const closed = await validateManualAbandonmentHistory(driver, artifacts, cut);
+  if (!closed) invalid('manual first response has no exact original durable abandonment');
   assertCurrentControlFrame(owner, input.identity);
+  const claim = cut.journal.find(entry => entry.opId === closed.opId && entry.attempt === closed.attempt && entry.phase === 'dispatch_claimed');
+  if (!claim) invalid('manual first response lost its exact original permanent claim');
+  resumeOwnedMcpServerManualTerminal(driver, owner, claim);
   return {
     run: cut.run,
     response
@@ -590,7 +639,7 @@ export async function validateManualAbandonmentHistory(driver: SqliteDriver, art
     !cut.items.some(entry => entry.payloadRef === marker.toolAbandonedItemRef && entry.itemId === item.itemId) || item.createdAt !== terminal.createdAt) {
     invalid();
   }
-  const physical = await readCanonicalArtifact<Physical>(artifacts, marker.dispatchFenceOrDeathEvidenceRef);
+  const physical = decodeManualDispatchClosureData(await readCanonicalArtifact(artifacts, marker.dispatchFenceOrDeathEvidenceRef));
   if (!exactKeys(physical, ['schemaVersion', 'format', 'runId', 'opId', 'attempt', 'dispatchId', 'dispatchJournalSeq', 'brokerFenceTokenDigest', 'unknownJournalSeq',
     'inspectorIdentityRef', 'inspectorIdentityDigest', 'inspectorStateOwnerEpoch', 'observedAt', 'evidenceDigest', 'kind',
     ...(physical.kind === 'original_native_joined' ? ['joined'] : ['deathEvidenceRef', 'deathEvidenceDigest'])]) || physical.schemaVersion !== 1 || physical.format !== 'cliq-manual-dispatch-closure-v1' || physical.evidenceDigest !== digestOmitting(physical, 'evidenceDigest') || physical.runId !== cut.run.id ||
@@ -613,6 +662,17 @@ export async function validateManualAbandonmentHistory(driver: SqliteDriver, art
   }, physical);
   let originalDeath: BrokerProcessDomainDeathEvidenceV1 | undefined;
   if (physical.kind === 'original_native_joined') {
+    if (original.stdio) {
+      const joined = physical.joined as import('./mcp-stdio-broker-native.js').NativeMcpStdioRunJoined;
+      if (!exactKeys(joined, ['kind', 'purpose', 'releaseFenceTokenDigest', 'execReleased', 'setupReleased', 'effectReleased', 'completedStages',
+        'tokenRevoked', 'matchingActiveReleaseCount', 'processJoined', 'pipesJoined', 'tasksJoined', 'outputCustodyRetired']) ||
+          inspecting.owner.ownerEpoch !== claiming.owner.ownerEpoch || joined.kind !== 'mcp_stdio_owner_joined' || joined.purpose !== 'run' ||
+          joined.releaseFenceTokenDigest !== row.brokerFenceTokenDigest || joined.tokenRevoked !== true || joined.matchingActiveReleaseCount !== 0 ||
+          joined.processJoined !== true || joined.pipesJoined !== true || joined.tasksJoined !== true || joined.outputCustodyRetired !== true ||
+          joined.execReleased !== true || joined.setupReleased !== true || typeof joined.effectReleased !== 'boolean' || !Array.isArray(joined.completedStages) ||
+          !same(joined.completedStages, ['initialize', 'initialized', 'tools_list', 'tools_call'].slice(0, joined.completedStages.length)) || joined.completedStages.length > 4)
+        invalid('MCP stdio manual closure changes its original joined local release domain');
+    } else {
     const joined = physical.joined as import('./mcp-broker-native.js').NativeMcpRunJoined;
     if (!exactKeys(joined, ['kind', 'purpose', 'brokerFenceTokenDigest', 'networkStarted', 'requestStarted', 'setupReleased', 'effectReleased', 'completedStages', 'tokenRevoked',
       'matchingActiveReleaseCount', 'networkJoined', 'tasksJoined']) || inspecting.owner.ownerEpoch !== claiming.owner.ownerEpoch || joined.kind !== 'mcp_http_owner_joined' || joined.purpose !== 'run' || joined.brokerFenceTokenDigest !== row.brokerFenceTokenDigest ||
@@ -621,6 +681,7 @@ export async function validateManualAbandonmentHistory(driver: SqliteDriver, art
       !Array.isArray(joined.completedStages) || joined.completedStages.length > 4 || !same(joined.completedStages, ['initialize', 'initialized', 'tools_list', 'tools_call'].slice(0, joined.completedStages.length)) ||
       joined.effectReleased && !joined.setupReleased || joined.requestStarted && !joined.networkStarted) {
       invalid();
+    }
     }
   }
   else if (physical.kind === 'broker_process_domain_dead') {
@@ -708,24 +769,45 @@ export async function validateManualAbandonmentHistory(driver: SqliteDriver, art
   }
   return marker;
 }
-export async function validateMcpStopComposition(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, manual?: Plan) {
+export async function validateMcpStopComposition(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1, manual?: Plan,
+  retryClosure?: import('./mcp-retry-admission.js').McpRetryTerminalClosure) {
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, cut.runSpec.assemblyRef));
   const noRelease = new Set<number>();
+  let closedRetry: TerminalDetail['abandonedRetryInvocations'] = [];
+  if (retryClosure) {
+    (await import('./mcp-retry-admission.js')).assertMcpRetryTerminalClosure(driver, artifacts, retryClosure, cut);
+    closedRetry = retryClosure.abandonedRetryInvocations;
+  } else if (['failed', 'cancelled'].includes(cut.run.status) && cut.run.terminalDetailRef) {
+    const detail = await readCanonicalArtifact<TerminalDetail>(artifacts, cut.run.terminalDetailRef);
+    closedRetry = await (await import('./mcp-retry-admission.js')).validateMcpRetryTerminalHistory(driver, artifacts, cut, detail);
+  }
   if (cut.journal.some(row => row.opKind === 'mcp-server')) {
-    invalid('stdio MCP terminal containment is not implemented');
+    const items = new Map((await artifacts.mapReads(cut.items, async row =>
+      readCanonicalArtifact<import('../kernel/types.js').ContinuationItem>(artifacts, row.payloadRef))).map(item => [item.itemId, item]));
+    await validateMcpServerHistory(driver, artifacts, cut.run, cut.runSpec, assembly, items, cut.journal);
+    // A generic undispatched Stop refund cannot close a local reservation:
+    // even an unclaimed launch owns real pipes, an input and a scope. Only
+    // its exact original typed physical retirement may enter terminal Stop.
+    for (const prepared of cut.journal.filter(row => row.opKind === 'mcp-server' && row.phase === 'prepared')) {
+      const entries = cut.journal.filter(row => row.opId === prepared.opId && row.attempt === prepared.attempt);
+      const closed = await readMcpServerClosedAttempt(driver, artifacts, cut.run, cut.runSpec, assembly, prepared, entries);
+      noRelease.add(closed.terminal.seq);
+    }
   }
   if (!assembly.mcpServers.length && cut.journal.some(row => row.opKind === 'mcp')) {
     invalid('MCP history has no original registered composition');
   }
   for (const server of assembly.mcpServers) {
     const registry = await readMcpRegistryClosure(driver, artifacts, server.registryRevisionRef, readSessionPrincipalId(driver, cut.run.sessionId));
-    if (registry.registry.transport.kind !== 'streamable_http' || server.manifestDigest !== registry.registry.manifestDigest) {
+    if (server.manifestDigest !== registry.registry.manifestDigest) {
       invalid();
     }
   }
   for (const row of cut.journal.filter(row => row.opKind === 'mcp')) {
     const final = cut.journal.filter(entry => entry.opId === row.opId && entry.attempt === row.attempt).at(-1)!;
-    if (final.phase === 'unknown' && manual?.original.unknown.seq !== final.seq || final.phase === 'dispatch_claimed') {
+    if (final.phase === 'unknown' && manual?.original.unknown.seq !== final.seq &&
+        !closedRetry.some(entry => final.replayClass === 'retry' && entry.opId === final.opId && entry.attempt === final.attempt &&
+          entry.unknownJournalSeq === final.seq && entry.budgetSettlementRef === final.budgetSettlementRef) || final.phase === 'dispatch_claimed') {
       invalid();
     }
     if (final.phase === 'failed' && !noRelease.has(final.seq)) {

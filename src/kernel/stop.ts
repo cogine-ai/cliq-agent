@@ -69,8 +69,16 @@ export type DependencyAcquisitionFailureEvidenceV1 = {
 export type DependencyAmbiguityFailureEvidenceV1 = Omit<DependencyAcquisitionFailureEvidenceV1, 'failureKind' | 'dependencyFailureItemRef' | 'failedJournalSeq'> & {
   failureKind: 'dependency_result_unavailable'; ambiguityRef: ArtifactRef; unknownJournalSeq: number;
 };
+export type RetryUnknownExhaustionEvidenceV1 = Omit<ModelResponseFailureEvidenceV1,
+  'failureKind' | 'unusableResponseRef' | 'unusableResponseDigest'> & {
+  failureKind: 'retry_unknown_exhausted'; retryUnknownResultRef: ArtifactRef; retryUnknownResultDigest: string;
+};
+export type McpCallResourceExhaustionEvidenceV1 = Omit<RetryUnknownExhaustionEvidenceV1, 'failureKind'> & {
+  failureKind: 'mcp_call_resource_exhausted'; resource: 'server_launch_capacity'; used: number; limit: number;
+};
 export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | McpKnownResultUnusableEvidenceV1 |
-  CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1;
+  CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1 |
+  RetryUnknownExhaustionEvidenceV1 | McpCallResourceExhaustionEvidenceV1;
 
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (

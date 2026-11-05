@@ -38,7 +38,8 @@ export type LocalControlConnection = Readonly<{
   close(): void;
 }>;
 /** Owner lifecycle only: close drains dispatches, so never await it inside one. */
-export type LocalControlListener = Readonly<{ close(): Promise<void> }>;
+export type LocalControlListener = Readonly<{ close(): Promise<void>;
+  fenceForMigration(): Promise<void>; assertFencedForMigration(): void; resumeAfterMigration(): void }>;
 type LiveChannel = { digest: string; assertCurrent(): void;
   processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 };
 type PreparedChannel = Readonly<{ identity: AuthenticatedControlIdentity;
@@ -60,6 +61,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   const channels = new Map<string, LiveChannel>();
   if (liveChannels.has(owner)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'the owner already has a control listener');
   let closing = false;
+  let migrationFenced = false, migrationAuthenticationJoined = false;
+  let migrationFenceJoin: Promise<void> | undefined;
   let drain: Promise<void> | undefined;
   const connections = new Set<LocalControlConnection>();
   const pending = new Set<Promise<unknown>>();
@@ -74,6 +77,15 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   };
   const acceptPeer = (peer: HeldControlPeer) => {
     if (retirementFailure) throw retirementFailure;
+    if (migrationFenced) {
+      try { peer.close(); }
+      catch (error) {
+        retirementFailure ??= error instanceof ResourceRetirementError ? error :
+          new ResourceRetirementError('fenced unauthenticated peer did not retire', error);
+        reportError(retirementFailure);
+      }
+      return;
+    }
     if (closing || connections.size >= 64 || authenticating.size >= 64) { peer.close(); return; }
     let socket: Socket;
     const fd = peer.takeSocketFd();
@@ -175,6 +187,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
     };
     const prepare = (): Promise<PreparedChannel> => {
       if (published) return published;
+      if (migrationFenced) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'new control authentication is fenced by migration'));
       // Register the original producer before its first capture/read/await.
       // Idle clients can overlap this work with their own independent checks,
       // but no live channel or authenticated frame exists until dispatch.
@@ -247,6 +260,32 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   native = owner.filesystem.openControlListener(accept, reportError);
   liveChannels.set(owner, channels);
   const listener: LocalControlListener = Object.freeze({
+    fenceForMigration() {
+      if (this !== listener || closing) return Promise.reject(new TypeError('invalid control migration fence'));
+      if (migrationFenceJoin) return migrationFenceJoin;
+      // Existing authenticated frames (in particular the import's original
+      // frame) remain valid. New peers/first authentication stop synchronously.
+      // Join all original hash/CAS producers before the protected SQL/CAS cut.
+      migrationFenced = true;
+      migrationFenceJoin = Promise.allSettled([...authenticating]).then(results => {
+        for (const result of results) if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError)
+          retirementFailure ??= result.reason;
+        if (retirementFailure) throw retirementFailure;
+        migrationAuthenticationJoined = true;
+      });
+      return migrationFenceJoin;
+    },
+    assertFencedForMigration() {
+      if (this !== listener || closing || !migrationFenced || !migrationAuthenticationJoined)
+        throw new TypeError('control migration fence has not actually joined');
+      if (retirementFailure) throw retirementFailure;
+    },
+    resumeAfterMigration() {
+      if (this !== listener || closing || !migrationFenced || !migrationAuthenticationJoined)
+        throw new TypeError('control authentication cannot resume before its original fence joined');
+      if (retirementFailure) throw retirementFailure;
+      migrationFenced = false; migrationAuthenticationJoined = false; migrationFenceJoin = undefined;
+    },
     close() {
       if (this !== listener) return Promise.reject(new TypeError('invalid control listener'));
       if (drain) return drain;

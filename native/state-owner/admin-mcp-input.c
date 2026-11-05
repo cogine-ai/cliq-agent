@@ -3,6 +3,8 @@
  * never a SQL permission grant.
  */
 #include "../linux/mcp-http-admin-protocol.h"
+#include "../linux/mcp-stdio-protocol.h"
+#include <math.h>
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
@@ -13,6 +15,7 @@ struct admin_mcp_input {
     int             parent_fd;
     struct stat     parent;
     bool            retained;
+    bool            stdio;
     struct admin_mcp_input *next;
 };
 static void
@@ -46,7 +49,7 @@ admin_mcp_input_current(struct cliq_mcp_admin_input *bridge)
     struct cliq_mcp_admin_birth recorded;
     return admin_mcp_current_process(bridge) && bridge->abi_version == CLIQ_MCP_ADMIN_INPUT_ABI && !atomic_load(&bridge->closed) && !input->lock->admin_mcp_retirement_error &&
         lock_is_held(input->lock) && input->parent_fd >= 0 && bridge->birth_fd >= 0 && fstat(input->parent_fd, &parent) == 0 && private_directory(&parent) && same_inode(&parent, &input->parent) &&
-        fstatat(input->lock->runtime_fd, "admin-mcp", &named, AT_SYMLINK_NOFOLLOW) == 0 && private_directory(&named) && same_inode(&named, &parent) &&
+        fstatat(input->lock->runtime_fd, input->stdio ? "admin-mcp-stdio" : "admin-mcp", &named, AT_SYMLINK_NOFOLLOW) == 0 && private_directory(&named) && same_inode(&named, &parent) &&
         fstat(bridge->birth_fd, &file) == 0 && private_lock_file(&file) && same_inode(&file, &bridge->birth_identity) &&
         fstatat(input->parent_fd, bridge->binding.nonce, &named, AT_SYMLINK_NOFOLLOW) == 0 && private_lock_file(&named) && same_inode(&file, &named) &&
         cliq_mcp_admin_read_exact(bridge->birth_fd, &recorded, sizeof(recorded), 0) && !memcmp(&recorded, &bridge->binding, sizeof(recorded)) &&
@@ -69,6 +72,42 @@ admin_mcp_input_close_native(struct cliq_mcp_admin_input *bridge)
     }
     return input->lock->admin_mcp_retirement_error;
 }
+static bool
+admin_mcp_retired_snapshot(struct cliq_mcp_admin_input *bridge, const unsigned char *expected, size_t expected_size)
+{
+    admin_mcp_input *input = (admin_mcp_input *)bridge;
+    if (!admin_mcp_current_process(bridge) || bridge->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->retained ||
+        !expected || !expected_size || expected_size > sizeof(struct cliq_mcp_admin_birth) +
+            CLIQ_MCP_STDIO_MAX_PROGRESS * sizeof(struct cliq_mcp_stdio_progress) ||
+        !atomic_load(&bridge->closed) || !atomic_load(&bridge->execution_claimed) || !atomic_load(&bridge->execution_joined) ||
+        bridge->birth_fd >= 0 || input->parent_fd >= 0 || input->lock->admin_mcp_retirement_error || !lock_is_held(input->lock)) return false;
+    int parent = openat(input->lock->runtime_fd, input->stdio ? "admin-mcp-stdio" : "admin-mcp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int birth = -1; struct stat held, named, file; unsigned char *bytes = NULL; size_t size = 0;
+    bool valid = parent >= 0 && !fstat(parent, &held) && private_directory(&held) && same_inode(&held, &input->parent) &&
+        admin_mcp_directory_same(&bridge->binding.admin_parent, &held) &&
+        !fstatat(input->lock->runtime_fd, input->stdio ? "admin-mcp-stdio" : "admin-mcp", &named, AT_SYMLINK_NOFOLLOW) &&
+        same_inode(&held, &named);
+    if (valid) birth = openat(parent, bridge->binding.nonce, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    valid = valid && birth >= 0 && !fstat(birth, &file) && private_lock_file(&file) && same_inode(&file, &bridge->birth_identity) &&
+        admin_mcp_directory_same(&bridge->binding.birth, &file) && !fstatat(parent, bridge->binding.nonce, &named, AT_SYMLINK_NOFOLLOW) &&
+        private_lock_file(&named) && same_inode(&file, &named);
+    if (valid && input->stdio) {
+        struct cliq_mcp_stdio_history history;
+        valid = cliq_mcp_stdio_read_history(birth, &history, &bytes, &size) && history.purpose == CLIQ_MCP_STDIO_ADMIN &&
+            history.count && history.last.kind == 9 && !memcmp(&history.header.admin, &bridge->binding, sizeof(bridge->binding));
+    } else if (valid) {
+        struct cliq_mcp_admin_history history;
+        valid = cliq_mcp_admin_read_history(birth, &history, &bytes, &size) && history.count && history.last.kind == 9 &&
+            !memcmp(&history.header, &bridge->binding, sizeof(bridge->binding));
+    }
+    valid = valid && size == expected_size && !memcmp(bytes, expected, size) && !fstat(birth, &held) &&
+        private_lock_file(&held) && same_inode(&held, &file) && !fstatat(parent, bridge->binding.nonce, &named, AT_SYMLINK_NOFOLLOW) &&
+        private_lock_file(&named) && same_inode(&held, &named) && lock_is_held(input->lock);
+    free(bytes);
+    int descriptors[] = {birth, parent};
+    for (size_t i = 0; i < 2; i++) if (descriptors[i] >= 0 && close(descriptors[i])) input->lock->admin_mcp_retirement_error = errno;
+    return valid && !input->lock->admin_mcp_retirement_error && lock_is_held(input->lock);
+}
 static int
 close_lock_admin_mcp_inputs(state_lock * lock)
 {
@@ -84,11 +123,14 @@ static napi_value admin_mcp_retirement(napi_env env) {
 }
 static admin_mcp_input * admin_mcp_unwrap(napi_env env, napi_callback_info info) {
     napi_value      self;
-    bool            live = false, retained = false;
+    bool            live = false, retained = false, stdio_live = false, stdio_retained = false;
     admin_mcp_input *input = NULL;
     if (napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok || napi_check_object_type_tag(env, self, &CLIQ_MCP_ADMIN_INPUT_TAG, &live) != napi_ok ||
-        napi_check_object_type_tag(env, self, &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG, &retained) != napi_ok || (!live && !retained) || napi_unwrap(env, self, (void **)&input) != napi_ok ||
-        !input || input->bridge.environment != env || !admin_mcp_current_process(&input->bridge)) {
+        napi_check_object_type_tag(env, self, &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG, &retained) != napi_ok ||
+        napi_check_object_type_tag(env, self, &CLIQ_MCP_STDIO_ADMIN_INPUT_TAG, &stdio_live) != napi_ok ||
+        napi_check_object_type_tag(env, self, &CLIQ_MCP_STDIO_ADMIN_RETAINED_INPUT_TAG, &stdio_retained) != napi_ok ||
+        (!live && !retained && !stdio_live && !stdio_retained) || napi_unwrap(env, self, (void **)&input) != napi_ok ||
+        !input || input->stdio != (stdio_live || stdio_retained) || input->bridge.environment != env || !admin_mcp_current_process(&input->bridge)) {
         native_error(env, "Invalid original Admin MCP input");
         return NULL;
     } return input;
@@ -174,13 +216,32 @@ admin_mcp_same_binding(const struct cliq_mcp_admin_birth *left, const struct cli
         !strcmp(left->target_ref, right->target_ref) && !strcmp(left->target_digest, right->target_digest) && !strcmp(left->core_ref, right->core_ref) && !strcmp(left->core_digest, right->core_digest) &&
         !strcmp(left->plan_ref, right->plan_ref) && !strcmp(left->plan_digest, right->plan_digest) && !strcmp(left->spec_ref, right->spec_ref) && !strcmp(left->spec_digest, right->spec_digest);
 }
-static napi_value admin_mcp_open(napi_env env, napi_callback_info info, bool create){
+static bool admin_stdio_text(napi_env env, napi_value value, char *out, size_t capacity, bool digest) {
+    size_t size = 0;
+    return napi_get_value_string_utf8(env, value, NULL, 0, &size) == napi_ok && size && size < capacity &&
+        napi_get_value_string_utf8(env, value, out, capacity, &size) == napi_ok && strlen(out) == size && (!digest || cliq_mcp_admin_digest(out));
+}
+static bool admin_stdio_arguments(napi_env env, napi_value args[14], struct cliq_mcp_admin_birth *birth) {
+    size_t index = 0;
+#define ADMIN_STDIO_TEXT(field, digest) do { if (!admin_stdio_text(env, args[index++], birth->field, sizeof(birth->field), digest)) return false; } while (0)
+    ADMIN_STDIO_TEXT(operation, false); ADMIN_STDIO_TEXT(principal, false); ADMIN_STDIO_TEXT(nonce, true);
+    ADMIN_STDIO_TEXT(target_ref, true); ADMIN_STDIO_TEXT(target_digest, true); ADMIN_STDIO_TEXT(core_ref, true); ADMIN_STDIO_TEXT(core_digest, true);
+    ADMIN_STDIO_TEXT(plan_ref, true); ADMIN_STDIO_TEXT(plan_digest, true); ADMIN_STDIO_TEXT(spec_ref, true); ADMIN_STDIO_TEXT(spec_digest, true);
+    double attempt, pid;
+    if (napi_get_value_double(env, args[index++], &attempt) != napi_ok || !isfinite(attempt) || attempt < 0 || attempt > 9007199254740991.0 || attempt != (double)(uint64_t)attempt ||
+        napi_get_value_double(env, args[index++], &pid) != napi_ok || !isfinite(pid) || pid < 1 || pid > INT32_MAX || pid != (double)(int64_t)pid) return false;
+    birth->attempt = (uint64_t)attempt; birth->supervisor_pid = (int64_t)pid;
+    ADMIN_STDIO_TEXT(supervisor_start_token, false);
+#undef ADMIN_STDIO_TEXT
+    return index == 14;
+}
+static napi_value admin_mcp_open(napi_env env, napi_callback_info info, bool create, bool stdio){
     state_lock     *lock = unwrap_lock(env, info);
-    size_t          argc = 2;
-    napi_value      args[2], self, result, identity;
+    size_t          argc = 15;
+    napi_value      args[15], self, result, identity;
     if (!lock)
         return NULL;
-    if (!lock_is_held(lock) || lock->admin_mcp_retirement_error || napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != 1)
+    if (!lock_is_held(lock) || lock->admin_mcp_retirement_error || napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != (stdio ? 14u : 1u))
         return native_error(env, "Admin MCP input requires its original held StateOwner");
     admin_mcp_input *input = calloc(1, sizeof(*input));
     if (!input)
@@ -189,34 +250,42 @@ static napi_value admin_mcp_open(napi_env env, napi_callback_info info, bool cre
     input->parent_fd = -1;
     input->bridge.birth_fd = -1;
     input->retained = !create;
+    input->stdio = stdio;
     struct cliq_mcp_admin_input *bridge = &input->bridge;
     bridge->abi_version = CLIQ_MCP_ADMIN_INPUT_ABI;
     bridge->creator_pid = getpid();
     bridge->environment = env;
     bridge->assert_current = admin_mcp_input_current;
     bridge->retire = admin_mcp_input_close_native;
+    bridge->assert_retired_snapshot = admin_mcp_retired_snapshot;
     atomic_init(&bridge->closed, false);
     atomic_init(&bridge->execution_claimed, false);
     atomic_init(&bridge->execution_joined, false);
-    if (!admin_mcp_binding_data(env, args[0], &bridge->binding))
+    if (!(stdio ? admin_stdio_arguments(env, args, &bridge->binding) : admin_mcp_binding_data(env, args[0], &bridge->binding)))
         goto failed;
+    if (stdio && create) {
+        char token[128];
+        if (bridge->binding.supervisor_pid != getpid() || observe_process_with_retirement(getpid(), token, &lock->process_observation_retirement_error) != 1 ||
+            lock->process_observation_retirement_error || strcmp(token, bridge->binding.supervisor_start_token)) goto failed;
+    }
+    const char *parent_name = stdio ? "admin-mcp-stdio" : "admin-mcp";
     int             made = 0;
     if (create) {
-        if (!mkdirat(lock->runtime_fd, "admin-mcp", 0700))
+        if (!mkdirat(lock->runtime_fd, parent_name, 0700))
             made = 1;
         else if (errno != EEXIST)
             goto failed;
     }
-    input->parent_fd = openat(lock->runtime_fd, "admin-mcp", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    input->parent_fd = openat(lock->runtime_fd, parent_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     struct stat     named;
     if (input->parent_fd < 0 || fstat(input->parent_fd, &input->parent) || !private_directory(&input->parent) || input->parent.st_dev != lock->root.st_dev ||
-        fstatat(lock->runtime_fd, "admin-mcp", &named, AT_SYMLINK_NOFOLLOW) || !same_inode(&named, &input->parent) || (made && !sync_directory(lock->runtime_fd)))
+        fstatat(lock->runtime_fd, parent_name, &named, AT_SYMLINK_NOFOLLOW) || !same_inode(&named, &input->parent) || (made && !sync_directory(lock->runtime_fd)))
         goto failed;
     bridge->birth_fd = openat(input->parent_fd, bridge->binding.nonce, O_RDWR | O_CLOEXEC | O_NOFOLLOW | (create ? O_CREAT | O_EXCL : 0), 0600);
     if (bridge->birth_fd < 0 || fstat(bridge->birth_fd, &bridge->birth_identity) || !private_lock_file(&bridge->birth_identity) || bridge->birth_identity.st_dev != lock->root.st_dev)
         goto failed;
     if (create) {
-        bridge->binding.magic = CLIQ_MCP_ADMIN_BIRTH_MAGIC;
+        bridge->binding.magic = stdio ? CLIQ_MCP_STDIO_ADMIN_BIRTH_MAGIC : CLIQ_MCP_ADMIN_BIRTH_MAGIC;
         bridge->binding.version = 1;
         bridge->binding.supervisor_pid = getpid();
         char            token[128];
@@ -242,7 +311,13 @@ static napi_value admin_mcp_open(napi_env env, napi_callback_info info, bool cre
     } else {
         struct cliq_mcp_admin_history history;
         struct cliq_mcp_admin_birth expected = bridge->binding;
-        if (!cliq_mcp_admin_read_history(bridge->birth_fd, &history, NULL, NULL) || !admin_mcp_same_binding(&expected, &history.header) || history.header.supervisor_pid <= 0 || history.header.supervisor_pid > INT32_MAX || history.header.supervisor_pid == getpid())
+        if (stdio) {
+            struct cliq_mcp_stdio_history original;
+            if (!cliq_mcp_stdio_read_history(bridge->birth_fd, &original, NULL, NULL) || original.purpose != CLIQ_MCP_STDIO_ADMIN) goto failed;
+            history.header = original.header.admin;
+        } else if (!cliq_mcp_admin_read_history(bridge->birth_fd, &history, NULL, NULL)) goto failed;
+        if (!admin_mcp_same_binding(&expected, &history.header) || history.header.supervisor_pid <= 0 || history.header.supervisor_pid > INT32_MAX || history.header.supervisor_pid == getpid() ||
+            (stdio && (history.header.supervisor_pid != expected.supervisor_pid || strcmp(history.header.supervisor_start_token, expected.supervisor_start_token))))
             goto failed;
         char            token[128];
         int             observed = observe_process_with_retirement((pid_t) history.header.supervisor_pid, token, &lock->process_observation_retirement_error);
@@ -259,7 +334,9 @@ static napi_value admin_mcp_open(napi_env env, napi_callback_info info, bool cre
     napi_set_named_property(env, identity, "attempt", attempt);
     napi_object_freeze(env, identity);
     const           napi_property_descriptor methods[] = {{"assertHeld", NULL, admin_mcp_assert, NULL, NULL, NULL, napi_default, NULL}, {"close", NULL, admin_mcp_close, NULL, NULL, NULL, napi_default, NULL}};
-    if (napi_set_named_property(env, result, "identity", identity) != napi_ok || napi_define_properties(env, result, 2, methods) != napi_ok || napi_type_tag_object(env, result, create ? &CLIQ_MCP_ADMIN_INPUT_TAG : &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG) != napi_ok ||
+    const napi_type_tag *tag = stdio ? (create ? &CLIQ_MCP_STDIO_ADMIN_INPUT_TAG : &CLIQ_MCP_STDIO_ADMIN_RETAINED_INPUT_TAG) :
+        (create ? &CLIQ_MCP_ADMIN_INPUT_TAG : &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG);
+    if (napi_set_named_property(env, result, "identity", identity) != napi_ok || napi_define_properties(env, result, 2, methods) != napi_ok || napi_type_tag_object(env, result, tag) != napi_ok ||
         napi_create_reference(env, self, 1, &input->lock_ref) != napi_ok || napi_wrap(env, result, input, admin_mcp_finalize, NULL, NULL) != napi_ok)
         goto failed;
     input->next = lock->admin_mcp_inputs;
@@ -275,10 +352,16 @@ failed:admin_mcp_input_close_native(bridge);
     return native_error(env, "Original Admin MCP birth is missing, partial, changed or unavailable; recovery is required");
 }
 static napi_value create_admin_mcp_input(napi_env env, napi_callback_info info) {
-    return admin_mcp_open(env, info, true);
+    return admin_mcp_open(env, info, true, false);
 }
 static napi_value open_retained_admin_mcp_input(napi_env env, napi_callback_info info) {
-    return admin_mcp_open(env, info, false);
+    return admin_mcp_open(env, info, false, false);
+}
+static napi_value create_admin_mcp_stdio_input(napi_env env, napi_callback_info info) {
+    return admin_mcp_open(env, info, true, true);
+}
+static napi_value open_retained_admin_mcp_stdio_input(napi_env env, napi_callback_info info) {
+    return admin_mcp_open(env, info, false, true);
 }
 static napi_value open_absent_admin_mcp_input(napi_env env, napi_callback_info info) {
     (void)info;

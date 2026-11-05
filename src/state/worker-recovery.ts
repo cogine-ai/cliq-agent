@@ -104,7 +104,11 @@ export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]
   const latest = new Map<string, InvocationJournalEntry>();
   for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
   return journal.filter(entry => entry.phase === 'prepared' &&
-    ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase));
+    ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase) &&
+    !(entry.opKind === 'mcp' && entry.replayClass === 'retry' && latest.get(`${entry.opId}\0${entry.attempt}`)!.phase === 'unknown' &&
+      journal.some(next => next.opId === entry.opId && next.opKind === 'mcp' && next.replayClass === 'retry' && next.phase === 'prepared' &&
+        next.attempt === entry.attempt + 1 && next.requestRef === entry.requestRef && next.target === entry.target &&
+        next.idempotencyKey === entry.idempotencyKey && !!next.evidenceRef && !!next.evidenceDigest)));
 }
 
 /** Data eligibility only, after readRecoveryClosure has validated the complete
@@ -135,7 +139,8 @@ export function hasOnlySettledMcpUnknowns(journal: readonly InvocationJournalEnt
   const open = openWorkerInvocations(journal);
   return open.length === 1 && open.every(prepared => {
     const entries = journal.filter(entry => entry.opId === prepared.opId && entry.attempt === prepared.attempt), final = entries.at(-1)!;
-    return prepared.opKind === 'mcp' && prepared.replayClass === 'manual' && entries.length === 3 && entries[1]!.phase === 'dispatch_claimed' &&
+    return prepared.opKind === 'mcp' && ['manual', 'retry', 'reconcile'].includes(prepared.replayClass) && entries.length === 3 &&
+      entries.every(entry => entry.opKind === 'mcp' && entry.replayClass === prepared.replayClass) && entries[1]!.phase === 'dispatch_claimed' &&
       final.phase === 'unknown' && final.opKind === 'mcp' && !!final.budgetSettlementRef && !!final.evidenceRef && !!final.evidenceDigest &&
       canonicalSha256(final.budgetDelta) === canonicalSha256(prepared.budgetDelta);
   });

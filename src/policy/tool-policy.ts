@@ -10,6 +10,7 @@ import { parseCanonicalBash } from './canonical-bash.js';
 import { exactKeys, requireEqual } from './runtime-authority.js';
 import { toolApprovalDecision } from './tool-approval.js';
 import { decodeSkillResourceInput } from '../kernel/skill.js';
+import { injectMcpIdempotencyKey } from '../kernel/mcp-recovery.js';
 
 const CLASSES: PolicyActionClass[] = ['read', 'plan', 'write', 'exec', 'mcp', 'verifier',
   'dependency_install_scripts', 'delivery', 'child_read_only', 'child_mutating'];
@@ -59,7 +60,7 @@ export function planToolRequest(input: {
 }) {
   const { runId, frontierRef, batchItemId, assemblyRef, assembly, workspaceIdentityRef, workspaceIdentityDigest, entry, call } = input;
   if (entry.access === 'control' || entry.execution.kind === 'supervisor_control') throw new TypeError('Supervisor input control has no operation request or target');
-  const { inputSchema: _schema, ...contract } = entry;
+  const { inputSchema: _schema, mcpRecovery: _mcpRecovery, ...contract } = entry;
   const targetCore = { schemaVersion: 1 as const, format: 'cliq-tool-target-v1' as const, runId,
     workspaceIdentityRef, workspaceIdentityDigest, toolManifestRef: assembly.tools.manifestRef,
     toolManifestDigest: assembly.tools.manifestDigest, toolName: call.toolName, toolContractDigest: canonicalSha256(contract), execution: entry.execution };
@@ -133,7 +134,7 @@ export function loadToolPolicy(input: {
   const { policy, policyRef, assembly, assemblyRef, principalId, workspaceIdentityRef, workspaceIdentityDigest, contracts } = immutableSnapshot(input);
   assertRunPolicySnapshot({ policy, policyRef, assembly, principalId, workspaceIdentityDigest });
   const resolver = loadToolContracts(contracts);
-  const byName = new Map(contracts.map(({ inputSchema: _schema, ...entry }) => [entry.name, entry]));
+  const byName = new Map(contracts.map(({ inputSchema: _schema, mcpRecovery: _mcpRecovery, ...entry }) => [entry.name, entry]));
 
   function evaluate(request: ToolRequestV1, target: ToolTargetV1, call: ToolCallInputV1, evaluatedAt: string): ToolPolicyChannelEvidenceV1 {
     parseCanonicalTime(evaluatedAt);
@@ -151,6 +152,12 @@ export function loadToolPolicy(input: {
     assertArtifactRef(request.frontierRef);
     const entry = byName.get(request.toolName);
     if (!entry) throw new TypeError('tool request selects an unknown frozen contract');
+    const recovery = contracts.find(contract => contract.name === request.toolName)?.mcpRecovery;
+    if (entry.execution.kind === 'mcp' && recovery && recovery.kind !== 'manual') {
+      if (!request.idempotencyKey) throw new TypeError('MCP normalization lost its frozen stable key');
+      const reproduced = injectMcpIdempotencyKey(call.value, recovery.idempotencyKeyInjection?.jsonPointer, request.idempotencyKey);
+      requireEqual(reproduced, call.value, 'MCP complete arguments frozen before tool authorization');
+    }
     const projected = resolver.projectInvocation({ callId: call.callId, index: call.index, toolName: call.toolName, input: call.value! });
     if (projected.kind !== 'tool' || entry.access === 'control') throw new TypeError('input control cannot mint an operation grant');
     if (entry.inputSchemaRef !== call.inputSchemaRef || entry.inputSchemaDigest !== call.inputSchemaDigest) throw new TypeError('tool input schema substitution');

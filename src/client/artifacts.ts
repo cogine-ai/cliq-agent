@@ -5,6 +5,7 @@ import { readChildMergeWaitingPresentation } from './child-merge-presentation.js
 import { readChildWaitingPresentation } from './child-wait-presentation.js';
 import { decodeManualAbandonAttestation, decodeToolAbandonedItem } from '../kernel/mcp.js';
 import { manualInvocationPresentation } from './mcp-presentation.js';
+import { readMcpServerWaitingPresentation } from './mcp-server-presentation.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { controlWireInteger, controlWireRecord, controlWireRef } from '../kernel/control-wire-data.js';
@@ -55,6 +56,8 @@ export async function readWaitingPresentation(app: PresentationClient, snapshot:
         return readDependencyScriptWaitingPresentation(app, snapshot, value, signal);
       if (subject && typeof subject === 'object' && subject.kind === 'verifier_launch')
         return readVerifierWaitingPresentation(app, snapshot, value, signal);
+      if (subject && typeof subject === 'object' && subject.kind === 'mcp_server_launch')
+        return readMcpServerWaitingPresentation(app, snapshot, value, signal);
       let text = canonicalJsonBytes(subject).toString('utf8');
       if (subject && typeof subject === 'object' && typeof subject.policyChannelEvidenceRef === 'string') {
         const evidence = await readClientJson(app, subject.policyChannelEvidenceRef, signal) as Record<string, unknown>;

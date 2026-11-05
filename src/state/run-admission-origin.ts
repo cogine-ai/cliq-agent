@@ -19,7 +19,7 @@ import { decodeAdmittedContext, decodeContextManifest, decodeRunObjective, decod
 import { KernelStorageError } from './errors.js';
 import { readAuthorizationGrant } from './repositories/authorization-grants.js';
 import { readCheckpoint, readControlRequest, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
-import { readFrozenSessionContextCut } from './session-context.js';
+import { consumeFrozenSessionContext } from './session-context-stream.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from './source-target.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { decodeVerifierSpec } from './verifier-artifacts.js';
@@ -94,8 +94,8 @@ export async function readRootRunAdmissionOrigin(driver: SqliteDriver, artifacts
   // Original frozen revision/ref/range come from the admitted artifact; SQL
   // contributes only immutable Session lineage. Every source item must have
   // existed by this Run's actual original admission time.
-  await readFrozenSessionContextCut(driver, reads, principalId, { ...session, contextRevision: admittedContext.sessionContextRevision,
-    latestItemSeq: admittedContext.throughSessionItemSeq, contextProjectionRef: admittedContext.sessionProjectionRef, updatedAt: run.createdAt });
+  await consumeFrozenSessionContext(driver, reads, principalId, { ...session, contextRevision: admittedContext.sessionContextRevision,
+    latestItemSeq: admittedContext.throughSessionItemSeq, contextProjectionRef: admittedContext.sessionProjectionRef, updatedAt: run.createdAt }, () => undefined);
   const { channel } = await readHistoricalControlChannel(driver, reads, { principalId,
     channelIdentityRef: control.channelIdentityRef, channelIdentityDigest: control.channelIdentityDigest });
   if (channel.openedAt > run.createdAt) invalid();

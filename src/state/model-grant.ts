@@ -1,44 +1,22 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { decodeEndpointCredentialGrantBinding, decodeEndpointRegistration, type EndpointRegistrationV1 } from '../kernel/credential-authority.js';
-import { assertArtifactRef, digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
+import { digestOmitting, parseCanonicalTime } from '../kernel/identity.js';
 import { decodeModelOperationGrant, planModelOperationGrant, type ModelGrantFrame, type ModelOperationGrantV1 } from '../kernel/model-grant.js';
 import type { InvocationJournalEntry, Run, RunAssemblyV1, RunSpec } from '../kernel/types.js';
-import type { LocalZeroCostProvenanceV1 } from '../model/pricing.js';
+import { decodeLocalZeroCostProvenanceData, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import { exactKeys, requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
+import { requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { KernelStorageError } from './errors.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import { readRetainedLocalModelRegistration } from './local-model-history.js';
 
 export type ModelTargetClosure = Readonly<{
   principalId: string; targetRef: string; targetDigest: string;
   target: EndpointRegistrationV1 | LocalZeroCostProvenanceV1;
 }>;
 
-function decodeLocalTarget(value: unknown): LocalZeroCostProvenanceV1 {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || !exactKeys(value, ['schemaVersion', 'format',
-    'ownerPrincipalId', 'provider', 'model', 'serviceSpecRef', 'serviceSpecDigest', 'stableServiceIdentityDigest',
-    'endpoint', 'endpointIdentityDigest', 'boundaryEvidenceRef', 'boundaryEvidenceDigest', 'capabilityEvidenceRef',
-    'capabilityDigest', 'createdAt', 'validThrough', 'provenanceDigest'])) throw new TypeError('local model target has invalid closed fields');
-  const target = value as LocalZeroCostProvenanceV1;
-  if (target.schemaVersion !== 1 || target.format !== 'cliq-local-zero-cost-v1' || target.provider !== 'ollama' ||
-      typeof target.ownerPrincipalId !== 'string' || !target.ownerPrincipalId || typeof target.model !== 'string' || !target.model ||
-      !exactKeys(target.endpoint, ['scheme', 'host', 'port']) || target.endpoint.scheme !== 'http' ||
-      !['127.0.0.1', '[::1]'].includes(target.endpoint.host) || !Number.isSafeInteger(target.endpoint.port) ||
-      target.endpoint.port < 1 || target.endpoint.port > 65535 || typeof target.createdAt !== 'string' ||
-      typeof target.validThrough !== 'string' || parseCanonicalTime(target.createdAt) > parseCanonicalTime(target.validThrough)) {
-    throw new TypeError('local model target has invalid identity or lifetime');
-  }
-  for (const key of ['serviceSpecRef', 'serviceSpecDigest', 'stableServiceIdentityDigest', 'endpointIdentityDigest',
-    'boundaryEvidenceRef', 'boundaryEvidenceDigest', 'capabilityEvidenceRef', 'capabilityDigest', 'provenanceDigest'] as const) {
-    assertArtifactRef(target[key]);
-  }
-  if (target.endpointIdentityDigest !== canonicalSha256(target.endpoint) || target.provenanceDigest !== digestOmitting(target, 'provenanceDigest')) {
-    throw new TypeError('local model target digest does not rehash');
-  }
-  return target;
-}
 
 /** Static retained data only. Installed catalog/price qualification and fresh
  * credential or managed-local boundary authority remain separate release gates. */
@@ -59,12 +37,13 @@ export async function readModelTargetData(artifacts: ArtifactCatalog,
       assembly.assemblyDigest !== digestOmitting(assembly, 'assemblyDigest')) throw new KernelStorageError('RECOVERY_REQUIRED', 'model target has no exact admitted assembly');
   const endpoint = assembly.provider.endpoint;
   if (endpoint.kind === 'local_zero_cost') {
-    const target = decodeLocalTarget(await readCanonicalArtifact(artifacts, endpoint.localProvenanceRef));
+    const target = decodeLocalZeroCostProvenanceData(await readCanonicalArtifact(artifacts, endpoint.localProvenanceRef));
     if (target.ownerPrincipalId !== principalId || target.provider !== assembly.provider.name || target.model !== assembly.provider.model ||
         target.endpointIdentityDigest !== endpoint.identityDigest || target.capabilityEvidenceRef !== assembly.provider.negotiation.capabilityEvidenceRef ||
         target.capabilityDigest !== assembly.provider.negotiation.capabilityDigest || target.createdAt > run.createdAt || target.validThrough < run.deadlineAt ||
         assembly.provider.credentialGrantRefs.length || assembly.provider.pricing.kind !== 'zero_cost' ||
         assembly.provider.pricing.provenanceRef !== endpoint.localProvenanceRef) throw new TypeError('local model target differs from its frozen assembly');
+    await readRetainedLocalModelRegistration(artifacts, { provenance: target, principalId, assembly });
     return immutableSnapshot({ principalId, targetRef: endpoint.localProvenanceRef, targetDigest: target.provenanceDigest, target });
   }
   const target = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, endpoint.endpointRegistrationRef));

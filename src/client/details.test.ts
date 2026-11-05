@@ -5,9 +5,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
+import { encodeSessionHandoffMarkdown, type SessionHandoffHeader, type SessionHandoffExcludedRange } from '../kernel/session-handoff-encoding.js';
+import type { SessionHandoffEntryV1 } from '../kernel/session-continuity.js';
 import { ContentAddressedStore } from '../state/cas.js';
 import type { InstalledControlResponseFor } from '../control/v1.js';
 import { artifactText, detailViewport, presentControlArtifacts, type ClientDetail } from './details.js';
+
+async function markdownFor(value: SessionHandoffHeader & { entries: readonly SessionHandoffEntryV1[]; excludedRanges: readonly SessionHandoffExcludedRange[] }) {
+  const header: SessionHandoffHeader = { sessionId: value.sessionId, contextRevision: value.contextRevision, throughItemSeq: value.throughItemSeq,
+    workspaceIdentityRef: value.workspaceIdentityRef, workspaceIdentityDigest: value.workspaceIdentityDigest,
+    contextProjectionRef: value.contextProjectionRef, contextProjectionDigest: value.contextProjectionDigest };
+  async function* rows<T>(values: readonly T[]) { yield* values; }
+  const chunks: Buffer[] = []; for await (const chunk of encodeSessionHandoffMarkdown(header, rows(value.entries), rows(value.excludedRanges))) chunks.push(chunk);
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 // Real source bytes/CAS and existing production closed data decoders only.
 // These fixtures create no accepted Run, grant, verifier or native proof.
@@ -65,7 +76,7 @@ test('handoff display binds the captured Session revision and original downloade
       workspaceIdentityDigest: f.ref, contextRevision: 3, throughItemSeq: 0, contextProjectionRef: f.ref,
       contextProjectionDigest: f.ref, entries: [], excludedRanges: [] };
     const handoff = { ...core, handoffDigest: canonicalSha256(core) }, jsonRef = await f.store(handoff);
-    const markdown = '# Cliq Session Handoff\n\nOriginal fixed bytes.\n', markdownRef = await f.cas.publish(Buffer.from(markdown));
+    const markdown = await markdownFor(handoff), markdownRef = await f.cas.publish(Buffer.from(markdown));
     const response = { protocolVersion: 1, ok: true, result: { method: 'session.handoff.create', json: await f.descriptor(jsonRef), markdown: await f.descriptor(markdownRef) } } as const;
     const request = { protocolVersion: 1, method: 'session.handoff.create', sessionId: 'session', expectedContextRevision: 3 } as const;
     await presentControlArtifacts(f.app, request, response, value => { assert.equal(value.text, markdown); assert.equal(value.artifactRef, markdownRef); });
@@ -76,6 +87,33 @@ test('handoff display binds the captured Session revision and original downloade
     assert.match(viewport.text, /view clipped/u); assert.doesNotThrow(() => canonicalJsonBytes(viewport));
     assert.match(artifactText(Buffer.from([255])), /Binary artifact/u);
     assert.equal(artifactText(Buffer.from('\ufefftext')), '\ufefftext');
+  } finally { await rm(f.home, { recursive: true, force: true }); }
+});
+
+test('long handoff presentation validates every fixed entry before reading or displaying its original Markdown', async () => {
+  const f = await fixture();
+  try {
+    const entries = Array.from({ length: 3200 }, (_, index) => ({ index, sourceKind: 'legacy_record' as const, fromItemSeq: 1, throughItemSeq: 1,
+      sourceRef: f.ref, sourceDigest: f.ref, contentUtf8: 'Complete retained user prose.' }));
+    const core = { schemaVersion: 1, format: 'cliq-session-handoff-v1', sessionId: 'session', workspaceIdentityRef: f.ref,
+      workspaceIdentityDigest: f.ref, contextRevision: 3, throughItemSeq: 1, contextProjectionRef: f.ref,
+      contextProjectionDigest: f.ref, entries, excludedRanges: [] };
+    const handoff = { ...core, handoffDigest: canonicalSha256(core) }, jsonRef = await f.store(handoff);
+    const markdown = await markdownFor(handoff), markdownRef = await f.cas.publish(Buffer.from(markdown));
+    const request = { protocolVersion: 1, method: 'session.handoff.create', sessionId: 'session', expectedContextRevision: 3 } as const;
+    const response = { protocolVersion: 1, ok: true, result: { method: 'session.handoff.create', json: await f.descriptor(jsonRef), markdown: await f.descriptor(markdownRef) } } as const;
+    const shown: ClientDetail[] = []; await presentControlArtifacts(f.app, request, response, value => { shown.push(value); });
+    assert.deepEqual(shown, [{ label: 'Session handoff', artifactRef: markdownRef, text: markdown }]);
+    const substituted = await f.cas.publish(Buffer.from('# Valid UTF8, unrelated handoff Markdown\n')), pairReads: string[] = [];
+    await assert.rejects(presentControlArtifacts({ artifact: async (ref, options) => { pairReads.push(ref); return f.app.artifact(ref, options); } },
+      request, { ...response, result: { ...response.result, markdown: await f.descriptor(substituted) } },
+      () => assert.fail('a foreign Markdown artifact was displayed')), /Markdown differs/u);
+    assert.deepEqual(pairReads, [jsonRef]);
+    const bad = { ...handoff, entries: [...entries.slice(0, -1), { ...entries.at(-1)!, sourceKind: 'unknown' }], handoffDigest: '' };
+    bad.handoffDigest = digestOmitting(bad, 'handoffDigest'); const badRef = await f.store(bad), reads: string[] = [];
+    await assert.rejects(presentControlArtifacts({ artifact: async (ref, options) => { reads.push(ref); return f.app.artifact(ref, options); } },
+      request, { ...response, result: { ...response.result, json: await f.descriptor(badRef) } }, () => assert.fail('incomplete handoff was displayed')));
+    assert.deepEqual(reads, [badRef]);
   } finally { await rm(f.home, { recursive: true, force: true }); }
 });
 

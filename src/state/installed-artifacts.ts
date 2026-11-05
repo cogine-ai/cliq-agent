@@ -16,6 +16,8 @@ import { bundledSkillMembers, bundledSkillRoots } from './bundled-skills.js';
 import { skillInstruction } from './skill-data.js';
 import { isNpmAdapterEntry, isNpmDataEntry, NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
 import { MCP_ADMIN_HELPER_ENTRY_ID, MCP_ADMIN_HELPER_RELATIVE_PATH } from './mcp-broker-native.js';
+import { verifyMcpRecoveryAdapterAuthority } from '../policy/mcp-recovery-authority.js';
+import { decodeMcpRecoveryPredicate } from '../kernel/mcp-recovery.js';
 
 function mismatch(message: string, cause?: unknown): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message, cause === undefined ? undefined : { cause });
@@ -64,7 +66,7 @@ export function validateBundle(value: unknown, releaseKeys: readonly ReleaseTrus
           (entry.entryId === NPM_DEPENDENCY_RECIPE.adapterId && !npmAdapter) ||
           (entry.entryId === NPM_DEPENDENCY_RECIPE.dataId && !npmData) ||
           (['supervisor', 'worker', 'provider_adapter', 'tool_adapter', 'platform_helper', 'mcp_server', 'mcp_recovery_adapter', 'local_inference'].includes(entry.role) && !entry.executable && !sourceInspector && !builtinTools && !npmAdapter&&!mcpAdminHelper) ||
-          entry.role === 'mcp_recovery_profile' ||
+          (entry.role === 'mcp_recovery_profile' && entry.executable) ||
           (entry.role === 'guest_toolchain' && entry.executable) ||
           (['policy_engine', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema', 'skill_bundle'].includes(entry.role) && entry.executable)) {
         mismatch('installed runtime entry path or role is unsupported');
@@ -90,29 +92,31 @@ function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
   let previous: Buffer | undefined;
   for (const root of bundle.structuredArtifacts) {
     const prompt = root.kind === 'system_prompt' || root.kind === 'compaction_prompt';
+    const recovery = root.kind === 'mcp_recovery_adapter';
     if (!exactKeys(root, ['artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs', 'kind',
-      ...(prompt ? ['provider', 'model'] : [])]) || (!prompt && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill'))
+      ...(prompt ? ['provider', 'model'] : []), ...(recovery ? ['executableEntryId'] : [])]) ||
+        (!prompt && !recovery && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill'))
       mismatch('installed runtime contains an unsupported structured root');
     boundedText(root.artifactId); boundedText(root.rootEntryId);
     if (prompt && (!['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].includes(boundedText(root.provider)) ||
         !boundedText(root.model))) mismatch('installed provider prompt identity is invalid');
     assertArtifactRef(root.artifactRef); assertArtifactRef(root.semanticDigest);
     const key = Buffer.from([root.kind, root.provider ?? '', root.model ?? '', root.artifactId].join('\0'));
-    const identity = [root.kind, root.provider ?? '', root.model ?? '', ...(root.kind === 'bundled_skill' ? [root.artifactId] : [])].join('\0');
+    const identity = [root.kind, root.provider ?? '', root.model ?? '', ...(root.kind === 'bundled_skill' || recovery ? [root.artifactId] : [])].join('\0');
     if ((previous && Buffer.compare(previous, key) >= 0) || identities.has(identity) || entries.has(root.rootEntryId))
       mismatch('installed structured roots are unordered or ambiguous');
     previous = key; identities.add(identity); entries.add(root.rootEntryId);
     const entry = bundle.entries.find(entry => entry.entryId === root.rootEntryId);
-    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind === 'bundled_skill' ? 'skill_bundle' : root.kind;
+    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind === 'bundled_skill' ? 'skill_bundle' : recovery ? 'mcp_recovery_profile' : root.kind;
     if (!entry || entry.executable || entry.role !== role || entry.digest !== root.artifactRef || entry.byteCount > 1048576 ||
-        !Array.isArray(root.memberRefs) || root.memberRefs.length > (root.kind === 'bundled_skill' ? 129 : 3) ||
+        !Array.isArray(root.memberRefs) || root.memberRefs.length > (root.kind === 'bundled_skill' ? 129 : recovery ? 384 : 3) ||
         root.memberRefs.some((ref, index) => { assertArtifactRef(ref); return ref === root.artifactRef || (index > 0 && ref <= root.memberRefs[index - 1]!); }) ||
-        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill' && root.memberRefs.length !== 0))
+        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill' && !recovery && root.memberRefs.length !== 0))
       mismatch('installed structured root does not bind its complete signed entry');
     roots.push(root);
   }
   if (roots.filter(root => root.kind === 'policy_engine_profile').length !== 1 ||
-      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'skill_bundle'].includes(entry.role) && !entries.has(entry.entryId)))
+      bundle.entries.some(entry => ['policy_engine', 'system_prompt', 'compaction_prompt', 'guest_toolchain', 'skill_bundle', 'mcp_recovery_profile'].includes(entry.role) && !entries.has(entry.entryId)))
     mismatch('installed signed structured entries are missing their exact discovery roots');
   for (const root of roots.filter(root => root.kind === 'system_prompt')) {
     if (!roots.some(other => other.kind === 'compaction_prompt' && other.provider === root.provider && other.model === root.model))
@@ -137,7 +141,7 @@ export type InstalledStructuredArtifacts = Readonly<{
  * that owner independently authenticates each guest's detached release signature.
  * A valid data graph does not authorize a process, model or tool dispatch. */
 export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManifest,
-  objects: ReadonlyMap<string, Buffer>): InstalledStructuredArtifacts {
+  objects: ReadonlyMap<string, Buffer>, releaseKeys?: readonly ReleaseTrustKey[]): InstalledStructuredArtifacts {
   try {
     const roots = structuredMetadata(bundle);
     const metadata = new Map<string, string>(), members = new Set<string>();
@@ -171,6 +175,26 @@ export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManife
         metadata.set(root.artifactRef, manifest.format);
         metadata.set(manifest.signatureRef, 'cliq-ed25519-signature-v1');
         metadata.set(manifest.guestImageRef, 'cliq-guest-image-raw-ext4-v1');
+      } else if (root.kind === 'mcp_recovery_adapter') {
+        if (!releaseKeys) mismatch('installed MCP profile requires the original immutable release trust keys');
+        const manifest = verifyMcpRecoveryAdapterAuthority({ bundle, releaseKeys, adapterId: root.artifactId, adapterRef: root.artifactRef, manifest: value });
+        const member = (ref: string): unknown => {
+          const entry = bundle.entries.find(entry => entry.digest === ref);
+          if (!entry || entry.role !== 'bundle_object' || entry.executable || entry.entryId !== identityHash('runtime-bundle-object-v1', ref) ||
+              entry.version !== '1' || entry.relativePath !== `objects/sha256/${ref.slice(0, 2)}/${ref}`)
+            mismatch('installed MCP profile member is not its exact signed data object');
+          members.add(ref); return read(ref);
+        };
+        metadata.set(root.artifactRef, manifest.format);
+        for (const profile of manifest.profiles) {
+          const argumentsValue = member(profile.staticArgumentsRef);
+          if (!argumentsValue || typeof argumentsValue !== 'object' || Array.isArray(argumentsValue)) mismatch('installed MCP static status arguments must be an object');
+          const completed = decodeMcpRecoveryPredicate(member(profile.completedPredicateRef)), failed = decodeMcpRecoveryPredicate(member(profile.failedPredicateRef));
+          if (completed.predicateDigest !== profile.completedPredicateDigest || failed.predicateDigest !== profile.failedPredicateDigest ||
+              completed.predicateDigest === failed.predicateDigest) mismatch('installed MCP profile predicates differ from their exact signed identities');
+          metadata.set(profile.staticArgumentsRef, 'cliq-mcp-recovery-static-arguments-v1');
+          metadata.set(profile.completedPredicateRef, completed.format); metadata.set(profile.failedPredicateRef, failed.format);
+        }
       } else if (root.kind === 'bundled_skill') {
         const closure = decodeBundledSkillClosure(value);
         bundledSkillMembers(bundle, root, closure);

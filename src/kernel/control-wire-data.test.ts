@@ -145,7 +145,7 @@ test('a publication dispatch carries its complete original birth pair without op
   for (const value of [withoutBirth, { ...withoutBirth, evidenceRef: ref }, { ...withoutBirth, evidenceDigest: ref },
     { ...claim, evidenceRef: 'not-a-cas-ref' }, { ...claim, evidenceDigest: 'not-a-digest' },
     ...['resultRef', 'receiptRef', 'errorRef', 'attestationRef', 'budgetSettlementRef'].map(key => ({ ...claim, [key]: ref })),
-    ...['model', 'tool', 'mcp-server', 'mcp', 'verifier'].map(opKind => ({ ...claim, opKind }))]) {
+    ...['model', 'tool', 'verifier'].map(opKind => ({ ...claim, opKind }))]) {
     assert.throws(() => decodeWireJournal(value), TypeError);
     assert.throws(() => decodeInvocationJournalEntry(value), { code: 'STATE_TRANSITION_INVALID' });
   }
@@ -185,7 +185,7 @@ test('completed publication data requires the same terminal receipt and evidence
   const { evidenceRef: _evidence, evidenceDigest: _digest, ...missing } = entry;
   for (const value of [missing, { ...entry, evidenceRef: 'c'.repeat(64) },
     { ...entry, receiptRef: undefined }, { ...entry, evidenceDigest: undefined },
-    ...['model', 'tool', 'verifier', 'mcp', 'mcp-server'].map(opKind => ({ ...entry, opKind }))])
+    ...['model', 'tool', 'verifier'].map(opKind => ({ ...entry, opKind }))])
     assert.throws(() => decodeWireJournal(value), TypeError);
 });
 
@@ -195,4 +195,29 @@ test('control data rejects accessors, hidden fields, sparse arrays and non-JSON 
   assert.throws(() => decodeWireRun(getter), TypeError); assert.equal(read, false);
   for (const value of [new Date(), [1, , 3], { x: undefined }, { x: 1n }, { x: Infinity },
     Object.defineProperty({}, 'x', { value: 1 }), { [Symbol('x')]: 1 }]) assert.throws(() => assertControlWireJson(value), TypeError);
+});
+
+test('MCP claim and completion data retain their separate original birth identity without accepting ordinary terminal fields', () => {
+  // Closed storage/wire data only. These records do not create the native
+  // stdio input, initialized instance, StateOwner, lease or execution fence.
+  for (const opKind of ['mcp', 'mcp-server'] as const) {
+    const claim = { seq: 2, runId: 'run-1', opId: 'mcp-operation', opKind, attempt: 0, leaseEpoch: 1,
+      phase: 'dispatch_claimed', target: ref, requestRef: ref, grantRef: ref, replayClass: 'manual', budgetDelta: budget,
+      timestamp: at, dispatchId: 'dispatch-1', supervisorInstanceId: 'supervisor-1', stateOwnerEpoch: 1,
+      brokerFenceTokenDigest: 'c'.repeat(64), evidenceRef: ref, evidenceDigest: 'b'.repeat(64),
+      ...(opKind === 'mcp-server' ? { sandboxLaunchSpecRef: ref } : {}) };
+    assert.deepEqual(decodeWireJournal(claim), claim);
+    assert.deepEqual(decodeInvocationJournalEntry(claim), claim);
+    const completed = { ...claim, seq: 3, phase: 'completed', resultRef: ref, budgetSettlementRef: ref };
+    assert.deepEqual(decodeWireJournal(completed), completed);
+    assert.deepEqual(decodeInvocationJournalEntry(completed), completed);
+    const { evidenceRef: _birth, evidenceDigest: _digest, ...withoutBirth } = claim;
+    for (const invalid of [{ ...withoutBirth, evidenceRef: ref }, { ...withoutBirth, evidenceDigest: ref },
+      { ...claim, evidenceRef: 'not-a-cas-ref' }, { ...completed, evidenceDigest: 'not-a-digest' },
+      ...['resultRef', 'receiptRef', 'errorRef', 'attestationRef', 'budgetSettlementRef'].map(key => ({ ...claim, [key]: ref })),
+      { ...completed, errorRef: ref }, { ...completed, callerProof: true }]) {
+      assert.throws(() => decodeWireJournal(invalid), TypeError);
+      assert.throws(() => decodeInvocationJournalEntry(invalid), { code: 'STATE_TRANSITION_INVALID' });
+    }
+  }
 });

@@ -1,4 +1,7 @@
 import { assertChildAncestryRelease } from '../child-ancestry.js';
+import { canonicalSha256 } from '../../kernel/canonical.js';
+import { decodeMcpRetryDispatchClosure } from '../../kernel/mcp-retry.js';
+import { mcpRetryAdmissionData, type McpRetryAdmission } from '../mcp-retry-admission.js';
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../../kernel/identity.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import type {
@@ -223,20 +226,32 @@ export async function prepareValidatedInvocation(
     /** Only the verifier owner may reproduce a completed infrastructure
      * receipt's positive death and frozen same-candidate retry allowance. */
     retryCompletedVerifier?: (connection: SqliteConnection, entries: InvocationJournalEntry[]) => void;
+    /** Original opaque owner only, never a caller-supplied evidence pair or
+     * callback pretending to observe the previous native dispatch. */
+    mcpRetryAdmission?: McpRetryAdmission;
   }
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
+  if (input.opKind === 'mcp-server') throw new KernelStorageError('INVALID_REQUEST', 'MCP server preparation requires its original stdio lifecycle writer');
   decodeBudgetUsage(input.reservation, 'invocation reservation');
   if (isZeroBudget(input.reservation)) {
     throw new KernelStorageError('INVALID_REQUEST', 'ordinary invocation reservation must be nonzero');
   }
   await artifacts.readBytes(input.requestRef);
   if (input.grantRef !== undefined) await artifacts.readBytes(input.grantRef);
-  const invocationMetadata = typed?.metadata ?? await joinResourceOperations([
+  const retryAdmission = typed?.mcpRetryAdmission && mcpRetryAdmissionData(driver, owner, typed.mcpRetryAdmission);
+  const retryReference = retryAdmission?.reference;
+  const retryClosure = retryReference && decodeMcpRetryDispatchClosure(await artifacts.readCanonical(retryReference.ref));
+  if (retryClosure && (input.opKind !== 'mcp' || input.replayClass !== 'retry' || retryClosure.runId !== input.runId || retryClosure.opId !== input.opId ||
+      retryClosure.requestRef !== input.requestRef || retryClosure.targetRef !== input.target ||
+      canonicalSha256(retryClosure) !== retryReference?.ref || retryClosure.evidenceDigest !== retryReference?.digest))
+    throw new KernelStorageError('INVALID_REQUEST', 'MCP retry preparation substitutes its original dispatch closure');
+  const invocationMetadata = [...(typed?.metadata ?? await joinResourceOperations([
     artifacts.describe(input.requestRef, 'application/json', 'cliq-invocation-request-v1'),
     ...(input.grantRef === undefined
       ? []
       : [artifacts.describe(input.grantRef, 'application/json', 'cliq-operation-grant-v1')])
-  ]);
+  ]))];
+  if (retryAdmission) invocationMetadata.push(...retryAdmission.metadata);
   const initialRun = readRun(driver, input.runId);
   const runSpec = decodeRunSpec(await artifacts.readCanonical(initialRun.specRef));
   const ceilings: BudgetUsage = {
@@ -250,6 +265,7 @@ export async function prepareValidatedInvocation(
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    retryAdmission?.reobserve(connection);
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
@@ -263,14 +279,25 @@ export async function prepareValidatedInvocation(
     );
     const highest = readHighestPreparedAttempt(connection, input.runId, input.opId);
     const attempt = highest === undefined ? 0 : highest.attempt + 1;
+    retryAdmission?.assertCurrent(connection, run, attempt, now);
     typed?.validate(connection, run, attempt, now);
     if (highest !== undefined) {
       const previous = readInvocationAttempt(connection, input.runId, input.opId, highest.attempt);
+      const originalUnknown = previous.at(-1);
+      if (input.opKind === 'mcp' && input.replayClass === 'retry' && originalUnknown?.phase === 'unknown' &&
+          (!retryClosure || retryClosure.attempt !== highest.attempt || retryClosure.nextAttempt !== attempt ||
+            retryClosure.preparedJournalSeq !== highest.seq || retryClosure.unknownJournalSeq !== originalUnknown.seq ||
+            retryClosure.dispatchId !== originalUnknown.dispatchId || retryClosure.brokerFenceTokenDigest !== originalUnknown.brokerFenceTokenDigest ||
+            retryClosure.unknownEvidenceRef !== originalUnknown.evidenceRef || retryClosure.unknownEvidenceDigest !== originalUnknown.evidenceDigest ||
+            retryClosure.budgetSettlementRef !== originalUnknown.budgetSettlementRef))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP retry lacks its exact wholly settled previous UNKNOWN and original dispatch closure');
+      if (retryClosure && (originalUnknown?.phase !== 'unknown' || retryClosure.nextAttempt !== attempt))
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP original retry closure cannot be borrowed by another preparation');
       if (!previousAttemptAllowsRetry(previous) && !(input.opKind === 'verifier' && previous.at(-1)?.phase === 'completed' && typed?.retryCompletedVerifier)) {
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'prior invocation attempt is not retryable and settled');
       }
       if (previous.at(-1)?.phase === 'completed') typed?.retryCompletedVerifier?.(connection, previous);
-    }
+    } else if (retryClosure) throw new KernelStorageError('INVALID_REQUEST', 'first MCP preparation has no previous UNKNOWN dispatch to close');
     assertBudgetWithin(run.budgetConsumed, run.budgetReserved, input.reservation, ceilings);
     const nextReserved = addBudget(run.budgetReserved, input.reservation, 'Run budget reservation');
     const entry: InvocationJournalEntry = {
@@ -289,6 +316,10 @@ export async function prepareValidatedInvocation(
     };
     if (input.idempotencyKey !== undefined) entry.idempotencyKey = input.idempotencyKey;
     if (input.grantRef !== undefined) entry.grantRef = input.grantRef;
+    if (retryClosure) {
+      if (!retryReference) throw new TypeError('MCP retry closure lost its exact reference');
+      entry.evidenceRef = retryReference.ref; entry.evidenceDigest = retryClosure.evidenceDigest;
+    }
     for (const artifact of invocationMetadata) insertArtifactMetadata(connection, artifact, now);
     appendInvocationJournalEntry(connection, entry);
     const update = connection
@@ -405,7 +436,7 @@ export async function claimInvocationDispatch(
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   const prepared = readHighestPreparedAttempt(driver, input.runId, input.opId);
-  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier' || prepared.opKind === 'publish')) {
+  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'mcp-server' || prepared.opKind === 'verifier' || prepared.opKind === 'publish')) {
     const run = readRun(driver, input.runId);
     const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
     const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -435,7 +466,7 @@ export async function claimValidatedInvocation(
   if ((preparedSnapshot?.opKind === 'mcp') !== (mcpOwner !== undefined))
     throw new KernelStorageError('INVALID_REQUEST', 'MCP claims require their original typed policy/native owner');
   const assertMcp = mcpOwner === undefined ? undefined : (await import('./tool.js')).assertMcpToolClaimOwner;
-  assertMcp?.(driver, owner, mcpOwner!, input);
+  const mcpEvidence = assertMcp?.(driver, owner, mcpOwner!, input);
   if ((preparedSnapshot?.opKind === 'publish') !== (publication !== undefined))
     throw new KernelStorageError('INVALID_REQUEST', 'publication claims require their original typed native owner');
   if ((preparedSnapshot?.opKind === 'tool' && preparedSnapshot.target === 'builtin:dependency-acquire') !== (dependency !== undefined) ||
@@ -458,7 +489,9 @@ export async function claimValidatedInvocation(
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
-    assertMcp?.(driver, owner, mcpOwner!, input);
+    const currentMcpEvidence = assertMcp?.(driver, owner, mcpOwner!, input);
+    if (currentMcpEvidence?.evidenceRef !== mcpEvidence?.evidenceRef || currentMcpEvidence?.evidenceDigest !== mcpEvidence?.evidenceDigest)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP original native instance claim attachment changed');
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
@@ -504,6 +537,11 @@ export async function claimValidatedInvocation(
     if (input.brokerFenceTokenDigest !== undefined) {
       claimed.brokerFenceTokenDigest = input.brokerFenceTokenDigest;
     }
+    // Prepared evidence closes the previous UNKNOWN, never the new claim.
+    // A stdio claim independently installs its own initialized instance below.
+    if (highest.opKind === 'mcp' && highest.replayClass === 'retry' && highest.attempt > 0) {
+      delete claimed.evidenceRef; delete claimed.evidenceDigest;
+    }
     if (publication) {
       claimed.evidenceRef = publication.evidenceRef;
       claimed.evidenceDigest = publication.evidenceDigest;
@@ -515,6 +553,10 @@ export async function claimValidatedInvocation(
       for (const artifact of dependency.metadata) insertArtifactMetadata(connection, artifact, now);
     }
     if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
+    if (mcpEvidence) {
+      claimed.evidenceRef = mcpEvidence.evidenceRef;
+      claimed.evidenceDigest = mcpEvidence.evidenceDigest;
+    }
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
     appendInvocationJournalEntry(connection, claimed);
   });
@@ -739,6 +781,12 @@ async function settleInitialInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
+    if (prepared.opKind === 'mcp-server') {
+      const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
+      const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1')
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP server lifecycle requires its original positive native retirement and unique local terminal writer');
+    }
     if (prepared.opKind === 'tool' && prepared.target === 'builtin:dependency-acquire' && terminal.phase !== 'unknown' && !retained?.dependencyOwner)
       throw new KernelStorageError('INVALID_REQUEST', 'dependency settlement requires its original native result and physical retirement');
     if (prepared.opKind === 'publish' && !retained?.publicationOwner) {
@@ -923,6 +971,9 @@ function commitInitialSettlement(
       budgetSettlementRef: settlementArtifact.ref,
       timestamp: settlement.settledAt
     };
+    if (!claim && prepared!.opKind === 'mcp' && prepared!.replayClass === 'retry' && prepared!.attempt > 0) {
+      delete entry.evidenceRef; delete entry.evidenceDigest; // The old dispatch closure remains on its original prepared row.
+    }
     if (terminal.phase === 'completed') {
       if (terminal.resultRef !== undefined) entry.resultRef = terminal.resultRef;
       if (terminal.receiptRef !== undefined) entry.receiptRef = terminal.receiptRef;

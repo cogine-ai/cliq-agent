@@ -54,6 +54,30 @@ import type { AdminMcpHttpBinding, NativeMcpAdminHttpOwner } from './mcp-broker-
 import type { InstalledControlResponseV1 } from '../kernel/control-wire.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
+import { readMcpStdioRegistrationConsent } from './mcp-stdio-consent.js';
+import { readMcpStdioLaunchRecipeData } from './mcp-stdio-launch.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
+import { assertControlWireJson, controlWireRecord, controlWireRef } from '../kernel/control-wire-data.js';
+import { assertBoundedJsonValue } from '../kernel/json.js';
+import { decodeMcpStdioLifecycleData, decodeMcpStdioCleanupData } from './native-owner.js';
+import type { McpStdioNativeLifecycle } from './mcp-stdio-lifecycle.js';
+import { decodeMcpStdioRecipeData } from './mcp-stdio-recipe.js';
+import { assertMcpStdioRecipeData } from './mcp-stdio-recipe-audit.js';
+import { observeMcpAdminWork } from './mcp-admin-diagnostics.js';
+import { readMcpStdioCapture } from './mcp-stdio-history.js';
+import { publishMcpAdminDiscovery } from './mcp-admin-publication.js';
+import { deriveMcpRecoveryToolContracts, readMcpRecoveryTemplates, publishMcpRequestedRecovery,
+  validateMcpOriginalRequestedRecovery, mcpRequestedRecoveryFromRegistry } from './mcp-recovery-contract.js';
+import { publishMcpAdminCurrentRetirement, readMcpAdminCurrentRetirementData, type McpAdminRetirementScope } from './mcp-admin-current-retirement.js';
+import { prepareMcpStdioAuthorization, consumeMcpStdioAuthorization, mcpStdioAuthorizationData, assertMcpStdioAuthorizationConsumed,
+  type PreparedMcpStdioAuthorization } from './mcp-stdio-authorization.js';
+import { prepareMcpStdioAdminAttempt } from './mcp-stdio-admin.js';
+import { publishMcpStdioLaunch } from './mcp-stdio-launch.js';
+import type { AdminMcpStdioBinding } from './mcp-stdio-broker-native.js';
+import { readInstalledMcpStdioAdminReady, retireInstalledRetainedMcpStdioAdmin, readInstalledMcpStdioAdminCleanup } from '../sandbox/mcp-stdio-native.js';
+import type { InstalledMcpStdioAdminScope, InstalledMcpStdioAdminCleanup, McpStdioPhysicalJoined } from '../sandbox/mcp-stdio-native.js';
+import { openRetainedAdminMcpStdioInput, type HeldAdminMcpStdioInput, type AdminMcpStdioInputBinding } from './native-owner.js';
+import type { McpStdioNativeCleanup } from './mcp-stdio-lifecycle.js';
 
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
 type RegistrySource = Readonly<{ registry: McpRegistryRevisionV1; assertUnchanged(connection: SqliteConnection): void }>;
@@ -85,11 +109,19 @@ export async function retireRetainedMcpAdminOperations(driver: SqliteDriver, art
     signal?.throwIfAborted(); const operation = readMcpAdminOperation(driver, row.principal_id, row.method, row.request_id);
     if (!operation || !['prepared', 'active'].includes(operation.phase)) invalid('MCP startup original Admin attempt changed its phase');
     const target = decodeMcpAdminProbeTarget(await readCanonicalArtifact(artifacts, operation.targetRef));
-    await readOriginalAdminRequest(driver, artifacts, operation, target);
-    const plan = await readCanonicalArtifact<ProcessContainmentPlanV1>(artifacts, operation.plannedContainmentRef), binding = retainedAdminInputBinding(operation, plan);
+    const originalRequest = await readOriginalAdminRequest(driver, artifacts, operation, target);
+    const plan = await readCanonicalArtifact<ProcessContainmentPlanV1>(artifacts, operation.plannedContainmentRef);
+    if (target.resolvedTransport.kind === 'stdio') {
+      const claiming = originalRequest.ownerHistory.entries.find(value => value.owner.supervisorInstanceId === operation.supervisorInstanceId);
+      if (!claiming) invalid('MCP original stdio Admin owning Supervisor is absent from its retained history');
+      await retireRetainedMcpStdioAdminOperation(driver, artifacts, owner, selected, anchor, operation, target,
+        retainedStdioAdminInputBinding(operation, plan, claiming.process), signal);
+      continue;
+    }
+    const binding = retainedAdminInputBinding(operation, plan);
     const current = assertActiveStateOwner(driver, owner);
     if (operation.supervisorInstanceId === current.supervisorInstanceId) invalid('MCP startup cannot replace its own original live Admin producer');
-    const launcher = await openInstalledLinuxWorkerLauncher(selected, anchor, { ...(signal ? {signal} : {}) });
+    const launcher = await observeMcpAdminWork('http', 'launcher_open', () => openInstalledLinuxWorkerLauncher(selected, anchor, { ...(signal ? {signal} : {}) }));
     let controller: LinuxWorkerController | undefined, input: ReturnType<typeof openRetainedAdminMcpInput> | undefined;
     let controllerOpening: Promise<LinuxWorkerController> | undefined;
     let cleanupTask: ReturnType<typeof retireInstalledRetainedMcpHttpAdmin> | undefined;
@@ -98,8 +130,8 @@ export async function retireRetainedMcpAdminOperations(driver: SqliteDriver, art
     const resource: AdminResource = { close: () => { cancellation.abort(new KernelStorageError('LEASE_FENCED', 'MCP successor checker is closing')); return retiring ??= (async () => {
       const errors: unknown[] = [];
       try { await cleanupTask; } catch (error) { errors.push(error); }
-      try { await (controller ?? await controllerOpening)?.close(); } catch (error) { errors.push(error); }
-      try { await launcher.close(); } catch (error) { errors.push(error); }
+      try { await observeMcpAdminWork('http', 'controller_close', async () => { await (controller ?? await controllerOpening)?.close(); }); } catch (error) { errors.push(error); }
+      try { await observeMcpAdminWork('http', 'launcher_close', () => launcher.close()); } catch (error) { errors.push(error); }
       try { input?.close(); } catch (error) { errors.push(error); }
       if (errors.length) throw errors.find(error => error instanceof ResourceRetirementError) ??
         new ResourceRetirementError('MCP original Admin successor checker did not retire', new AggregateError(errors));
@@ -107,16 +139,16 @@ export async function retireRetainedMcpAdminOperations(driver: SqliteDriver, art
     let resources = adminResources.get(driver); if (!resources) adminResources.set(driver, resources = new Set()); resources.add(resource);
     let failure: unknown;
     try {
-      controllerOpening = launcher.startController({ signal: cleanupSignal });
+      controllerOpening = observeMcpAdminWork('http', 'controller_start', () => launcher.startController({ signal: cleanupSignal }));
       controller = await controllerOpening; cleanupSignal.throwIfAborted();
       input = openRetainedAdminMcpInput(owner.filesystem, binding);
-      cleanupTask = retireInstalledRetainedMcpHttpAdmin(selected, anchor, controller, owner.filesystem, input, binding,
-        { supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch }, { signal: cleanupSignal });
+      cleanupTask = observeMcpAdminWork('http', 'retained_cleanup', () => retireInstalledRetainedMcpHttpAdmin(selected, anchor, controller!, owner.filesystem, input!, binding,
+        { supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch }, { signal: cleanupSignal }));
       const receipt = await cleanupTask;
       const closed = readInstalledMcpAdminCleanup(receipt, input);
       // This is the actual current checker, not a reconstruction of the old
       // owner's unavailable FD/socket joins. Close its owning controller too.
-      await controller.close();
+      await observeMcpAdminWork('http', 'controller_close', () => controller!.close());
       const retirement = await publishAdminRetirement(artifacts, owner, driver, operation, closed.lifecycleSnapshot, closed.joined.observation, closed.observation);
       readInstalledMcpAdminCleanup(receipt, input);
       await finishFailedAdminAttempt(driver, artifacts, owner, operation, retirement, { principalId: operation.principalId,
@@ -200,6 +232,17 @@ function retainedAdminInputBinding(operation: AdminOperationV1, plan: ProcessCon
     plannedContainmentDigest: operation.plannedContainmentDigest, sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef,
     sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest };
 }
+function retainedStdioAdminInputBinding(operation: AdminOperationV1, plan: ProcessContainmentPlanV1,
+  original: Readonly<{ pid: number; processStartToken: string }>): AdminMcpStdioInputBinding {
+  const nonce = plan.backend.kind === 'linux' ? plan.backend.cgroupPath.split('/').at(-1)?.match(/^cliq-mcp-stdio-admin-([0-9a-f]{64})$/u)?.[1] : undefined;
+  if (!nonce || plan.backend.kind !== 'linux' || plan.backend.pidNamespaceReservationId !== `linux-mcp-stdio:admin:${nonce}`)
+    invalid('MCP original stdio Admin plan has no exact closed native purpose/nonce');
+  return { adminOperationId: operation.adminOperationId, attempt: operation.attempt, principalId: operation.principalId, nonce,
+    targetRef: operation.targetRef, targetDigest: operation.targetDigest, probePayloadCoreRef: operation.probePayloadCoreRef,
+    probePayloadCoreDigest: operation.probePayloadCoreDigest, plannedContainmentRef: operation.plannedContainmentRef,
+    plannedContainmentDigest: operation.plannedContainmentDigest, sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef,
+    sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest, originalSupervisorPid: original.pid, originalSupervisorStartToken: original.processStartToken };
+}
 function adminProbeRequestDigest(operation: AdminOperationV1, target: McpAdminProbeTargetV1, dispatchId: string): string {
   if (!('processContainmentRef' in operation) || !operation.processContainmentRef) invalid('MCP Admin probe has no actual blocked original containment');
   return canonicalSha256({ schemaVersion: 1, kind: 'mcp_registry_probe', adminOperationId: operation.adminOperationId,
@@ -208,24 +251,73 @@ function adminProbeRequestDigest(operation: AdminOperationV1, target: McpAdminPr
     containmentRef: operation.processContainmentRef, target: target.resolvedTransport, payloadRef: operation.probePayloadCoreRef,
     payloadDigest: operation.probePayloadCoreDigest, expiresAt: operation.deadlineAt });
 }
+async function retireRetainedMcpStdioAdminOperation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor, operation: AdminOperationV1, target: McpAdminProbeTargetV1,
+  binding: AdminMcpStdioInputBinding, signal?: AbortSignal) {
+  const current = assertActiveStateOwner(driver, owner);
+  if (current.supervisorInstanceId === operation.supervisorInstanceId) invalid('MCP stdio successor cannot replace its own original live Admin attempt');
+  const cancellation = new AbortController(), combined = signal ? AbortSignal.any([signal, cancellation.signal]) : cancellation.signal;
+  const launcher = await observeMcpAdminWork('stdio', 'launcher_open', () => openInstalledLinuxWorkerLauncher(selected, anchor, { signal: combined }));
+  let controller: LinuxWorkerController | undefined, opening: Promise<LinuxWorkerController> | undefined;
+  let physical: HeldAdminMcpStdioInput | undefined, cleanupTask: ReturnType<typeof retireInstalledRetainedMcpStdioAdmin> | undefined, closing: Promise<void> | undefined;
+  const resource: AdminResource = { close: () => closing ??= (async () => {
+    cancellation.abort(new KernelStorageError('LEASE_FENCED', 'MCP stdio current Admin checker is closing'));
+    const failures: unknown[] = [];
+    const revoke = observeMcpAdminWork('stdio', 'controller_close', async () => { const held = controller ?? await opening; await held?.close(); });
+    for (const result of await Promise.allSettled([cleanupTask, revoke])) if (result.status === 'rejected') failures.push(result.reason);
+    try { await observeMcpAdminWork('stdio', 'launcher_close', () => launcher.close()); } catch (error) { failures.push(error); }
+    try { physical?.close(); } catch (error) { failures.push(error); }
+    if (failures.length) throw new ResourceRetirementError('MCP stdio Admin current checker did not completely join', new AggregateError(failures));
+  })() };
+  let owners = adminResources.get(driver); if (!owners) adminResources.set(driver, owners = new Set()); owners.add(resource);
+  let failure: unknown;
+  try {
+    opening = observeMcpAdminWork('stdio', 'controller_start', () => launcher.startController({ signal: combined })); controller = await opening; combined.throwIfAborted();
+    physical = openRetainedAdminMcpStdioInput(owner.filesystem, binding);
+    cleanupTask = observeMcpAdminWork('stdio', 'retained_cleanup', () => retireInstalledRetainedMcpStdioAdmin({ selected, anchor, controller: controller!, lock: owner.filesystem, input: physical!, inputBinding: binding,
+      checker: { supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch }, signal: combined }));
+    const receipt = await cleanupTask, actual = readInstalledMcpStdioAdminCleanup(receipt, physical);
+    const retirement = await publishAdminRetirement(artifacts, owner, driver, operation, actual.lifecycleSnapshot, actual.joined.observation, undefined,
+      { binding, cleanup: { observation: actual.observation, cleanupSnapshot: actual.cleanupSnapshot } });
+    await finishFailedAdminAttempt(driver, artifacts, owner, operation, retirement, { principalId: operation.principalId,
+      channelIdentityRef: target.channelIdentityRef, channelIdentityDigest: target.channelIdentityDigest }, false,
+      { kind: 'stdio_cleanup', receipt, input: physical });
+  } catch (error) { failure = error; }
+  finally {
+    try { await resource.close(); if (failure === undefined) owners.delete(resource); } catch (error) { failure = error; }
+  }
+  if (failure !== undefined) throw failure instanceof ResourceRetirementError ? failure :
+    new ResourceRetirementError('MCP stdio original Admin birth/current cleanup remains unresolved', failure);
+}
 async function publishAdminRetirement(artifacts: ArtifactCatalog, owner: StateOwnerContext, driver: SqliteDriver,
-  operation: AdminOperationV1, lifecycleBytes: Buffer, observation: McpAdminScopeObservation, cleanup?: NativeAdminCleanupObservation) {
+  operation: AdminOperationV1, lifecycleBytes: Buffer, observation: McpAdminScopeObservation, cleanup?: NativeAdminCleanupObservation,
+  stdio?: Readonly<{ binding: AdminMcpStdioInputBinding; cleanup?: Readonly<{ observation: McpStdioNativeCleanup; cleanupSnapshot: Buffer }> }>,
+  originalScope?: McpAdminRetirementScope) {
   const plan = await readCanonicalArtifact<ProcessContainmentPlanV1>(artifacts, operation.plannedContainmentRef);
   if (plan.backend.kind !== 'linux' || plan.filesystemBinding.kind !== 'isolated-empty-root') invalid('MCP original Admin plan changed its physical purpose');
-  const binding = retainedAdminInputBinding(operation, plan), lifecycle = decodeAdminMcpLifecycleData(lifecycleBytes);
-  requireEqual(lifecycle.binding, binding, 'MCP original complete native birth');
-  if (!cleanup && (!lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired)) invalid('MCP original Admin lifecycle has no actual complete resource join');
-  if (cleanup && (cleanup.originalBirthDigest !== sha256Bytes(lifecycleBytes) || canonicalSha256(cleanup.originalBinding) !== canonicalSha256(binding) ||
-      !cleanup.priorControllerDead || !cleanup.priorSupervisorDead || !cleanup.networkJoined || !cleanup.outputCustodyRetired || cleanup.remainingDescendants !== 0))
+  const binding = stdio?.binding ?? retainedAdminInputBinding(operation, plan), stdioLifecycle = stdio ? decodeMcpStdioLifecycleData(lifecycleBytes) : undefined;
+  const lifecycle = stdioLifecycle ?? decodeAdminMcpLifecycleData(lifecycleBytes), actualCleanup = stdio?.cleanup?.observation ?? cleanup;
+  requireEqual(lifecycle.binding, stdio ? { kind: 'admin', ...binding } : binding, 'MCP original complete native birth');
+  if (!actualCleanup && (!lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired || stdioLifecycle && !stdioLifecycle.joined.ownerDrained))
+    invalid('MCP original Admin lifecycle has no actual complete resource join');
+  if (stdioLifecycle?.joined.responseRefused) invalid('MCP unsafe original stdio event remains pending recovery');
+  if (actualCleanup && (actualCleanup.originalBirthDigest !== sha256Bytes(lifecycleBytes) || canonicalSha256(actualCleanup.originalBinding) !== canonicalSha256(stdio ? { kind: 'admin', ...binding } : binding) ||
+      !actualCleanup.priorControllerDead || !actualCleanup.priorSupervisorDead || !actualCleanup.outputCustodyRetired || actualCleanup.remainingDescendants !== 0 ||
+      cleanup && !cleanup.networkJoined))
     invalid('MCP original Admin cleanup does not close its complete unchanged birth');
   if (observation.cgroupPopulated !== 0 || observation.remainingTrackedDescendants !== 0 ||
       lifecycle.reservation.cgroupInode !== observation.cgroupId) invalid('MCP original Admin domain is not actually empty');
-  const current = assertActiveStateOwner(driver, owner), inspector = supervisorInspectorIdentity(current), observedAt = new Date(cleanup?.observedAtMs ?? observation.observedAtMs).toISOString();
+  const current = assertActiveStateOwner(driver, owner), inspector = supervisorInspectorIdentity(current), observedAt = new Date(actualCleanup?.observedAtMs ?? observation.observedAtMs).toISOString();
   const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
-  const lifecycleArtifact = await artifacts.publishBytes(lifecycleBytes, 'application/octet-stream', 'cliq-mcp-admin-native-lifecycle-bytes-v1');
+  const lifecycleArtifact = await artifacts.publishBytes(lifecycleBytes, 'application/octet-stream', stdio ? 'cliq-mcp-stdio-native-lifecycle-bytes-v1' : 'cliq-mcp-admin-native-lifecycle-bytes-v1');
   const projectionArtifact = await artifacts.publishCanonical(lifecycle, lifecycle.format);
-  const cleanupArtifact = cleanup ? await artifacts.publishCanonical(cleanup, 'cliq-mcp-admin-retained-cleanup-v1') : undefined;
-  const metadata: PublishedArtifact[] = [inspectorArtifact, lifecycleArtifact, projectionArtifact, ...(cleanupArtifact ? [cleanupArtifact] : [])];
+  const stdioCleanupRaw = stdio?.cleanup ? await artifacts.publishBytes(stdio.cleanup.cleanupSnapshot, 'application/octet-stream', 'cliq-mcp-stdio-native-cleanup-bytes-v1') : undefined;
+  const stdioCleanupProjection = stdio?.cleanup ? await artifacts.publishCanonical(stdio.cleanup.observation, stdio.cleanup.observation.format) : undefined;
+  const cleanupArtifact = stdioCleanupRaw && stdioCleanupProjection ? await artifacts.publishCanonical({ schemaVersion: 1,
+    format: 'cliq-mcp-stdio-admin-cleanup-root-v1', cleanupRawRef: stdioCleanupRaw.ref, cleanupProjectionRef: stdioCleanupProjection.ref }, 'cliq-mcp-stdio-admin-cleanup-root-v1')
+    : cleanup ? await artifacts.publishCanonical(cleanup, 'cliq-mcp-admin-retained-cleanup-v1') : undefined;
+  const metadata: PublishedArtifact[] = [inspectorArtifact, lifecycleArtifact, projectionArtifact, ...(cleanupArtifact ? [cleanupArtifact] : []),
+    ...(stdioCleanupRaw ? [stdioCleanupRaw, stdioCleanupProjection!] : [])];
   const common = { schemaVersion: 1 as const, format: 'cliq-admin-probe-closure-evidence-v1' as const, adminOperationId: operation.adminOperationId,
     attempt: operation.attempt, targetRef: operation.targetRef, targetDigest: operation.targetDigest,
     plannedContainmentRef: operation.plannedContainmentRef, plannedContainmentDigest: operation.plannedContainmentDigest,
@@ -236,6 +328,9 @@ async function publishAdminRetirement(artifacts: ArtifactCatalog, owner: StateOw
     ...(cleanupArtifact ? { nativeCleanupRef: cleanupArtifact.ref, nativeCleanupDigest: cleanupArtifact.ref } : {}) };
   let closure: AdminProbeClosureEvidenceV1, processContainmentRef: string | undefined;
   if (lifecycle.containment === null) {
+    if (stdioLifecycle && (stdioLifecycle.joined.spawnAttempted || stdioLifecycle.joined.execReleased || observation.namespaceInitPid !== 0 ||
+        observation.namespaceInitDeadAndReaped !== 0 || !actualCleanup && stdioLifecycle.progressKind !== 9))
+      invalid('MCP missing stdio READY cannot prove that its original namespace was never created');
     if ('probeDispatch' in operation && operation.probeDispatch && operation.probeDispatch.state !== 'blocked') invalid('claimed MCP Admin cannot invent a no-spawn branch');
     const evidence: ProcessContainmentNoSpawnEvidenceV1 = { schemaVersion: 1, kind: 'containment_plan_quiescent', planRef: operation.plannedContainmentRef,
       sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest, owner: plan.owner,
@@ -269,14 +364,25 @@ async function publishAdminRetirement(artifacts: ArtifactCatalog, owner: StateOw
       ? { dispatchId: dispatch.dispatchId, probeRequestDigest: dispatch.probeRequestDigest } : {}), deathEvidenceRef: evidenceArtifact.ref,
       deathEvidenceDigest: evidence.evidenceDigest, evidenceDigest: '' };
   }
+  const root = stateRootIdentityForLock(owner.filesystem);
+  const currentRetirement = originalScope && closure.closureKind === 'containment_dead' && closure.dispatchId &&
+    'probeDispatch' in operation && operation.probeDispatch?.state === 'released'
+    ? await publishMcpAdminCurrentRetirement(artifacts, originalScope, lifecycleBytes, lifecycle, {
+      supervisorInstanceId: current.supervisorInstanceId, stateOwnerEpoch: current.ownerEpoch,
+      pid: lifecycle.originalSupervisor.pid, processStartToken: lifecycle.originalSupervisor.processStartToken, acquiredAt: current.acquiredAt,
+      stateRootIdentity: { deviceId: root.deviceId, fileId: root.directoryFileId, ownerUid: root.ownerUid } }) : undefined;
+  if (currentRetirement) { closure = { ...closure, nativeCurrentRetirement: currentRetirement.edge }; metadata.push(...currentRetirement.metadata); }
   (closure as {evidenceDigest:string}).evidenceDigest = digestOmitting(closure, 'evidenceDigest'); decodeAdminProbeClosureEvidence(closure);
   const artifact = await artifacts.publishCanonical(closure, closure.format); metadata.push(artifact);
-  return { closure, artifact, metadata, processContainmentRef, observedAt, lifecycle, binding };
+  return { closure, artifact, metadata, processContainmentRef, observedAt, lifecycle, binding, currentRetirement };
 }
 async function finishFailedAdminAttempt(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, operation: AdminOperationV1,
-  retirement: Awaited<ReturnType<typeof publishAdminRetirement>>, identity: AuthenticatedControlIdentity | undefined, deterministic: boolean,
+  retirement: Pick<Awaited<ReturnType<typeof publishAdminRetirement>>, 'artifact' | 'closure' | 'metadata' | 'processContainmentRef' | 'currentRetirement'>,
+  identity: AuthenticatedControlIdentity | undefined, deterministic: boolean,
   physical: Readonly<{ kind:'original'; scope:InstalledMcpHttpAdminScope; joined:McpAdminPhysicalJoined }> |
-    Readonly<{ kind:'cleanup'; receipt:InstalledMcpAdminCleanup; input:HeldAdminMcpInput }>) {
+    Readonly<{ kind:'cleanup'; receipt:InstalledMcpAdminCleanup; input:HeldAdminMcpInput }> |
+    Readonly<{ kind:'stdio_original'; scope:InstalledMcpStdioAdminScope; joined:McpStdioPhysicalJoined }> |
+    Readonly<{ kind:'stdio_cleanup'; receipt:InstalledMcpStdioAdminCleanup; input:HeldAdminMcpStdioInput }>) {
   const code = deterministic ? 'schema_invalid' as const : 'transport_failed_no_effect' as const;
   const diagnostic = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-admin-probe-diagnostic-v1', code }, 'cliq-admin-probe-diagnostic-v1');
   const finishedAt = sampleCanonicalNow(), error: AdminProbeErrorV1 = { schemaVersion: 1, format: 'cliq-admin-probe-error-v1',
@@ -306,10 +412,14 @@ async function finishFailedAdminAttempt(driver: SqliteDriver, artifacts: Artifac
   driver.transaction(connection => {
     assertActiveStateOwner(connection, owner);
     if (physical.kind === 'original') physical.scope.assertJoined(physical.joined);
-    else readInstalledMcpAdminCleanup(physical.receipt, physical.input);
+    else if (physical.kind === 'stdio_original') physical.scope.assertJoined(physical.joined);
+    else if (physical.kind === 'cleanup') readInstalledMcpAdminCleanup(physical.receipt, physical.input);
+    else readInstalledMcpStdioAdminCleanup(physical.receipt, physical.input);
+    retirement.currentRetirement?.assertCurrent();
     const now = sampleCanonicalNow(); clock = advanceTimeFence(connection, owner.ownerEpoch, now); if (clock !== 'healthy') return;
     requireEqual(readMcpAdminOperation(connection, operation.principalId, operation.method, operation.requestId, operation.attempt), operation, 'MCP original retired failure attempt');
-    if (now < finishedAt || Date.parse(now) - Date.parse(retirement.closure.observedAt) > 5_000)
+    const observedAtMs = retirement.currentRetirement?.current.observedAtMs ?? Date.parse(retirement.closure.observedAt);
+    if (now < finishedAt || Date.parse(now) < observedAtMs || Date.parse(now) - observedAtMs > 5_000)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP Admin retirement is stale at its actual failure commit');
     for (const item of [...retirement.metadata, diagnostic, errorArtifact, ...(responseArtifact ? [responseArtifact] : [])]) insertArtifactMetadata(connection, item, finishedAt);
     connection.prepare('UPDATE admin_operations SET state=?,row_json=? WHERE principal_id=? AND method=? AND request_id=? AND attempt=?')
@@ -323,10 +433,15 @@ async function finishFailedAdminAttempt(driver: SqliteDriver, artifacts: Artifac
   }); requireHealthyFence(clock);
   return { failed, response };
 }
-export function assertMcpManualHttpProfile(target: McpAdminProbeTargetV1): void {
+function assertMcpHttpProfile(target: McpAdminProbeTargetV1): void {
   if (target.resolvedTransport.kind !== 'streamable_http' || target.resolvedTransport.credentialGrantRefs.length > 1 ||
-      target.requestedToolRecovery.some(item => item.recovery.kind !== 'manual'))
-    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'this MCP profile supports public or one Bearer HTTP credential and manual recovery only');
+      target.requestedToolRecovery.some(item => item.recovery.kind === 'reconcile'))
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP HTTP requires at most one Bearer credential and manual or explicitly risk-consented retry recovery');
+}
+function assertMcpProfile(target: McpAdminProbeTargetV1): void {
+  if (target.resolvedTransport.kind === 'streamable_http') return assertMcpHttpProfile(target);
+  if (target.resolvedTransport.executable.kind !== 'runtime_bundle')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP stdio requires its exact signed executable closure');
 }
 export function readMcpAdminOperation(connection: SqliteConnection, principalId: string, method: string,
   requestId: string, attempt?: number): AdminOperationV1 | undefined {
@@ -387,25 +502,32 @@ async function readOriginalAdminRequest(driver: SqliteDriver, artifacts: Artifac
   }
   let source: RegistrySource | undefined;
   if (request.method === 'mcp.register') {
-    if (request.target.kind !== 'streamable_http' || target.resolvedTransport.kind !== 'streamable_http' ||
-        request.target.credentialGrantIds.length !== target.resolvedTransport.credentialGrantRefs.length)
-      invalid('MCP original registration target changed its transport or credential cardinality');
-    const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, target.resolvedTransport.endpointRegistrationRef));
-    if (endpoint.endpointRegistrationId !== request.target.endpointRegistrationId) invalid('MCP original endpoint id differs from retained target');
-    const credentials = await artifacts.mapReads(target.resolvedTransport.credentialGrantRefs, async ref =>
-      decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref)));
-    requireEqual(credentials.map(value => value.credentialGrantId), request.target.credentialGrantIds, 'MCP exact original credential IDs');
+    if (request.target.kind === 'stdio' && target.resolvedTransport.kind === 'stdio') {
+      if (request.target.executionIdentityGrantId !== target.resolvedTransport.executionIdentityGrantId)
+        invalid('MCP stdio original request changes its one-use identity grant');
+      requireEqual(request.target.argv, target.resolvedTransport.argv, 'MCP stdio exact original non-secret argv');
+      const consent = await readMcpStdioRegistrationConsent(driver, artifacts, operation.principalId, target.registrationId, target.resolvedTransport);
+      if (consent.history.consumption?.operationId !== first.adminOperationId || consent.history.consumption.requestId !== first.requestId)
+        invalid('MCP stdio identity read was not consumed by this exact first prepared operation');
+      context.assertions.set(`stdio-identity:${consent.grant.grantId}`, consent.assertUnchanged);
+    } else if (request.target.kind === 'streamable_http' && target.resolvedTransport.kind === 'streamable_http') {
+      if (request.target.credentialGrantIds.length !== target.resolvedTransport.credentialGrantRefs.length)
+        invalid('MCP original registration changed its credential cardinality');
+      const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, target.resolvedTransport.endpointRegistrationRef));
+      if (endpoint.endpointRegistrationId !== request.target.endpointRegistrationId) invalid('MCP original endpoint id differs from retained target');
+      const credentials = await artifacts.mapReads(target.resolvedTransport.credentialGrantRefs, async ref =>
+        decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref)));
+      requireEqual(credentials.map(value => value.credentialGrantId), request.target.credentialGrantIds, 'MCP exact original credential IDs');
+    } else invalid('MCP original registration target changed its exact original transport');
     requireEqual(target.lifecycle, normalizeMcpLifecycle(request.lifecycle), 'MCP original requested lifecycle');
-    if (Object.values(request.toolRecovery).some(recovery => recovery.kind !== 'manual')) invalid('MCP original request selected an unsupported recovery profile');
-    requireEqual(target.requestedToolRecovery, Object.entries(request.toolRecovery).sort(([left], [right]) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
-      .map(([toolName]) => ({ toolName, recovery: { kind: 'manual' } })), 'MCP exact original recovery overrides');
+    await validateMcpOriginalRequestedRecovery(artifacts, request, target);
   } else {
     if (target.expectedRegistryRevision !== request.expectedRegistryRevision || !target.sourceRegistryRevisionRef)
       invalid('MCP original refresh lost its expected source revision');
     source = await readMcpRefreshSource(driver, artifacts, target.sourceRegistryRevisionRef, operation.principalId, target.registrationId, request.expectedRegistryRevision, context);
     requireEqual(target.resolvedTransport, source.registry.transport, 'MCP copy-only refresh original transport');
     requireEqual(target.lifecycle, source.registry.lifecycle, 'MCP copy-only refresh original lifecycle');
-    requireEqual(target.requestedToolRecovery, source.registry.tools.map(tool => ({ toolName: tool.name, recovery: tool.recovery })), 'MCP copy-only refresh original recovery');
+    requireEqual(target.requestedToolRecovery, await mcpRequestedRecoveryFromRegistry(artifacts, source.registry), 'MCP copy-only refresh original recovery');
   }
   return { request, channel, first, ownerHistory, firstOwner, source };
 }
@@ -446,12 +568,15 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
   if (canonicalSha256(diagnostic) !== error.diagnosticDigest) invalid('MCP original failure diagnostic changed its complete bytes');
   const plan = await readCanonicalArtifact<ProcessContainmentPlanV1>(artifacts, operation.plannedContainmentRef);
   const spec = await readCanonicalArtifact<SandboxLaunchSpecV1>(artifacts, operation.sandboxLaunchSpecRef);
-  const binding = retainedAdminInputBinding(operation, plan), raw = await artifacts.readBoundedBytes(closure.nativeLifecycleRef, 16_777_216);
+  const raw = await artifacts.readBoundedBytes(closure.nativeLifecycleRef, 16_777_216), stdio = target.resolvedTransport.kind === 'stdio';
   if (sha256Bytes(raw) !== closure.nativeLifecycleDigest || closure.nativeLifecycleRef !== closure.nativeLifecycleDigest)
     invalid('MCP failed original birth/progress bytes differ');
-  const lifecycle = decodeAdminMcpLifecycleData(raw), projection = await readCanonicalArtifact(artifacts, closure.nativeLifecycleProjectionRef);
+  const stdioLifecycle = stdio ? decodeMcpStdioLifecycleData(raw) : undefined, lifecycle = stdioLifecycle ?? decodeAdminMcpLifecycleData(raw);
+  const binding = stdio ? retainedStdioAdminInputBinding(operation, plan, lifecycle.originalSupervisor) : retainedAdminInputBinding(operation, plan);
+  const projection = await readCanonicalArtifact(artifacts, closure.nativeLifecycleProjectionRef);
   requireEqual(lifecycle, projection, 'MCP failed original full binary birth/progress projection');
-  requireEqual(lifecycle.binding, binding, 'MCP failed original prepared native binding');
+  requireEqual(lifecycle.binding, stdio ? { kind: 'admin', ...binding } : binding, 'MCP failed original prepared native binding');
+  if (stdioLifecycle?.joined.responseRefused) invalid('MCP unsafe original stdio event cannot become an ordinary local failure/retry');
   if (canonicalSha256(projection) !== closure.nativeLifecycleProjectionDigest || plan.planDigest !== operation.plannedContainmentDigest ||
       plan.planDigest !== digestOmitting(plan, 'planDigest') || spec.launchSpecDigest !== operation.sandboxLaunchSpecDigest ||
       spec.launchSpecDigest !== digestOmitting(spec, 'launchSpecDigest') || plan.backend.kind !== 'linux' ||
@@ -469,9 +594,24 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
       [lifecycle.stateRootIdentity, lifecycle.runtimeIdentity, lifecycle.birthIdentity, lifecycle.privateParentIdentity].some(value => value.ownerUid !== history.rootIdentity.ownerUid))
     invalid('MCP failure resource evidence is outside its exact original owner/inspector history');
   const recipe = await readAdminLaunchRecipe(artifacts, operation, plan, spec, history);
+  if (stdioLifecycle) await auditStdioAdminNativeRecipeData(artifacts, stdioLifecycle, target, recipe.core);
   if (original[0]!.owner.runtimeBundleRef !== recipe.core.runtimeBundleRef || original[0]!.owner.runtimeBundleManifestDigest !== recipe.core.runtimeBundleManifestDigest)
     invalid('MCP original failed probe borrows another signed runtime');
-  if (closure.nativeCleanupRef) {
+  let actualRetirement = lifecycle.retirement;
+  if (closure.nativeCleanupRef && stdioLifecycle) {
+    const cleanup = await readStdioAdminCleanupData(artifacts, closure.nativeCleanupRef);
+    if (closure.nativeCleanupDigest !== closure.nativeCleanupRef || cleanup.originalBirthDigest !== sha256Bytes(raw) ||
+        canonicalSha256(cleanup.originalBinding) !== canonicalSha256({ kind: 'admin', ...binding }) || !cleanup.priorSupervisorDead || !cleanup.priorControllerDead ||
+        !cleanup.outputCustodyRetired || cleanup.remainingDescendants !== 0 ||
+        canonicalSha256(cleanup.originalController) !== canonicalSha256(lifecycle.controller) ||
+        cleanup.originalReservation.cgroupName !== lifecycle.reservation.cgroupName || cleanup.originalReservation.cgroupDevice !== lifecycle.reservation.cgroupDevice ||
+        cleanup.originalReservation.cgroupInode !== lifecycle.reservation.cgroupInode || cleanup.currentChecker.stateOwnerEpoch !== inspecting.owner.ownerEpoch ||
+        cleanup.currentChecker.supervisorInstanceId !== inspecting.owner.supervisorInstanceId || cleanup.currentChecker.supervisorPid !== inspecting.process.pid ||
+        cleanup.currentChecker.supervisorStartToken !== inspecting.process.processStartToken || inspecting.owner.ownerEpoch <= original[0]!.owner.ownerEpoch ||
+        new Date(cleanup.observedAtMs).toISOString() !== closure.observedAt)
+      invalid('MCP stdio successor cleanup substitutes the exact old domain/current inspector');
+    actualRetirement = cleanup.retirement;
+  } else if (closure.nativeCleanupRef) {
     const cleanup = await readCanonicalArtifact<NativeAdminCleanupObservation>(artifacts, closure.nativeCleanupRef);
     if (closure.nativeCleanupDigest !== closure.nativeCleanupRef || canonicalSha256(cleanup) !== closure.nativeCleanupDigest || cleanup.originalBirthDigest !== sha256Bytes(raw) ||
         canonicalSha256(cleanup.originalBinding) !== canonicalSha256(binding) || !cleanup.priorSupervisorDead || !cleanup.priorControllerDead ||
@@ -484,7 +624,7 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
         new Date(cleanup.observedAtMs).toISOString() !== closure.observedAt)
       invalid('MCP separate actual successor cleanup substitutes an original domain or current inspector');
   } else {
-    if (!lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired || !lifecycle.retirement || inspecting.owner.ownerEpoch !== original[0]!.owner.ownerEpoch ||
+    if (!lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired || stdioLifecycle && !stdioLifecycle.joined.ownerDrained || !lifecycle.retirement || inspecting.owner.ownerEpoch !== original[0]!.owner.ownerEpoch ||
         lifecycle.retirement.cgroupPopulated !== 0 || lifecycle.retirement.remainingTrackedDescendants !== 0 ||
         lifecycle.retirement.cgroupId !== lifecycle.reservation.cgroupInode || new Date(lifecycle.retirement.observedAtMs).toISOString() !== closure.observedAt ||
         lifecycle.containment && (lifecycle.retirement.namespaceInitDeadAndReaped !== 1 || lifecycle.retirement.pidNamespaceId !== lifecycle.containment.pidNamespaceId ||
@@ -493,9 +633,21 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
   }
   await readSupervisorInspector(artifacts, inspecting.owner, { runtime: { runtimeBundleRef: inspecting.owner.runtimeBundleRef,
     runtimeBundleManifestDigest: inspecting.owner.runtimeBundleManifestDigest } }, closure);
+  const originalOwner = original[0]!;
+  const currentRetirement = await readMcpAdminCurrentRetirementData(artifacts, closure, raw, lifecycle, {
+    supervisorInstanceId: originalOwner.owner.supervisorInstanceId, stateOwnerEpoch: originalOwner.owner.ownerEpoch,
+    pid: originalOwner.process.pid, processStartToken: originalOwner.process.processStartToken, acquiredAt: originalOwner.owner.acquiredAt,
+    ...(originalOwner.owner.state === 'terminal' ? { releasedAt: originalOwner.owner.releasedAt } : {}),
+    stateRootIdentity: { deviceId: history.rootIdentity.deviceId, fileId: history.rootIdentity.directoryFileId, ownerUid: history.rootIdentity.ownerUid } });
+  if (currentRetirement && (inspecting.owner.ownerEpoch !== originalOwner.owner.ownerEpoch ||
+      currentRetirement.observedAtMs > Date.parse(error.createdAt) || Date.parse(operation.finishedAt) - currentRetirement.observedAtMs > 5_000))
+    invalid('MCP failed current observation is outside its actual same-owner finalization interval');
   if (closure.closureKind === 'no_spawn') {
     if (lifecycle.containment !== null || operation.processContainmentRef !== undefined || operation.probeDispatch !== undefined)
       invalid('MCP no-spawn failure substitutes an actual blocked/claimed process');
+    if (stdioLifecycle && (stdioLifecycle.joined.spawnAttempted || stdioLifecycle.joined.execReleased || !actualRetirement ||
+        actualRetirement.namespaceInitPid !== 0 || actualRetirement.namespaceInitDeadAndReaped !== 0))
+      invalid('MCP missing stdio READY cannot prove a never-created namespace');
     const noSpawn = await readCanonicalArtifact<ProcessContainmentNoSpawnEvidenceV1>(artifacts, closure.noSpawnEvidenceRef);
     requireEqual(noSpawn, { schemaVersion: 1, kind: 'containment_plan_quiescent', planRef: operation.plannedContainmentRef,
       sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest, owner: plan.owner,
@@ -513,6 +665,10 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
     const death = await readCanonicalArtifact<ProcessContainmentDeathEvidenceV1>(artifacts, closure.deathEvidenceRef);
     if (containment.backend.kind !== 'linux') invalid('MCP original failed containment changed its backend');
     const physical = lifecycle.containment;
+    if (stdioLifecycle && (!actualRetirement || actualRetirement.namespaceInitDeadAndReaped !== 1 || actualRetirement.cgroupPopulated !== 0 ||
+        actualRetirement.remainingTrackedDescendants !== 0 || actualRetirement.namespaceInitPid !== physical.namespaceInitPid ||
+        actualRetirement.pidNamespaceId !== physical.pidNamespaceId || actualRetirement.namespaceInitStartToken !== physical.namespaceInitStartToken ||
+        actualRetirement.observedAtMs !== Date.parse(closure.observedAt))) invalid('MCP current stdio retirement lost its actual original namespace identity');
     requireEqual(containment, { schemaVersion: 1, planRef: operation.plannedContainmentRef, sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef,
       sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest, owner: plan.owner, filesystemBinding: plan.filesystemBinding,
       launchNonceDigest: plan.launchNonceDigest, backend: { kind: 'linux', cgroupPath: plan.backend.cgroupPath,
@@ -548,6 +704,43 @@ async function readAdminFailureHistory(driver: SqliteDriver, artifacts: Artifact
   } };
 }
 
+export function decodeMcpStdioAdminCleanupRoot(value: unknown) {
+  assertControlWireJson(value); assertBoundedJsonValue(value, 'MCP stdio current-cleanup root');
+  const root = controlWireRecord(value, ['schemaVersion', 'format', 'cleanupRawRef', 'cleanupProjectionRef']);
+  if (root.schemaVersion !== 1 || root.format !== 'cliq-mcp-stdio-admin-cleanup-root-v1') invalid('MCP stdio cleanup has no closed original raw/current projection root');
+  return immutableSnapshot({ schemaVersion: 1 as const, format: 'cliq-mcp-stdio-admin-cleanup-root-v1' as const,
+    cleanupRawRef: controlWireRef(root.cleanupRawRef), cleanupProjectionRef: controlWireRef(root.cleanupProjectionRef) });
+}
+export async function readStdioAdminCleanupData(artifacts: ArtifactCatalog, reference: string) {
+  const root = decodeMcpStdioAdminCleanupRoot(await readCanonicalArtifact(artifacts, reference));
+  if (canonicalSha256(root) !== reference) invalid('MCP stdio cleanup root complete bytes changed');
+  const bytes = await artifacts.readBoundedBytes(root.cleanupRawRef, 16_777_216), cleanup = decodeMcpStdioCleanupData(bytes);
+  if (sha256Bytes(bytes) !== root.cleanupRawRef || canonicalSha256(cleanup) !== root.cleanupProjectionRef) invalid('MCP stdio actual cleanup bytes/projection changed');
+  requireEqual(await readCanonicalArtifact(artifacts, root.cleanupProjectionRef), cleanup, 'MCP stdio complete actual native cleanup byte projection');
+  return cleanup;
+}
+async function auditStdioAdminNativeRecipeData(artifacts: ArtifactCatalog, lifecycle: McpStdioNativeLifecycle, target: McpAdminProbeTargetV1,
+  core: AdminProbePayloadCoreV1) {
+  const transport = target.resolvedTransport;
+  if (transport.kind !== 'stdio' || transport.executable.kind !== 'runtime_bundle' || lifecycle.binding.kind !== 'admin')
+    invalid('MCP stdio original native recipe has another purpose/transport');
+  const executable = transport.executable;
+  const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, core.runtimeBundleRef); verifyRuntimeBundle(bundle, artifacts.releaseTrustRoots());
+  const server = bundle.entries.filter(entry => entry.entryId === executable.executableId), client = bundle.entries.filter(entry => entry.entryId === 'linux_worker_controller'),
+    isolation = bundle.entries.filter(entry => entry.entryId === 'linux_bubblewrap');
+  if (server.length !== 1 || server[0]!.role !== 'mcp_server' || !server[0]!.executable || server[0]!.digest !== transport.executable.executableDigest ||
+      client.length !== 1 || client[0]!.role !== 'platform_helper' || !client[0]!.executable || client[0]!.digest !== core.adapterExecutableDigest ||
+      isolation.length !== 1 || isolation[0]!.role !== 'platform_helper' || !isolation[0]!.executable)
+    invalid('MCP stdio original native images are outside its complete original signed runtime');
+  requireEqual(lifecycle.images.server, { digest: server[0]!.digest, byteCount: server[0]!.byteCount }, 'MCP stdio original signed server image');
+  requireEqual(lifecycle.images.client, { digest: client[0]!.digest, byteCount: client[0]!.byteCount }, 'MCP stdio original fixed signed client image');
+  requireEqual(lifecycle.images.isolation, { digest: isolation[0]!.digest, byteCount: isolation[0]!.byteCount }, 'MCP stdio original fixed signed isolation image');
+  const bytes = await artifacts.readBoundedBytes(lifecycle.images.recipe.digest, lifecycle.images.recipe.byteCount), recipe = decodeMcpStdioRecipeData(bytes);
+  if (recipe.recipeDigest !== lifecycle.images.recipe.digest || recipe.byteCount !== lifecycle.images.recipe.byteCount)
+    invalid('MCP stdio original sealed recipe full bytes differ from native birth');
+  assertMcpStdioRecipeData(recipe, { purpose: 'admin', transport, serverByteCount: server[0]!.byteCount, resources: DEFAULT_SANDBOX_RESOURCES });
+}
+
 async function readMcpAdminResourceClosure(driver: SqliteDriver, artifacts: ArtifactCatalog,
   operation: Extract<AdminOperationV1, { phase: 'completed' }>, core: ReturnType<typeof decodeAdminProbePayloadCore>,
   closure: ReturnType<typeof decodeAdminProbeClosureEvidence>) {
@@ -560,25 +753,28 @@ async function readMcpAdminResourceClosure(driver: SqliteDriver, artifacts: Arti
     invalid('MCP Admin closure has no complete original native birth/progress capture');
   const lifecycleBytes = await artifacts.readBoundedBytes(closure.nativeLifecycleRef, 16_777_216);
   if (closure.nativeLifecycleDigest !== closure.nativeLifecycleRef) invalid('MCP native lifecycle raw digest differs');
-  const lifecycle = decodeAdminMcpLifecycleData(lifecycleBytes);
+  const stdio = core.probeKind === 'mcp_stdio';
+  const lifecycle = stdio ? decodeMcpStdioLifecycleData(lifecycleBytes) : decodeAdminMcpLifecycleData(lifecycleBytes);
   const lifecycleProjection = await readCanonicalArtifact(artifacts, closure.nativeLifecycleProjectionRef);
   if (canonicalSha256(lifecycleProjection) !== closure.nativeLifecycleProjectionDigest)
     invalid('MCP original native lifecycle projection does not rehash');
   requireEqual(lifecycle, lifecycleProjection, 'MCP complete original binary birth/hash-chain projection');
-  if (!lifecycle.joined.protocolCompleted) invalid('MCP successful registry probe did not complete the real original helper protocol');
+  if (!lifecycle.joined.protocolCompleted || stdio && (!('responseRefused' in lifecycle.joined) || lifecycle.joined.responseRefused || !lifecycle.joined.ownerDrained))
+    invalid('MCP successful registry probe did not complete and drain its real original protocol');
   const owner = { kind: 'admin_probe', adminOperationId: operation.adminOperationId, attempt: operation.attempt,
     principalId: operation.principalId, method: operation.method, originalRequestDigest: operation.requestDigest,
     targetRef: operation.targetRef, supervisorInstanceId: operation.supervisorInstanceId };
   if (plan.schemaVersion !== 1 || plan.format !== 'cliq-process-containment-plan-v1' || plan.planDigest !== operation.plannedContainmentDigest ||
       plan.planDigest !== digestOmitting(plan, 'planDigest') || plan.backend.kind !== 'linux' ||
       plan.filesystemBinding.kind !== 'isolated-empty-root' || spec.owner.kind !== 'admin_probe' ||
-      spec.purpose !== 'admin_mcp_http_probe' || spec.schemaVersion !== 1 || spec.format !== 'cliq-sandbox-launch-v1' ||
+      spec.purpose !== (stdio ? 'admin_mcp_stdio_probe' : 'admin_mcp_http_probe') || spec.schemaVersion !== 1 || spec.format !== 'cliq-sandbox-launch-v1' ||
       spec.launchSpecDigest !== operation.sandboxLaunchSpecDigest || spec.launchSpecDigest !== digestOmitting(spec, 'launchSpecDigest') ||
       spec.runtime.runtimeBundleRef !== core.runtimeBundleRef || spec.runtime.runtimeBundleManifestDigest !== core.runtimeBundleManifestDigest ||
       spec.containmentPlanRef !== operation.plannedContainmentRef || spec.containmentPlanDigest !== plan.planDigest ||
       spec.adminTargetRef !== operation.targetRef || spec.adminTargetDigest !== operation.targetDigest ||
       spec.probePayloadCoreRef !== operation.probePayloadCoreRef || spec.processInvocation.kind !== 'admin_probe' ||
-      spec.processInvocation.recipe !== 'cliq-admin-mcp-http-probe-v1' || spec.processInvocation.purpose !== 'admin_mcp_http_probe' ||
+      spec.processInvocation.recipe !== (stdio ? 'cliq-admin-mcp-stdio-probe-v1' : 'cliq-admin-mcp-http-probe-v1') ||
+      spec.processInvocation.purpose !== (stdio ? 'admin_mcp_stdio_probe' : 'admin_mcp_http_probe') ||
       spec.processInvocation.targetRef !== operation.targetRef || spec.processInvocation.targetDigest !== operation.targetDigest ||
       spec.processInvocation.probePayloadCoreRef !== operation.probePayloadCoreRef ||
       spec.processInvocation.argvCwdSource !== 'trusted_recipe_decode_of_admin_target_and_probe_core' ||
@@ -597,18 +793,19 @@ async function readMcpAdminResourceClosure(driver: SqliteDriver, artifacts: Arti
   requireEqual(containment.owner, owner, 'MCP actual original Admin owner');
   requireEqual(containment.filesystemBinding, plan.filesystemBinding, 'MCP actual isolated empty root');
   const backend = containment.backend;
-  const nonce = plan.backend.cgroupPath.split('/').at(-1)?.match(/^cliq-mcp-admin-([0-9a-f]{64})$/u)?.[1];
+  const nonce = plan.backend.cgroupPath.split('/').at(-1)?.match(stdio ? /^cliq-mcp-stdio-admin-([0-9a-f]{64})$/u : /^cliq-mcp-admin-([0-9a-f]{64})$/u)?.[1];
   if (!nonce) invalid('MCP Admin native reservation has no exact original nonce');
   const expectedInput: AdminMcpInputBinding = { adminOperationId: operation.adminOperationId, attempt: operation.attempt,
     principalId: operation.principalId, nonce, targetRef: operation.targetRef, targetDigest: operation.targetDigest,
     probePayloadCoreRef: operation.probePayloadCoreRef, probePayloadCoreDigest: operation.probePayloadCoreDigest,
     plannedContainmentRef: operation.plannedContainmentRef, plannedContainmentDigest: operation.plannedContainmentDigest,
     sandboxLaunchSpecRef: operation.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: operation.sandboxLaunchSpecDigest };
-  requireEqual(lifecycle.binding, expectedInput, 'MCP native birth original prepared intent');
+  requireEqual(lifecycle.binding, stdio ? { kind: 'admin', ...expectedInput, originalSupervisorPid: lifecycle.originalSupervisor.pid,
+    originalSupervisorStartToken: lifecycle.originalSupervisor.processStartToken } : expectedInput, 'MCP native birth original prepared intent');
   const physical = lifecycle.containment, retirement = lifecycle.retirement;
   if (!physical || !retirement || !lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired ||
-      lifecycle.reservation.cgroupName !== `cliq-mcp-admin-${nonce}` || lifecycle.reservation.cgroupInode !== backend.cgroupId ||
-      plan.backend.pidNamespaceReservationId !== `cliq-mcp-admin-pidns:${nonce}` ||
+      lifecycle.reservation.cgroupName !== (stdio ? `cliq-mcp-stdio-admin-${nonce}` : `cliq-mcp-admin-${nonce}`) || lifecycle.reservation.cgroupInode !== backend.cgroupId ||
+      plan.backend.pidNamespaceReservationId !== (stdio ? `linux-mcp-stdio:admin:${nonce}` : `cliq-mcp-admin-pidns:${nonce}`) ||
       plan.backend.subreaperStartToken !== `linux-subreaper:${lifecycle.controller.pid}:${lifecycle.controller.processStartToken}` ||
       physical.pidNamespaceId !== backend.pidNamespaceId || physical.cgroupId !== backend.cgroupId ||
       physical.namespaceInitStartToken !== backend.namespaceInitStartToken || physical.cgroupPopulated !== 1 ||
@@ -650,13 +847,45 @@ async function readMcpAdminResourceClosure(driver: SqliteDriver, artifacts: Arti
   await readSupervisorInspector(artifacts, inspecting.owner,
     { runtime: { runtimeBundleRef: inspecting.owner.runtimeBundleRef, runtimeBundleManifestDigest: inspecting.owner.runtimeBundleManifestDigest } }, closure);
   await readAdminLaunchRecipe(artifacts, operation, plan, spec, history);
-  return { plan, spec, containment, death, history };
+  if (stdio) await auditStdioAdminNativeRecipeData(artifacts, decodeMcpStdioLifecycleData(lifecycleBytes), target, core);
+  const originalOwner = claiming[0]!;
+  const currentRetirement = await readMcpAdminCurrentRetirementData(artifacts, closure, lifecycleBytes, lifecycle, {
+    supervisorInstanceId: originalOwner.owner.supervisorInstanceId, stateOwnerEpoch: originalOwner.owner.ownerEpoch,
+    pid: originalOwner.process.pid, processStartToken: originalOwner.process.processStartToken, acquiredAt: originalOwner.owner.acquiredAt,
+    ...(originalOwner.owner.state === 'terminal' ? { releasedAt: originalOwner.owner.releasedAt } : {}),
+    stateRootIdentity: { deviceId: history.rootIdentity.deviceId, fileId: history.rootIdentity.directoryFileId, ownerUid: history.rootIdentity.ownerUid } });
+  if (currentRetirement && (inspecting.owner.ownerEpoch !== originalOwner.owner.ownerEpoch || currentRetirement.observedAtMs > Date.parse(operation.finishedAt)))
+    invalid('MCP successful current observation is outside its actual same-owner finalization interval');
+  return { plan, spec, containment, death, history, currentRetirement };
 }
 /** Same original signed launch recipe for completed, no-spawn, failed and
  * successor-retired attempts. A failure row cannot relax physical history. */
 async function readAdminLaunchRecipe(artifacts: ArtifactCatalog, operation: AdminOperationV1, plan: ProcessContainmentPlanV1,
   spec: SandboxLaunchSpecV1, history: Awaited<ReturnType<typeof readRetainedStateOwnerHistory>>) {
   const core = decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, operation.probePayloadCoreRef));
+  if (core.probeKind === 'mcp_stdio') {
+    const target = decodeMcpAdminProbeTarget(await readCanonicalArtifact(artifacts, operation.targetRef));
+    const nonce = plan.backend.kind === 'linux' && plan.backend.cgroupPath.split('/').at(-1)?.match(/^cliq-mcp-stdio-admin-([0-9a-f]{64})$/u)?.[1];
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, core.runtimeBundleRef);
+    const launcher = bundle.entries.filter(entry => entry.entryId === 'linux_worker_controller');
+    if (!nonce || plan.backend.kind !== 'linux' || target.resolvedTransport.kind !== 'stdio' || target.resolvedTransport.executable.kind !== 'runtime_bundle' ||
+        core.payloadCoreDigest !== operation.probePayloadCoreDigest || core.runtimeBundleManifestDigest !== bundle.manifestDigest ||
+        core.protocolRecipe !== 'mcp-initialize-capabilities-tools-list-v1' || core.maximumResponseBytes !== 1_048_576 ||
+        launcher.length !== 1 || launcher[0]!.role !== 'platform_helper' || !launcher[0]!.executable || core.adapterExecutableId !== launcher[0]!.entryId ||
+        core.adapterVersion !== launcher[0]!.version || core.adapterExecutableDigest !== launcher[0]!.digest ||
+        plan.createdAt !== operation.createdAt || spec.createdAt !== operation.createdAt)
+      invalid('MCP stdio Admin core substitutes its original fixed signed C driver, bounded protocol or prepared interval');
+    const expectedOwner = { kind: 'admin_probe' as const, adminOperationId: operation.adminOperationId, attempt: operation.attempt,
+      principalId: operation.principalId, method: operation.method, originalRequestDigest: operation.requestDigest,
+      targetRef: operation.targetRef, supervisorInstanceId: operation.supervisorInstanceId };
+    await readMcpStdioLaunchRecipeData(artifacts, { purpose: { kind: 'admin', owner: expectedOwner, targetRef: operation.targetRef,
+      targetDigest: operation.targetDigest, probePayloadCoreRef: operation.probePayloadCoreRef }, bundle,
+      originalController: { subreaperStartToken: plan.backend.subreaperStartToken }, cgroupParent: plan.backend.cgroupPath.slice(0, plan.backend.cgroupPath.lastIndexOf('/')),
+      ownerUid: history.rootIdentity.ownerUid, executable: target.resolvedTransport.executable, nonce, createdAt: operation.createdAt,
+      resources: DEFAULT_SANDBOX_RESOURCES, plan, spec });
+    for await (const _chunk of artifacts.readChunks(launcher[0]!.digest, launcher[0]!.byteCount)) artifacts.assertReadActive();
+    return { core };
+  }
   const nonce = plan.backend.kind === 'linux' && plan.backend.cgroupPath.split('/').at(-1)?.match(/^cliq-mcp-admin-([0-9a-f]{64})$/u)?.[1];
   if (!nonce || core.payloadCoreDigest !== operation.probePayloadCoreDigest || core.probeKind !== 'mcp_streamable_http' ||
       core.protocolRecipe !== 'mcp-initialize-capabilities-tools-list-v1' || core.maximumResponseBytes !== 1_048_576 ||
@@ -762,36 +991,38 @@ async function readMcpRegistryClosureInContext(driver: SqliteDriver, artifacts: 
   if (registry.registryRevision !== (target.method === 'mcp.register' ? 1 : target.expectedRegistryRevision! + 1))
     invalid('MCP immutable registry revision is not its original register/copy-only refresh successor');
   await readOriginalAdminRequest(driver, artifacts, operation, target, context);
-  assertMcpManualHttpProfile(target);
+  assertMcpProfile(target);
   const core = decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, operation.probePayloadCoreRef));
   const result = decodeMcpAdminProbeResult(await readCanonicalArtifact(artifacts, operation.resultRef));
   const closure = decodeAdminProbeClosureEvidence(await readCanonicalArtifact(artifacts, operation.evidenceRef));
   const resources = await readMcpAdminResourceClosure(driver, artifacts, operation, core, closure);
   const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, core.runtimeBundleRef);
   verifyRuntimeBundle(bundle, artifacts.releaseTrustRoots());
-  const helper = bundle.entries.filter(entry => entry.entryId === MCP_ADMIN_HELPER_ENTRY_ID);
-  if (helper.length !== 1 || helper[0]!.executable || helper[0]!.role !== 'platform_helper' ||
-      helper[0]!.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH || helper[0]!.version !== '1' ||
+  const stdio = registry.transport.kind === 'stdio';
+  const helper = bundle.entries.filter(entry => entry.entryId === (stdio ? 'linux_worker_controller' : MCP_ADMIN_HELPER_ENTRY_ID));
+  if (helper.length !== 1 || helper[0]!.executable !== stdio || helper[0]!.role !== 'platform_helper' ||
+      !stdio && helper[0]!.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH || helper[0]!.version !== '1' ||
       core.adapterExecutableId !== helper[0]!.entryId || core.adapterVersion !== helper[0]!.version ||
       core.adapterExecutableDigest !== helper[0]!.digest || bundle.manifestDigest !== core.runtimeBundleManifestDigest ||
-      core.probeKind !== 'mcp_streamable_http') invalid('MCP registry substitutes its original signed Admin protocol recipe');
+      core.probeKind !== (stdio ? 'mcp_stdio' : 'mcp_streamable_http')) invalid('MCP registry substitutes its original signed Admin protocol recipe');
   for await (const _chunk of artifacts.readChunks(helper[0]!.digest, helper[0]!.byteCount)) artifacts.assertReadActive();
   if (!result.initializeCaptureRef || !result.toolsListCaptureRef) invalid('MCP probe has no retained original finite captures');
-  const initialized = await readMcpHttpCapture(artifacts, result.initializeCaptureRef), listed = await readMcpHttpCapture(artifacts, result.toolsListCaptureRef);
+  const initialized = stdio ? await readMcpStdioCapture(artifacts, result.initializeCaptureRef) : await readMcpHttpCapture(artifacts, result.initializeCaptureRef);
+  const listed = stdio ? await readMcpStdioCapture(artifacts, result.toolsListCaptureRef) : await readMcpHttpCapture(artifacts, result.toolsListCaptureRef);
   if (initialized.capture.phase !== 'initialize' || listed.capture.phase !== 'tools_list' ||
       initialized.decoded.response.kind !== 'result' || listed.decoded.response.kind !== 'result') invalid('MCP registry discovery was not received successfully');
   const negotiation = decodeMcpInitializeResult(initialized.decoded.response.result), tools = decodeMcpToolsListResult(listed.decoded.response.result);
   const interfaces = tools.map(tool => tool.interface);
-  if (result.initializeResponseRef !== initialized.capture.rawResponseRef || result.initializeResponseDigest !== initialized.capture.rawFinitePrefixDigest ||
+  if (result.initializeResponseRef !== initialized.capture.rawResponseRef || result.initializeResponseDigest !== initialized.decoded.rawFinitePrefixDigest ||
       result.capabilityResponseRef !== result.initializeResponseRef || result.capabilityResponseDigest !== result.initializeResponseDigest ||
-      result.toolsListResponseRef !== listed.capture.rawResponseRef || result.toolsListResponseDigest !== listed.capture.rawFinitePrefixDigest ||
+      result.toolsListResponseRef !== listed.capture.rawResponseRef || result.toolsListResponseDigest !== listed.decoded.rawFinitePrefixDigest ||
       result.initializeDigest !== negotiation.initializeDigest || result.capabilityDigest !== negotiation.capabilityDigest ||
       canonicalSha256(interfaces) !== result.probedToolsListDigest) invalid('MCP discovery semantic projections differ from original received bytes');
   requireEqual(result.normalizedTools, interfaces, 'MCP original complete discovered interfaces');
-  requireEqual(registry.tools, interfaces.map(tool => {
-    const data = { ...tool, version: 'mcp-tool-contract-v1', recovery: { kind: 'manual' } };
-    return { ...data, toolContractDigest: canonicalSha256(data) };
-  }), 'MCP exact original discovered interfaces plus frozen manual contracts');
+  const derivedRecovery = await deriveMcpRecoveryToolContracts(artifacts, { target, targetRef: operation.targetRef,
+    result, resultRef: operation.resultRef, probePayloadCoreRef: operation.probePayloadCoreRef, registryRevision: registry.registryRevision });
+  await readMcpRecoveryTemplates(artifacts, derivedRecovery);
+  requireEqual(registry.tools, derivedRecovery.tools, 'MCP exact original discovered interfaces plus original proven recovery contracts');
   for (const tool of tools) {
     requireEqual(await readCanonicalArtifact(artifacts, tool.interface.inputSchemaRef), tool.inputSchema, 'MCP retained input schema');
     if (tool.outputSchema) requireEqual(await readCanonicalArtifact(artifacts, tool.interface.outputSchemaRef!), tool.outputSchema, 'MCP retained output schema');
@@ -826,16 +1057,20 @@ async function readMcpRegistryClosureInContext(driver: SqliteDriver, artifacts: 
     invalid('MCP publication receipt does not reproduce its one completed original attempt');
   requireEqual(registry.transport, target.resolvedTransport, 'MCP original transport');
   requireEqual(registry.lifecycle, target.lifecycle, 'MCP original lifecycle');
-  if (registry.tools.some(tool => tool.recovery.kind !== 'manual')) invalid('MCP first profile cannot borrow retry or signed reconciliation');
-  const endpoint = registry.transport.kind === 'streamable_http' && decodeEndpointRegistration(await readCanonicalArtifact(artifacts, registry.transport.endpointRegistrationRef));
-  if (!endpoint || endpoint.ownerPrincipalId !== principalId || !endpoint.purposes.includes('mcp_streamable_http') ||
-      endpoint.endpointIdentityDigest !== registry.transport.endpointIdentityDigest || endpoint.tlsPolicyDigest !== registry.transport.tlsPolicyDigest)
-    invalid('MCP registry is not rooted in its principal-bound endpoint');
-  for (const ref of registry.transport.credentialGrantRefs) {
-    const credential = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
-    if (credential.ownerPrincipalId !== principalId || credential.purpose !== 'mcp_streamable_http' ||
-        credential.endpointRegistrationRef !== registry.transport.endpointRegistrationRef || credential.endpointIdentityDigest !== endpoint.endpointIdentityDigest ||
-        credential.tlsPolicyDigest !== endpoint.tlsPolicyDigest) invalid('MCP registry borrows another purpose or endpoint credential');
+  if (registry.transport.kind === 'streamable_http') {
+    const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, registry.transport.endpointRegistrationRef));
+    if (endpoint.ownerPrincipalId !== principalId || !endpoint.purposes.includes('mcp_streamable_http') ||
+        endpoint.endpointIdentityDigest !== registry.transport.endpointIdentityDigest || endpoint.tlsPolicyDigest !== registry.transport.tlsPolicyDigest)
+      invalid('MCP registry is not rooted in its principal-bound endpoint');
+    for (const ref of registry.transport.credentialGrantRefs) {
+      const credential = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
+      if (credential.ownerPrincipalId !== principalId || credential.purpose !== 'mcp_streamable_http' ||
+          credential.endpointRegistrationRef !== registry.transport.endpointRegistrationRef || credential.endpointIdentityDigest !== endpoint.endpointIdentityDigest ||
+          credential.tlsPolicyDigest !== endpoint.tlsPolicyDigest) invalid('MCP registry borrows another purpose or endpoint credential');
+    }
+  } else {
+    const consent = await readMcpStdioRegistrationConsent(driver, artifacts, principalId, registry.registrationId, registry.transport);
+    context.assertions.set(`stdio-identity:${consent.grant.grantId}`, consent.assertUnchanged);
   }
   const response = await readCanonicalArtifact<ControlApplicationResponseV1>(artifacts, operation.controlResponseRef);
   if (!response.ok || response.result.method !== operation.method ||
@@ -844,7 +1079,8 @@ async function readMcpRegistryClosureInContext(driver: SqliteDriver, artifacts: 
     invalid('MCP publication has no exact retained first control response');
   const control = readControlRequest(driver, principalId, operation.method, operation.requestId);
   if (!control || control.requestDigest !== operation.requestDigest || control.responseRef !== operation.controlResponseRef ||
-      control.committedAt < operation.finishedAt || Date.parse(control.committedAt) - Date.parse(closure.observedAt) > 5_000)
+      control.committedAt < operation.finishedAt || Date.parse(control.committedAt) < (resources.currentRetirement?.observedAtMs ?? Date.parse(closure.observedAt)) ||
+      Date.parse(control.committedAt) - (resources.currentRetirement?.observedAtMs ?? Date.parse(closure.observedAt)) > 5_000)
     invalid('MCP publication lost its original first response or actual fresh control commit interval');
   const responseChannel = await readHistoricalControlChannel(driver, artifacts, { principalId, channelIdentityRef: control.channelIdentityRef,
     channelIdentityDigest: control.channelIdentityDigest });
@@ -901,12 +1137,11 @@ export function combineMcpToolManifest(builtin: ToolContractManifestV1,
     if (selected.has(registry.registrationId) || ref !== canonicalSha256(registry)) throw new TypeError('duplicate or substituted frozen MCP registry');
     selected.add(registry.registrationId);
     for (const tool of registry.tools) {
-      if (tool.recovery.kind !== 'manual') throw new TypeError('unsupported MCP recovery in frozen assembly');
       entries.push({ name: mcpExposedToolName(registry.registrationId, tool.name), version: tool.version,
         description: mcpExposedToolDescription(registry.registrationId, tool.name, tool.description),
         access: 'exec', inputSchemaRef: tool.inputSchemaRef, inputSchemaDigest: tool.inputSchemaDigest,
         ...(tool.outputSchemaRef ? { outputSchemaRef: tool.outputSchemaRef, outputSchemaDigest: tool.outputSchemaDigest } : {}),
-        replayClass: 'manual', execution: { kind: 'mcp', registrationId: registry.registrationId,
+        replayClass: tool.recovery.kind, execution: { kind: 'mcp', registrationId: registry.registrationId,
           registryRevisionRef: ref, registryManifestDigest: registry.manifestDigest, serverToolName: tool.name, toolContractDigest: tool.toolContractDigest } });
     }
   }
@@ -919,7 +1154,8 @@ export function combineMcpToolManifest(builtin: ToolContractManifestV1,
 /** Called before real Admin input creation. Only immutable artifacts and the
  * original prepared row are installed; no physical resource is inferred. */
 export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  request: McpMutationRequestV1, identity: AuthenticatedControlIdentity, value: AdminOperationV1) {
+  request: McpMutationRequestV1, identity: AuthenticatedControlIdentity, value: AdminOperationV1,
+  stdioPreparation?: Readonly<{ authorization?: PreparedMcpStdioAuthorization; recipe: PublishedArtifact }>) {
   const operation = decodeAdminOperation(value);
   const liveAuthorization = operation.attempt === 1 ? await validateControlChannelClosure(artifacts, owner, identity) : undefined;
   if (operation.phase !== 'prepared' || operation.principalId !== identity.principalId || operation.method !== request.method ||
@@ -933,7 +1169,15 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
       originalRequest.method !== request.method || operation.attempt === 1 &&
       (target.channelIdentityRef !== identity.channelIdentityRef || target.channelIdentityDigest !== identity.channelIdentityDigest))
     throw new TypeError('MCP prepared intent lost its original authenticated request/channel provenance');
-  assertMcpManualHttpProfile(target);
+  assertMcpProfile(target);
+  const stdio = target.resolvedTransport.kind === 'stdio';
+  const firstConsent = stdio && request.method === 'mcp.register' && operation.attempt === 1;
+  if (stdio !== (stdioPreparation !== undefined) || firstConsent !== (stdioPreparation?.authorization !== undefined))
+    invalid('MCP stdio first prepared intent requires its original opaque one-use identity authorization and sealed recipe');
+  const consentData = stdioPreparation?.authorization ? mcpStdioAuthorizationData(owner, stdioPreparation.authorization) : undefined;
+  if (consentData) requireEqual(consentData.transport, target.resolvedTransport, 'MCP first prepared original one-use executable identity');
+  const retainedConsent = stdio && !firstConsent ? await readMcpStdioRegistrationConsent(driver, artifacts, operation.principalId,
+    target.registrationId, target.resolvedTransport as Extract<McpRegistryRevisionV1['transport'], { kind: 'stdio' }>) : undefined;
   const core = decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, operation.probePayloadCoreRef));
   if (target.ownerPrincipalId !== identity.principalId || target.registrationId !== request.registrationId || target.requestCoreDigest !== mcpMutationCoreDigest(request) ||
       target.targetDigest !== operation.targetDigest || core.payloadCoreDigest !== operation.probePayloadCoreDigest)
@@ -942,6 +1186,11 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
     [operation.plannedContainmentRef, 'cliq-process-containment-plan-v1'], [operation.sandboxLaunchSpecRef, 'cliq-sandbox-launch-v1'],
     [target.originalRequestRef, 'cliq-mcp-original-request-v1']] as const;
   const metadata = await artifacts.mapReads(members, ([ref, format]) => artifacts.describe(ref, 'application/json', format));
+  for (const item of target.requestedToolRecovery) if (item.recovery.kind === 'retry') {
+    metadata.push(await artifacts.describe(item.recovery.explicitRiskConsentRef, 'application/json', 'cliq-mcp-retry-risk-consent-v1'),
+      await artifacts.describe(item.recovery.safetyAssertionRef, 'application/json', 'cliq-mcp-retry-safety-assertion-v1'));
+  }
+  if (originalRequest.method === 'mcp.register') await validateMcpOriginalRequestedRecovery(artifacts, originalRequest, target);
   const prior = readMcpAdminOperation(driver, operation.principalId, operation.method, operation.requestId);
   const priorHistory = prior?.phase === 'failed' ? await readAdminFailureHistory(driver, artifacts, prior) : undefined;
   let outcome: ReturnType<typeof advanceTimeFence> | undefined;
@@ -952,6 +1201,7 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
         Date.parse(operation.deadlineAt) - Date.parse(operation.createdAt) !== target.lifecycle.launchTimeoutMs)
       throw new KernelStorageError('LEASE_FENCED', 'MCP prepared owner or original control deadline changed');
     const existing = readMcpAdminOperation(connection, identity.principalId, request.method, request.requestId);
+    retainedConsent?.assertUnchanged(connection);
     priorHistory?.assertUnchanged(connection);
     if (operation.attempt > 1 && !priorHistory) invalid('MCP successor attempt has no original positive failure closure');
     if (existing && (operation.attempt !== existing.attempt + 1 || existing.phase !== 'failed' || existing.failureDisposition !== 'retryable_recovery' ||
@@ -959,12 +1209,155 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
       if (existing.requestDigest !== request.requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'MCP request id names another intent');
       throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original attempt must be retired and pass its exact backoff before another producer');
     }
-    for (const artifact of [...metadata, ...(liveAuthorization?.metadata ?? historicalAuthorization?.metadata ?? [])]) insertArtifactMetadata(connection, artifact, now);
+    if (stdioPreparation?.authorization) consumeMcpStdioAuthorization(connection, owner, stdioPreparation.authorization, target,
+      request.requestId, request.requestDigest, now);
+    for (const artifact of [...metadata, ...(liveAuthorization?.metadata ?? historicalAuthorization?.metadata ?? []),
+      ...(consentData?.metadata ?? []), ...(stdioPreparation ? [stdioPreparation.recipe] : [])]) insertArtifactMetadata(connection, artifact, now);
     connection.prepare('INSERT INTO admin_operations(principal_id,method,request_id,attempt,state,row_json) VALUES(?,?,?,?,?,?)')
       .run(identity.principalId, request.method, request.requestId, operation.attempt, 'prepared', canonicalJsonBytes(operation).toString('utf8'));
   });
   requireHealthyFence(outcome);
+  if (stdioPreparation?.authorization) assertMcpStdioAuthorizationConsumed(driver, owner, stdioPreparation.authorization);
   return operation;
+}
+
+async function executeMcpStdioAdminAttempt(input: Readonly<{
+  driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; selected: HeldInstalledRuntime; anchor: HeldInstalledAnchor;
+  request: McpMutationRequestV1; identity: AuthenticatedControlIdentity; target: McpAdminProbeTargetV1; targetArtifact: PublishedArtifact;
+  core: AdminProbePayloadCoreV1; coreArtifact: PublishedArtifact; runtime: RuntimeBundleManifest; createdAt: string; deadlineAt: string;
+  attempt: number; adminOperationId: string; nonce: string; original?: Awaited<ReturnType<typeof readMcpRegistry>>;
+  priorClosure?: Awaited<ReturnType<typeof readAdminFailureHistory>>; authorization?: PreparedMcpStdioAuthorization;
+  producer: { digest: string; task?: Promise<unknown>; resume?: () => Promise<unknown> }; key: string; signal: AbortSignal;
+}>) {
+  const { driver, artifacts, owner, selected, anchor, request, identity, target, targetArtifact, core, coreArtifact, runtime,
+    createdAt, deadlineAt, attempt, adminOperationId, nonce, original, priorClosure, authorization, producer, key, signal } = input;
+  const transport = target.resolvedTransport;
+  if (transport.kind !== 'stdio') throw new TypeError('MCP stdio Admin received another frozen transport');
+  const consent = authorization ? undefined : await readMcpStdioRegistrationConsent(driver, artifacts, identity.principalId, request.registrationId, transport);
+  const launcher = await observeMcpAdminWork('stdio', 'launcher_open', () => openInstalledLinuxWorkerLauncher(selected, anchor, { signal }));
+  let controller: LinuxWorkerController;
+  try { controller = await observeMcpAdminWork('stdio', 'controller_start', () => launcher.startController({ signal })); }
+  catch (error) { await observeMcpAdminWork('stdio', 'launcher_close', () => launcher.close()); throw error; }
+  let cgroupParent = ''; withInstalledWorkerRoot(selected, anchor, (_fd, value) => { cgroupParent = value; });
+  const nativeAttempt = prepareMcpStdioAdminAttempt({ selected, anchor, controller, owner, artifacts, transport, deadlineMs: Date.parse(deadlineAt), signal });
+  let stopping = false, closed: Promise<void> | undefined;
+  const resource: AdminResource = { close() { stopping = true; return closed ??= (async () => {
+    const failures: unknown[] = [];
+    // Unlike HTTP, stdio closes its original pipe owner and waits for the
+    // graceful drain/ACK before joining this dedicated controller and launcher.
+    try { await observeMcpAdminWork('stdio', 'native_close', () => nativeAttempt.close()); } catch (error) { failures.push(error); }
+    try { await observeMcpAdminWork('stdio', 'controller_close', () => controller.close()); } catch (error) { failures.push(error); }
+    try { await observeMcpAdminWork('stdio', 'launcher_close', () => launcher.close()); } catch (error) { failures.push(error); }
+    if (failures.length) throw new ResourceRetirementError('MCP stdio Admin original resources did not join', new AggregateError(failures));
+  })(); } };
+  let owners = adminResources.get(driver); if (!owners) adminResources.set(driver, owners = new Set()); owners.add(resource);
+  let scope: InstalledMcpStdioAdminScope | undefined, inputBinding: AdminMcpStdioInputBinding | undefined;
+  try {
+    const nativePreparation = await observeMcpAdminWork('stdio', 'native_prepare', () => nativeAttempt.prepare()); signal.throwIfAborted();
+    const launch = await observeMcpAdminWork('stdio', 'plan_publish', () => publishMcpStdioLaunch(artifacts, { purpose: { kind: 'admin', owner: { kind: 'admin_probe',
+      adminOperationId, attempt, principalId: identity.principalId, method: request.method, originalRequestDigest: request.requestDigest,
+      targetRef: targetArtifact.ref, supervisorInstanceId: owner.supervisorInstanceId },
+      targetRef: targetArtifact.ref, targetDigest: target.targetDigest, probePayloadCoreRef: coreArtifact.ref }, bundle: runtime,
+      controller, cgroupParent, lock: owner.filesystem,
+      executable: transport.executable, nonce, createdAt, resources: DEFAULT_SANDBOX_RESOURCES }));
+    const prepared: AdminOperationV1 = { schemaVersion: 1, adminOperationId, principalId: identity.principalId, method: request.method,
+      requestId: request.requestId, requestDigest: request.requestDigest, attempt, maxAttempts: 3, deadlineAt, targetRef: targetArtifact.ref,
+      targetDigest: target.targetDigest, probePayloadCoreRef: coreArtifact.ref, probePayloadCoreDigest: core.payloadCoreDigest,
+      supervisorInstanceId: owner.supervisorInstanceId, plannedContainmentRef: launch.planArtifact.ref, plannedContainmentDigest: launch.plan.planDigest,
+      sandboxLaunchSpecRef: launch.specArtifact.ref, sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, rowVersion: 1, createdAt, phase: 'prepared' };
+    await observeMcpAdminWork('stdio', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared,
+      { ...(authorization ? { authorization } : {}), recipe: nativePreparation.recipe }));
+    priorClosure?.assertUnchanged(driver); consent?.assertUnchanged(driver);
+    const current = assertActiveStateOwner(driver, owner), process = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, current.processIdentityRef));
+    inputBinding = { adminOperationId, attempt, principalId: identity.principalId, nonce, targetRef: prepared.targetRef, targetDigest: prepared.targetDigest,
+      probePayloadCoreRef: prepared.probePayloadCoreRef, probePayloadCoreDigest: prepared.probePayloadCoreDigest,
+      plannedContainmentRef: prepared.plannedContainmentRef, plannedContainmentDigest: prepared.plannedContainmentDigest,
+      sandboxLaunchSpecRef: prepared.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: prepared.sandboxLaunchSpecDigest,
+      originalSupervisorPid: process.pid, originalSupervisorStartToken: process.processStartToken };
+    signal.throwIfAborted(); scope = nativeAttempt.createScope(inputBinding);
+    await observeMcpAdminWork('stdio', 'scope_reserve', () => scope!.reservation()); scope.createBlocked();
+    const ready = await observeMcpAdminWork('stdio', 'scope_ready', () => scope!.ready());
+    if (launch.plan.backend.kind !== 'linux') throw new TypeError('MCP stdio Admin original native plan is not Linux');
+    const containment: ProcessContainment = { schemaVersion: 1, planRef: launch.planArtifact.ref, sandboxLaunchSpecRef: launch.specArtifact.ref,
+      sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, owner: launch.plan.owner, filesystemBinding: launch.plan.filesystemBinding,
+      launchNonceDigest: launch.plan.launchNonceDigest, backend: { kind: 'linux', pidNamespaceReservationId: launch.plan.backend.pidNamespaceReservationId,
+        pidNamespaceId: ready.pidNamespaceId, cgroupPath: launch.plan.backend.cgroupPath, cgroupId: ready.cgroupId,
+        namespaceInitStartToken: ready.namespaceInitStartToken, subreaperStartToken: launch.plan.backend.subreaperStartToken }, createdAt: new Date(ready.observedAtMs).toISOString() };
+    const containmentArtifact = await artifacts.publishCanonical(containment, 'cliq-process-containment-v1');
+    let active: Extract<AdminOperationV1, { phase: 'active' }> = { ...prepared, phase: 'active', processContainmentRef: containmentArtifact.ref,
+      leaseExpiresAt: deadlineAt, probeDispatch: { state: 'blocked' }, rowVersion: 2 };
+    const write = (next: AdminOperationV1, previous: AdminOperationV1) => {
+      let clock: ReturnType<typeof advanceTimeFence> | undefined;
+      driver.transaction(connection => {
+        assertActiveStateOwner(connection, owner); nativeAttempt.original().input.assertHeld(); const now = sampleCanonicalNow();
+        clock = advanceTimeFence(connection, owner.ownerEpoch, now); if (clock !== 'healthy') return;
+        consent?.assertUnchanged(connection); if (authorization) assertMcpStdioAuthorizationConsumed(connection, owner, authorization);
+        readInstalledMcpStdioAdminReady(scope!, nativeAttempt.original().input);
+        if (stopping || now >= deadlineAt) throw new KernelStorageError('LEASE_FENCED', 'MCP stdio Admin original owner/deadline is revoked');
+        requireEqual(readMcpAdminOperation(connection, identity.principalId, request.method, request.requestId, attempt), previous, 'MCP stdio exact original Admin transition');
+        for (const metadata of [targetArtifact, coreArtifact, launch.planArtifact, launch.specArtifact, containmentArtifact]) insertArtifactMetadata(connection, metadata, now);
+        connection.prepare('UPDATE admin_operations SET state=?,row_json=? WHERE principal_id=? AND method=? AND request_id=? AND attempt=?')
+          .run(next.phase, canonicalJsonBytes(decodeAdminOperation(next)).toString('utf8'), identity.principalId, request.method, request.requestId, attempt);
+      }); requireHealthyFence(clock);
+    };
+    write(active, prepared);
+    const dispatchId = identityHash('cliq-mcp-admin-dispatch-v1', adminOperationId, attempt, nonce), claimedAt = sampleCanonicalNow();
+    const probeRequestDigest = adminProbeRequestDigest(active, target, dispatchId);
+    const claimed: typeof active = { ...active, rowVersion: 3, probeDispatch: { state: 'claimed', probeRequestDigest, dispatchId, claimedAt } };
+    write(claimed, active); active = claimed;
+    const binding: AdminMcpStdioBinding = { adminOperationId, attempt, principalId: identity.principalId, method: request.method,
+      controlRequestDigest: request.requestDigest, targetRef: prepared.targetRef, targetDigest: prepared.targetDigest,
+      probePayloadCoreRef: prepared.probePayloadCoreRef, probePayloadCoreDigest: prepared.probePayloadCoreDigest, probeRequestDigest, dispatchId,
+      supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch, processContainmentRef: containmentArtifact.ref,
+      plannedContainmentRef: prepared.plannedContainmentRef, plannedContainmentDigest: prepared.plannedContainmentDigest,
+      sandboxLaunchSpecRef: prepared.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: prepared.sandboxLaunchSpecDigest, nonce, deadlineMs: Date.parse(deadlineAt) };
+    const gate = () => {
+      let clock: ReturnType<typeof advanceTimeFence> | undefined;
+      driver.transaction(connection => {
+        const current = assertActiveStateOwner(connection, owner), now = sampleCanonicalNow(); nativeAttempt.original().input.assertHeld();
+        clock = advanceTimeFence(connection, owner.ownerEpoch, now); if (clock !== 'healthy') return;
+        consent?.assertUnchanged(connection); if (authorization) assertMcpStdioAuthorizationConsumed(connection, owner, authorization);
+        if (stopping || now >= deadlineAt || current.supervisorInstanceId !== active.supervisorInstanceId || current.ownerEpoch !== binding.stateOwnerEpoch)
+          throw new KernelStorageError('LEASE_FENCED', 'MCP stdio Admin original current claim is revoked');
+        requireEqual(readMcpAdminOperation(connection, identity.principalId, request.method, request.requestId, attempt), active, 'MCP stdio original permanent probe gate');
+      }); requireHealthyFence(clock);
+    };
+    const released: typeof active = { ...active, rowVersion: 4, probeDispatch: { state: 'released', probeRequestDigest, dispatchId, claimedAt, releasedAt: sampleCanonicalNow() } };
+    write(released, active); active = released;
+    const received = await nativeAttempt.bindAndDrive(binding, gate); await resource.close();
+    const actual = nativeAttempt.joined(), lifecycle = actual.originalLifecycle;
+    if (lifecycle.format !== 'cliq-mcp-stdio-native-lifecycle-v1' || lifecycle.binding.kind !== 'admin')
+      invalid('MCP Admin publication cannot borrow a Run or recovery-purpose native lifecycle');
+    if (!lifecycle.joined.protocolCompleted || !lifecycle.joined.ownerDrained || lifecycle.joined.responseRefused || !lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired)
+      invalid('MCP stdio original Admin probe did not actually finish and join its fixed protocol');
+    const finish = async (): Promise<InstalledControlResponseV1> => {
+      const published = await received.publish(artifacts, actual.ownerJoined), originalPhysical = nativeAttempt.original();
+      const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch, containment,
+        containmentArtifact, lifecycleBytes: actual.lifecycleSnapshot, lifecycle, published, ...(original ? { original } : {}),
+        physical: { kind: 'stdio', native: originalPhysical.native, binding, scope: originalPhysical.scope, joined: actual.joined, ownerJoined: actual.ownerJoined } });
+      nativeAttempt.release(); owners!.delete(resource); adminProducers.get(driver)!.delete(key); return response;
+    };
+    producer.resume = () => observeMcpAdminWork('stdio', 'discovery_publish', finish); return producer.resume() as Promise<InstalledControlResponseV1>;
+  } catch (failure) {
+    if (producer.resume) throw failure;
+    await resource.close();
+    const operation = readMcpAdminOperation(driver, identity.principalId, request.method, request.requestId, attempt);
+    if (!operation && !scope) { owners!.delete(resource); throw failure; }
+    if (!scope || !inputBinding) throw new ResourceRetirementError('MCP stdio Admin construction lacks its complete original resource birth', failure);
+    if (!operation || !['prepared', 'active'].includes(operation.phase)) throw failure;
+    const actual = nativeAttempt.joined(), original = nativeAttempt.original();
+    let retirement: Awaited<ReturnType<typeof publishAdminRetirement>> | undefined;
+    const finish = async (): Promise<InstalledControlResponseV1> => {
+      retirement = await publishAdminRetirement(artifacts, owner, driver, operation, actual.lifecycleSnapshot, actual.joined.observation, undefined,
+        { binding: inputBinding! }, original.scope);
+      const finalized = await finishFailedAdminAttempt(driver, artifacts, owner, operation, retirement, identity, failure instanceof TypeError,
+        { kind: 'stdio_original', scope: original.scope, joined: actual.joined });
+      nativeAttempt.release(); owners!.delete(resource); producer.resume = undefined;
+      if (finalized.failed.phase === 'failed' && finalized.failed.failureDisposition === 'retryable_recovery') throw new McpAdminRetryPending(finalized.failed.retryNotBeforeAt);
+      adminProducers.get(driver)!.delete(key); return finalized.response;
+    };
+    producer.resume = finish; return finish();
+  } finally { await resource.close(); if (producer.resume) owners!.delete(resource); }
 }
 
 /** One authenticated original producer. A disconnected observer cannot cancel
@@ -1005,35 +1398,47 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
     const original = request.method === 'mcp.refresh' ? await readMcpRegistry(driver, artifacts, identity.principalId, request.registrationId) : undefined;
     if (request.method === 'mcp.refresh' && original?.registry.registryRevision !== request.expectedRegistryRevision)
       throw new KernelStorageError('REVISION_CONFLICT', 'MCP refresh expected revision changed');
-    if (request.method === 'mcp.register' && (request.target.kind !== 'streamable_http' || request.target.credentialGrantIds.length > 1 ||
-        Object.values(request.toolRecovery).some(value => value.kind !== 'manual')))
-      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP stdio, multiple credentials, retry and signed reconciliation are not implemented');
+    if (request.method === 'mcp.register' && request.target.kind === 'streamable_http' &&
+        (request.target.credentialGrantIds.length > 1 || Object.values(request.toolRecovery).some(value => value.kind === 'reconcile')))
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP HTTP requires at most one credential and cannot borrow a signed stdio status profile');
+    const runtime = await withHeldInstalledRuntime(selected, async installed => { await installed.revalidate(signal); return immutableSnapshot(installed.bundle); }, signal);
+    let stdioAuthorization: PreparedMcpStdioAuthorization | undefined;
     const retainedTarget = previous ? decodeMcpAdminProbeTarget(await readCanonicalArtifact(artifacts, previous.targetRef)) : undefined;
-    const transport = retainedTarget ? retainedTarget.resolvedTransport : request.method === 'mcp.register' && request.target.kind === 'streamable_http'
-      ? await resolveInstalledMcpTransport(selected, artifacts, identity.principalId, request.target.endpointRegistrationId, request.target.credentialGrantIds, signal)
-      : original!.registry.transport;
-    if (transport.kind !== 'streamable_http' || transport.credentialGrantRefs.length > 1) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP refresh selects an unsupported retained transport');
-    await withInstalledMcpHttpAuthority(selected, owner, artifacts, identity.principalId, transport,
-      async authority => { authority.assertCurrent(); }, signal);
+    let transport: McpAdminProbeTargetV1['resolvedTransport'];
+    if (retainedTarget) transport = retainedTarget.resolvedTransport;
+    else if (request.method === 'mcp.refresh') transport = original!.registry.transport;
+    else if (request.target.kind === 'streamable_http') transport = await resolveInstalledMcpTransport(selected, artifacts, identity.principalId,
+      request.target.endpointRegistrationId, request.target.credentialGrantIds, signal);
+    else {
+      stdioAuthorization = await prepareMcpStdioAuthorization(driver, artifacts, owner, { bundle: runtime, releaseKeys: artifacts.releaseTrustRoots() },
+        identity.principalId, request, signal);
+      transport = mcpStdioAuthorizationData(owner, stdioAuthorization).transport;
+    }
+    if (transport.kind === 'streamable_http') {
+      if (transport.credentialGrantRefs.length > 1) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP refresh selects multiple retained credentials');
+      await withInstalledMcpHttpAuthority(selected, owner, artifacts, identity.principalId, transport,
+        async authority => { authority.assertCurrent(); }, signal);
+    } else if (!stdioAuthorization) await readMcpStdioRegistrationConsent(driver, artifacts, identity.principalId, request.registrationId, transport);
     const createdAt = sampleCanonicalNow();
     const originalRequestArtifact = retainedTarget ? undefined : await artifacts.publishCanonical(request, 'cliq-mcp-original-request-v1');
+    const requestedToolRecovery = retainedTarget?.requestedToolRecovery ?? (request.method === 'mcp.register'
+      ? (await publishMcpRequestedRecovery(artifacts, request, identity, createdAt)).requested
+      : await mcpRequestedRecoveryFromRegistry(artifacts, original!.registry));
     const target: McpAdminProbeTargetV1 = retainedTarget ?? { schemaVersion: 1, format: 'cliq-mcp-admin-probe-target-v1', ownerPrincipalId: identity.principalId,
       originalRequestRef: originalRequestArtifact!.ref, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest,
       registrationId: request.registrationId, method: request.method, resolvedTransport: transport, assertStatelessPerCall: true,
-      requestedToolRecovery: request.method === 'mcp.register' ? Object.entries(request.toolRecovery).sort(([left], [right]) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
-        .map(([toolName]) => ({ toolName, recovery: { kind: 'manual' as const } })) : original!.registry.tools.map(tool => ({ toolName: tool.name, recovery: { kind: 'manual' as const } })),
+      requestedToolRecovery,
       lifecycle: request.method === 'mcp.register' ? normalizeMcpLifecycle(request.lifecycle) : original!.registry.lifecycle,
       requestCoreDigest: mcpMutationCoreDigest(request), targetDigest: '', createdAt,
       ...(request.method === 'mcp.refresh' ? { expectedRegistryRevision: request.expectedRegistryRevision, sourceRegistryRevisionRef: original!.ref } : {}) };
-    if (!retainedTarget) (target as { targetDigest: string }).targetDigest = digestOmitting(target, 'targetDigest'); assertMcpManualHttpProfile(target);
+    if (!retainedTarget) (target as { targetDigest: string }).targetDigest = digestOmitting(target, 'targetDigest'); assertMcpProfile(target);
     const deadlineAt = new Date(Date.parse(createdAt) + target.lifecycle.launchTimeoutMs).toISOString();
     const targetArtifact = await artifacts.publishCanonical(target, target.format);
-    const runtime = await withHeldInstalledRuntime(selected, async installed => { await installed.revalidate(signal); return immutableSnapshot(installed.bundle); }, signal);
-    const helper = runtime.entries.find(entry => entry.entryId === MCP_ADMIN_HELPER_ENTRY_ID);
-    if (!helper || helper.executable || helper.role !== 'platform_helper' || helper.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH || helper.version !== '1')
+    const helper = runtime.entries.find(entry => entry.entryId === (transport.kind === 'stdio' ? 'linux_worker_controller' : MCP_ADMIN_HELPER_ENTRY_ID));
+    if (!helper || helper.role !== 'platform_helper' || helper.version !== '1' || (transport.kind === 'stdio' ? !helper.executable : helper.executable || helper.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH))
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed signed MCP Admin helper is unavailable');
-    await retainInstalledMcpAdminRecipe(selected, signal);
-    const core: AdminProbePayloadCoreV1 = previous ? decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, previous.probePayloadCoreRef)) : { schemaVersion: 1, format: 'cliq-admin-probe-payload-core-v1', probeKind: 'mcp_streamable_http',
+    if (transport.kind === 'streamable_http') await retainInstalledMcpAdminRecipe(selected, signal);
+    const core: AdminProbePayloadCoreV1 = previous ? decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, previous.probePayloadCoreRef)) : { schemaVersion: 1, format: 'cliq-admin-probe-payload-core-v1', probeKind: transport.kind === 'stdio' ? 'mcp_stdio' : 'mcp_streamable_http',
       runtimeBundleRef: canonicalSha256(runtime), runtimeBundleManifestDigest: runtime.manifestDigest, adapterExecutableId: helper.entryId,
       adapterVersion: helper.version, adapterExecutableDigest: helper.digest, protocolRecipe: 'mcp-initialize-capabilities-tools-list-v1',
       maximumResponseBytes: 1_048_576, payloadCoreDigest: '' };
@@ -1043,6 +1448,9 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP recovery requires its original immutable signed Admin recipe');
     const coreArtifact = await artifacts.publishCanonical(core, core.format), nonce = randomBytes(32).toString('hex');
     const adminOperationId = identityHash('cliq-mcp-admin-operation-v1', identity.principalId, request.method, request.requestId, request.requestDigest, target.targetDigest);
+    if (transport.kind === 'stdio') return executeMcpStdioAdminAttempt({ driver, artifacts, owner, selected, anchor, request, identity, target,
+      targetArtifact, core, coreArtifact, runtime, createdAt, deadlineAt, attempt, adminOperationId, nonce,
+      ...(original ? { original } : {}), ...(priorClosure ? { priorClosure } : {}), ...(stdioAuthorization ? { authorization: stdioAuthorization } : {}), producer, key, signal });
     signal.throwIfAborted();
     const launcher = await openInstalledLinuxWorkerLauncher(selected, anchor, { signal });
     let controller: LinuxWorkerController;
@@ -1154,90 +1562,10 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
           invalid('MCP actual Admin native lifecycle did not complete and join its original helper protocol');
         physicalInput!.close();
         const finish = async (): Promise<InstalledControlResponseV1> => {
-          const published = await received.publish(artifacts), initialize = published.captures.get('initialize')!, listed = published.captures.get('tools_list')!;
-          if (initialize.response.kind !== 'result' || listed.response.kind !== 'result') invalid('MCP original discovery was rejected');
-          const negotiation = decodeMcpInitializeResult(initialize.response.result), discovered = decodeMcpToolsListResult(listed.response.result);
-          const tools = discovered.map(item => { const core = { ...item.interface, version: 'mcp-tool-contract-v1' as const, recovery: { kind: 'manual' as const } };
-            return { ...core, toolContractDigest: canonicalSha256(core) }; });
-          const schemaMetadata: PublishedArtifact[] = [];
-          for (const tool of discovered) { schemaMetadata.push(await artifacts.publishCanonical(tool.inputSchema, 'cliq-mcp-tool-input-schema-v1'));
-            if (tool.outputSchema) schemaMetadata.push(await artifacts.publishCanonical(tool.outputSchema, 'cliq-mcp-tool-output-schema-v1')); }
-          const inspector = supervisorInspectorIdentity(assertActiveStateOwner(driver, owner)), inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
-          const observedAt = new Date(joined.observation.observedAtMs).toISOString();
-          const death: ProcessContainmentDeathEvidenceV1 = { schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: containmentArtifact.ref,
-            planRef: launch.planArtifact.ref, sandboxLaunchSpecRef: launch.specArtifact.ref, sandboxLaunchSpecDigest: launch.spec.launchSpecDigest,
-            owner: launch.plan.owner, launchNonceDigest: launch.plan.launchNonceDigest, inspectorSupervisorInstanceId: owner.supervisorInstanceId,
-            inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
-            backend: { ...containment.backend as Extract<ProcessContainment['backend'], {kind:'linux'}>, cgroupPopulated: 0,
-              namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 }, observedAt, evidenceDigest: '' };
-          death.evidenceDigest = digestOmitting(death, 'evidenceDigest'); const deathArtifact = await artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
-          const lifecycleArtifact = await artifacts.publishBytes(lifecycleBytes, 'application/octet-stream', 'cliq-mcp-admin-native-lifecycle-bytes-v1');
-          const lifecycleProjection = await artifacts.publishCanonical(lifecycle, 'cliq-mcp-admin-native-lifecycle-v1');
-          const closure: AdminProbeClosureEvidenceV1 = { schemaVersion: 1, format: 'cliq-admin-probe-closure-evidence-v1', adminOperationId, attempt,
-            targetRef: prepared.targetRef, targetDigest: prepared.targetDigest, plannedContainmentRef: prepared.plannedContainmentRef,
-            plannedContainmentDigest: prepared.plannedContainmentDigest, sandboxLaunchSpecRef: prepared.sandboxLaunchSpecRef,
-            sandboxLaunchSpecDigest: prepared.sandboxLaunchSpecDigest, inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest,
-            observedAt, closureKind: 'containment_dead', processContainmentRef: containmentArtifact.ref, dispatchId, probeRequestDigest,
-            deathEvidenceRef: deathArtifact.ref, deathEvidenceDigest: death.evidenceDigest, nativeLifecycleRef: lifecycleArtifact.ref,
-            nativeLifecycleDigest: lifecycleArtifact.ref, nativeLifecycleProjectionRef: lifecycleProjection.ref, nativeLifecycleProjectionDigest: lifecycleProjection.ref, evidenceDigest: '' };
-          (closure as {evidenceDigest:string}).evidenceDigest = digestOmitting(closure, 'evidenceDigest');
-          const closureArtifact = await artifacts.publishCanonical(closure, closure.format), completedAt = observedAt;
-          const result: McpAdminProbeResultV1 = { schemaVersion: 1, format: 'cliq-mcp-admin-probe-result-v1', adminOperationId, attempt, dispatchId,
-            probeRequestDigest, targetRef: prepared.targetRef, targetDigest: prepared.targetDigest, probePayloadCoreRef: prepared.probePayloadCoreRef,
-            probePayloadCoreDigest: prepared.probePayloadCoreDigest, processContainmentRef: containmentArtifact.ref,
-            initializeResponseRef: initialize.descriptor.rawResponseRef, initializeResponseDigest: initialize.descriptor.rawFinitePrefixDigest,
-            capabilityResponseRef: initialize.descriptor.rawResponseRef, capabilityResponseDigest: initialize.descriptor.rawFinitePrefixDigest,
-            toolsListResponseRef: listed.descriptor.rawResponseRef, toolsListResponseDigest: listed.descriptor.rawFinitePrefixDigest,
-            initializeCaptureRef: initialize.captureRef, toolsListCaptureRef: listed.captureRef, initializeDigest: negotiation.initializeDigest,
-            capabilityDigest: negotiation.capabilityDigest, normalizedTools: discovered.map(item => item.interface),
-            probedToolsListDigest: canonicalSha256(discovered.map(item => item.interface)), completedAt, resultDigest: '' };
-          (result as {resultDigest:string}).resultDigest = digestOmitting(result, 'resultDigest'); const resultArtifact = await artifacts.publishCanonical(result, result.format);
-          const finishedAt = sampleCanonicalNow(), revision = (original?.registry.registryRevision ?? 0) + 1;
-          const registryCore = { schemaVersion: 1 as const, format: 'cliq-mcp-registry-v1' as const, registrationId: request.registrationId,
-            registryRevision: revision, ownerPrincipalId: identity.principalId, transport, initializeDigest: negotiation.initializeDigest,
-            capabilityDigest: negotiation.capabilityDigest, probedToolsListDigest: result.probedToolsListDigest, toolsListDigest: canonicalSha256(tools),
-            stateModel: 'stateless_per_call' as const, tools, lifecycle: target.lifecycle, createdAt: finishedAt };
-          const receipt: McpRegistrationReceiptV1 = { schemaVersion: 1, format: 'cliq-mcp-registration-receipt-v1', registrationId: request.registrationId,
-            registryRevision: revision, ownerPrincipalId: identity.principalId, requestDigest: request.requestDigest, adminOperationId, adminAttempt: attempt,
-            dispatchId, probeRequestDigest, adminProbeTargetRef: prepared.targetRef, adminProbeTargetDigest: prepared.targetDigest,
-            probeResultRef: resultArtifact.ref, probeResultDigest: result.resultDigest, probeClosureEvidenceRef: closureArtifact.ref,
-            probeClosureEvidenceDigest: closure.evidenceDigest, initializeDigest: negotiation.initializeDigest, capabilityDigest: negotiation.capabilityDigest,
-            probedToolsListDigest: result.probedToolsListDigest, toolsListDigest: registryCore.toolsListDigest,
-            registryCoreDigest: canonicalSha256(registryCore), createdAt: finishedAt, receiptDigest: '' };
-          (receipt as {receiptDigest:string}).receiptDigest = digestOmitting(receipt, 'receiptDigest'); const receiptArtifact = await artifacts.publishCanonical(receipt, receipt.format);
-          const registryValue = { ...registryCore, registrationReceiptRef: receiptArtifact.ref, manifestDigest: '' };
-          registryValue.manifestDigest = digestOmitting(registryValue, 'manifestDigest'); const registry = decodeMcpRegistryRevision(registryValue);
-          const registryArtifact = await artifacts.publishCanonical(registry, registry.format);
-          const response: Extract<InstalledControlResponseV1,{ok:true}> = { protocolVersion: 1, ok: true, result: { method: request.method, registry: mcpRegistrySummary(registry) } };
-          const responseArtifact = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
-          const completed: AdminOperationV1 = { ...active, phase: 'completed', probeDispatch: released.probeDispatch as Extract<typeof released.probeDispatch,{state:'released'}>,
-            resultRef: resultArtifact.ref, resultDigest: result.resultDigest, evidenceRef: closureArtifact.ref, evidenceDigest: closure.evidenceDigest,
-            controlResponseRef: responseArtifact.ref, controlResponseDigest: responseArtifact.ref, finishedAt };
-          // The lifecycle closes first. One original transaction publishes the
-          // completed attempt, immutable revision pointer and first response.
-          let clock: ReturnType<typeof advanceTimeFence> | undefined;
-          driver.transaction(connection => {
-            assertActiveStateOwner(connection, owner); assertInstalledMcpAdminJoined(native!, published.joined, binding); scope!.assertJoined(joined); const now = sampleCanonicalNow();
-            clock = advanceTimeFence(connection, owner.ownerEpoch, now); if (clock !== 'healthy') return;
-            requireEqual(readMcpAdminOperation(connection, identity.principalId, request.method, request.requestId, attempt), active, 'MCP original completed Admin claim');
-            original?.assertUnchanged(connection);
-            const current = connection.prepare('SELECT current_revision FROM mcp_registrations WHERE owner_principal_id=? AND registration_id=?')
-              .get<{current_revision:bigint}>(identity.principalId, request.registrationId);
-            if ((current ? Number(current.current_revision) : 0) !== revision - 1 || now < finishedAt)
-              throw new KernelStorageError('REVISION_CONFLICT', 'MCP registry revision changed before immutable publication');
-            if (Date.parse(now) - Date.parse(closure.observedAt) > 5_000)
-              throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original Admin retirement is stale at its actual publication commit');
-            for (const item of [...published.metadata, ...schemaMetadata, inspectorArtifact, deathArtifact, lifecycleArtifact, lifecycleProjection,
-              closureArtifact, resultArtifact, receiptArtifact, registryArtifact, responseArtifact]) insertArtifactMetadata(connection, item, finishedAt);
-            connection.prepare('UPDATE admin_operations SET state=?,row_json=? WHERE principal_id=? AND method=? AND request_id=? AND attempt=?')
-              .run('completed', canonicalJsonBytes(decodeAdminOperation(completed)).toString('utf8'), identity.principalId, request.method, request.requestId, attempt);
-            connection.prepare(`INSERT INTO mcp_registrations(owner_principal_id,registration_id,current_revision,current_revision_ref) VALUES(?,?,?,?)
-              ON CONFLICT(owner_principal_id,registration_id) DO UPDATE SET current_revision=excluded.current_revision,current_revision_ref=excluded.current_revision_ref`)
-              .run(identity.principalId, request.registrationId, revision, registryArtifact.ref);
-            insertControlRequest(connection, { principalId: identity.principalId, method: request.method, requestId: request.requestId,
-              requestDigest: request.requestDigest, channelIdentityRef: identity.channelIdentityRef, channelIdentityDigest: identity.channelIdentityDigest,
-              responseRef: responseArtifact.ref, committedAt: now });
-          }); requireHealthyFence(clock);
+          const published = await received.publish(artifacts);
+          const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch,
+            containment, containmentArtifact, lifecycleBytes, lifecycle, published, ...(original ? { original } : {}),
+            physical: { kind: 'http', native: native!, binding, scope: scope!, joined, ownerJoined: published.joined } });
           native!.releaseDomain(); owners!.delete(resource); producers!.delete(key); return response;
         };
         producer.resume = finish; return finish();
@@ -1253,7 +1581,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
       const joined = await scope.close(), lifecycleBytes = scope.lifecycleSnapshot();
       let retirement: Awaited<ReturnType<typeof publishAdminRetirement>> | undefined;
       const finishFailure = async (): Promise<InstalledControlResponseV1> => {
-        retirement ??= await publishAdminRetirement(artifacts, owner, driver, originalOperation, lifecycleBytes, joined.observation);
+        retirement = await publishAdminRetirement(artifacts, owner, driver, originalOperation, lifecycleBytes, joined.observation, undefined, undefined, scope);
         const finalized = await finishFailedAdminAttempt(driver, artifacts, owner, originalOperation, retirement, identity, failure instanceof TypeError,
           { kind: 'original', scope: scope!, joined });
         if (domainRetained) { native!.releaseDomain(); domainRetained = false; }

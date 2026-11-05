@@ -5,7 +5,9 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { sha256Bytes } from '../kernel/identity.js';
-import type { ContinuationItem, SessionContextProjection, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
+import type { ContinuationItem, SessionRunTerminalItem, TerminalDetail } from '../kernel/types.js';
+import { decodeSessionContextHead } from '../kernel/session-context-page-reader.js';
+import { fixtureSessionContextSegments } from './testing/session-context.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
@@ -34,8 +36,8 @@ test('terminal stop retains prepared refund and cancellation times while its del
     let delayed = 0;
     const writer = t.mock.method(prototype, 'writeFile', async function(this: FileHandle, ...args: unknown[]) {
       await Reflect.apply(originalWriteFile, this, args);
-      if (!Buffer.isBuffer(args[0]) || !args[0].toString('utf8').includes('"format":"cliq-session-context-v1"')) return;
-      const projection = JSON.parse(args[0].toString('utf8')) as SessionContextProjection;
+      if (!Buffer.isBuffer(args[0]) || !args[0].toString('utf8').includes('"format":"cliq-session-context-v2"')) return;
+      const projection = decodeSessionContextHead(JSON.parse(args[0].toString('utf8')));
       if (projection.sessionId === sessionBefore.id && projection.throughItemSeq === sessionBefore.latestItemSeq + 1) {
         delayed += 1;
         clock += 1_000;
@@ -122,9 +124,13 @@ test('a sealed stop refuses a changed Session cut without rebuilding, then a new
       if (text.includes('"format":"cliq-session-run-terminal-v1"')) {
         const item = JSON.parse(text) as SessionRunTerminalItem;
         if (item.runId === fixture.runId) firstTerminalRef = sha256Bytes(bytes);
-      } else if (text.includes('"format":"cliq-session-context-v1"')) {
-        const projection = JSON.parse(text) as SessionContextProjection;
-        if (projection.sessionId === run.sessionId && projection.segments.some(segment => segment.kind === 'raw' &&
+      } else if (text.includes('"format":"cliq-session-context-v2"')) {
+        const projection = decodeSessionContextHead(JSON.parse(text));
+        // The actual new head bytes have been written. Its referenced pages
+        // were fully published first; verify their complete real CAS graph
+        // before selecting this original terminal's root-write barrier.
+        const segments = await fixtureSessionContextSegments(fixture.store.artifacts, projection);
+        if (projection.sessionId === run.sessionId && segments.some(segment => segment.kind === 'raw' &&
             segment.items.some(item => item.payloadRef === firstTerminalRef))) {
           preparedProjections++;
           if (preparedProjections === 1) { reached(); await resume; }
@@ -161,9 +167,9 @@ test('a sealed stop refuses a changed Session cut without rebuilding, then a new
     const session = fixture.store.getSession(run.sessionId);
     assert.equal(session.latestItemSeq, 2);
     assert.equal(session.contextRevision, 3);
-    const projection = await fixture.store.artifacts.readCanonical<SessionContextProjection>(session.contextProjectionRef);
-    assert.deepEqual(projection.segments.map(segment => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
-    const terminalItems = await Promise.all(projection.segments.map(segment => {
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, session.contextProjectionRef);
+    assert.deepEqual(segments.map(segment => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
+    const terminalItems = await Promise.all(segments.map(segment => {
       assert.ok(segment.kind === 'raw');
       return fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef);
     }));

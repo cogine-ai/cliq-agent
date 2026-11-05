@@ -37,6 +37,11 @@ static inline bool cliq_hex_digest(const char *value) {
     return true;
 }
 static inline bool cliq_admin_packet_strings_terminated(const struct cliq_worker_packet *packet) {
+    if (packet->command >= CLIQ_MCP_STDIO_RESERVE && packet->command <= CLIQ_MCP_STDIO_CLEANUP_RETAINED)
+        return packet->stdio_input_digest[64] == '\0' && packet->stdio_recipe_digest[64] == '\0' && packet->stdio_server_digest[64] == '\0' &&
+            packet->stdio_init_digest[64] == '\0' && packet->stdio_bwrap_digest[64] == '\0' &&
+            packet->stdio_checker_supervisor_id[sizeof(packet->stdio_checker_supervisor_id)-1] == '\0' &&
+            packet->stdio_checker_supervisor_token[sizeof(packet->stdio_checker_supervisor_token)-1] == '\0' && packet->stdio_original_birth_digest[64] == '\0';
     if (packet->command < CLIQ_MCP_ADMIN_RESERVE || packet->command > CLIQ_MCP_ADMIN_CLEANUP_RETAINED) return true;
     return packet->admin_operation_id[sizeof(packet->admin_operation_id)-1]=='\0' && packet->admin_principal_id[sizeof(packet->admin_principal_id)-1]=='\0' &&
         packet->admin_target_ref[64]=='\0' && packet->admin_target_digest[64]=='\0' && packet->admin_core_ref[64]=='\0' && packet->admin_core_digest[64]=='\0' && packet->admin_plan_digest[64]=='\0' &&

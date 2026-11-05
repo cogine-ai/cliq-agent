@@ -6,6 +6,7 @@ import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RetainedVerifierToolchain } from '../state/guest-toolchain.js';
 import { BUILTIN_SCRIPT_TOOL_NAMES, decodeToolExecutionIdentity, assertBuiltinScriptGuest } from '../tools/execution-identity.js';
+import { MCP_STDIO_EXECUTION_PATH } from '../sandbox/mcp-stdio-executable.js';
 
 /** Supplied by trusted Supervisor composition, never by a Run, repository, worker or control request. */
 export type ReleaseTrustKey = { keyId: string; publicKeyPem: string };
@@ -136,9 +137,20 @@ export function verifyToolRuntimeAuthority(input: {
     if (!retained || retained.ref !== selected.registryRevisionRef || canonicalSha256(retained.registry) !== retained.ref ||
         retained.registry.manifestDigest !== selected.manifestDigest || retained.registry.registryRevision !== selected.registryRevision ||
         retained.registry.ownerPrincipalId !== policy.principalId || retained.registry.stateModel !== 'stateless_per_call' ||
-        retained.registry.transport.kind !== 'streamable_http' || retained.registry.transport.credentialGrantRefs.length > 1 ||
+        (retained.registry.transport.kind === 'streamable_http' && retained.registry.transport.credentialGrantRefs.length > 1) ||
         retained.registry.tools.some(tool => tool.recovery.kind !== 'manual'))
       throw new TypeError('MCP tool authority substitutes its principal, frozen registry or supported recovery');
+    if (retained.registry.transport.kind === 'stdio') {
+      const identity = retained.registry.transport.executable;
+      if (identity.kind !== 'runtime_bundle' || identity.runtimeBundleRef !== assembly.runtime.runtimeBundleRef ||
+          identity.runtimeBundleRef !== canonicalSha256(bundle))
+        throw new TypeError('MCP stdio requires its exact current signed runtime executable closure');
+      executable(identity.executableId, identity.executableDigest, 'mcp_server');
+      const server = bundle.entries.find(entry => entry.entryId === identity.executableId)!;
+      if (identity.executionPath !== MCP_STDIO_EXECUTION_PATH || server.byteCount < 1 || server.byteCount > 268_435_456)
+        throw new TypeError('MCP stdio executable differs from its exact signed path or supported file bound');
+      assertMcpStdioRuntimeRecipe(bundle);
+    }
   }
   for (const tool of tools) {
     const execution = decodeToolExecutionIdentity(tool.execution);
@@ -177,10 +189,23 @@ export function verifyToolRuntimeAuthority(input: {
       if (!retained || !contract || retained.ref !== execution.registryRevisionRef ||
           retained.registry.manifestDigest !== execution.registryManifestDigest || contract.toolContractDigest !== execution.toolContractDigest ||
           tool.name !== mcpExposedToolName(execution.registrationId, execution.serverToolName) || tool.version !== contract.version ||
-          tool.description !== mcpExposedToolDescription(execution.registrationId, execution.serverToolName, contract.description) || tool.access !== 'exec' || tool.replayClass !== 'manual' ||
-          contract.recovery.kind !== 'manual' || tool.inputSchemaRef !== contract.inputSchemaRef || tool.inputSchemaDigest !== contract.inputSchemaDigest ||
+          tool.description !== mcpExposedToolDescription(execution.registrationId, execution.serverToolName, contract.description) || tool.access !== 'exec' ||
+          tool.replayClass !== contract.recovery.kind || tool.inputSchemaRef !== contract.inputSchemaRef || tool.inputSchemaDigest !== contract.inputSchemaDigest ||
           tool.outputSchemaRef !== contract.outputSchemaRef || tool.outputSchemaDigest !== contract.outputSchemaDigest)
-        throw new TypeError('MCP tool differs from its exact frozen manual contract');
+        throw new TypeError('MCP tool differs from its exact frozen recovery contract');
     }
   }
+}
+/** Signed data recipe support only. The genuine installed factories still
+ * enforce actual native image/purpose, static ELF, custody and release gates. */
+export function assertMcpStdioRuntimeRecipe(bundle: RuntimeBundleManifest): void {
+  const exact = (id: string, relativePath?: string) => bundle.entries.filter(entry => entry.entryId === id &&
+    entry.role === 'platform_helper' && entry.executable === true && entry.byteCount > 0 && entry.byteCount <= 268_435_456 &&
+    (relativePath === undefined || entry.relativePath === relativePath));
+  if (exact('mcp-stdio-broker-v1', 'native/linux-x64/linux-mcp-stdio-broker.node').filter(entry => entry.version === '1').length !== 1 ||
+      exact('linux_worker_controller').length !== 1 || exact('linux_bubblewrap').length !== 1)
+    throw new TypeError('MCP stdio complete fixed signed platform recipe is unavailable');
+  const roots = bundle.entries.filter(entry => entry.entryId === 'installed-empty-root' && entry.role === 'sandbox_root_profile' &&
+    entry.executable === false && entry.byteCount > 0);
+  if (roots.length !== 1) throw new TypeError('MCP stdio exact signed empty root is unavailable');
 }

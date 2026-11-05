@@ -2,7 +2,8 @@
 // original claim owns setup and effect together; no phase may create a claim,
 // retry, replacement URL, credential or deadline.
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, sha256Bytes, identityHash } from '../kernel/identity.js';
+import { decodeMcpHttpRetryClaimIdentity, mcpRetryState, mcpRetryPositiveFailureAction } from '../kernel/mcp-retry.js';
+import { digestOmitting, sha256Bytes, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { decodeMcpCallResult, decodeMcpHttpCapture, decodeMcpInitializeResult, decodeMcpToolsListResult,
   decodeMcpKnownUnusableResponse, mcpNoReleaseCheckpointId, type McpKnownUnusableResponseV1,
@@ -39,11 +40,14 @@ import { decodeBudgetSettlement } from './decoders.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
 import { decodeBrokerProcessDomainDeath, type BrokerProcessDomainDeathEvidenceV1 } from '../kernel/broker-process-domain-death.js';
-import { withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { withHeldInstalledRuntime, type HeldInstalledRuntime, type HeldInstalledAnchor } from './installed-runtime.js';
 import { stateRootIdentityForLock } from './native-owner.js';
 import { assertInstalledMcpBrokerProcess } from './mcp-native-binding.js';
 import { readStopSourceData } from './stop-source.js';
 import { toolCheckpointId } from './tool-checkpoint.js';
+import { decodeMcpServerInstanceIdentity } from '../kernel/mcp-stdio.js';
+import { readMcpStdioManualDispatchOwner, assertMcpStdioRunQuiescence } from './mcp-stdio-execution.js';
+import { readMcpStdioRunCapture, assertMcpStdioCaptureObservation } from './mcp-stdio-history.js';
 import { assertInstalledMcpAdminJoined, assertInstalledMcpAdminOwner, assertInstalledMcpRawResponse,
   assertInstalledMcpRunJoined, assertInstalledMcpRunOwner, assertInstalledMcpUnusableResponse } from './mcp-native-binding.js';
 import type { AdminMcpHttpBinding, NativeMcpAdminHttpOwner, NativeMcpAdminJoined, NativeMcpMessage,
@@ -258,7 +262,7 @@ export function acknowledgeMcpRunCapture(reference: string): void {
  * death; successor recovery separately observes original creator-process death. */
 export function readMcpManualDispatchOwner(claim: InvocationJournalEntry) {
   const retained = retainedRunOwners.get(dispatchKey(claim));
-  if (!retained) return undefined;
+  if (!retained) return readMcpStdioManualDispatchOwner(claim);
   const { owner, state } = retained, binding = state.binding;
   if (binding.runId !== claim.runId || binding.opId !== claim.opId || binding.attempt !== claim.attempt ||
       binding.dispatchId !== claim.dispatchId || binding.dispatchJournalSeq !== claim.seq || binding.brokerFenceTokenDigest !== claim.brokerFenceTokenDigest ||
@@ -268,22 +272,27 @@ export function readMcpManualDispatchOwner(claim: InvocationJournalEntry) {
   assertInstalledMcpRunJoined(owner, state.joined, binding);
   return Object.freeze({ owner, binding, joined: state.joined,
     assertJoined() { assertInstalledMcpRunJoined(owner, state.joined!, binding); },
+    async releaseRetry(_closureRef: string) {
+      assertInstalledMcpRunJoined(owner, state.joined!, binding); owner.releaseDispatchFence(); retainedRunOwners.delete(dispatchKey(claim));
+    },
     release() { assertInstalledMcpRunJoined(owner, state.joined!, binding); owner.releaseDispatchFence(); retainedRunOwners.delete(dispatchKey(claim)); } });
 }
 export function assertMcpRunQuiescence(runId: string): void {
+  assertMcpStdioRunQuiescence(runId);
   for (const { owner, state } of retainedRunOwners.values()) if (state.binding.runId === runId) {
     if (state.running || !state.joined) throw new ResourceRetirementError('MCP original producer still owns physical work', undefined);
     assertInstalledMcpRunJoined(owner, state.joined, state.binding);
   }
 }
-async function readMcpOriginalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, input: {
+export async function readMcpOriginalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, input: {
   prepared: InvocationJournalEntry; claim: InvocationJournalEntry; assembly: RunAssemblyV1; throughEpoch: number;
 }) {
   const { prepared, claim, assembly } = input;
   const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, prepared.requestRef), target = await readCanonicalArtifact<ToolTargetV1>(artifacts, prepared.target);
   const grant = prepared.grantRef && await readCanonicalArtifact<ToolOperationGrantV1>(artifacts, prepared.grantRef);
   const run = readRun(driver, prepared.runId), principalId = readSessionPrincipalId(driver, run.sessionId);
-  if (!grant || prepared.opKind !== 'mcp' || prepared.replayClass !== 'manual' || claim.opKind !== 'mcp' || claim.replayClass !== 'manual' ||
+  const retryPolicy = assembly.retry.tools.find(tool => tool.toolName === request.toolName);
+  if (!grant || !retryPolicy || prepared.opKind !== 'mcp' || prepared.replayClass !== retryPolicy.replayClass || claim.opKind !== 'mcp' || claim.replayClass !== prepared.replayClass ||
       prepared.phase !== 'prepared' || claim.phase !== 'dispatch_claimed' || claim.runId !== prepared.runId || claim.opId !== prepared.opId ||
       claim.attempt !== prepared.attempt || claim.requestRef !== prepared.requestRef || claim.target !== prepared.target || claim.grantRef !== prepared.grantRef ||
       !claim.dispatchId || !claim.brokerFenceTokenDigest || !claim.stateOwnerEpoch || !claim.supervisorInstanceId || claim.sandboxLaunchSpecRef !== undefined ||
@@ -291,33 +300,63 @@ async function readMcpOriginalClaim(driver: SqliteDriver, artifacts: ArtifactCat
       target.execution.kind !== 'mcp' || grant.grantDigest !== digestOmitting(grant, 'grantDigest') || grant.principalId !== principalId ||
       grant.runId !== run.id || request.runId !== run.id || request.opId !== prepared.opId || grant.opId !== prepared.opId ||
       grant.requestRef !== prepared.requestRef || grant.requestDigest !== request.requestDigest || grant.targetRef !== prepared.target ||
-      grant.targetDigest !== target.targetDigest || grant.frontierRef !== request.frontierRef || grant.subject.replayClass !== 'manual' ||
+      grant.targetDigest !== target.targetDigest || grant.frontierRef !== request.frontierRef || grant.subject.replayClass !== prepared.replayClass ||
       request.targetRef !== prepared.target || request.targetDigest !== target.targetDigest || grant.subject.batchItemId !== request.batchItemId ||
       grant.subject.callId !== request.callId || grant.subject.callIndex !== request.callIndex || grant.subject.toolName !== request.toolName ||
       grant.subject.toolContractDigest !== target.toolContractDigest ||
-      grant.maxDispatchedAttempts !== 1 || grant.issuedAt > claim.timestamp || grant.expiresAt <= claim.timestamp || claim.timestamp >= run.deadlineAt ||
+      grant.maxDispatchedAttempts !== retryPolicy.maxDispatchedAttempts || grant.issuedAt > claim.timestamp || grant.expiresAt <= claim.timestamp || claim.timestamp >= run.deadlineAt ||
       request.assemblyRef !== canonicalSha256(assembly))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original permanent claim is not its exact admitted request/target/grant');
   const execution = target.execution;
   const registry = await readMcpRegistryClosure(driver, artifacts, execution.registryRevisionRef, principalId);
-  if (registry.registry.transport.kind !== 'streamable_http' || registry.registry.registrationId !== execution.registrationId ||
-      execution.registryManifestDigest !== registry.registry.manifestDigest || !registry.registry.tools.some(tool => tool.name === execution.serverToolName && tool.toolContractDigest === execution.toolContractDigest) ||
+  const toolContract = registry.registry.tools.find(tool => tool.name === execution.serverToolName);
+  if (registry.registry.registrationId !== execution.registrationId ||
+      execution.registryManifestDigest !== registry.registry.manifestDigest || !toolContract || toolContract.toolContractDigest !== execution.toolContractDigest ||
+      toolContract.recovery.kind !== prepared.replayClass ||
       !assembly.mcpServers.some(server => server.registrationId === execution.registrationId &&
       server.registryRevisionRef === registry.ref && server.manifestDigest === registry.registry.manifestDigest))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP successor cannot borrow another frozen registry or transport');
   const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
   verifyRuntimeBundle(bundle, artifacts.releaseTrustRoots());
-  const images = bundle.entries.filter(entry => entry.entryId === 'mcp-streamable-http-broker-v1');
+  const stdio = registry.registry.transport.kind === 'stdio';
+  const images = bundle.entries.filter(entry => entry.entryId === (stdio ? 'mcp-stdio-broker-v1' : 'mcp-streamable-http-broker-v1'));
   if (bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest || images.length !== 1 || images[0]!.role !== 'platform_helper' ||
-      !images[0]!.executable || images[0]!.version !== '1' || images[0]!.relativePath !== 'native/linux-x64/linux-mcp-http-broker.node')
+      !images[0]!.executable || images[0]!.version !== '1' || images[0]!.relativePath !== (stdio ? 'native/linux-x64/linux-mcp-stdio-broker.node' : 'native/linux-x64/linux-mcp-http-broker.node'))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original claim has no signed creator-process-only native recipe');
+  const stdioInstance = stdio && claim.evidenceRef ? decodeMcpServerInstanceIdentity(await readCanonicalArtifact(artifacts, claim.evidenceRef)) : undefined;
+  const httpRetryIdentity = !stdio && prepared.replayClass === 'retry' && claim.evidenceRef
+    ? decodeMcpHttpRetryClaimIdentity(await readCanonicalArtifact(artifacts, claim.evidenceRef)) : undefined;
+  const httpWorker = httpRetryIdentity && readWorkerLaunch(driver, httpRetryIdentity.binding.workerLaunchId);
+  if (stdio ? !stdioInstance || stdioInstance.identityDigest !== claim.evidenceDigest || stdioInstance.runId !== run.id ||
+      stdioInstance.batchItemId !== request.batchItemId || stdioInstance.callId !== request.callId || stdioInstance.callIndex !== request.callIndex ||
+      stdioInstance.registryRevisionRef !== registry.ref || stdioInstance.registryManifestDigest !== registry.registry.manifestDigest ||
+      stdioInstance.initializedAt > claim.timestamp : prepared.replayClass === 'retry'
+        ? !httpRetryIdentity || httpRetryIdentity.identityDigest !== claim.evidenceDigest || httpRetryIdentity.binding.runId !== run.id ||
+          httpRetryIdentity.binding.opId !== claim.opId || httpRetryIdentity.binding.attempt !== claim.attempt ||
+          httpRetryIdentity.binding.dispatchId !== claim.dispatchId || httpRetryIdentity.binding.dispatchJournalSeq !== claim.seq ||
+          httpRetryIdentity.binding.requestRef !== prepared.requestRef || httpRetryIdentity.binding.requestDigest !== request.requestDigest ||
+          httpRetryIdentity.binding.targetRef !== prepared.target || httpRetryIdentity.binding.targetDigest !== target.targetDigest ||
+          httpRetryIdentity.binding.grantRef !== prepared.grantRef || httpRetryIdentity.binding.grantDigest !== grant.grantDigest ||
+          httpRetryIdentity.binding.registryRef !== registry.ref || httpRetryIdentity.binding.manifestDigest !== registry.registry.manifestDigest ||
+          httpRetryIdentity.binding.toolContractDigest !== toolContract.toolContractDigest || httpRetryIdentity.binding.brokerFenceTokenDigest !== claim.brokerFenceTokenDigest ||
+          httpRetryIdentity.binding.supervisorInstanceId !== claim.supervisorInstanceId || httpRetryIdentity.binding.stateOwnerEpoch !== claim.stateOwnerEpoch ||
+          httpRetryIdentity.binding.leaseEpoch !== claim.leaseEpoch || httpRetryIdentity.binding.batchItemId !== request.batchItemId ||
+          httpRetryIdentity.binding.callId !== request.callId || httpRetryIdentity.binding.callIndex !== request.callIndex ||
+          !httpWorker || httpWorker.runId !== run.id || httpWorker.supervisorInstanceId !== claim.supervisorInstanceId ||
+          httpWorker.leaseEpoch !== claim.leaseEpoch || !httpWorker.activatedAt || httpWorker.activatedAt > claim.timestamp ||
+          httpWorker.retiredAt !== undefined && httpWorker.retiredAt < claim.timestamp ||
+          httpRetryIdentity.binding.deadlineMs <= Date.parse(claim.timestamp) ||
+          httpRetryIdentity.binding.deadlineMs > Math.min(Date.parse(run.deadlineAt), Date.parse(grant.expiresAt),
+            Date.parse(prepared.timestamp) + registry.registry.lifecycle.callTimeoutMs)
+        : claim.evidenceRef !== undefined || claim.evidenceDigest !== undefined)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original claim changes its exact transport-specific initialized instance root');
   const history = await readRetainedStateOwnerHistory(driver, artifacts, input.throughEpoch);
   const claiming = history.entries.find(entry => entry.owner.ownerEpoch === claim.stateOwnerEpoch);
   if (!claiming || claiming.owner.supervisorInstanceId !== claim.supervisorInstanceId || claiming.owner.acquiredAt > claim.timestamp ||
       claiming.owner.runtimeBundleRef !== assembly.runtime.runtimeBundleRef || claiming.owner.runtimeBundleManifestDigest !== assembly.runtime.runtimeBundleManifestDigest ||
       claiming.process.platform !== 'linux' || claiming.owner.state === 'terminal' && claiming.owner.releasedAt < claim.timestamp)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original native creator is outside its retained StateOwner history');
-  return { request, target, execution, grant, registry, history, claiming, principalId };
+  return { request, target, execution, grant, registry, history, claiming, principalId, stdioInstance, httpRetryIdentity, toolContract, retryPolicy };
 }
 /** Retained data audit of a successor-produced UNKNOWN. The genuine death
  * observation is made only by recoverMcpClaimedAfterProcessDeath below. */
@@ -378,13 +417,24 @@ export async function readMcpAmbiguityHistory(driver: SqliteDriver, artifacts: A
     throw new TypeError('MCP UNKNOWN has no original full-once settlement');
   for (const usage of [unknown.budgetDelta, settlement.reserved, settlement.consumed, settlement.released])
     requireEqual(usage, prepared.budgetDelta, 'MCP UNKNOWN whole original charge exactly once');
-  return { ...original, ambiguity, settlement };
+  let stdioClosed: Awaited<ReturnType<typeof import('./mcp-server-history.js').readMcpServerClosedAttempt>> | undefined;
+  if (original.stdioInstance) {
+    const instance = original.stdioInstance, run = readRun(driver, claim.runId);
+    const spec = await readCanonicalArtifact<import('../kernel/types.js').RunSpec>(artifacts, run.specRef);
+    const server = readInvocationAttempt(driver, run.id, instance.launchOpId, instance.launchAttempt);
+    const closed = await (await import('./mcp-server-history.js')).readMcpServerClosedAttempt(driver, artifacts, run, spec, assembly, server[0]!, server);
+    stdioClosed = closed;
+    if (closed.terminal.phase !== 'failed' || closed.terminal.seq !== unknown.seq + 1 || closed.terminal.timestamp !== unknown.timestamp ||
+        !closed.instanceInitialized) throw new TypeError('MCP stdio UNKNOWN lacks its atomic original initialized local-server failure closure');
+  }
+  return { ...original, ambiguity, settlement, stdioClosed };
 }
 /** No target I/O or old token is recreated. Real death of the original
  * nontransferable creator closes only its local domain; remote effect and a
  * response never durably handed off remain UNKNOWN/full once. */
 export async function recoverMcpClaimedAfterProcessDeath(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  installedRuntime: HeldInstalledRuntime, input: { runId: string; expectedRunRevision: number }) {
+  installedRuntime: HeldInstalledRuntime, input: { runId: string; expectedRunRevision: number },
+  stdio?: Readonly<{ anchor: HeldInstalledAnchor; signal?: AbortSignal }>) {
   const run = readRun(driver, input.runId);
   if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'MCP successor claim cut changed');
   const rows = driver.prepare("SELECT op_id,attempt FROM run_journal WHERE run_id=? AND op_kind='mcp' AND phase='dispatch_claimed'").all<{op_id:string;attempt:number}>(run.id);
@@ -397,6 +447,11 @@ export async function recoverMcpClaimedAfterProcessDeath(driver: SqliteDriver, a
   const spec = await readCanonicalArtifact<import('../kernel/types.js').RunSpec>(artifacts, run.specRef);
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef);
   const original = await readMcpOriginalClaim(driver, artifacts, { prepared: prepared!, claim: claim!, assembly, throughEpoch: active.ownerEpoch });
+  if (original.stdioInstance) {
+    if (!stdio) throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP stdio successor requires its genuine installed retained-input cleanup owner');
+    return (await import('./mcp-stdio-recovery.js')).recoverMcpStdioClaimedAfterProcessDeath(driver, artifacts, owner, installedRuntime,
+      stdio.anchor, input, stdio.signal);
+  }
   if (active.ownerEpoch <= original.claiming.owner.ownerEpoch) throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP successor must be a strictly newer retained owner');
   assertInstalledMcpBrokerProcess();
   await withHeldInstalledRuntime(installedRuntime, async installed => {
@@ -462,7 +517,7 @@ export async function settleMcpRunUnknown(driver: SqliteDriver, artifacts: Artif
   const target = await readCanonicalArtifact<ToolTargetV1>(artifacts, prepared.target);
   const active = assertActiveStateOwner(driver, context);
   if (active.supervisorInstanceId !== claim.supervisorInstanceId || active.ownerEpoch !== claim.stateOwnerEpoch ||
-      prepared.opKind !== 'mcp' || claim.opKind !== 'mcp' || prepared.replayClass !== 'manual' ||
+      prepared.opKind !== 'mcp' || claim.opKind !== 'mcp' || prepared.replayClass !== claim.replayClass || !['manual', 'retry', 'reconcile'].includes(prepared.replayClass) ||
       target.execution.kind !== 'mcp' || !prepared.grantRef || !claim.dispatchId || !claim.brokerFenceTokenDigest)
     throw new KernelStorageError('LEASE_FENCED', 'MCP unknown belongs to another original native claim owner');
   const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
@@ -494,6 +549,18 @@ export async function settleMcpRunUnknown(driver: SqliteDriver, artifacts: Artif
       } };
   });
 }
+/** Data projection only, after the owning reader has verified the original
+ * permanent claim, irreversible no-release proof and once-only settlement. */
+export function planMcpNoReleaseResult(request: ToolRequestV1, failed: InvocationJournalEntry, createdAt: string) {
+  parseCanonicalTime(createdAt); parseCanonicalTime(failed.timestamp);
+  if (failed.opKind !== 'mcp' || failed.phase !== 'failed' || failed.runId !== request.runId || failed.opId !== request.opId ||
+      failed.requestRef !== canonicalSha256(request) || !failed.errorRef || !failed.budgetSettlementRef || createdAt < failed.timestamp)
+    throw new TypeError('MCP positive error projection lost its original failed invocation');
+  return planToolInvocationResult(request, createdAt, { outcome: 'error', code: 'TOOL_EXECUTION_FAILED',
+    diagnosticRef: failed.errorRef, diagnosticDigest: failed.errorRef, opId: failed.opId, attempt: failed.attempt,
+    journalErrorRef: failed.errorRef, journalErrorDigest: failed.errorRef }, { code: 'TOOL_EXECUTION_FAILED' });
+}
+
 export async function failMcpRunWithoutRelease(driver: SqliteDriver, artifacts: ArtifactCatalog, context: StateOwnerContext,
   owner: NativeMcpRunHttpOwner, prepared: InvocationJournalEntry, claim: InvocationJournalEntry, resolveToolInput: ResolveToolInput) {
   const state = runOwners.get(owner);
@@ -522,24 +589,31 @@ export async function failMcpRunWithoutRelease(driver: SqliteDriver, artifacts: 
   const error = planCanonicalArtifact({ schemaVersion: 1, format: 'cliq-mcp-no-release-error-v1', runId: claim.runId,
     opId: claim.opId, attempt: claim.attempt, requestRef: prepared.requestRef, evidenceRef: evidenceArtifact.ref,
     evidenceDigest: evidence.evidenceDigest, code: 'TOOL_EXECUTION_FAILED' }, 'cliq-invocation-error-v1');
-  await artifacts.publishBytes(error.bytes, error.mediaType, error.schemaKind);
+  const errorArtifact = await artifacts.publishBytes(error.bytes, error.mediaType, error.schemaKind);
+  const assembly = prepared.replayClass === 'retry' ? await readCanonicalArtifact<RunAssemblyV1>(artifacts, selected.runSpec.assemblyRef) : undefined;
+  const retryPolicy = assembly?.retry.tools.find(tool => tool.toolName === request.toolName);
+  if (prepared.replayClass === 'retry' && retryPolicy?.replayClass !== 'retry')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP positive failure lost its exact original literal retry policy');
   const settled = await settleValidatedInvocation(driver, artifacts, context, { runId: claim.runId, opId: claim.opId, attempt: claim.attempt,
     expectedRunRevision: selected.run.revision }, { phase: 'failed', requireClaim: true, consumed: ZERO_BUDGET,
-    errorRef: error.ref, evidenceRef: evidenceArtifact.ref, evidenceDigest: evidence.evidenceDigest }, async ({ settlement }) => {
-      const result = planToolInvocationResult(request, settlement.settledAt, { outcome: 'error', code: 'TOOL_EXECUTION_FAILED',
-        diagnosticRef: error.ref, diagnosticDigest: error.ref, opId: claim.opId, attempt: claim.attempt,
-        journalErrorRef: error.ref, journalErrorDigest: error.ref }, { code: 'TOOL_EXECUTION_FAILED' });
-      const graph = await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
+    errorRef: error.ref, evidenceRef: evidenceArtifact.ref, evidenceDigest: evidence.evidenceDigest }, async ({ run, settlement }) => {
+      const prospective: InvocationJournalEntry = { ...claim, phase: 'failed', seq: settlement.terminalJournalSeq, timestamp: settlement.settledAt,
+        budgetDelta: ZERO_BUDGET, errorRef: error.ref, evidenceRef: evidenceArtifact.ref, evidenceDigest: evidence.evidenceDigest, budgetSettlementRef: canonicalSha256(settlement) };
+      const retainForRetry = retryPolicy && mcpRetryPositiveFailureAction(mcpRetryState(retryPolicy,
+        [...selected.journal.filter(entry => entry.opId === claim.opId), prospective], settlement.settledAt, binding.deadlineMs), 'failed',
+      !!run.stopIntentRef || run.cancelRequested) === 'retry';
+      const result = planMcpNoReleaseResult(request, prospective, settlement.settledAt);
+      const graph = retainForRetry ? undefined : await prepareContinuationCommit(artifacts, { context: selected.context, existingItems: selected.items,
         items: [result.item], frontier: nextToolFrontier(selected, 1), checkpointId: mcpNoReleaseCheckpointId(claim.runId, claim.opId, claim.attempt),
         workspaceStateRef: selected.checkpoint.workspaceStateRef, artifacts: [error, ...result.artifacts] });
-      return { metadata: [...graph.metadata, evidenceArtifact, inspectorArtifact],
+      return { metadata: [...(graph?.metadata ?? [errorArtifact]), evidenceArtifact, inspectorArtifact],
         validate(connection, current, committedAt) {
           assertInstalledMcpNoReleaseFence(fence, binding); assertActiveStateOwner(connection, context);
           requireEqual(readInvocationAttempt(connection, claim.runId, claim.opId, claim.attempt), [prepared, claim], 'MCP zero-I/O original claim');
           if (current.frontierRef !== selected.run.frontierRef || current.latestCheckpointId !== selected.run.latestCheckpointId ||
               current.leaseEpoch !== claim.leaseEpoch || committedAt < evidence.observedAt || Date.parse(committedAt) - Date.parse(evidence.observedAt) > 5000)
             throw new KernelStorageError('LEASE_FENCED', 'MCP no-release original held fence or ordered cut changed');
-        }, commit(connection, current, journal, committedAt) { graph.commit(connection, current, journal.seq, committedAt); } };
+        }, commit(connection, current, journal, committedAt) { graph?.commit(connection, current, journal.seq, committedAt); } };
     });
   fence.close(); state.noReleaseFence = undefined; owner.releaseDispatchFence(); retainedRunOwners.delete(dispatchKey(claim));
   return settled.run;
@@ -548,7 +622,7 @@ export async function readMcpNoReleaseHistory(driver: SqliteDriver, artifacts: A
   prepared: InvocationJournalEntry; claim: InvocationJournalEntry; failed: InvocationJournalEntry; assembly: RunAssemblyV1;
 }) {
   const { prepared, claim, failed, assembly } = input;
-  if (prepared.opKind !== 'mcp' || claim.opKind !== 'mcp' || failed.opKind !== 'mcp' || prepared.replayClass !== 'manual' ||
+  if (prepared.opKind !== 'mcp' || claim.opKind !== 'mcp' || failed.opKind !== 'mcp' || !['manual', 'retry', 'reconcile'].includes(prepared.replayClass) ||
       failed.phase !== 'failed' || !failed.errorRef || !failed.evidenceRef || !failed.budgetSettlementRef || !claim.brokerFenceTokenDigest || claim.sandboxLaunchSpecRef)
     throw new TypeError('MCP no-release history lacks its exact original HTTP claim');
   const originalClaim = await readMcpOriginalClaim(driver, artifacts, { prepared, claim, assembly, throughEpoch: claim.stateOwnerEpoch! });
@@ -576,7 +650,7 @@ export async function readMcpNoReleaseHistory(driver: SqliteDriver, artifacts: A
   if (original.supervisorInstanceId !== claim.supervisorInstanceId || original.acquiredAt > claim.timestamp ||
       original.state === 'terminal' && original.releasedAt < failed.timestamp) throw new TypeError('MCP no-release is outside its original StateOwner lifetime');
   await readSupervisorInspector(artifacts, original, assembly, evidence);
-  return { request, target, evidence, error, settlement, history };
+  return { request, target, evidence, error, settlement, history, originalClaim };
 }
 
 /** Complete retained data audit. It cannot create a native result, live fence
@@ -591,8 +665,10 @@ export async function readMcpRunCapture(driver: SqliteDriver, artifacts: Artifac
       unusable && (value.malformedResult || value.result !== null) ||
       value.captureDigest !== input.captureDigest || value.captureDigest !== digestOmitting(value, 'captureDigest'))
     throw new TypeError('MCP retained capture does not rehash');
-  const { request, target, execution, grant, registry } = await readMcpOriginalClaim(driver, artifacts,
-    { prepared, claim, assembly, throughEpoch: claim.stateOwnerEpoch! });
+  const original = await readMcpOriginalClaim(driver, artifacts, { prepared, claim, assembly, throughEpoch: claim.stateOwnerEpoch! });
+  const { request, target, execution, grant, registry } = original;
+  if (original.httpRetryIdentity) requireEqual(value.binding, original.httpRetryIdentity.binding,
+    'MCP received retry result retains its complete actual original native claim binding and deadline');
   const selected = assembly.mcpServers.find(item => item.registrationId === execution.registrationId);
   const launch = readWorkerLaunch(driver, value.binding.workerLaunchId);
   if (!selected || selected.registryRevisionRef !== registry.ref || selected.manifestDigest !== registry.registry.manifestDigest ||
@@ -603,7 +679,7 @@ export async function readMcpRunCapture(driver: SqliteDriver, artifacts: Artifac
       launch.leaseEpoch !== claim.leaseEpoch || !Number.isSafeInteger(value.binding.deadlineMs) || value.binding.deadlineMs <= Date.parse(claim.timestamp) ||
       value.binding.deadlineMs > Math.min(Date.parse(grant.expiresAt), Date.parse(readRun(driver, claim.runId).deadlineAt), Date.parse(claim.timestamp) + registry.registry.lifecycle.callTimeoutMs) ||
       execution.registryManifestDigest !== registry.registry.manifestDigest || prepared.opKind !== 'mcp' || claim.opKind !== 'mcp' ||
-      prepared.replayClass !== 'manual' || claim.replayClass !== 'manual' || claim.sandboxLaunchSpecRef !== undefined ||
+      prepared.replayClass !== claim.replayClass || !['manual', 'retry', 'reconcile'].includes(prepared.replayClass) || claim.sandboxLaunchSpecRef !== undefined ||
       value.binding.runId !== claim.runId || value.binding.opId !== claim.opId || value.binding.attempt !== claim.attempt ||
       value.binding.dispatchId !== claim.dispatchId || value.binding.dispatchJournalSeq !== claim.seq || value.binding.requestRef !== prepared.requestRef ||
       value.binding.requestDigest !== request.requestDigest || value.binding.targetRef !== prepared.target || value.binding.targetDigest !== target.targetDigest ||
@@ -667,25 +743,38 @@ export async function readMcpKnownUnusableCause(driver: SqliteDriver, artifacts:
   observedAt: string, sourceCheckpointId?: string, sourceRunRevision?: number, registeredJournalSeq?: number) {
   if (!cut.journal.some(entry => entry.opKind === 'mcp' && entry.phase === 'completed')) return undefined;
   const source = readStopSourceData(driver, cut, observedAt, sourceCheckpointId, sourceRunRevision, registeredJournalSeq);
-  const latest = source.journal.at(-1);
+  const tail = source.journal.at(-1);
+  const latest = tail?.opKind === 'mcp-server' && tail.phase === 'completed' ? source.journal.at(-2) : tail;
   if (latest?.opKind !== 'mcp' || latest.phase !== 'completed' || !latest.resultRef || !latest.budgetSettlementRef) return undefined;
   const observation = await readCanonicalArtifact<ToolObservationV1>(artifacts, latest.resultRef);
   if (!observation.captureRef || !observation.captureDigest) throw new TypeError('MCP completed result lost its original capture');
-  const rawCapture = await readCanonicalArtifact<McpRunCaptureV1>(artifacts, observation.captureRef);
-  if (rawCapture.format !== 'cliq-mcp-known-unusable-run-capture-v1') return undefined;
+  const rawCapture = await readCanonicalArtifact<{ format: string }>(artifacts, observation.captureRef);
+  const stdio = rawCapture.format === 'cliq-mcp-stdio-known-unusable-run-capture-v1';
+  if (!stdio && rawCapture.format !== 'cliq-mcp-known-unusable-run-capture-v1') return undefined;
   const entries = source.journal.filter(entry => entry.opId === latest.opId && entry.attempt === latest.attempt), [prepared, claim] = entries;
   if (entries.length !== 3 || prepared?.phase !== 'prepared' || claim?.phase !== 'dispatch_claimed' ||
       source.journal.some(entry => entry.opId === latest.opId && entry.attempt !== latest.attempt && entry.phase === 'dispatch_claimed'))
     throw new TypeError('MCP known-unusable failure does not own one original completed claim');
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, cut.runSpec.assemblyRef);
-  const captured = await readMcpRunCapture(driver, artifacts, { captureRef: observation.captureRef, captureDigest: observation.captureDigest, prepared, claim, assembly });
-  await assertMcpCaptureObservation(artifacts, observation, captured);
+  if (stdio) {
+    const captured = await readMcpStdioRunCapture(driver, artifacts, { captureRef: observation.captureRef, captureDigest: observation.captureDigest, prepared, claim, assembly });
+    await assertMcpStdioCaptureObservation(artifacts, observation, captured);
+    if (tail?.opKind !== 'mcp-server' || tail.phase !== 'completed' || tail.seq !== latest.seq + 1 || tail.timestamp !== latest.timestamp ||
+        tail.opId !== captured.launch.launchOpId || tail.attempt !== captured.launch.attempt || tail.resultRef !== captured.binding.instanceIdentityRef)
+      throw new TypeError('MCP stdio known-unusable Stop has no atomic original local-server completion');
+    const spec = await readCanonicalArtifact<import('../kernel/types.js').RunSpec>(artifacts, cut.run.specRef);
+    const rows = readInvocationAttempt(driver, latest.runId, tail.opId, tail.attempt);
+    await (await import('./mcp-server-history.js')).readMcpServerClosedAttempt(driver, artifacts, cut.run, spec, assembly, rows[0]!, rows);
+  } else {
+    const captured = await readMcpRunCapture(driver, artifacts, { captureRef: observation.captureRef, captureDigest: observation.captureDigest, prepared, claim, assembly });
+    await assertMcpCaptureObservation(artifacts, observation, captured);
+  }
   const request = await readCanonicalArtifact<ToolRequestV1>(artifacts, prepared.requestRef);
   const row = source.items.at(-1), item = row && await readCanonicalArtifact<ToolResultItem>(artifacts, row.payloadRef);
   if (!row || !item || item.kind !== 'tool_result' || item.outcome !== 'error' || item.opId !== latest.opId ||
       item.batchItemId !== request.batchItemId || item.callId !== request.callId || item.index !== request.callIndex ||
       item.createdAt !== latest.timestamp || row.itemSeq !== source.checkpoint.runItemSeq ||
-      source.checkpoint.id !== toolCheckpointId(cut.run.id, latest.opId, latest.attempt) || source.checkpoint.journalSeq !== latest.seq ||
+      source.checkpoint.id !== toolCheckpointId(cut.run.id, latest.opId, latest.attempt) || source.checkpoint.journalSeq !== (stdio ? tail!.seq : latest.seq) ||
       observation.outcome !== 'error' || observation.code !== 'TOOL_PROTOCOL_ERROR' || observation.observationDigest !== digestOmitting(observation, 'observationDigest') ||
       observation.observedAt > latest.timestamp || latest.timestamp > observedAt)
     throw new TypeError('MCP known-unusable failure is not its original result item and ready Checkpoint');

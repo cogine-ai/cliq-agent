@@ -45,7 +45,8 @@ test('the local zero-cost data projection keeps both full token envelopes withou
   try {
     const before = f.store.getRun(f.runId), assembly = structuredClone(f.authority.assembly), endpoint = { scheme: 'http' as const, host: '127.0.0.1' as const, port: 11434 },
       ref = 'a'.repeat(64), provenance: import('../model/pricing.js').LocalZeroCostProvenanceV1 = { schemaVersion: 1, format: 'cliq-local-zero-cost-v1',
-        ownerPrincipalId: 'inert-data-principal', provider: 'ollama', model: assembly.provider.model, serviceSpecRef: ref, serviceSpecDigest: ref,
+        ownerPrincipalId: 'inert-data-principal', provider: 'ollama', model: assembly.provider.model,
+        localModelRegistrationRef: ref, localModelRegistrationDigest: ref, serviceSpecRef: ref, serviceSpecDigest: ref,
         stableServiceIdentityDigest: ref, endpoint, endpointIdentityDigest: canonicalSha256(endpoint), boundaryEvidenceRef: ref,
         boundaryEvidenceDigest: ref, capabilityEvidenceRef: ref, capabilityDigest: ref, createdAt: '2026-10-01T00:00:00.000Z',
         validThrough: '2026-11-01T00:00:00.000Z', provenanceDigest: '' };

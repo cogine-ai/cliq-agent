@@ -1,4 +1,5 @@
-import type { RunSnapshotV1, Session, SessionContextProjection } from '../kernel/types.js';
+import type { RunSnapshotV1, Session } from '../kernel/types.js';
+import type { InstalledSessionContextPresentation } from '../control/session-context.js';
 import type { InstalledControlRequestV1, InstalledControlResponseFor, InstalledControlFeature } from '../control/v1.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ClientUpdate } from './application.js';
@@ -27,6 +28,14 @@ export function runHeadline(snapshot: RunSnapshotV1): string {
   return run.status === 'queued' ? 'Queued' : `Running · ${run.nextStep}`;
 }
 export function humanResponse(request: InstalledControlRequestV1, response: InstalledControlResponseFor<InstalledControlFeature>): readonly string[] {
+  if (!response.ok && request.method === 'run.submit' && response.method === 'run.submit' &&
+      response.error.code === 'INVALID_REQUEST' && response.error.retryable === false &&
+      response.error.messageCode === 'session.context_requires_compaction' && response.error.issues.length === 1 &&
+      response.error.issues[0]?.path === 'sessionId' && response.error.issues[0].issueCode === 'session_context_requires_compaction') {
+    return [`Session ${terminalText(JSON.stringify(request.sessionId))} needs compaction before a new Run can be admitted.`,
+      'Use session show to inspect complete context boundaries, then session compact with a summary of a complete raw range.',
+      'After compaction, submit a new Run.'];
+  }
   if (!response.ok) return [`${response.error.code}: ${response.error.messageCode}`, ...(response.error.code === 'EVENT_CURSOR_EXPIRED'
     ? [`Display history before event ${response.error.earliestEventSeq} is unavailable. Snapshot revision ${response.error.snapshot.run.revision}.`,
       `Attach explicitly with --after ${response.error.earliestEventSeq - 1} to read retained events.`] : [])];
@@ -70,18 +79,20 @@ export function humanResponse(request: InstalledControlRequestV1, response: Inst
 
 /** Exact whole-segment boundaries for fork/compact selection. Historical raw
  * bodies and legacy/control payloads do not enter this display projection. */
-export function sessionContextLines(projection: SessionContextProjection): string[] {
-  return [`Context ${projection.sessionId} · revision ${projection.contextRevision} · through ${projection.throughItemSeq}`,
-    ...projection.segments.map(segment => `${segment.fromItemSeq}–${segment.throughItemSeq} · ${segment.kind}` +
-      (segment.kind === 'summary' ? ` · ${segment.retainedItemIds.length} retained · ${segment.summaryRef}` : '')),
+export function sessionContextLines(context: InstalledSessionContextPresentation): string[] {
+  if (context.kind === 'head') return [`Context ${context.sessionId} · revision ${context.contextRevision} · through ${context.throughItemSeq} · reading boundaries`];
+  if (context.kind === 'complete') return ['Context boundaries complete.',
     'Fork through a complete segment end. Compact from/to complete raw segment boundaries; resume creates a new Run.'];
+  const segment = context.boundary;
+  return [`${segment.fromItemSeq}–${segment.throughItemSeq} · ${segment.kind}` +
+    (segment.kind === 'summary' ? ` · ${segment.retainedItemCount} retained · ${segment.summaryRef}` : '')];
 }
 export function reduceClientView(state: ClientView, update: ClientUpdate): ClientView {
   if (update.kind === 'connection') return immutableSnapshot({ ...state, connection: update.state });
   if (update.kind === 'pending') return immutableSnapshot({ ...state, pending: update, refusal: undefined });
   if (update.kind === 'context') {
     if (state.session && (state.session.id !== update.session.id || state.session.contextRevision > update.session.contextRevision)) return state;
-    return immutableSnapshot({ ...state, session: update.session, lines: [...state.lines, ...sessionContextLines(update.projection)].slice(-200) });
+    return immutableSnapshot({ ...state, session: update.session, lines: [...state.lines, ...sessionContextLines(update.context)].slice(-200) });
   }
   if (update.kind === 'transcript') {
     if (state.run && state.run.run.id !== update.runId) return state;

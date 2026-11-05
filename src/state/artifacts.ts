@@ -164,6 +164,36 @@ export class ArtifactCatalog {
     this.readSignal?.throwIfAborted(); return Buffer.concat(chunks, verified.byteLength);
   }
 
+  /** The v2 context head has a fixed small profile. A canonical v1 prefix
+   * selects only the original historical read profile; it grants no authority
+   * and the complete reader still checks exact UTF-8/JCS/schema afterwards.
+   * This avoids allocating an oversized v2 object before learning its format,
+   * without falsely imposing today's small-page bounds on real v1 history. */
+  async readSessionContextHeadBytes(ref: ArtifactRef): Promise<Buffer> {
+    assertArtifactRef(ref); this.assertReadActive();
+    const verified = await this.cas.verify(ref, this.readSignal);
+    this.assertReadActive();
+    const chunks: Buffer[] = []; let prefix = Buffer.alloc(0), profiled = false;
+    for await (const chunk of this.readChunks(ref, verified.byteLength)) {
+      this.assertReadActive();
+      if (!profiled) {
+        const needed = Math.min(256 - prefix.length, chunk.length);
+        prefix = Buffer.concat([prefix, chunk.subarray(0, needed)], prefix.length + needed);
+        const legacy = /^\{"contextRevision":[1-9][0-9]{0,15},"format":"cliq-session-context-v1",/u.test(prefix.toString('latin1'));
+        if (legacy || prefix.length === 256 || verified.byteLength <= 262_144) {
+          if (!legacy && verified.byteLength > 262_144)
+            throw new KernelStorageError('ARTIFACT_MISMATCH', 'Session v2 context head exceeds its fixed small-artifact ceiling');
+          profiled = true;
+        }
+      }
+      chunks.push(chunk);
+    }
+    this.assertReadActive();
+    if (!profiled && verified.byteLength > 262_144)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'Session context has no supported complete profile');
+    return Buffer.concat(chunks, verified.byteLength);
+  }
+
   /** Complete original-byte verification without retaining an object buffer. */
   async verifyBytes(ref: ArtifactRef): Promise<void> {
     assertArtifactRef(ref);

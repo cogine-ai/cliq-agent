@@ -22,6 +22,21 @@ export type ProcessContainmentOwner =
       dispatchId: string
     }
   | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
+    }
+  | {
       kind: 'admin_probe'
       adminOperationId: string
       attempt: number
@@ -206,6 +221,22 @@ export type SandboxProcessInvocationV1 =
         stdout: 'captured'
         stderr: 'captured'
         extraFileDescriptors: 'authenticated_worker_channel_only'
+      }
+    }
+  | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: {
+        stdin: 'mcp_framed'
+        stdout: 'mcp_framed'
+        stderr: 'captured'
+        extraFileDescriptors: 'none'
       }
     }
   | {
@@ -399,6 +430,26 @@ export type SandboxLaunchSpecV1 =
       adminTargetRef?: never
       adminTargetDigest?: never
       probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
     })
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
@@ -810,7 +861,7 @@ export type SandboxProfileV1 = {
   format: 'cliq-sandbox-profile-v1'
   backend: 'macos_vm' | 'linux_namespace'
   allowedOwners: Array<
-    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection'
+    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection' | 'reconciliation_probe'
   >
   filesystemPolicy: 'typed_launch_spec_only'
   hostFilesystemReachability: 'none'

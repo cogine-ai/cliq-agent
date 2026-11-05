@@ -1,3 +1,4 @@
+import { publishSessionContextGraph } from '../session-context-graph.js';
 import path from 'node:path';
 import { decodeSessionCreatePublicRequest } from '../../kernel/control-wire.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
@@ -354,19 +355,9 @@ async function createSessionWithin(
 
     const now = sampleCanonicalNow();
     const sessionId = identityHash('cliq-session-id-v1', input.principalId, 'session.create', input.admissionKey);
-    const projection: SessionContextProjection = {
-      schemaVersion: 1,
-      format: 'cliq-session-context-v1',
-      sessionId,
-      contextRevision: 1,
-      throughItemSeq: 0,
-      segments: [],
-      projectionDigest: ''
-    };
-    projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
-    const projectionArtifact = await artifacts.publishCanonical(projection, 'cliq-session-context-v1');
+    const { head: projection, artifact: projectionArtifact } = await publishSessionContextGraph(artifacts,
+      { sessionId, contextRevision: 1, throughItemSeq: 0, segments: [] });
     published.push(projectionArtifact);
-    decodeSessionProjection(projection);
 
     const session: Session = {
       schemaVersion: 1,

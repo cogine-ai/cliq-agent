@@ -48,7 +48,16 @@ export const readToolCut = stateOperation('RECOVERY_REQUIRED', async (
         if (audit?.kind !== 'child_merge_batch' || audit.resume.kind !== 'await_tool' || audit.resume.batchItemId !== batch.itemId ||
             audit.resume.callIndex !== next || audit.resume.callId !== batch.calls[next]?.callId)
           throw new TypeError('merge policy audit overtakes its real owning await call');
+      } else if (item.subjectKind === 'mcp_server_launch') {
+        const original = await artifacts.readCanonical<import('../kernel/mcp-server-authorization.js').McpServerPolicyChannelEvidenceV1>(item.policyChannelEvidenceRef);
+        const evidence = (await import('../kernel/mcp-server-authorization.js')).decodeMcpServerPolicyChannelEvidence(original);
+        if (evidence.runId !== run.id || evidence.opId !== item.opId || evidence.evidenceDigest !== item.policyChannelEvidenceDigest ||
+            evidence.namedAction.originatingBatchItemId !== batch.itemId || evidence.namedAction.originatingCallIndex !== next ||
+            evidence.namedAction.originatingCallId !== batch.calls[next]?.callId) throw new TypeError('MCP server policy overtakes its exact owning call');
       } else if (item.subjectKind !== 'tool_call') throw new TypeError('unexpected policy subject inside tool batch');
+    } else if (item.kind === 'mcp_server_stopped') {
+      if (item.runId !== run.id || item.batchItemId !== batch.itemId || item.callIndex !== next || item.callId !== batch.calls[next]?.callId)
+        throw new TypeError('MCP server retirement overtakes its exact owning call');
     } else if (item.kind === 'child_handle') {
       const selectedCall = batch.calls[next];
       if (selectedCall?.toolName !== 'delegate' || item.delegateBatchItemId !== batch.itemId || item.delegateCallIndex !== next ||

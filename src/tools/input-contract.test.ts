@@ -11,7 +11,7 @@ import { composePermissionTable } from '../policy/decision-table.js';
 function tool<T>(inputSchema: T) {
   const ref = canonicalSha256(inputSchema);
   return { name: 'read', version: 'mcp-tool-contract-v1', access: 'exec' as const, description: 'Read a file', inputSchema,
-    inputSchemaRef: ref, inputSchemaDigest: ref, replayClass: 'retry' as const, execution: {
+    inputSchemaRef: ref, inputSchemaDigest: ref, replayClass: 'manual' as const, mcpRecovery: { kind: 'manual' as const }, execution: {
       kind: 'mcp' as const, registrationId: 'registered-server', registryRevisionRef: canonicalSha256('registry'),
       registryManifestDigest: canonicalSha256('manifest'), serverToolName: 'remote-read', toolContractDigest: canonicalSha256('contract')
     } };

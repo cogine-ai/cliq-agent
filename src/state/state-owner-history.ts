@@ -147,7 +147,7 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
     if (count !== byteCount) invalid('retained skill resource is incomplete');
     return Buffer.concat(chunks);
   });
-  validateInstalledStructuredArtifacts(bundle, buffers);
+  validateInstalledStructuredArtifacts(bundle, buffers, artifacts.releaseTrustRoots());
   if (companion) {
     const objects = new Map<string, Buffer>();
     for (const object of companion.objects) objects.set(object.artifactRef,

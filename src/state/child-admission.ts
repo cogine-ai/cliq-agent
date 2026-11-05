@@ -15,6 +15,7 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import { childDelegateOperationId, loadToolPolicy } from '../policy/tool-policy.js';
 import { loadToolContracts } from '../tools/input-contract.js';
+import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { decodeDelegateRequest } from '../tools/child-inputs.js';
 import { validateModelTurn } from '../runtime/continuation.js';
 import { validateContextItems } from '../runtime/context-compaction.js';
@@ -125,7 +126,7 @@ async function readDirectChildAdmission(driver: SqliteDriver, artifacts: Artifac
       run.id !== identityHash('cliq-run-id-v1', cut.parentPrincipal, 'delegate', allocation.admissionKey))
     invalid('does not bind the complete normalized original delegate identity');
   const manifest = await readCanonicalArtifact<ToolContractManifestV1>(reads, assembly.tools.manifestRef);
-  const contracts = await reads.mapReads(manifest.entries, async entry => ({ ...entry,
+  const contracts = await reads.mapReads(manifest.entries, async entry => readMcpInputAuthority(reads, { ...entry,
     inputSchema: await readCanonicalArtifact(reads, entry.inputSchemaRef) }));
   const tools = loadToolContracts(contracts);
   const batchRow = driver.prepare('SELECT run_id,kind,payload_ref,item_seq FROM items WHERE item_id = ?')

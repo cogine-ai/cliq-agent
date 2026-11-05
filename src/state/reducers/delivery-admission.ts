@@ -1,3 +1,5 @@
+import type { SessionContextIndexCut } from '../session-context-index.js';
+import { readCurrentSessionContextGraph, assertCurrentSessionContextGraph, consumeFrozenSessionContext, readSessionContextGraphHead } from '../session-context-stream.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { normalizeRunApplyRequest, runApplyIntentDigest } from '../../kernel/control-apply.js';
 import { decodeInstalledControlEnvelope } from '../../kernel/control-wire.js';
@@ -45,7 +47,7 @@ type Binding = {
   native: NativeStateOwner; normalized: Normalized; source: VerifiedDeliverySource; capture: Capture;
   workspace: Extract<import('../../kernel/types.js').WorkspaceIdentityV1, { kind: 'live' }>;
   repository?: import('../../kernel/types.js').RepositoryIdentity;
-  target: SourceInspectionTarget; session: Session; run: Run; spec: RunSpec; workspaceState: WorkspaceStateManifest;
+  target: SourceInspectionTarget; session: Session; sessionContextCut: SessionContextIndexCut; run: Run; spec: RunSpec; workspaceState: WorkspaceStateManifest;
   contextManifest: ContextManifest; response: ApplyResponse; responseRef: string; admittedRequestDigest: string;
   metadata: PublishedArtifact[]; signal?: AbortSignal;
   verifierConsumption?: Awaited<ReturnType<typeof prepareDeliveryVerifierConsumption>>;
@@ -147,7 +149,8 @@ export async function prepareInstalledDelivery(input: {
   if (workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.identityDigest !== target.workspaceIdentityDigest)
     invalid('delivery requires its unchanged live Session workspace identity');
   const repository = workspace.repositoryIdentityRef ? decodeRepositoryIdentity(await readCanonicalArtifact(artifacts, workspace.repositoryIdentityRef)) : undefined;
-  const sessionProjection = decodeSessionProjection(await readCanonicalArtifact(artifacts, session.contextProjectionRef));
+  const sessionContext = await readCurrentSessionContextGraph(driver, artifacts, identity.principalId, session.id, session.contextRevision, { signal });
+  const sessionProjection = sessionContext.projection;
   if (sessionProjection.sessionId !== session.id || sessionProjection.contextRevision !== session.contextRevision ||
       sessionProjection.throughItemSeq !== session.latestItemSeq) invalid('delivery Session projection differs from its captured cursor');
   if (target.sessionId !== session.id || target.expectedContextRevision !== session.contextRevision ||
@@ -219,7 +222,7 @@ export async function prepareInstalledDelivery(input: {
   const prepared: PreparedInstalledDelivery = Object.freeze({ kind: 'prepared_installed_delivery' });
   preparedDeliveries.set(prepared, { driver, artifacts, owner, identity, native: installedAuthority.native, normalized, source, verifierConsumption,
     capture, target, workspace: immutableSnapshot(workspace), ...(repository ? { repository } : {}),
-    session: immutableSnapshot(session), run: immutableSnapshot(run), spec: immutableSnapshot(spec),
+    session: immutableSnapshot(session), sessionContextCut: sessionContext.cut, run: immutableSnapshot(run), spec: immutableSnapshot(spec),
     workspaceState: immutableSnapshot(workspaceState), contextManifest: immutableSnapshot(contextManifest), response: immutableSnapshot(response),
     responseRef: responseArtifact.ref, admittedRequestDigest, metadata, signal });
   return prepared;
@@ -244,6 +247,7 @@ export async function admitInstalledDelivery(driver: SqliteDriver, artifacts: Ar
     const current = readSession(connection, session.id);
     if (!same(current, session) || !same(readSourceInspectionAttempt(connection, key(identity.principalId, normalized.request)), capture))
       invalid('delivery admission lost its exact original Session or capture cut');
+    assertCurrentSessionContextGraph(connection, value.sessionContextCut);
     const root = value.native.openWorkspaceRoot(value.workspace.canonicalRootPath); let failure: unknown;
     try {
       assertHeldWorkspaceRoot(root);
@@ -344,7 +348,7 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
   const checkpoint = readCheckpoint(driver, identityHash('cliq-checkpoint-id-v1', runId, 'initial', 0));
   const workspaceState = decodeWorkspaceState(await readCanonicalArtifact(artifacts, checkpoint.workspaceStateRef));
   const context = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  const sessionProjection = decodeSessionProjection(await readCanonicalArtifact(artifacts, context.sessionProjectionRef));
+  const sessionProjection = await readSessionContextGraphHead(artifacts, context.sessionProjectionRef);
   const contextManifest = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
   if (checkpoint.runId !== runId || checkpoint.reason !== 'initial' || checkpoint.basedOnRunRevision !== 0 || checkpoint.runItemSeq !== 0 ||
       checkpoint.journalSeq !== 0 || checkpoint.createdAt !== run.createdAt || workspaceState.runId !== runId ||
@@ -354,6 +358,9 @@ export const readDeliveryRunAdmission = stateOperation('RECOVERY_REQUIRED', asyn
       sessionProjection.throughItemSeq !== context.throughSessionItemSeq || contextManifest.runId !== runId || contextManifest.throughItemSeq !== 0 ||
       contextManifest.admittedContextRef !== spec.admittedContextRef || contextManifest.assemblyRef !== spec.assemblyRef || contextManifest.segments.length)
     invalid('delivery initial recovery image/context differs from its committed snapshot');
+  await consumeFrozenSessionContext(driver, artifacts, admission.principal_id, { ...readSession(driver, run.sessionId),
+    contextRevision: context.sessionContextRevision, latestItemSeq: context.throughSessionItemSeq,
+    contextProjectionRef: context.sessionProjectionRef, updatedAt: run.createdAt }, () => undefined, signal);
   const recovered = await readCandidateSource(artifacts, spec, checkpoint.workspaceStateRef, signal);
   if (inspection.outcome.kind !== 'captured' || recovered.diff.operations.length || workspaceState.invalidatedEphemeralPaths.length ||
       workspaceState.privateGitStateRef !== inspection.outcome.privateGitStateRef)

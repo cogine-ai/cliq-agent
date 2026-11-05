@@ -210,7 +210,7 @@ export function decodeSandboxProfile(value: unknown): SandboxProfileV1 {
   let previous = '';
   for (const owner of profile.allowedOwners) {
     const current = text(owner, 'sandbox profile owner');
-    if (!['worker_activation', 'run_invocation', 'admin_probe', 'local_inference_service', 'source_inspection'].includes(current) || Buffer.compare(Buffer.from(previous), Buffer.from(current)) >= 0) mismatch('sandbox profile owners must be valid, unique and byte-sorted');
+    if (!['worker_activation', 'run_invocation', 'admin_probe', 'local_inference_service', 'source_inspection', 'reconciliation_probe'].includes(current) || Buffer.compare(Buffer.from(previous), Buffer.from(current)) >= 0) mismatch('sandbox profile owners must be valid, unique and byte-sorted');
     previous = current;
   }
   resources(profile.resources); rehash(profile, 'profileDigest', 'sandbox profile');

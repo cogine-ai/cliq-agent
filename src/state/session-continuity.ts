@@ -1,18 +1,22 @@
+import { createStreamedSessionHandoff } from './session-handoff-stream.js';
+import type { SessionContextHead } from '../kernel/session-context-pages.js';
+import { readCurrentSessionContextGraph, assertCurrentSessionContextGraph, consumeFrozenSessionContext, readSessionContextGraphHead } from './session-context-stream.js';
+import { scanSessionCompactionRange, sessionContextPrefixSegments, compactedSessionContextSegments, plannedSessionContextGraphRef } from './session-context-revision.js';
+import { publishOwnedSessionContextGraph } from './session-context-publication.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, normalizeBoundedText, parseCanonicalTime } from '../kernel/identity.js';
-import { controlWireRecord, decodeWireSession, decodeWireArtifactDescriptor, decodeWireSessionItem } from '../kernel/control-wire-data.js';
+import { controlWireRecord, decodeWireSession, decodeWireSessionItem } from '../kernel/control-wire-data.js';
 import { decodeSessionContinuityRequest, normalizeSessionSummary, type SessionCompactRequestV1, type SessionForkRequestV1,
-  type SessionHandoffRequestV1, type SessionCompactionItem, type SessionContinuityResultV1, type SessionHandoffV1 } from '../kernel/session-continuity.js';
-import type { Session, SessionContextProjection, ArtifactDescriptorV1 } from '../kernel/types.js';
+ type SessionCompactionItem, type SessionContinuityResultV1 } from '../kernel/session-continuity.js';
+import type { Session, SessionContextProjection } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ModelTextV1 } from '../protocol/agent-ir.js';
 import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
 import { assertCurrentControlFrame, validateControlChannelClosure, readRetainedControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
-import { decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { insertControlRequest, readAdmissionReplay, readControlRequest } from './rows.js';
-import { assertSessionContextCut, decodeSessionContext, readSessionContextCut, readFrozenSessionContextCut, sessionSourceItemsDigest, wholeSessionPrefix } from './session-context.js';
+import { decodeSessionContext, sessionSourceItemsDigest } from './session-context.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 
@@ -89,22 +93,28 @@ async function auditReplay(driver: SqliteDriver, artifacts: ArtifactCatalog, own
         session.latestItemSeq !== metadata.itemSeq || session.updatedAt !== metadata.createdAt || payload.createdAt !== metadata.createdAt || payload.schemaVersion !== 1 || payload.kind !== 'compaction')
       return corrupt('Session compaction response differs from its original immutable item');
     if (retainedChannel.channel.openedAt > metadata.createdAt) return corrupt('Session compaction original channel postdates its item');
-    const previous = decodeSessionContext(await readCanonical(artifacts, payload.previousProjectionRef));
-    const selected = previous.segments.filter(segment => segment.throughItemSeq >= request.fromItemSeq && segment.fromItemSeq <= request.throughItemSeq);
-    if (previous.sessionId !== request.sessionId || previous.contextRevision !== request.expectedContextRevision || previous.throughItemSeq !== metadata.itemSeq - 1 ||
-        !selected.length || selected[0]!.fromItemSeq !== request.fromItemSeq || selected.at(-1)!.throughItemSeq !== request.throughItemSeq || selected.some(segment => segment.kind !== 'raw'))
+    const previous = await readSessionContextGraphHead(artifacts, payload.previousProjectionRef);
+    if (previous.sessionId !== request.sessionId || previous.contextRevision !== request.expectedContextRevision || previous.throughItemSeq !== metadata.itemSeq - 1)
       return corrupt('Session compaction original frozen source range changed');
-    const sources = selected.flatMap(segment => segment.kind === 'raw' ? segment.items : []), kept = sources.filter(source => request.retainedItemIds.includes(source.itemId));
+    const selection = await scanSessionCompactionRange(artifacts, previous, request).catch(error => {
+      if (error instanceof TypeError) return corrupt('Session compaction original frozen whole raw range changed'); throw error;
+    });
     const utf8 = normalizeSessionSummary(request.summaryMarkdown), textCore = { schemaVersion: 1, format: 'cliq-model-text-v1', utf8, byteCount: Buffer.byteLength(utf8) };
     const text = { ...textCore, textDigest: canonicalSha256(textCore) };
     const expectedPayload = { schemaVersion: 1, kind: 'compaction', fromItemSeq: request.fromItemSeq, throughItemSeq: request.throughItemSeq,
-      sourceItemsDigest: sessionSourceItemsDigest(sources), summaryRef: canonicalSha256(text), summaryDigest: text.textDigest,
-      retainedItemIds: kept.map(source => source.itemId), previousProjectionRef: payload.previousProjectionRef, createdAt: metadata.createdAt };
-    if (kept.length !== request.retainedItemIds.length || canonicalSha256(payload) !== canonicalSha256(expectedPayload) ||
-        canonicalSha256(compactProjection(previous, payload, itemId, metadata.itemSeq)) !== session.contextProjectionRef)
+      sourceItemsDigest: selection.sourceItemsDigest, summaryRef: canonicalSha256(text), summaryDigest: text.textDigest,
+      retainedItemIds: [...selection.retainedItemIds], previousProjectionRef: payload.previousProjectionRef, createdAt: metadata.createdAt };
+    const retainedHead = await readSessionContextGraphHead(artifacts, session.contextProjectionRef);
+    const expectedProjectionRef = retainedHead.schemaVersion === 1 ? previous.schemaVersion === 1
+      ? canonicalSha256(compactProjection(previous, payload, itemId, metadata.itemSeq))
+      : corrupt('v1 compaction response cannot claim a future v2 source') : await plannedSessionContextGraphRef(artifacts,
+        { sessionId: previous.sessionId, contextRevision: previous.contextRevision + 1, throughItemSeq: metadata.itemSeq,
+          segments: compactedSessionContextSegments(artifacts, previous, payload, itemId, metadata.payloadRef) });
+    if (canonicalSha256(payload) !== canonicalSha256(expectedPayload) || expectedProjectionRef !== session.contextProjectionRef)
       return corrupt('Session compaction response changed its original summary or replacement projection');
   }
-  await readFrozenSessionContextCut(driver, artifacts, principalId, session, connection => { current(); assertActiveStateOwner(connection, owner); });
+  await consumeFrozenSessionContext(driver, artifacts, principalId, session, () => undefined, undefined,
+    connection => { current(); assertActiveStateOwner(connection, owner); });
   driver.readSnapshot(connection => {
     current(); assertActiveStateOwner(connection, owner);
     if (canonicalSha256(readControlRequest(connection, principalId, request.method, request.requestId) ?? null) !== canonicalSha256(retained) ||
@@ -168,41 +178,43 @@ export async function mutateSessionContext(driver: SqliteDriver, artifacts: Arti
     if (regressed) throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; Session alias binding is paused');
     current(); return retained;
   }
-  const context = await readSessionContextCut(driver, artifacts, identity.principalId, request.sessionId, request.expectedContextRevision);
+  const context = await readCurrentSessionContextGraph(driver, artifacts, identity.principalId, request.sessionId, request.expectedContextRevision, { signal });
   current(); const now = sampleCanonicalNow(), original = context.cut.session;
   const published: PublishedArtifact[] = [...channel.metadata];
   const requestArtifact = await artifacts.publishCanonical(core(request), `cliq-${request.method.replace('.', '-')}-request-core-v1`);
   if (requestArtifact.ref !== request.requestDigest) return corrupt('Session mutation public core changed');
   published.push(requestArtifact);
-  let session: Session, projection: SessionContextProjection, compaction: { itemId: string; itemSeq: number; payloadRef: string } | undefined;
+  let session: Session, projection: SessionContextHead, projectionArtifact: PublishedArtifact, compaction: { itemId: string; itemSeq: number; payloadRef: string } | undefined;
   if (request.method === 'session.fork') {
     const id = identityHash('cliq-session-id-v1', identity.principalId, request.method, request.admissionKey);
-    projection = { schemaVersion: 1, format: 'cliq-session-context-v1', sessionId: id, contextRevision: 1,
-      throughItemSeq: request.throughItemSeq, segments: wholeSessionPrefix(context.projection, request.throughItemSeq), projectionDigest: '' };
+    const forked = await publishOwnedSessionContextGraph(driver, artifacts, owner, { sessionId: id, contextRevision: 1,
+      throughItemSeq: request.throughItemSeq, segments: sessionContextPrefixSegments(artifacts, context.projection, request.throughItemSeq, signal) }, signal)
+      .catch(error => { if (error instanceof TypeError) throw new KernelStorageError('INVALID_REQUEST', 'Session cursor must end a complete current segment'); throw error; });
+    projection = forked.head; projectionArtifact = forked.artifact;
     session = { schemaVersion: 1, id, workspaceIdentityRef: original.workspaceIdentityRef, parentSessionId: original.id,
       forkedThroughItemSeq: request.throughItemSeq, contextRevision: 1, latestItemSeq: request.throughItemSeq,
       contextProjectionRef: '', createdAt: now, updatedAt: now, ...(request.name === undefined ? {} : { name: normalizeBoundedText(request.name, 1, 256) }) };
   } else {
-    const selected = context.projection.segments.filter(segment => segment.throughItemSeq >= request.fromItemSeq && segment.fromItemSeq <= request.throughItemSeq);
-    if (!selected.length || selected[0]!.fromItemSeq !== request.fromItemSeq || selected.at(-1)!.throughItemSeq !== request.throughItemSeq || selected.some(segment => segment.kind !== 'raw'))
-      throw new KernelStorageError('INVALID_REQUEST', 'Session compaction requires whole raw segments');
-    const sources = selected.flatMap(segment => segment.kind === 'raw' ? segment.items : []), retained = sources.filter(source => request.retainedItemIds.includes(source.itemId));
-    if (retained.length !== request.retainedItemIds.length) throw new KernelStorageError('INVALID_REQUEST', 'Session retained item is outside the raw range');
+    const selection = await scanSessionCompactionRange(artifacts, context.projection, request, signal).catch(error => {
+      if (error instanceof TypeError) throw new KernelStorageError('INVALID_REQUEST', 'Session compaction requires exact whole raw segments and retained items'); throw error;
+    });
     const utf8 = normalizeSessionSummary(request.summaryMarkdown), textCore = { schemaVersion: 1 as const, format: 'cliq-model-text-v1' as const, utf8, byteCount: Buffer.byteLength(utf8) };
     const text: ModelTextV1 = { ...textCore, textDigest: canonicalSha256(textCore) };
     const summary = await artifacts.publishCanonical(text, text.format); published.push(summary);
     const payload: SessionCompactionItem = { schemaVersion: 1, kind: 'compaction', fromItemSeq: request.fromItemSeq, throughItemSeq: request.throughItemSeq,
-      sourceItemsDigest: sessionSourceItemsDigest(sources), summaryRef: summary.ref, summaryDigest: text.textDigest,
-      retainedItemIds: retained.map(source => source.itemId), previousProjectionRef: original.contextProjectionRef, createdAt: now };
+      sourceItemsDigest: selection.sourceItemsDigest, summaryRef: summary.ref, summaryDigest: text.textDigest,
+      retainedItemIds: [...selection.retainedItemIds], previousProjectionRef: original.contextProjectionRef, createdAt: now };
     const payloadArtifact = await artifacts.publishCanonical(payload, 'cliq-session-compaction-v1'); published.push(payloadArtifact);
     const itemSeq = original.latestItemSeq + 1;
     if (!Number.isSafeInteger(itemSeq) || !Number.isSafeInteger(original.contextRevision + 1)) return corrupt('Session sequence is exhausted');
     compaction = { itemId: identityHash('cliq-session-compaction-item-v1', original.id, request.requestId), itemSeq, payloadRef: payloadArtifact.ref };
-    projection = compactProjection(context.projection, payload, compaction.itemId, itemSeq);
+    const compacted = await publishOwnedSessionContextGraph(driver, artifacts, owner, { sessionId: original.id,
+      contextRevision: original.contextRevision + 1, throughItemSeq: itemSeq,
+      segments: compactedSessionContextSegments(artifacts, context.projection, payload, compaction.itemId, payloadArtifact.ref, signal) }, signal);
+    projection = compacted.head; projectionArtifact = compacted.artifact;
     session = { ...original, contextRevision: projection.contextRevision, latestItemSeq: itemSeq, contextProjectionRef: '', updatedAt: now };
   }
-  projection.projectionDigest = digestOmitting(projection, 'projectionDigest'); decodeSessionContext(projection);
-  const projectionArtifact = await artifacts.publishCanonical(projection, projection.format); published.push(projectionArtifact);
+  published.push(projectionArtifact);
   session.contextProjectionRef = projectionArtifact.ref; decodeWireSession(session);
   const result: Response = { protocolVersion: 1, ok: true, result: { method: request.method, snapshot: { schemaVersion: 1, session } } };
   const resultArtifact = await artifacts.publishCanonical(result, 'cliq-control-response-v1'); published.push(resultArtifact);
@@ -218,7 +230,7 @@ export async function mutateSessionContext(driver: SqliteDriver, artifacts: Arti
     if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { regressed = true; return; }
     const committedAt = readTimeFence(connection)!.lastAcceptedAt;
     if (now > committedAt || now < original.updatedAt) throw new KernelStorageError('INVALID_REQUEST', 'Session preparation time is noncausal');
-    assertSessionContextCut(connection, context.cut);
+    assertCurrentSessionContextGraph(connection, context.cut);
     for (const artifact of published) insertArtifactMetadata(connection, artifact, committedAt);
     if (request.method === 'session.fork') {
       connection.prepare(`INSERT INTO sessions(id,workspace_identity_ref,name,parent_session_id,forked_through_item_seq,context_revision,latest_item_seq,
@@ -242,40 +254,5 @@ export async function mutateSessionContext(driver: SqliteDriver, artifacts: Arti
 
 export async function createSessionHandoff(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   input: unknown, identity: AuthenticatedControlIdentity, signal?: AbortSignal) {
-  const request = decodeSessionContinuityRequest(input);
-  if (request.method !== 'session.handoff.create') throw new TypeError('Session handoff method is invalid');
-  const channel = await validateControlChannelClosure(artifacts, owner, identity);
-  const current = () => { signal?.throwIfAborted(); if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, identity); };
-  current(); const context = await readSessionContextCut(driver, artifacts, identity.principalId, request.sessionId, request.expectedContextRevision);
-  const through = request.throughItemSeq ?? context.projection.throughItemSeq, segments = wholeSessionPrefix(context.projection, through);
-  const workspace = decodeWorkspaceIdentity(await readCanonical(artifacts, context.cut.session.workspaceIdentityRef));
-  if (workspace.ownerPrincipalId !== identity.principalId) return corrupt('Session handoff workspace belongs to another principal');
-  const handoff: SessionHandoffV1 = { schemaVersion: 1, format: 'cliq-session-handoff-v1', sessionId: context.cut.session.id,
-    workspaceIdentityRef: context.cut.session.workspaceIdentityRef, workspaceIdentityDigest: workspace.identityDigest,
-    contextRevision: context.projection.contextRevision, throughItemSeq: through, contextProjectionRef: context.cut.session.contextProjectionRef,
-    contextProjectionDigest: context.projection.projectionDigest, entries: context.entries.filter(entry => entry.throughItemSeq <= through)
-      .map(({ sourceItemId: _id, ...entry }, index) => ({ ...entry, index })), excludedRanges: segments.filter(segment => segment.kind === 'excluded_control')
-      .map(({ fromItemSeq, throughItemSeq, sourceItemsDigest }) => ({ fromItemSeq, throughItemSeq, sourceItemsDigest })), handoffDigest: '' };
-  const complete = { ...handoff, handoffDigest: digestOmitting(handoff, 'handoffDigest') };
-  const json = await artifacts.publishCanonical(complete, complete.format); current();
-  let markdown = '# Cliq Session Handoff\n\n' + `Session: ${canonicalJsonBytes(complete.sessionId).toString('utf8')}\nContext revision: ${complete.contextRevision}\nThrough item: ${through}\n`;
-  for (const entry of complete.entries) markdown += `\n## Entry ${entry.index + 1}: ${entry.sourceKind}\n\n` + entry.contentUtf8.split('\n').map(line => `    ${line}`).join('\n') + '\n';
-  markdown += `\nExcluded control ranges: ${complete.excludedRanges.length}\n`;
-  const rendered = await artifacts.publishBytes(Buffer.from(markdown), 'text/markdown; charset=utf-8', 'cliq-session-handoff-markdown-v1'); current();
-  let regressed = false, descriptors: { json: ArtifactDescriptorV1; markdown: ArtifactDescriptorV1 } | undefined;
-  driver.transaction(connection => {
-    current(); assertActiveStateOwner(connection, owner);
-    if (advanceTimeFence(connection, owner.ownerEpoch) !== 'healthy') { regressed = true; return; }
-    assertSessionContextCut(connection, context.cut);
-    for (const artifact of [...channel.metadata, json, rendered]) insertArtifactMetadata(connection, artifact, readTimeFence(connection)!.lastAcceptedAt);
-    const descriptor = (artifact: PublishedArtifact): ArtifactDescriptorV1 => {
-      const stored = connection.prepare('SELECT byte_length,media_type FROM artifacts WHERE ref=?').get<{ byte_length: bigint; media_type: string }>(artifact.ref);
-      if (!stored || stored.byte_length !== BigInt(artifact.byteLength)) return corrupt('Session handoff original catalog length differs');
-      return decodeWireArtifactDescriptor({ schemaVersion: 1, ref: artifact.ref, digest: artifact.ref, sizeBytes: artifact.byteLength, mediaType: stored.media_type });
-    };
-    descriptors = { json: descriptor(json), markdown: descriptor(rendered) };
-  });
-  if (regressed) throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; Session handoff registration is paused');
-  if (!descriptors) return corrupt('Session handoff registered no descriptors');
-  return immutableSnapshot({ method: 'session.handoff.create' as const, ...descriptors });
+  return createStreamedSessionHandoff(driver, artifacts, owner, input, identity, signal);
 }

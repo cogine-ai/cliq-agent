@@ -273,6 +273,46 @@ export function reserveInstalledMcpHttpAdmin(controller: LinuxWorkerController, 
 }
 const mcpAdminCleanupControllers=new WeakMap<LinuxWorkerController,(input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number})=>
   import('./mcp-http-admin-native.js').NativeMcpAdminCleanupScope>();
+type McpStdioReserve = (input: object, recipe: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioRecipe,
+  server: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioServerImage, config: Buffer) => import('./mcp-stdio-native.js').NativeMcpStdioScope;
+type McpStdioCleanup = (input: object, checker: { supervisorInstanceId: string; stateOwnerEpoch: number }) =>
+  import('./mcp-stdio-native.js').NativeMcpStdioCleanupScope;
+const mcpStdioAdminControllers = new WeakMap<LinuxWorkerController, McpStdioReserve>();
+const mcpStdioRecoveryControllers = new WeakMap<LinuxWorkerController, McpStdioReserve>();
+const mcpStdioRecoveryCleanupControllers = new WeakMap<LinuxWorkerController, McpStdioCleanup>();
+const mcpStdioRunControllers = new WeakMap<LinuxWorkerController, McpStdioReserve>();
+const mcpStdioAdminCleanupControllers = new WeakMap<LinuxWorkerController, McpStdioCleanup>();
+const mcpStdioRunCleanupControllers = new WeakMap<LinuxWorkerController, McpStdioCleanup>();
+export function reserveInstalledMcpStdioAdmin(controller: LinuxWorkerController, ...args: Parameters<McpStdioReserve>) {
+  assertLinuxWorkerController(controller); const reserve = mcpStdioAdminControllers.get(controller);
+  if (!reserve) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed MCP stdio Admin recipe is unavailable');
+  return reserve(...args);
+}
+export function reserveInstalledMcpStdioRun(controller: LinuxWorkerController, ...args: Parameters<McpStdioReserve>) {
+  assertLinuxWorkerController(controller); const reserve = mcpStdioRunControllers.get(controller);
+  if (!reserve) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed MCP stdio Run recipe is unavailable');
+  return reserve(...args);
+}
+export function reserveInstalledMcpStdioRecovery(controller: LinuxWorkerController, ...args: Parameters<McpStdioReserve>) {
+  assertLinuxWorkerController(controller); const reserve = mcpStdioRecoveryControllers.get(controller);
+  if (!reserve) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed MCP read-only recovery recipe is unavailable');
+  return reserve(...args);
+}
+export function cleanupInstalledMcpStdioRecovery(controller: LinuxWorkerController, ...args: Parameters<McpStdioCleanup>) {
+  assertLinuxWorkerController(controller); const cleanup = mcpStdioRecoveryCleanupControllers.get(controller);
+  if (!cleanup) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the original MCP recovery cleanup is unavailable');
+  return cleanup(...args);
+}
+export function cleanupInstalledMcpStdioAdmin(controller: LinuxWorkerController, ...args: Parameters<McpStdioCleanup>) {
+  assertLinuxWorkerController(controller); const cleanup = mcpStdioAdminCleanupControllers.get(controller);
+  if (!cleanup) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the original MCP stdio Admin cleanup is unavailable');
+  return cleanup(...args);
+}
+export function cleanupInstalledMcpStdioRun(controller: LinuxWorkerController, ...args: Parameters<McpStdioCleanup>) {
+  assertLinuxWorkerController(controller); const cleanup = mcpStdioRunCleanupControllers.get(controller);
+  if (!cleanup) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the original MCP stdio Run cleanup is unavailable');
+  return cleanup(...args);
+}
 export function cleanupInstalledMcpHttpAdmin(controller:LinuxWorkerController,input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number}){
   assertLinuxWorkerController(controller);const cleanup=mcpAdminCleanupControllers.get(controller);
   if(!cleanup)throw new KernelStorageError('UNSUPPORTED_PLATFORM','fixed MCP Admin original-birth cleanup is unavailable');
@@ -452,6 +492,18 @@ type NativeControllerPreparationBirthObservation = Readonly<{
   readyObservedAtMs: number; observedAtMs: number;
 }>;
 type NativeController = { pid: number; processStartToken: string;
+  reserveMcpStdioAdmin?(input: object, helper: NativeImage, bubblewrap: NativeImage,
+    recipe: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioRecipe,
+    server: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioServerImage, config: Buffer): import('./mcp-stdio-native.js').NativeMcpStdioScope;
+  reserveMcpStdioRecovery?(input: object, helper: NativeImage, bubblewrap: NativeImage,
+    recipe: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioRecipe,
+    server: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioServerImage, config: Buffer): import('./mcp-stdio-native.js').NativeMcpStdioScope;
+  cleanupRetainedMcpStdioRecovery?(input: object, ownerEpoch: number, supervisorInstanceId: string): import('./mcp-stdio-native.js').NativeMcpStdioCleanupScope;
+  reserveMcpStdioRun?(input: object, helper: NativeImage, bubblewrap: NativeImage,
+    recipe: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioRecipe,
+    server: import('../state/mcp-stdio-broker-native.js').NativeMcpStdioServerImage, config: Buffer): import('./mcp-stdio-native.js').NativeMcpStdioScope;
+  cleanupRetainedMcpStdioAdmin?(input: object, ownerEpoch: number, supervisorInstanceId: string): import('./mcp-stdio-native.js').NativeMcpStdioCleanupScope;
+  cleanupRetainedMcpStdioRun?(input: object, ownerEpoch: number, supervisorInstanceId: string): import('./mcp-stdio-native.js').NativeMcpStdioCleanupScope;
   cleanupRetainedMcpHttpAdmin?(input:object,checker:{supervisorInstanceId:string;stateOwnerEpoch:number}):import('./mcp-http-admin-native.js').NativeMcpAdminCleanupScope;
   reserveMcpHttpAdmin?(input: object, helper: NativeImage, bubblewrap: NativeImage, guest: NativeGuestToolchain,
     script: import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage, config: Buffer): import('./mcp-http-admin-native.js').NativeMcpAdminScope;
@@ -490,6 +542,8 @@ type NativeController = { pid: number; processStartToken: string;
   close(): Promise<void>;
 };
 export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInterfaceVersion?: 2; readonly verifierInterfaceVersion?: 1;
+  readonly mcpStdioInterfaceVersion?: 1;
+  sealMcpStdioServer?(fd: number): import('../state/mcp-stdio-broker-native.js').NativeMcpStdioServerImage;
   readonly mcpAdminInterfaceVersion?: 1;
   sealMcpHttpAdminProbe?(fd: number): import('../state/mcp-broker-native.js').NativeMcpAdminProbeImage;
   readonly dependencyInterfaceVersion?: 1;
@@ -2405,6 +2459,35 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
             async close() { if (this !== controller) throw new TypeError('invalid worker controller'); await closeController(); controllers.delete(native); }
           });
           linuxWorkerControllers.add(controller);
+          if (binding.mcpStdioInterfaceVersion === 1) {
+            if (typeof native.reserveMcpStdioRecovery === 'function') mcpStdioRecoveryControllers.set(controller, (input, recipe, server, config) => {
+              controllerReceiver(); return native.reserveMcpStdioRecovery!(input, helper, bwrap, recipe, server, config);
+            });
+            if (typeof native.cleanupRetainedMcpStdioRecovery === 'function') mcpStdioRecoveryCleanupControllers.set(controller, (input, checker) => {
+              controllerReceiver(); const copy = immutableSnapshot(checker);
+              if (Reflect.ownKeys(copy).length !== 2 || !Object.hasOwn(copy, 'supervisorInstanceId') || !Object.hasOwn(copy, 'stateOwnerEpoch'))
+                throw new TypeError('MCP recovery checker has an unexpected field');
+              return native.cleanupRetainedMcpStdioRecovery!(input, copy.stateOwnerEpoch, copy.supervisorInstanceId);
+            });
+            if (typeof native.reserveMcpStdioAdmin === 'function') mcpStdioAdminControllers.set(controller, (input, recipe, server, config) => {
+              controllerReceiver(); return native.reserveMcpStdioAdmin!(input, helper, bwrap, recipe, server, config);
+            });
+            if (typeof native.reserveMcpStdioRun === 'function') mcpStdioRunControllers.set(controller, (input, recipe, server, config) => {
+              controllerReceiver(); return native.reserveMcpStdioRun!(input, helper, bwrap, recipe, server, config);
+            });
+            if (typeof native.cleanupRetainedMcpStdioAdmin === 'function') mcpStdioAdminCleanupControllers.set(controller, (input, checker) => {
+              controllerReceiver(); const copy = immutableSnapshot(checker);
+              if (Reflect.ownKeys(copy).length !== 2 || !Object.hasOwn(copy, 'supervisorInstanceId') || !Object.hasOwn(copy, 'stateOwnerEpoch'))
+                throw new TypeError('MCP stdio checker has an unexpected field');
+              return native.cleanupRetainedMcpStdioAdmin!(input, copy.stateOwnerEpoch, copy.supervisorInstanceId);
+            });
+            if (typeof native.cleanupRetainedMcpStdioRun === 'function') mcpStdioRunCleanupControllers.set(controller, (input, checker) => {
+              controllerReceiver(); const copy = immutableSnapshot(checker);
+              if (Reflect.ownKeys(copy).length !== 2 || !Object.hasOwn(copy, 'supervisorInstanceId') || !Object.hasOwn(copy, 'stateOwnerEpoch'))
+                throw new TypeError('MCP stdio checker has an unexpected field');
+              return native.cleanupRetainedMcpStdioRun!(input, copy.stateOwnerEpoch, copy.supervisorInstanceId);
+            });
+          }
           if (binding.mcpAdminInterfaceVersion === 1 && typeof native.reserveMcpHttpAdmin === 'function')
             mcpAdminControllers.set(controller, (input, guest, script, config) => {
               controllerReceiver();

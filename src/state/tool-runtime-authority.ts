@@ -9,6 +9,7 @@ import type { SandboxResourceSpec } from '../kernel/execution.js';
 import { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
 import { LINUX_VERIFIER_RESOURCE_MINIMUMS } from '../sandbox/guest-toolchain.js';
 import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
+import { inspectMcpStaticLinuxExecutable } from '../sandbox/mcp-stdio-executable.js';
 
 /** Fixed recipe support only, never a grant or a replacement OS limit. The
  * original supplied profile remains unchanged when it cannot support Node. */
@@ -43,6 +44,16 @@ export async function readToolRuntimeAuthority(artifacts: ArtifactCatalog, input
     return { ref: selected.registryRevisionRef, registry };
   });
   verifyToolRuntimeAuthority({ ...input, mcpRegistries, ...(guestToolchain ? { guestToolchain } : {}) });
+  for (const registry of mcpRegistries) {
+    if (registry.registry.transport.kind !== 'stdio') continue;
+    const identity = registry.registry.transport.executable;
+    if (identity.kind !== 'runtime_bundle') throw new TypeError('MCP stdio requires its supported exact signed static executable');
+    const entry = input.bundle.entries.find(entry => entry.entryId === identity.executableId)!;
+    signal?.throwIfAborted();
+    const bytes = await (signal ? artifacts.withReadSignal(signal) : artifacts).readBoundedBytes(entry.digest, entry.byteCount);
+    if (bytes.length !== entry.byteCount) throw new TypeError('MCP stdio retained server byte count differs');
+    inspectMcpStaticLinuxExecutable(bytes); signal?.throwIfAborted();
+  }
   if (guestToolchain) assertBuiltinScriptResources(guestToolchain.manifest.guestImageByteCount, input.resources);
   for (const digest of new Set(scripts.map(execution => execution.adapterCodeDigest))) {
     const entry = input.bundle.entries.find(entry => entry.digest === digest)!;

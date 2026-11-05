@@ -21,7 +21,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#if defined(CLIQ_MODEL_BROKER_MODULE) || defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) || defined(CLIQ_MCP_HTTP_BROKER_MODULE)
+#if defined(CLIQ_MODEL_BROKER_MODULE) || defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) || defined(CLIQ_MCP_HTTP_BROKER_MODULE) || defined(CLIQ_MCP_STDIO_BROKER_MODULE)
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -1138,7 +1138,7 @@ static napi_value user(napi_env env, napi_callback_info info) {
   }
   napi_value result; napi_create_object(env, &result); set_number(env, result, "uid", uid); set_number(env, result, "gid", gid); set_string(env, result, "home", home); return result;
 }
-#if !defined(CLIQ_MODEL_BROKER_MODULE) && !defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) && !defined(CLIQ_MCP_HTTP_BROKER_MODULE)
+#if !defined(CLIQ_MODEL_BROKER_MODULE) && !defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) && !defined(CLIQ_MCP_HTTP_BROKER_MODULE) && !defined(CLIQ_MCP_STDIO_BROKER_MODULE)
 static napi_value initialize(napi_env env, napi_value exports) {
   const napi_property_descriptor methods[] = {
     {"currentUser", NULL, user, NULL, NULL, NULL, napi_default, NULL},
@@ -1154,6 +1154,8 @@ NAPI_MODULE(cliq_linux_credential_platform, initialize)
 #include "dependency-broker.h"
 #elif defined(CLIQ_MCP_HTTP_BROKER_MODULE)
 #include "mcp-http-broker.h"
+#elif defined(CLIQ_MCP_STDIO_BROKER_MODULE)
+#include "mcp-stdio-broker.h"
 #else
 /* A distinct signed provider image. Its private handle owns the token, key,
  * copied request, connection and cancellation. No native call selects SQL
