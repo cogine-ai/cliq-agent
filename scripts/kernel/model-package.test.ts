@@ -4,12 +4,33 @@ import { rootCertificates } from 'node:tls';
 import { canonicalSha256 } from '../../src/kernel/canonical.js';
 import { sha256Bytes } from '../../src/kernel/identity.js';
 import { projectCompactionPrompt } from '../../src/model/request.js';
-import { buildInstalledModelPackageEntries } from './model-package.js';
+import { buildInstalledModelPackageEntries, buildInstalledModelPrompts } from './model-package.js';
 import { installedModelPackageEntries, type InstalledModelPackageFixture } from './testing/installed-model-package.js';
 
 const broker = Buffer.from('inert broker bytes for build-data regression');
 const edit = Buffer.from('inert edit bytes for build-data regression');
 const selected = { provider: 'openai-compatible' as const, model: 'deepseek-flash' };
+
+test('signed script-capable prompts explain the actual tools, candidate checks and separate application boundary', () => {
+  for (const provider of ['openai-compatible', 'ollama'] as const) {
+    const material = buildInstalledModelPrompts({ provider, model: 'inert-prompt-contract' }, true);
+    const system = material.system;
+    assert(system.value.utf8.includes('/usr/bin/node'));
+    assert(system.value.utf8.includes('Do not assume host utilities or package managers are available.'));
+    assert(system.value.utf8.includes('Your final response submits a candidate for the configured checks.'));
+    assert(system.value.utf8.includes('If verifier feedback returns, fix the reported failure within the original task and budget.'));
+    assert(system.value.utf8.includes('The user reviews the result and explicitly applies it to the original workspace.'));
+    assert.equal(system.value.byteCount, Buffer.byteLength(system.value.utf8));
+    assert.equal(system.ref, sha256Bytes(system.bytes));
+    const entry = material.entries.find(entry => entry.role === 'system_prompt')!;
+    assert.deepEqual(entry.bytes, system.bytes);
+    const root = material.structuredArtifacts.find(root => root.kind === 'system_prompt')!;
+    assert.equal(root.artifactRef, system.ref);
+    assert.equal(root.semanticDigest, system.value.textDigest);
+  }
+  const editOnly = buildInstalledModelPrompts(selected, false);
+  assert(!editOnly.system.value.utf8.includes('/usr/bin/node'));
+});
 
 test('real-provider build material preserves the existing fixed tools and complete compaction byte closure', () => {
   const material = buildInstalledModelPackageEntries(selected, broker, edit);

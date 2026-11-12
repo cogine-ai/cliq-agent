@@ -87,12 +87,14 @@ No key enters source, command arguments, public configuration or retained logs.
 Only fixed phase messages and bounded original reports are retained; no raw child
 output is uploaded. Remove the temporary Actions secret when the experiment ends.
 
-Each explicitly dispatched journey retains the original USD 5 Run ceiling,
+Each explicitly dispatched journey uses a USD 3.50 Run ceiling (reduced from
+USD 5 to stay within the remaining experiment authorization), the unchanged
 conservative full-request token prices, five-minute Run budget and all original
 command, READY, request, stop and cleanup checks. There is no automatic retry.
-The operator must reserve CNY 35 against the authorized CNY 200 total before each
+The operator must reserve CNY 24.50 against the authorized CNY 200 total before each
 attempt, including an ambiguous/unfinished attempt; the factor seven covers the
 selected published CNY/USD tariff ratios, not a currency-market assumption.
 Do not dispatch beyond that total or treat an absent report as zero cost.
+Prior unresolved USD 5 attempts retain their original CNY 35 reservations.
 The fixed model, TLS pin and prices in `provider-qualification.ts` must be
 reverified before a later experiment; they are not automatically updated.

@@ -49,80 +49,46 @@ component results, not installed Stop2 or complete I1 qualification. The manual
 CI transport added afterwards has independent subprocess/routing regressions and
 strict typechecking; the production source exercised by the full suite is unchanged.
 
-The current QEMU daily experiments pass normal setup, but model enrollment still
-reaches its original sixty-second command bound before secret storage or model
-execution. Keep those failures and their cleanup evidence. Direct TLS 1.3
-read-only DeepSeek checks confirm the selected account/model are available;
-they create no model generation request and do not qualify installed auth.
-The owner has now authorized the dedicated key in an explicit funded experiment
-on a free native GitHub runner. Its fixed-revision, original daily journey is the
-next validation path; no external-host handoff is required to continue.
+Current native-runner evidence (2026-11-13): the owner authorized the dedicated
+DeepSeek credential in a manual, fixed-revision experiment on a free GitHub
+runner; no external host is required. Native setup, Secret Service enrollment,
+regional authenticated TLS pins and normal Run admission now pass. QEMU's old
+enrollment timeout is retained as historical evidence, not the active blocker.
 
-The first authorized native-runner attempt at `e09279d668d1177e5e659b549b4712b83dc7c2cb`
-([funded run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302434568))
-passed signed setup (10.1s), actual Secret Service/model enrollment (27.4s),
-and normal Run admission (21.7s). Execution then retained `RECOVERY_REQUIRED`
-at `drive_model_release`; it did not reach result review or application.
-The original services joined, cleanup reported zero errors, and the complete
-output scan found no secret. This closes the observed installation/enrollment
-blocker on that runner, not the real-model journey. Dispatch/spend remain
-unresolved; keep the first CNY35 reservation against the CNY200 experiment ceiling.
-The follow-up retains closed native broker reasons and checks the actual public
-TLS peer without a credential before running another funded journey.
+- The [controlled Linux daily journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43318173967)
+  passes actual modification, failed required check, repair, review and explicit
+  application. The same run passes signed schema7-to-schema8 upgrade,
+  admission/preparation cancellation and original-claim CAS-failure settlement.
+  Received-tool successor recovery and delayed/publication recovery remain
+  failures. The aggregate workflow is not green.
+- The [sixth funded journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43318210293)
+  at `725fb8118da9e75c5edb9b2bacac9c012bce282e` completes real directory/file
+  reads and an edit. A subsequent original Bash capture exits 127; the model
+  continues and misses the unchanged 90-second terminal bound. This does not
+  qualify result review/application or prove which command failed.
+- Read-only diagnostics retain original claim-bound outcome/exit codes and
+  bounded public progress, never raw model/tool text. The controlled tool
+  campaign now directly executes the signed `/usr/bin/node` inside Bash while
+  retaining exact stdout, empty stderr, exit and physical-retirement checks.
+  Its Linux result is still pending; do not infer it from a wiring test.
+- Script-capable signed prompts explain the actual available commands, final
+  candidate/check/repair flow and separate user review/application boundary.
+  This improves product instructions; it neither grants permissions nor proves
+  that the real-provider timeout is fixed.
 
-The third funded attempt at `f22c9f250819e81c0805d16acb314c3fb79ff3e3`
-([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43312760480))
-passes the fixed regional TLS pins, setup, enrollment and admission. It reaches
-`tool_release`, then fails the unchanged ninety-second terminal bound. No
-scheduler failure was recorded before Stop; the original services joined and the
-complete secret scan passed. This is not completed task delivery. Preserve its
-CNY35 reservation; cumulative unresolved reservations are CNY70. The next
-experiment retains at most 128 already-decoded public status/counter/timing
-samples to distinguish polling cost from advancing or stagnant execution. It
-adds no request, retry, model text, timeout extension or qualification authority.
+Cumulative conservative reservations are CNY175, with CNY25 unreserved; these
+are not actual billed spending. Previous unresolved attempts keep their original
+reservations. A subsequent experiment uses at most USD3.50/CNY24.50, preserving
+full-request pricing and every original deadline and assertion. The second
+attempt's public TLS preflight failed before the credential step and sent zero
+model requests; only that attempt's zero-cost reservation was released. Do not
+start another paid attempt before the controlled command diagnosis is complete.
 
-The fourth attempt ([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43314512529),
-`96427503933aae5628710e0769c526316e204b6a`) shows continuous progress through
-model/tool steps, reaching Journal sequence 26. Its 46 complete authenticated
-status reads each take roughly 1.7 seconds; there is no pre-Stop scheduler failure.
-It still fails the original terminal deadline. The fixture now yields between
-observations for twice the measured read duration (250ms floor, 5s ceiling),
-retaining the same 90s terminal and 30s request checks. This changes observation
-load, not task authority or the acceptance deadline. Incremental, bounded Journal
-phase summaries distinguish completed/failed/unknown operations without retaining
-model/tool text. Whether reduced observer load fixes the real journey must still
-be measured; production behavior is unchanged.
-
-The fifth attempt ([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43316398261),
-`ba7e7218f6c4396f31ebab1c75a994c5044d8c55`) reduces observations to 24 and
-reaches Journal sequence 31, including five completed model requests and five
-completed tools, but still fails the unchanged terminal deadline. Tool completion
-alone does not imply a successful tool business outcome. The follow-up reads
-only the original complete retained result/capture objects and emits closed
-outcome/termination codes to distinguish that case; it grants no authority and
-never publishes model/tool content. Cumulative conservative reservations are
-CNY140, not a claim about actual billed spending.
-
-The same-source [ordinary Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302398092)
-passes the controlled daily modification/check/repair/review/application journey,
-credential authority/finalizer shutdown, admission/preparation shutdown and
-original-claim settlement after CAS refusal. It also exposes GCC13 compilation
-failures, a forbidden extra compiler environment override in a fixture, and a
-Session continuity fixture still reading the former inline context format.
-These are being repaired together. The received-tool successor reaches finalize
-but misses its unchanged 30s terminal bound; upgrade fails second credential
-enrollment. Those failures remain open and are not converted into passing cuts.
-
-The follow-up candidate `4126a7703b1255ff0664254677c1f777f8903968` passes local
-build and the full suite (4,024 passed, 32 skipped), plus 33 focused native/control
-regressions for the final fixture-only changes. Its Ubuntu 24/GCC13 CI build now
-passes. The [second manual run](https://github.com/cogine-ai/cliq-agent/actions/runs/43311719119)
-authenticates the real provider's TLS certificate/hostname, but observes a
-different regional public key and correctly refuses the former single pin.
-The credential-bearing step is skipped: no credential or model request was sent.
-The configuration now explicitly includes both independently authenticated
-public keys. It does not accept arbitrary keys, disable TLS verification, or
-learn pins automatically. The real-model journey still requires a passing run.
+Local build and the full suite pass for production source `4126a7703b1255ff0664254677c1f777f8903968`
+(4,024 passed, 32 skipped). Subsequent changes affect CI, signed package data and
+qualification consumers, with focused regressions and strict script typechecking.
+The production TypeScript/native bytes are unchanged; installed evidence must
+still bind the exact package/fixture revision. The real-model task remains open.
 
 ### Current product and qualification status (2026-11-03)
 

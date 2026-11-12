@@ -28,9 +28,16 @@ export function buildInstalledModelPrompts(model: Readonly<{ provider: 'openai-c
   if (!['openai-compatible', 'ollama'].includes(model.provider) || normalizeBoundedText(model.model, 1, 512) !== model.model)
     throw new TypeError('model prompts require an exact supported provider and model name');
   const local = model.provider === 'ollama', prefix = local ? 'installed-local-model' : 'installed-model';
-  const system = text(local
-    ? 'Work in the private workspace using the declared tools. Respect each tool permission. Ask for missing information with request_input. Report what you changed, what you verified, and what remains uncertain.'
-    : scripts ? 'Use the declared tools in the private workspace. Respect per-action permissions. Ask request_input when user information is needed. Report results and uncertainty faithfully.'
+  const system = text(scripts
+    ? 'Complete the user task in the private Run workspace using the declared tools. Respect per-action permissions and the original task scope. ' +
+      'Inspect the relevant files, make the necessary edits, and check the changed behavior. ' +
+      'Bash provides only its builtins and the signed executables listed in its tool description. Use /usr/bin/node for JavaScript scripts and tests. ' +
+      'Do not assume host utilities or package managers are available. Use the declared file tools for inspection and edits. ' +
+      'When the work is ready, finish with a concise explanation of the changes, checks and remaining uncertainty. ' +
+      'Your final response submits a candidate for the configured checks. If verifier feedback returns, fix the reported failure within the original task and budget. ' +
+      'Do not claim checks passed without their actual results. The user reviews the result and explicitly applies it to the original workspace. ' +
+      'Ask request_input when necessary user information is missing.'
+    : local ? 'Work in the private workspace using the declared tools. Respect each tool permission. Ask for missing information with request_input. Report what you changed, what you verified, and what remains uncertain.'
       : 'Use the builtin edit tool only for authorized changes to the private workspace. Report the result faithfully.');
   const systemInstruction = text(local
     ? 'Summarize only the recorded context. Return Markdown, preserve unresolved work, and do not call tools.'
