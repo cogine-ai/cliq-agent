@@ -31,9 +31,13 @@ type Result<M extends InstalledControlFeature> = Extract<InstalledControlRespons
 type Cut = Result<'run.get'>;
 export type ProviderJourneyStage = 'setup' | 'model_setup' | 'workspace' | 'session' | 'authorization' | 'admission' | 'execution' | 'result' |
   'review' | 'reconnect' | 'application' | 'publication' | 'accounting';
+export type ProviderJourneyProgress = Readonly<{
+  stage: ProviderJourneyStage; elapsedMs: number; readElapsedMs: number; status: Cut['snapshot']['run']['status'];
+  nextStep: Cut['snapshot']['run']['nextStep']; revision: number; journalSeq: number; itemSeq: number;
+}>;
 export class InstalledProviderJourneyError extends Error {
   readonly code = 'INSTALLED_PROVIDER_JOURNEY_REFUSED';
-  constructor(readonly stage: ProviderJourneyStage) { super(`installed provider journey refused at ${stage}`); this.name = 'InstalledProviderJourneyError'; }
+  constructor(readonly stage: ProviderJourneyStage, readonly progress: readonly ProviderJourneyProgress[] = []) { super(`installed provider journey refused at ${stage}`); this.name = 'InstalledProviderJourneyError'; }
 }
 export type InstalledProviderJourneyInput = Readonly<{
   workspacePath: string; model: RunModelRequest & { provider: 'openai-compatible' }; budgets: RunSpec['budgets'];
@@ -82,6 +86,10 @@ export async function runInstalledDailyProviderJourney(input: InstalledDailyProv
 async function runProviderJourney(journey: Journey) {
   const { input, context } = journey;
   let stage: ProviderJourneyStage = 'workspace';
+  // Fixed scalars from already-decoded public responses only. Keep the original
+  // requests, deadlines and failure; this cannot grant or retry any operation.
+  const progress: ProviderJourneyProgress[] = [];
+  const started = performance.now();
   const mark = (next: ProviderJourneyStage) => { stage = next; context.mark?.(next); };
   try {
     if (journey.kind === 'daily') check(['owned_https', 'real_provider'].includes(journey.input.providerKind));
@@ -161,7 +169,13 @@ async function runProviderJourney(journey: Journey) {
       const by = Date.now() + TERMINAL_MS;
       for (;;) {
         check(Date.now() < by);
+        const reading = performance.now();
         const cut = await send({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, journalLimit: 1, checkpointLimit: 1 }, 'run.get');
+        const observed = performance.now();
+        progress.push({ stage, elapsedMs: Math.round(observed - started), readElapsedMs: Math.round(observed - reading),
+          status: cut.snapshot.run.status, nextStep: cut.snapshot.run.nextStep, revision: cut.snapshot.run.revision,
+          journalSeq: cut.highWaterJournalSeq, itemSeq: cut.highWaterItemSeq });
+        if (progress.length > 128) progress.shift();
         check(Date.now() < by);
         if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) return cut;
         // A wait is visible refusal to finish this particular autonomous case.
@@ -346,6 +360,6 @@ async function runProviderJourney(journey: Journey) {
   } catch {
     // Provider/tool bytes and arbitrary assertions must never become a retained
     // diagnostic, cause chain or console message in the credential-owning owner.
-    throw new InstalledProviderJourneyError(stage);
+    throw new InstalledProviderJourneyError(stage, progress);
   }
 }

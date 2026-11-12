@@ -70,6 +70,17 @@ unresolved; keep the first CNY35 reservation against the CNY200 experiment ceili
 The follow-up retains closed native broker reasons and checks the actual public
 TLS peer without a credential before running another funded journey.
 
+The third funded attempt at `f22c9f250819e81c0805d16acb314c3fb79ff3e3`
+([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43312760480))
+passes the fixed regional TLS pins, setup, enrollment and admission. It reaches
+`tool_release`, then fails the unchanged ninety-second terminal bound. No
+scheduler failure was recorded before Stop; the original services joined and the
+complete secret scan passed. This is not completed task delivery. Preserve its
+CNY35 reservation; cumulative unresolved reservations are CNY70. The next
+experiment retains at most 128 already-decoded public status/counter/timing
+samples to distinguish polling cost from advancing or stagnant execution. It
+adds no request, retry, model text, timeout extension or qualification authority.
+
 The same-source [ordinary Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302398092)
 passes the controlled daily modification/check/repair/review/application journey,
 credential authority/finalizer shutdown, admission/preparation shutdown and

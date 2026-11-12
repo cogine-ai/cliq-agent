@@ -31,7 +31,7 @@ import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-
 import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import type { InstalledModelPackageFixture } from './installed-model-package.js';
 import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
-import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyProviderJourney,
+import { PROVIDER_JOURNEY_FILES, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext } from './installed-provider-journey.js';
 import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 import { installedServiceProfiles } from '../../../src/state/installed-services.js';
@@ -2885,6 +2885,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const error = errors.shift(); if (!(error instanceof Error)) continue;
         const diagnostic = error as Error & { code?: unknown; errcode?: unknown };
         if (error instanceof InstalledClientConsumerDeadlineError || error instanceof InstalledClientDriverError) failureKinds.push(error.diagnostic);
+        else if (error instanceof InstalledProviderJourneyError) report.providerProgress = { diagnosticOnly: true, stage: error.stage, cuts: error.progress };
         else if (error instanceof InstalledVerifierOutcomeError) failureKinds.push({ kind: 'installed_verifier_outcome', stage: error.diagnosticStage });
         else if (error instanceof InstalledDeliveryOutcomeError) failureKinds.push({ kind: 'installed_delivery_outcome', stage: error.diagnosticStage });
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });

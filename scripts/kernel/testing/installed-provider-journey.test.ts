@@ -111,7 +111,17 @@ test('UNKNOWN reconciliation remains an explicit failed journey without auto-pro
       highWaterItemSeq: 0, highWaterJournalSeq: 0, highWaterCheckpointCursor: encodeControlCheckpointCursor('run', { createdAt: at, checkpointId: 'checkpoint' }),
       nextItemSeq: 0, nextJournalSeq: 0 } };
   });
-  await assert.rejects(runInstalledProviderJourney(input, f.context), refusedAt('execution'));
+  await assert.rejects(runInstalledProviderJourney(input, f.context), error => {
+    refusedAt('execution')(error); assert(error instanceof InstalledProviderJourneyError);
+    assert.equal(error.progress.length, 1);
+    const cut = error.progress[0]!;
+    assert.deepEqual(Object.keys(cut).sort(), ['elapsedMs', 'itemSeq', 'journalSeq', 'nextStep', 'readElapsedMs', 'revision', 'stage', 'status']);
+    assert.equal(cut.status, 'waiting'); assert.equal(cut.stage, 'execution');
+    assert.equal(cut.journalSeq, 0); assert.equal(cut.itemSeq, 0);
+    assert(Number.isSafeInteger(cut.elapsedMs) && cut.elapsedMs >= 0);
+    assert(Number.isSafeInteger(cut.readElapsedMs) && cut.readElapsedMs >= 0 && cut.readElapsedMs <= cut.elapsedMs);
+    return true;
+  });
   assert.deepEqual(f.calls.map(request => request.method), ['session.create', 'authorization.create', 'run.submit', 'run.get']);
   assert.equal(f.reconnects(), 0); assert.equal(f.artifacts.length, 0);
 });
