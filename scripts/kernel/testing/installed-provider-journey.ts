@@ -3,7 +3,8 @@
 // No setup, secret handling, host execution or native authority lives here.
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
-import { sha256Bytes } from '../../../src/kernel/identity.js';
+import { decodeBuiltinToolCapture } from '../../../src/state/builtin-tool-capture.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { BudgetUsage, RunSpec } from '../../../src/kernel/types.js';
 import type { RunModelRequest } from '../../../src/kernel/control-submit.js';
@@ -40,6 +41,26 @@ export type ProviderJourneyProgress = Readonly<{
 export class InstalledProviderJourneyError extends Error {
   readonly code = 'INSTALLED_PROVIDER_JOURNEY_REFUSED';
   constructor(readonly stage: ProviderJourneyStage, readonly progress: readonly ProviderJourneyProgress[] = []) { super(`installed provider journey refused at ${stage}`); this.name = 'InstalledProviderJourneyError'; }
+}
+/** Read-only diagnostic from the original public Journal and complete retained
+ * objects. It emits no content, path, model text or execution/recovery proof. */
+export function providerToolDiagnostic(row: Cut['journal'][number], observation: Record<string, unknown>, capture?: unknown) {
+  check(row.opKind === 'tool' && row.phase === 'completed' && row.resultRef === sha256Bytes(canonicalJsonBytes(observation)));
+  check(observation.format === 'cliq-tool-observation-v1' && observation.schemaVersion === 1 &&
+    observation.observationDigest === digestOmitting(observation, 'observationDigest'));
+  for (const key of ['runId', 'opId', 'attempt', 'requestRef', 'dispatchId'] as const) check(observation[key] === row[key]);
+  check(observation.targetRef === row.target && observation.grantRef === row.grantRef);
+  check(observation.outcome === 'executed' || observation.outcome === 'error');
+  if (observation.outcome === 'error') check(['TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED'].includes(observation.code as string));
+  const base = { seq: row.seq, outcome: observation.outcome, ...(observation.outcome === 'error' ? { code: observation.code } : {}) };
+  if (observation.captureRef === undefined) { check(capture === undefined); return base; }
+  const parsed = decodeBuiltinToolCapture(capture);
+  check(sha256Bytes(canonicalJsonBytes(parsed)) === observation.captureRef && parsed.captureDigest === observation.captureDigest);
+  for (const key of ['runId', 'opId', 'attempt', 'requestRef', 'dispatchId'] as const) check(parsed[key] === row[key]);
+  check(parsed.targetRef === row.target && parsed.grantRef === row.grantRef);
+  return { ...base, tool: parsed.tool, terminationReason: parsed.terminationReason, durationMs: parsed.durationMs,
+    ...(parsed.terminationReason === 'exit' ? { exitCode: parsed.exitCode } : {}),
+    ...(parsed.terminationReason === 'spawn_error' ? { nativeErrorCode: parsed.nativeErrorCode } : {}) };
 }
 export type InstalledProviderJourneyInput = Readonly<{
   workspacePath: string; model: RunModelRequest & { provider: 'openai-compatible' }; budgets: RunSpec['budgets'];

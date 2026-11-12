@@ -93,6 +93,16 @@ phase summaries distinguish completed/failed/unknown operations without retainin
 model/tool text. Whether reduced observer load fixes the real journey must still
 be measured; production behavior is unchanged.
 
+The fifth attempt ([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43316398261),
+`ba7e7218f6c4396f31ebab1c75a994c5044d8c55`) reduces observations to 24 and
+reaches Journal sequence 31, including five completed model requests and five
+completed tools, but still fails the unchanged terminal deadline. Tool completion
+alone does not imply a successful tool business outcome. The follow-up reads
+only the original complete retained result/capture objects and emits closed
+outcome/termination codes to distinguish that case; it grants no authority and
+never publishes model/tool content. Cumulative conservative reservations are
+CNY140, not a claim about actual billed spending.
+
 The same-source [ordinary Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302398092)
 passes the controlled daily modification/check/repair/review/application journey,
 credential authority/finalizer shutdown, admission/preparation shutdown and

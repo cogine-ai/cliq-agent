@@ -31,7 +31,7 @@ import { decodeRunResult, decodeWorkspaceDiff } from '../../../src/state/result-
 import { buildInstalledProviderQualificationPackage, buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
 import type { InstalledModelPackageFixture } from './installed-model-package.js';
 import { providerModelDefinition, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
-import { PROVIDER_JOURNEY_FILES, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
+import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext } from './installed-provider-journey.js';
 import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 import { installedServiceProfiles } from '../../../src/state/installed-services.js';
@@ -1505,8 +1505,29 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(BigInt(bytes.length), before.size); scanBytes(bytes); return bytes;
         } finally { await held.close(); }
       };
+      const inspectedToolResults = new Set<string>();
+      const retainedObject = async (ref: string) => {
+        const bytes = await readCas(ref), value = parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        assert(canonicalJsonBytes(value).equals(bytes)); return value;
+      };
       const workflowContext: InstalledProviderJourneyContext = {
-        send: async (body: import('../../../src/control/v1.js').InstalledControlRequestV1, timeout: number) => { assert(client); return client.send(body, timeout); },
+        send: async (body: import('../../../src/control/v1.js').InstalledControlRequestV1, timeout: number) => {
+          assert(client); const response = await client.send(body, timeout);
+          if (options.provider && body.method === 'run.get' && response.ok && response.result?.method === 'run.get') {
+            for (const row of response.result.journal) {
+              if (row.opKind !== 'tool' || row.phase !== 'completed' || !row.resultRef || inspectedToolResults.has(row.resultRef)) continue;
+              if (inspectedToolResults.size >= 100) break;
+              inspectedToolResults.add(row.resultRef);
+              const diagnostics: unknown[] = report.providerToolDiagnostics ??= [];
+              try {
+                const observed = await retainedObject(row.resultRef) as Record<string, unknown>;
+                const capture = typeof observed.captureRef === 'string' ? await retainedObject(observed.captureRef) : undefined;
+                diagnostics.push(providerToolDiagnostic(row, observed, capture));
+              } catch { diagnostics.push({ seq: row.seq, kind: 'unavailable' }); }
+            }
+          }
+          return response;
+        },
         artifact: async (ref: string, options: { maxBytes: number; signal?: AbortSignal }) => {
           options.signal?.throwIfAborted(); const bytes = await readPublicArtifact(ref);
           options.signal?.throwIfAborted(); assert(bytes.length <= options.maxBytes); return bytes;

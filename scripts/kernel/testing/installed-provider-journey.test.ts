@@ -3,12 +3,14 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { digestOmitting } from '../../../src/kernel/identity.js';
 import { runSnapshot, sessionSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
 import type { InstalledControlRequestV1 } from '../../../src/control/v1.js';
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
-import { PROVIDER_JOURNEY_FILES, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
+import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
 
 // Powerless public-protocol data only. These cases do not create an installed
@@ -222,4 +224,24 @@ test('terminal observation yields after expensive authenticated reads without ex
     if (mode === 'complete') { await context.terminal('inert'); assert.equal(calls, 2); assert.deepEqual(waits, [3400]); }
     else { await assert.rejects(context.terminal('inert')); assert.equal(calls, 1); assert.deepEqual(waits, []); }
   }
+});
+
+
+test('retained tool diagnosis binds the original Journal and emits only fixed outcomes, never content or unknown error codes', () => {
+  const secret = 'inert-private-model-tool-text';
+  const observation = { schemaVersion: 1, format: 'cliq-tool-observation-v1', runId: 'run', opId: 'op', attempt: 0,
+    requestRef: ref, dispatchId: 'dispatch', targetRef: ref, grantRef: ref,
+    outcome: 'executed', content: { text: secret }, observationDigest: '' };
+  observation.observationDigest = digestOmitting(observation, 'observationDigest');
+  const row = { seq: 3, opKind: 'tool', phase: 'completed', runId: 'run', opId: 'op', attempt: 0,
+    requestRef: ref, dispatchId: 'dispatch', target: ref, grantRef: ref, resultRef: canonicalSha256(observation) };
+  const summary = providerToolDiagnostic(row as never, observation);
+  assert.deepEqual(summary, { seq: 3, outcome: 'executed' }); assert(!JSON.stringify(summary).includes(secret));
+  assert.throws(() => providerToolDiagnostic({ ...row, dispatchId: 'other' } as never, observation));
+  const error = { ...observation, outcome: 'error', code: secret, observationDigest: '' };
+  error.observationDigest = digestOmitting(error, 'observationDigest');
+  assert.throws(() => providerToolDiagnostic({ ...row, resultRef: canonicalSha256(error) } as never, error));
+  error.code = 'TOOL_PROTOCOL_ERROR'; error.observationDigest = digestOmitting(error, 'observationDigest');
+  assert.deepEqual(providerToolDiagnostic({ ...row, resultRef: canonicalSha256(error) } as never, error),
+    { seq: 3, outcome: 'error', code: 'TOOL_PROTOCOL_ERROR' });
 });

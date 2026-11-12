@@ -189,7 +189,7 @@ test('an owned responder refusal retains only its original fixed source frames, 
     const context = { primary, responderErrors: [responder], report: {}, journeyKind, dailyJourney: journeyKind === 'daily',
       mcpJourney: ['mcp', 'mcp-stdio', 'mcp-recovery'].includes(journeyKind), options: { provider }, Error, AggregateError,
       InstalledClientConsumerDeadlineError: class {}, InstalledClientDriverError: class {},
-      InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {} };
+      InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {}, InstalledProviderJourneyError: class {} };
     vm.runInNewContext(code, context);
     const result = JSON.parse(JSON.stringify(context.report));
     assert.deepEqual(Object.keys(result.error).sort(), ['diagnosticOnly', 'failureKinds', 'kind', 'sourceFrames']);
