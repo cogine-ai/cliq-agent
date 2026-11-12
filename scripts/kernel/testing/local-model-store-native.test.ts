@@ -44,6 +44,26 @@ test('managed model data store retains original account/store/pager ownership an
         const identity=fs.fstatSync(fd,{bigint:true}), tuple=[identity.dev,identity.ino,identity.uid,identity.gid,identity.mode];
         assert.throws(()=>native.acquireLocalModelStore(fd,root,[identity.dev,identity.ino+1n,identity.uid,identity.gid,identity.mode]),/refused/);
         assert.equal(fs.existsSync(root+'/local-models'),false);
+        const untouched=fs.fstatSync(fd,{bigint:true});
+        assert.equal(native.inspectExistingLocalModelStore(fd,root,tuple),null);
+        assert.deepEqual(fs.readdirSync(root),[]);
+        const unchanged=fs.fstatSync(fd,{bigint:true});
+        for(const key of ['dev','ino','mode','uid','gid','nlink','size','mtimeNs','ctimeNs'])assert.equal(unchanged[key],untouched[key]);
+        fs.symlinkSync(root,root+'/local-models');
+        assert.throws(()=>native.inspectExistingLocalModelStore(fd,root,tuple),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        assert.equal(fs.lstatSync(root+'/local-models').isSymbolicLink(),true);fs.unlinkSync(root+'/local-models');
+        fs.mkdirSync(root+'/local-models',{mode:0o700});
+        assert.throws(()=>native.inspectExistingLocalModelStore(fd,root,tuple),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        assert.deepEqual(fs.readdirSync(root+'/local-models'),[]);fs.rmdirSync(root+'/local-models');
+        fs.mkdirSync(root+'/local-models',{mode:0o700});fs.mkdirSync(root+'/local-models/objects',{mode:0o700});
+        for(const name of ['registry.lock','registry.sqlite3','registry.sqlite3-journal'])fs.writeFileSync(root+'/local-models/'+name,Buffer.alloc(0),{mode:0o600});
+        const emptyBefore=fs.lstatSync(root+'/local-models/registry.sqlite3',{bigint:true});
+        assert.throws(()=>native.inspectExistingLocalModelStore(fd,root,tuple),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        const emptyAfter=fs.lstatSync(root+'/local-models/registry.sqlite3',{bigint:true});
+        for(const key of ['dev','ino','mode','uid','gid','nlink','size','mtimeNs','ctimeNs'])assert.equal(emptyAfter[key],emptyBefore[key]);
+        assert.deepEqual(fs.readdirSync(root+'/local-models/objects'),[]);
+        for(const name of ['registry.lock','registry.sqlite3','registry.sqlite3-journal'])fs.unlinkSync(root+'/local-models/'+name);
+        fs.rmdirSync(root+'/local-models/objects');fs.rmdirSync(root+'/local-models');
         const exclusive=native.acquireKernelGlobalExclusive();
         assert.throws(()=>native.acquireLocalModelStore(fd,root,tuple),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_BUSY');
         assert.equal(fs.existsSync(root+'/local-models'),false); exclusive.close();
@@ -133,6 +153,17 @@ test('managed model data store retains original account/store/pager ownership an
         for(const object of objects){while(!original.copyObjectStep(object.ref)){inspectTemporaryAccess();assert.ok(++steps<10000);await new Promise(resolve=>setImmediate(resolve))}}
         original.finish();assert.ok(steps>32*3);assert.equal(sawWriter,true);assert.equal(sawReadonly,true);original.close();
         for(const object of objects){assert.equal(digest(fs.readFileSync(root+'/local-models/objects/'+object.ref)),object.ref);assert.equal(fs.statSync(root+'/local-models/objects/'+object.ref).mode&0o777,0o400)}
+        const weightRef=objects[0].ref;
+        assert.throws(()=>store.openObjectSource(weightRef,weights.length-1),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        const source=store.openObjectSource(weightRef,weights.length);
+        assert.throws(()=>store.close(),e=>e.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
+        assert.throws(()=>store.openObjectSource(weightRef,weights.length),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        const streamHash=createHash('sha256');let received=0;
+        for(let chunk;(chunk=source.readChunk())!==null;){assert.ok(chunk.length>0&&chunk.length<=65536);received+=chunk.length;streamHash.update(chunk)}
+        assert.equal(received,weights.length);assert.equal(streamHash.digest('hex'),weightRef);source.close();source.close();
+        assert.throws(()=>source.readChunk(),e=>e.code==='ERR_CLIQ_LOCAL_MODEL_STORE');
+        const cancelled=store.openObjectSource(weightRef,weights.length);
+        assert.equal(cancelled.readChunk().length,65536);cancelled.close();store.assertHeld();
         original=store.openPackage(packageRoot+'/model-manifest.json');original.captureInventory(inventory());
         for(const object of objects)while(!original.copyObjectStep(object.ref))await new Promise(resolve=>setImmediate(resolve));
         original.finish();original.close();
@@ -147,6 +178,11 @@ test('managed model data store retains original account/store/pager ownership an
         fs.writeFileSync(driftRoot+'/objects/'+objects[0].ref,Buffer.alloc(weights.length,0x2a));
         assert.throws(()=>original.copyObjectStep(objects[0].ref),/integrity|custody/);original.close();
         store.assertHeld();store.close();store.close();assert.throws(()=>store.assertHeld(),/holder/);
+        const existing=native.inspectExistingLocalModelStore(fd,root,tuple);existing.assertHeld();
+        assert.deepEqual(existing.readSmallObject(smallRef),small);
+        db=new DatabaseSync(uri,{allowExtension:false});assert.equal(db.prepare('SELECT head FROM model_registry').get().head,'head-1');
+        assert.throws(()=>existing.close(),e=>e.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
+        db.close();existing.assertHeld();existing.close();assert.throws(()=>existing.assertHeld(),/holder/);
         assert.throws(()=>native.deriveLocalModelStoreGate({}),/genuine/);
         const archiveGate=native.acquireKernelGlobalExclusive(), owner=native.acquireLock(root,true);
         const originalGate=native.bindMigrationCredentialGate(owner,archiveGate), modelGate=native.deriveLocalModelStoreGate(originalGate);

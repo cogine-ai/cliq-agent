@@ -119,7 +119,8 @@ type Scan = { scan(bytes: Uint8Array): void; close(): void };
 type Response = { protocolVersion: 1; ok: boolean; method?: string;
   result?: Record<string, any>; error?: Record<string, unknown> };
 type Input = { executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
-  openScan(): Scan; onJoined(): void; timeout?: number; headlessSchemaVersion?: 3; headlessTransport?: 'rpc'; initialRequest?: InstalledControlRequestV1 };
+  openScan(): Scan; onJoined(): void; timeout?: number; headlessSchemaVersion?: 3; headlessTransport?: 'rpc'; initialRequest?: InstalledControlRequestV1;
+  coldHello?: 'migration' | 'local_inference' };
 export type InstalledClientDriverStage = 'platform' | 'composition' | 'selection' | 'authentication' | 'request' | 'output' | 'retirement';
 const driverStages = ['platform', 'composition', 'selection', 'authentication', 'request', 'output', 'retirement'] as const;
 const driverMarkers = driverStages.flatMap(stage => [
@@ -175,8 +176,14 @@ export async function openInstalledClientConsumer(input: Input) {
   assert(input.headlessTransport === undefined || input.headlessSchemaVersion === 3 && input.headlessTransport === 'rpc');
   assert(input.initialRequest === undefined || input.headlessSchemaVersion === 3 && input.headlessTransport === undefined &&
     ['run.get', 'session.get', 'run.list', 'authorization.list', 'run.submit'].includes(input.initialRequest.method));
-  const timeout = input.timeout ?? 5000;
-  assert(Number.isSafeInteger(timeout) && timeout > 0 && timeout <= 5000);
+  const coldHello = input.coldHello;
+  // Only these two schema3 JSONL fixtures can wait longer for their first
+  // greeting. They carry no initial request under this readiness deadline.
+  assert(coldHello === undefined || (coldHello === 'migration' || coldHello === 'local_inference') &&
+    input.headlessSchemaVersion === 3 && input.headlessTransport === undefined && input.initialRequest === undefined && input.timeout === undefined);
+  const normalTimeout = input.timeout ?? 5000;
+  assert(Number.isSafeInteger(normalTimeout) && normalTimeout > 0 && normalTimeout <= 5000);
+  const timeout = coldHello === undefined ? normalTimeout : 90_000;
   const by = performance.now() + timeout;
   const outScan = input.openScan(); let errorScan: Scan;
   try { errorScan = input.openScan(); } catch (error) { outScan.close(); throw error; }

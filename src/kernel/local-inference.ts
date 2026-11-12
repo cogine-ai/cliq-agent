@@ -57,12 +57,13 @@ export type LocalModelRegistryHeadV1 = LocalModelRegistryHeadBase & (
     activeRegistrationRef: string; activeRegistrationDigest: string }>);
 export type LocalInferenceActivationParticipantV1 =
   Readonly<{ kind: 'run_submission'; requestId: string; requestDigest: string; runSubmitRequestRef: string;
-    admissionKey: string; admissionIntentDigest: string; joinedAt: string }> |
+    channelIdentityRef: string; channelIdentityDigest: string; admissionKey: string; admissionIntentDigest: string; joinedAt: string }> |
   Readonly<{ kind: 'run_model_frontier'; runId: string; runRevisionAtJoin: number; frontierRef: string; joinedAt: string }>;
 export type LocalInferenceActivationFailureV1 = Readonly<{
   schemaVersion: 1; activationCycleId: string; ownerPrincipalId: string; serviceId: string;
   serviceSpecRef: string; serviceSpecDigest: string; finalAttempt: 1 | 2;
-  reason: 'activation_timeout' | 'sandbox_launch_failed' | 'health_mismatch' | 'capability_mismatch' | 'containment_unprovable';
+  reason: 'activation_timeout' | 'sandbox_launch_failed' | 'health_mismatch' | 'capability_mismatch' |
+    'containment_unprovable' | 'activation_cancelled_for_migration';
   launchIds: readonly string[]; evidenceRefs: readonly string[]; observedAt: string; failureDigest: string;
 }>;
 type LocalInferenceActivationCycleBase = Readonly<{
@@ -83,7 +84,7 @@ export type LocalInferenceActivationCycleV1 = LocalInferenceActivationCycleBase 
 type LocalInferenceServiceLaunchBase = Readonly<{
   schemaVersion: 1; serviceId: string; launchId: string; ownerPrincipalId: string; serviceSpecRef: string;
   serviceSpecDigest: string; supervisorInstanceId: string; activationCycleId: string; activationAttempt: 1 | 2;
-  activationNonceDigest: string; containmentPlanRef: string; sandboxLaunchSpecRef: string;
+  activationNonceDigest: string; containmentPlanRef: string; sandboxLaunchSpecRef: string; nativeInputRef: string;
   rowVersion: number; leaseVersion: number; createdAt: string; activationDeadlineAt: string;
 }>;
 export type LocalInferenceServiceLaunchV1 = LocalInferenceServiceLaunchBase & (
@@ -261,11 +262,13 @@ export function decodeLocalModelRegistryHead(value: unknown): LocalModelRegistry
 export function decodeLocalInferenceParticipant(value: unknown): LocalInferenceActivationParticipantV1 {
   const kind = (value as { kind?: unknown } | null)?.kind;
   if (kind !== 'run_submission' && kind !== 'run_model_frontier') invalid();
-  const data = object(value, kind === 'run_submission' ? ['kind', 'requestId', 'requestDigest', 'runSubmitRequestRef', 'admissionKey',
-    'admissionIntentDigest', 'joinedAt'] : ['kind', 'runId', 'runRevisionAtJoin', 'frontierRef', 'joinedAt']);
+  const data = object(value, kind === 'run_submission' ? ['kind', 'requestId', 'requestDigest', 'runSubmitRequestRef',
+    'channelIdentityRef', 'channelIdentityDigest', 'admissionKey', 'admissionIntentDigest', 'joinedAt'] :
+    ['kind', 'runId', 'runRevisionAtJoin', 'frontierRef', 'joinedAt']);
   time(data.joinedAt);
   if (kind === 'run_submission') {
-    assertRequestId(controlWireText(data.requestId)); refs(data, ['requestDigest', 'runSubmitRequestRef', 'admissionIntentDigest']);
+    assertRequestId(controlWireText(data.requestId));
+    refs(data, ['requestDigest', 'runSubmitRequestRef', 'channelIdentityRef', 'channelIdentityDigest', 'admissionIntentDigest']);
     if (!/^[A-Za-z0-9_-]{22,128}$/u.test(controlWireText(data.admissionKey, 128, 22))) invalid();
   } else { text(data.runId); controlWireInteger(data.runRevisionAtJoin, 1); controlWireRef(data.frontierRef); }
   return immutableSnapshot(data) as LocalInferenceActivationParticipantV1;
@@ -305,14 +308,14 @@ export function decodeLocalInferenceCycle(value: unknown): LocalInferenceActivat
   }
   data.launchIds.forEach((id, index) => { if (id !== localInferenceLaunchId(data.activationCycleId as string, (index + 1) as 1 | 2)) invalid(); });
   if ((phase === 'starting_launch' || phase === 'active') && data.currentLaunchId !== data.launchIds.at(-1)) invalid();
-  if (phase === 'retry_wait' && (attempt !== 1 || time(data.retryNotBeforeAt) < joined)) invalid();
+  if (phase === 'retry_wait' && (attempt !== 1 || time(data.retryNotBeforeAt) < at)) invalid();
   if (phase === 'active' || phase === 'failed') {
     if (time(data.finishedAt) < joined) invalid(); controlWireRef(data[phase === 'active' ? 'boundaryEvidenceRef' : 'failureDetailRef']);
   }
   digest(data, 'cycleDigest'); return immutableSnapshot(data) as LocalInferenceActivationCycleV1;
 }
 const LAUNCH_FIELDS = ['schemaVersion', 'serviceId', 'launchId', 'ownerPrincipalId', 'serviceSpecRef', 'serviceSpecDigest', 'supervisorInstanceId',
-  'activationCycleId', 'activationAttempt', 'activationNonceDigest', 'containmentPlanRef', 'sandboxLaunchSpecRef', 'rowVersion', 'leaseVersion',
+  'activationCycleId', 'activationAttempt', 'activationNonceDigest', 'containmentPlanRef', 'sandboxLaunchSpecRef', 'nativeInputRef', 'rowVersion', 'leaseVersion',
   'createdAt', 'activationDeadlineAt', 'phase'];
 export function decodeLocalInferenceLaunch(value: unknown): LocalInferenceServiceLaunchV1 {
   const record = value as { phase?: unknown; retirementKind?: unknown } | null, phase = record?.phase;
@@ -327,7 +330,7 @@ export function decodeLocalInferenceLaunch(value: unknown): LocalInferenceServic
   decodeLocalIdentity(data.serviceId); decodeLocalIdentity(data.activationCycleId);
   const attempt = controlWireInteger(data.activationAttempt, 1, 2), version = controlWireInteger(data.rowVersion, 1), lease = controlWireInteger(data.leaseVersion);
   if (data.launchId !== localInferenceLaunchId(data.activationCycleId as string, attempt as 1 | 2)) invalid();
-  refs(data, ['serviceSpecRef', 'serviceSpecDigest', 'activationNonceDigest', 'containmentPlanRef', 'sandboxLaunchSpecRef']);
+  refs(data, ['serviceSpecRef', 'serviceSpecDigest', 'activationNonceDigest', 'containmentPlanRef', 'sandboxLaunchSpecRef', 'nativeInputRef']);
   const at = time(data.createdAt), deadline = time(data.activationDeadlineAt);
   if (parseCanonicalTime(deadline) - parseCanonicalTime(at) !== LOCAL_INFERENCE_ACTIVATION_MS) invalid();
   if (phase === 'reserved' ? version !== 1 || lease !== 0 : version < 2) invalid();
@@ -344,12 +347,45 @@ export function decodeLocalInferenceFailure(value: unknown): LocalInferenceActiv
     'finalAttempt', 'reason', 'launchIds', 'evidenceRefs', 'observedAt', 'failureDigest']);
   header(data); text(data.ownerPrincipalId); decodeLocalIdentity(data.activationCycleId); decodeLocalIdentity(data.serviceId);
   refs(data, ['serviceSpecRef', 'serviceSpecDigest']); const attempt = controlWireInteger(data.finalAttempt, 1, 2);
-  if (!['activation_timeout', 'sandbox_launch_failed', 'health_mismatch', 'capability_mismatch', 'containment_unprovable'].includes(data.reason as string) ||
+  if (!['activation_timeout', 'sandbox_launch_failed', 'health_mismatch', 'capability_mismatch',
+    'containment_unprovable', 'activation_cancelled_for_migration'].includes(data.reason as string) ||
       !Array.isArray(data.launchIds) || data.launchIds.length !== attempt || !Array.isArray(data.evidenceRefs) ||
       data.evidenceRefs.length < 1 || data.evidenceRefs.length > 4 || new Set(data.evidenceRefs).size !== data.evidenceRefs.length) invalid();
   data.launchIds.forEach((id, index) => { if (id !== localInferenceLaunchId(data.activationCycleId as string, (index + 1) as 1 | 2)) invalid(); });
   data.evidenceRefs.forEach(controlWireRef); time(data.observedAt); digest(data, 'failureDigest');
   return immutableSnapshot(data) as LocalInferenceActivationFailureV1;
+}
+
+/** An unresolved attempt may be positively retired later. Historical
+ * failure still names the original input, never the successor's proof. */
+export function localInferenceFailureSources(cycle: LocalInferenceActivationCycleV1, failure: LocalInferenceActivationFailureV1,
+  launches: readonly LocalInferenceServiceLaunchV1[]): readonly Readonly<{ ref: string;
+    purpose: 'local_inference_native_input' | 'process_containment_no_spawn' | 'process_containment_death' }>[] {
+  if ((cycle.phase !== 'starting_launch' && cycle.phase !== 'failed') || failure.activationCycleId !== cycle.activationCycleId ||
+      failure.ownerPrincipalId !== cycle.ownerPrincipalId || failure.serviceId !== cycle.serviceId || failure.serviceSpecRef !== cycle.serviceSpecRef ||
+      failure.serviceSpecDigest !== cycle.serviceSpecDigest || failure.finalAttempt !== cycle.activationAttempt ||
+      failure.observedAt < cycle.participants.at(-1)!.joinedAt || cycle.phase === 'failed' &&
+        (failure.observedAt > cycle.finishedAt || canonicalSha256(failure) !== cycle.failureDetailRef) ||
+      launches.length !== cycle.launchIds.length || failure.launchIds.some((id, index) => id !== cycle.launchIds[index]))
+    invalid();
+  const first = launches[0], second = launches[1];
+  if (second && (first?.phase !== 'retired' ||
+      parseCanonicalTime(second.createdAt) - parseCanonicalTime(first.retiredAt) < LOCAL_INFERENCE_RETRY_MS)) invalid();
+  const sources = launches.map((launch, index) => {
+    if (launch.launchId !== cycle.launchIds[index] || launch.activationAttempt !== index + 1 || launch.activationCycleId !== cycle.activationCycleId ||
+        launch.ownerPrincipalId !== cycle.ownerPrincipalId || launch.serviceId !== cycle.serviceId || launch.serviceSpecRef !== cycle.serviceSpecRef ||
+        launch.serviceSpecDigest !== cycle.serviceSpecDigest || launch.createdAt > failure.observedAt)
+      invalid();
+    if (index === launches.length - 1 && failure.reason === 'containment_unprovable') {
+      if (launch.phase === 'retired' && launch.retiredAt < failure.observedAt) invalid();
+      return { ref: launch.nativeInputRef, purpose: 'local_inference_native_input' as const };
+    }
+    if (launch.phase !== 'retired' || launch.retiredAt > failure.observedAt || cycle.activationAttempt === 1) invalid();
+    return { ref: launch.retirementEvidenceRef, purpose: launch.retirementKind === 'no_spawn'
+      ? 'process_containment_no_spawn' as const : 'process_containment_death' as const };
+  });
+  if (sources.length !== failure.evidenceRefs.length || sources.some((item, index) => item.ref !== failure.evidenceRefs[index])) invalid();
+  return sources;
 }
 export function localStableServiceIdentity(input: Readonly<{ service: LocalInferenceServiceSpecV1; serviceSpecRef: string }>): string {
   const service = decodeLocalInferenceServiceSpec(input.service);

@@ -18,13 +18,14 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { assertSqliteConnectionOwnedBy, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
-import { readRetainedStateOwnerHistory } from './state-owner-history.js';
+import { readRetainedStateOwnerHistory, type StateOwnerRollbackHistory } from './state-owner-history.js';
 import { readRetainedControlChannelClosure } from './control-channel.js';
 import { readControlRequest } from './rows.js';
 import { readTimeFence } from './canonical-time.js';
 import { readOwnedImportInventory } from './owned-import-inventory.js';
 import { readSignedKernelSchema } from './signed-schema.js';
 import { decodeKernelRollbackDrainingControl, type KernelRollbackDrainingControlV1 } from '../kernel/kernel-archive-data.js';
+import type { RetainedRollbackArchiveReady, RetainedRollbackRecords } from './kernel-rollback-history.js';
 
 /** Parse only complete canonical fixed documents, without exposing untrusted
  * source text, parser excerpts or nested causes in a startup diagnostic. */
@@ -43,7 +44,8 @@ function invalid(): never { throw new KernelStorageError('RECOVERY_REQUIRED', 'r
  * native package or permission to replay. Current backup/archive availability
  * is a separate rollback check; this reader makes no current-copy birth claim. */
 async function readCompletedImportHistory(native: NativeStateOwner, context: StateOwnerContext,
-  driver: SqliteDriver, artifacts: ArtifactCatalog, checkAccount: () => void, signal?: AbortSignal, allowDraining = false) {
+  driver: SqliteDriver, artifacts: ArtifactCatalog, checkAccount: () => void, signal?: AbortSignal, allowDraining = false,
+  recovery?: Readonly<{ records: RetainedRollbackRecords | RetainedRollbackArchiveReady; ownerHistory: StateOwnerRollbackHistory }>) {
   checkAccount();
   signal?.throwIfAborted(); artifacts = signal ? artifacts.withReadSignal(signal) : artifacts;
   const owner = context.filesystem;
@@ -57,9 +59,13 @@ async function readCompletedImportHistory(native: NativeStateOwner, context: Sta
   const fixed = document(observed.controlBytes);
   if ((fixed as { format?: unknown } | null)?.format === 'cliq-kernel-rollback-control-v1') {
     if (!allowDraining) return Object.freeze({ kind: 'recovery_required' as const });
-    draining = decodeKernelRollbackDrainingControl(fixed);
+    if (recovery) {
+      const current = 'restoring' in recovery.records ? recovery.records.restoring : recovery.records.ready;
+      if (canonicalSha256(fixed) !== canonicalSha256(current)) return invalid();
+      draining = recovery.records.draining;
+    } else draining = decodeKernelRollbackDrainingControl(fixed);
     current(); originalControlBytes = await artifacts.readBoundedBytes(draining.originalImportControlRef, 1_048_576); current();
-  }
+  } else if (recovery) return invalid();
   const control = decodeDocument(originalControlBytes, decodeOwnedLegacyImportControl);
   const root = stateRootIdentityForLock(owner);
   if (control.stateRootIdentityRef !== canonicalSha256(root) || control.stateRootIdentityDigest !== root.identityDigest ||
@@ -74,8 +80,11 @@ async function readCompletedImportHistory(native: NativeStateOwner, context: Sta
       draining.originalImportControlRef !== canonicalSha256(control) || draining.originalImportControlDigest !== control.controlDigest ||
       draining.originalKernelAuthorityRef !== canonicalSha256(marker) || draining.originalKernelAuthorityDigest !== marker.markerDigest ||
       draining.preparedAt < marker.publishedAt)) return invalid();
-  if (draining && canonicalSha256(await read(draining.originalKernelAuthorityRef, decodeMigrationAuthorityMarker)) !== canonicalSha256(marker))
-    return invalid();
+  if (draining) {
+    const originalAuthority = recovery?.records.originalMarker ??
+      await read(draining.originalKernelAuthorityRef, decodeMigrationAuthorityMarker);
+    if (canonicalSha256(originalAuthority) !== canonicalSha256(marker)) return invalid();
+  }
   if (marker.migrationId !== control.migrationId ||
       marker.stateRootIdentityRef !== control.stateRootIdentityRef || marker.stateRootIdentityDigest !== control.stateRootIdentityDigest ||
       marker.stateRootCanonicalAbsolutePath !== control.stateRootCanonicalAbsolutePath || marker.receiptRef !== control.committedReceiptRef ||
@@ -160,7 +169,7 @@ async function readCompletedImportHistory(native: NativeStateOwner, context: Sta
     current(); if (event.kind === 'entry' && (event.entry.sourceIdentity.ownerUid !== root.ownerUid ||
         event.entry.backupIdentity.ownerUid !== root.ownerUid)) return invalid();
   }
-  const history = await readRetainedStateOwnerHistory(driver, artifacts, context.ownerEpoch); current();
+  const history = await readRetainedStateOwnerHistory(driver, artifacts, context.ownerEpoch, recovery?.ownerHistory); current();
   const original = history.entries[preparation.preparingOwner.ownerEpoch - 1];
   if (!original || preparation.preparingOwnerHistoryThroughEpoch !== preparation.preparingOwner.ownerEpoch) return invalid();
   // Compare immutable fields against the retained actual row. Never rewrite
@@ -210,7 +219,7 @@ async function readCompletedImportHistory(native: NativeStateOwner, context: Sta
   if (final.kind !== 'controlled' || !final.controlBytes.equals(observed.controlBytes) ||
       !final.authorityBytes?.equals(observed.authorityBytes)) return invalid();
   return Object.freeze({ kind: 'completed' as const, control, authority: marker, preparation, request, response, candidate, legacy, ready, sourceAuth,
-    backup, inventory, image, generation, schema, authMarker,
+    backup, inventory, image, generation, schema, authMarker, retainedOwnerHistory: history,
     currentDraining: draining,
     originalDocuments: Object.freeze({ controlBytes: Buffer.from(originalControlBytes), authorityBytes: Buffer.from(observed.authorityBytes),
       currentControlBytes: Buffer.from(observed.controlBytes), authMarkerBytes: canonicalJsonBytes(authMarker) }), assertUnchanged });
@@ -230,10 +239,11 @@ export async function readInstalledCompletedImportUnderShared(native: NativeStat
  * Returned decoded data is not permission to adopt/copy/restore old objects;
  * the separate current inspector must still observe every original identity. */
 export async function readInstalledCompletedImportUnderExclusive(native: NativeStateOwner, context: StateOwnerContext,
-  gate: HeldMigrationCredentialGate, driver: SqliteDriver, artifacts: ArtifactCatalog, signal?: AbortSignal) {
+  gate: HeldMigrationCredentialGate, driver: SqliteDriver, artifacts: ArtifactCatalog, signal?: AbortSignal,
+  recovery?: Readonly<{ records: RetainedRollbackRecords | RetainedRollbackArchiveReady; ownerHistory: StateOwnerRollbackHistory }>) {
   const check = () => assertHeldMigrationGateOwner(native, gate, context.filesystem);
   check();
-  const result = await readCompletedImportHistory(native, context, driver, artifacts, check, signal, true);
+  const result = await readCompletedImportHistory(native, context, driver, artifacts, check, signal, true, recovery);
   if (result.kind !== 'completed') return invalid();
   return result;
 }

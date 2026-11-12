@@ -58,7 +58,8 @@ export function localCycleFixture(): Extract<LocalInferenceActivationCycleV1, { 
     localModelRegistrationRef: localRef(registration), localModelRegistrationDigest: registration.registrationDigest,
     serviceId: service.serviceId, serviceSpecRef: localRef(service), serviceSpecDigest: service.serviceSpecDigest, cycleOrdinal,
     participants: [{ kind: 'run_submission' as const, requestId: '019a3c00-0000-7000-8000-000000000001', requestDigest: localRef('request'),
-      runSubmitRequestRef: localRef('wire-request'), admissionKey: 'A'.repeat(43), admissionIntentDigest: localRef('admission'), joinedAt: LOCAL_AT }],
+      runSubmitRequestRef: localRef('wire-request'), channelIdentityRef: localRef('channel'),
+      channelIdentityDigest: localRef('channel-digest'), admissionKey: 'A'.repeat(43), admissionIntentDigest: localRef('admission'), joinedAt: LOCAL_AT }],
     rowVersion: 1, createdAt: LOCAL_AT, phase: 'starting_launch' as const, activationAttempt: 1 as const, launchIds: [currentLaunchId], currentLaunchId };
   return { ...core, cycleDigest: localRef(core) };
 }
@@ -67,6 +68,7 @@ export function localLaunchFixture(): Extract<LocalInferenceServiceLaunchV1, { p
   return { schemaVersion: 1, serviceId: cycle.serviceId, launchId: cycle.currentLaunchId, ownerPrincipalId: cycle.ownerPrincipalId,
     serviceSpecRef: cycle.serviceSpecRef, serviceSpecDigest: cycle.serviceSpecDigest, supervisorInstanceId: 'literal-supervisor',
     activationCycleId: cycle.activationCycleId, activationAttempt: 1, activationNonceDigest: localRef('activation-nonce'),
-    containmentPlanRef: localRef('plan'), sandboxLaunchSpecRef: localRef('sandbox-launch'), rowVersion: 1, leaseVersion: 0,
+    containmentPlanRef: localRef('plan'), sandboxLaunchSpecRef: localRef('sandbox-launch'), nativeInputRef: localRef('native-input'),
+    rowVersion: 1, leaseVersion: 0,
     createdAt: LOCAL_AT, activationDeadlineAt: addCanonicalDuration(LOCAL_AT, 120000), phase: 'reserved' };
 }

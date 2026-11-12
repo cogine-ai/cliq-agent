@@ -15,7 +15,7 @@ import { readNativeCallbackEvidence } from './native-callback-evidence.js';
 
 const original = { commit: 'ba804a59dcadee80cb41c822e2d0e32198462f20', tree: 'e35a127d9e90848e4c569aa03b398d56a59a025d',
   native: '73cd16a6f23e9054c7a0b50ec6c1dcdeb47a1561f180f661686e1a63f74140a9' };
-const candidateNative = '2d6d38363e9ce2319051752e4f55e34239f1ad546f22b08b72015a66ca065717';
+const candidateNative = 'd4dee913ca605ad7d4374060b2596866061f84af349d7d5a79acd2cf7050bd85';
 const overlays = Object.freeze({
   'scripts/kernel/testing/model-broker-preparation-lifecycle-child.mjs': '0454d5fd45921b3de29599f383253b28252848a3b765a16ff4de8a12940988c1',
   'scripts/kernel/testing/credential-platform-timeout-child.mjs': 'c019ef4df83956e3aabf13ac7acafebb8aec9c86dc260382991837685e8df982',

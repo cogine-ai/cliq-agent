@@ -849,6 +849,35 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
   }
 });
 
+if (process.platform === 'linux') for (const stage of ['package', 'revalidate'] as const)
+test(`opening an installed selection cancels its real ${stage} verification and leaves no usable selection`, async () => {
+  const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-open-cancel-')));
+  const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
+  const diagnostic = channel(INSTALLED_WORK_CHANNEL), stop = new AbortController();
+  const reason = new Error('original startup cancelled');
+  let armed = false, observed = false, reopened: HeldInstalledRuntime | undefined;
+  const subscriber = (value: unknown) => {
+    const work = value as InstalledWorkSnapshot;
+    if (armed && !observed && work?.[stage]?.started > work[stage].completed) {
+      observed = true; stop.abort(reason);
+    }
+  };
+  try {
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, Buffer.alloc(3 * 1_048_576 + 17, 0x61));
+    const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
+    await runtime.installInitial({ packageRoot, stateRoot });
+    diagnostic.subscribe(subscriber); armed = true;
+    await assert.rejects(runtime.openSelected(stateRoot, stop.signal), error => error === reason);
+    assert(observed, 'cancellation occurs after entering the actual original verification');
+    armed = false;
+    reopened = await runtime.openSelected(stateRoot);
+    await reopened.assertHeld();
+  } finally {
+    armed = false; diagnostic.unsubscribe(subscriber); await reopened?.close();
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 if (process.platform === 'linux') test('a cancelled original revalidation job joins before selected close and a fresh selection verifies all image bytes', async () => {
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-image-cancel-')));
   const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');

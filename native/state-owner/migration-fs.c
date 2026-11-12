@@ -4,6 +4,7 @@
 #include "migration-legacy-locks.h"
 typedef struct migration_backup_node migration_backup_node;
 typedef struct migration_publication_state migration_publication_state;
+typedef struct migration_process_cut migration_process_cut;
 static int migrate_backup_retire(migration_filesystem *scope);
 static void migrate_backup_free(migration_filesystem *scope);
 static napi_value migrate_backup_next(napi_env env, napi_callback_info info);
@@ -30,6 +31,12 @@ static napi_value migrate_publication_read_preparation(napi_env env, napi_callba
 static napi_value migrate_publication_read_rendezvous(napi_env env, napi_callback_info info);
 static napi_value migrate_publication_assert_credential_cutover(napi_env env, napi_callback_info info);
 static napi_value migrate_publication_inventory_page(napi_env env, napi_callback_info info);
+static int mq_scope_retire(migration_filesystem *scope);
+static napi_value migrate_process_begin(napi_env env, napi_callback_info info);
+static napi_value migrate_process_step(napi_env env, napi_callback_info info);
+static napi_value migrate_process_settle_package(napi_env env, napi_callback_info info);
+static napi_value migrate_process_cancel(napi_env env, napi_callback_info info);
+static napi_value migrate_process_check_before_control(napi_env env, napi_callback_info info);
 
 typedef struct current_migration_inspection current_migration_inspection;
 static int ci_custody(migration_filesystem *scope);
@@ -71,6 +78,7 @@ struct migration_filesystem {
     migration_publication_state *publication;
     migration_legacy_locks *legacy_locks;
     current_migration_inspection *inspection;
+    migration_process_cut *process_cut;
 };
 static const napi_type_tag migration_filesystem_tag = {0x1879e20bd5a44c86ULL, 0xac9d105e7f11b2aaULL};
 
@@ -209,6 +217,7 @@ static int migrate_scope_release_candidate(migration_filesystem *scope, napi_env
 }
 static int migrate_scope_retire(migration_filesystem *scope) {
     if (scope->uncertain || scope->children || migrate_legacy_locks_can_retire(scope) != 0) return -1;
+    if (mq_scope_retire(scope) != 0) return -1;
     if (ci_retire(scope) != 0 || migrate_publication_retire(scope) != 0) return -1;
     if (migrate_scope_close_fd(scope, &scope->context_fd) != 0) return -1;
     if (migrate_backup_retire(scope) != 0) return -1;
@@ -425,6 +434,11 @@ static napi_value acquire_migration_filesystem(napi_env env, napi_callback_info 
         {"prepareLegacyLocksNext", NULL, migrate_legacy_locks_prepare_next, NULL, NULL, NULL, napi_default, NULL},
         {"assertLegacyLocks", NULL, migrate_legacy_locks_assert, NULL, NULL, NULL, napi_default, NULL},
         {"releaseLegacyLocks", NULL, migrate_legacy_locks_release, NULL, NULL, NULL, napi_default, NULL},
+        {"beginLegacyProcessCut", NULL, migrate_process_begin, NULL, NULL, NULL, napi_default, NULL},
+        {"stepLegacyProcessCut", NULL, migrate_process_step, NULL, NULL, NULL, napi_default, NULL},
+        {"settleLegacyProcessPackage", NULL, migrate_process_settle_package, NULL, NULL, NULL, napi_default, NULL},
+        {"cancelLegacyProcessCut", NULL, migrate_process_cancel, NULL, NULL, NULL, napi_default, NULL},
+        {"checkBeforeLegacyProcessControl", NULL, migrate_process_check_before_control, NULL, NULL, NULL, napi_default, NULL},
         {"observeRoots", NULL, migrate_publication_roots, NULL, NULL, NULL, napi_default, NULL},
         {"publishInitialSpine", NULL, migrate_publication_initial, NULL, NULL, NULL, napi_default, NULL},
         {"advanceControl", NULL, migrate_publication_control, NULL, NULL, NULL, napi_default, NULL},
@@ -458,4 +472,5 @@ failed:
 #include "migration-backup.c"
 #include "migration-publication.c"
 #include "migration-legacy-locks.c"
+#include "migration-process-quiescence.h"
 #include "migration-current-inspector.c"

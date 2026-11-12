@@ -22,6 +22,20 @@ test('ordinary command success requires actual child, complete input and all ori
   } finally { scan.close(); }
 });
 
+test('the delayed bootstrap fixture admits three minutes and preserves the ordinary ceiling', async () => {
+  const scan = scanner();
+  const command = { executable: process.execPath, args: ['--version'], cwd: tmpdir(), env: {}, scanner: scan };
+  try {
+    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs: 180_000 }), { code: 'ERR_ASSERTION' });
+    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs: 180_001, fixtureScope: 'installed_delayed_bootstrap' }),
+      { code: 'ERR_ASSERTION' });
+    assert.equal(scan.stats().streamsOpened, 0);
+    const result = await runInstalledDailyCommand({ ...command, deadlineMs: 180_000, fixtureScope: 'installed_delayed_bootstrap' });
+    assert.equal(result.stdout.toString().trim(), process.version);
+    assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); }
+});
+
 test('a real nonzero child records only its actual exit, byte counts and joined resources', async () => {
   const scan = scanner(), privateOutput = 'untrusted-command-error-must-not-be-retained';
   try {
@@ -54,6 +68,27 @@ test('an actual exec refusal distinguishes no spawned process from the joined ch
     });
     assert.equal(scan.stats().streamsClosed, 2);
   } finally { scan.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('failed daily setup retains only scanned fixed credential phases and complete work counters', async () => {
+  const scan = scanner();
+  const output = 'unretained private diagnostic\nCLIQ_CREDENTIAL_PHASE_V1:history\n' +
+    'CLIQ_INSTALLED_WORK_V1:credential:1:1:7:3:0:0:0:0:0:0:0:0\n' +
+    'CLIQ_CREDENTIAL_PHASE_V1:first_supervisor\nCLIQ_CREDENTIAL_PHASE_V1:unknown\n';
+  try {
+    await assert.rejects(runInstalledDailyCommand({ executable: process.execPath,
+      args: ['-e', `process.stdin.resume();process.stdin.on('end',()=>process.stderr.write(${JSON.stringify(output)},()=>process.exit(7)));`],
+      cwd: tmpdir(), env: {}, deadlineMs: 3_000, scanner: scan }), error => {
+      assert(error instanceof InstalledDailyCommandError);
+      assert.equal(error.diagnostic.reason, 'exit'); assert.equal(error.launcherAndPipesJoined, true);
+      assert.deepEqual(error.diagnostic.credentialPhases?.map(value => value.phase), ['history', 'first_supervisor']);
+      assert.deepEqual(error.diagnostic.installedWork?.snapshots.map(value => value.package),
+        [{ started: 1, completed: 1, bytesRead: 7, spanElapsedMs: 3 }]);
+      assert(!JSON.stringify(error).includes('unretained private diagnostic'));
+      assert(!JSON.stringify(error).includes('unknown')); return true;
+    });
+    assert.equal(scan.stats().streamsClosed, 2);
+  } finally { scan.close(); }
 });
 
 test('real oversized output preserves the original two-MiB refusal independently of the secret scanner', async () => {

@@ -19,7 +19,11 @@ import { readCanonicalArtifact } from '../../../src/state/agent-context.js';
 import { ResourceRetirementError } from '../../../src/state/errors.js';
 
 const source = await readFile(new URL('../../../src/state/store.ts', import.meta.url), 'utf8');
-const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+const between = (start: string, end: string) => {
+  const from = source.indexOf(start), to = source.indexOf(end, from + start.length);
+  assert(from >= 0 && to > from, `expected exact Store boundaries ${start} and ${end}`);
+  return source.slice(from, to);
+};
 
 test('terminal retirement forwards only the existing complete recovery reader phases', async () => {
   // Execute only the real inert observer, never a Store, Run or recovery cut.
@@ -90,7 +94,7 @@ test('assembly fixed observations remain outside authority input and precede onl
   assert.equal((assembly.getText().match(/reportInstalledRunAssemblyPhase\(/gu) ?? []).length, assemblyStages.length + 1,
     'only the eight original boundaries and the contained verifier observer forwarding are present');
   assert.match(code, /type InstalledRunAssemblyPhase = Extract<InstalledApplyDiagnosticStage, `submit_assembly_\$\{string\}`>;/u);
-  const submit = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  const submit = between('private async submitInstalledRunOwned(', 'async startInstalledRuns()');
   assert.match(submit, /credentialBindings: authority.bindings, controlledHome \}, signal, diagnosis\?\.stage\);/u);
   assert.match(submit, /catch \(error\) \{\s*diagnosis\?\.failure\(error, this.closeRequested\);\s*throw error;/u);
 });
@@ -242,7 +246,7 @@ for (const fault of ['cancel', 'ordinary', 'retirement'] as const)
 
 test('submit diagnosis preserves the registered producer, actual admission resolution and untouched catch error', async () => {
   // Execute the real inert catch only, never a substitute Store or authority.
-  const body = between('private async submitInstalledRunOwned(', '/** One bounded production lane,');
+  const body = between('private async submitInstalledRunOwned(', 'async startInstalledRuns()');
   assert.match(body, /const diagnosis = beginInstalledSubmitDiagnostic\(\);\s*try \{/u);
   for (const [stage, operation] of [['submit_preflight_authority', 'await validateControlChannelClosure'],
     ['submit_source_capture', 'const source = await this.captureSubmittedSource'],
@@ -421,8 +425,9 @@ test('authorization diagnosis records only existing await boundaries and rethrow
     '      maxCandidateGenerations: decision.maxCandidateGenerations, maxAttemptsPerCandidate: decision.maxAttemptsPerCandidate\n' +
     "    } : decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
     "      ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)\n" +
+    "      : decision.purpose === 'mcp_stdio' ? await selectMcpStdioIdentity(artifacts, runtime, request as McpIdentityCreateRequest, signal)\n" +
     '      : await (async () => {\n        const selected = await readRetainedVerifierToolchain'),
-  'the unchanged verifier selection remains inside its execution-only branch, after source-specific selection');
+  'the verifier selection stays in its execution-only branch, after source and MCP identity selection');
   assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error\);\s*throw error;/u);
   const transaction = body.slice(body.indexOf('driver.transaction(connection =>'), body.indexOf('    requireHealthyFence(outcome);'));
   assert(!transaction.includes('diagnosis'), 'no subscriber callback runs inside the original authoritative transaction');
@@ -453,7 +458,7 @@ test('the driver captures its original phase before deletion and records only th
 });
 
 test('the single pre-close snapshot is subscription gated and precedes the original synchronous revocation', () => {
-  const body = between('beginClose(): void {', 'const credential = installedCredentialFinalizers.get(this);');
+  const body = between('beginClose(): void {', 'revokeInstalledCredentialInspection(installedCredentialFinalizers.get(this));');
   assert.match(body, /!this.closeRequested && this.installedRuntime && installedRunDiagnosticsSubscribed\(\)/u);
   assert(body.indexOf('noteInstalledStoreStop(') < body.indexOf('this.closeRequested = true;'), 'snapshot must precede revocation');
   assert.match(body, /phases: \[\.\.\.this.installedRunPhases.values\(\)\]/u);
@@ -575,7 +580,7 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const stopPhaseRead = body.indexOf('const stopPhase = readInstalledStoreStopPhaseJournal(text,');
   assert(stopPhaseRead > body.indexOf('const observation = readInstalledPublicationStageJournal(text,'));
   assert(body.includes('originalPidObservedAbsent: true, phase: stopPhase.phase'));
-  const optionalAssembly = body.indexOf('if (originalStopFailed) try {');
+  const optionalAssembly = body.indexOf('if (sameStoppedLifetime && originalStopFailed) try {');
   assert(optionalAssembly > body.indexOf("report.publicationWorkDiagnostics = { diagnosticOnly: true, kind: 'observed', ...work,"),
     'the original bounded publication observations are retained before an optional assembly query can spend the remaining deadline');
   const publicationBody = body.slice(0, optionalAssembly);
@@ -589,6 +594,7 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
     'the original window sample and deadline check remain; V2 rechecks that same unchanged deadline after its bounded decode');
   assert(!/report\.installedWritersJoined\s*=|scanner\.openStream\(/u.test(body), 'a phase is not resource-join evidence and creates no new scanner stream');
   assert(!/originalServerJoined: true|qualified: true|report\.storeFailureDiagnostics =/u.test(body), 'arrival data never upgrades exit-summary or outcome proof');
+  assert.match(body, /originalStopSucceeded: sameStoppedLifetime && !originalStopFailed/u);
 });
 
 test('safe scanner failure diagnosis is sticky and snapshots only original counts after writers join', async () => {

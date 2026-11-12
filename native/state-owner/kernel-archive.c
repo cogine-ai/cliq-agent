@@ -16,6 +16,7 @@ enum kernel_archive_phase {
 enum kernel_archive_role { KA_MAIN, KA_JOURNAL };
 typedef struct kernel_archive kernel_archive;
 typedef struct kernel_archive_namespace kernel_archive_namespace;
+typedef struct kernel_archive_models kernel_archive_models;
 typedef struct kernel_archive_file {
     sqlite3_file base;
     kernel_archive *held;
@@ -31,9 +32,9 @@ struct kernel_archive {
     gid_t gid;
     pthread_t main_thread;
     uint64_t generation;
-    int root_fd, migration_fd, collection_fd, directory_fd, control_fd;
+    int root_fd, runtime_fd, migration_fd, collection_fd, directory_fd, control_fd;
     int rejection_parent_fd, rejection_fd, read_rejection_fd, image_fd, journal_fd;
-    struct stat root, migration, collection, directory, control;
+    struct stat root, runtime, migration, collection, directory, control;
     struct stat rejection_parent, rejection, read_rejection, birth, image, journal, hash_before;
     int gate_fd, owner_lock_fd;
     struct stat gate, owner_lock;
@@ -52,9 +53,16 @@ struct kernel_archive {
     uint64_t journal_births, journal_deletions, read_opens, read_closes, read_open_cut;
     kernel_archive_file *main_file;
     kernel_archive_namespace *cas;
+    kernel_archive_models *models;
+    rw_archive *runtime_witnesses;
+    migration_filesystem *rollback_source;
+    napi_ref rollback_reference;
 };
 static int kans_custody(kernel_archive *held);
 static int kans_retire(kernel_archive *held);
+static int kam_custody(kernel_archive *held);
+static int kam_retire(kernel_archive *held);
+static int kam_capture_complete(kernel_archive *held);
 static const napi_type_tag kernel_archive_tag = {0xc079250a64b3391fULL, 0xb0e72c63178d95abULL};
 /* One mutex protects the active pointer and every SQLite lease/FD operation.
  * It deliberately does not identify a persistent libuv worker pthread. */
@@ -115,6 +123,13 @@ static int ka_local_model_store_absent(const kernel_archive *held) {
     struct stat observed;
     return fstatat(held->root_fd, "local-models", &observed, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
 }
+/* Retained native service witnesses need their original-claim visitor too.
+ * Until that complete namespace is captured, even an empty present directory
+ * is not silently called an absent/archived service resource domain. */
+static int ka_local_inference_runtime_absent(const kernel_archive *held) {
+    struct stat observed;
+    return fstatat(held->runtime_fd, "local-inference", &observed, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT;
+}
 /* Worker-safe custody observation only: no NAPI, main-thread guard, NSS lookup,
  * clock or mutable StateOwner bookkeeping is read on a SQLite worker thread.
  * Strong parent references and the original borrower count prevent retirement. */
@@ -129,7 +144,7 @@ static int ka_custody(kernel_archive *held) {
         observed.st_uid != held->uid || (observed.st_mode & 07777) != 0600 || observed.st_nlink != 1 ||
         fstat(held->owner_lock_fd, &observed) != 0 || !same_inode(&observed, &held->owner_lock) ||
         observed.st_uid != held->uid || (observed.st_mode & 07777) != 0600 || observed.st_nlink != 1 ||
-        !ka_local_model_store_absent(held) ||
+        !ka_named_directory(held, held->root_fd, "runtime", held->runtime_fd, &held->runtime) ||
         !ka_named_directory(held, held->root_fd, "migration", held->migration_fd, &held->migration) ||
         !ka_named_directory(held, held->migration_fd, "kernel-archives", held->collection_fd, &held->collection) ||
         !ka_named_directory(held, held->collection_fd, held->archive_id, held->directory_fd, &held->directory) ||
@@ -147,7 +162,12 @@ static int ka_custody(kernel_archive *held) {
     static const char *const forbidden[] = {"kernel.sqlite3-wal", "kernel.sqlite3-shm"};
     for (size_t index = 0; index < sizeof(forbidden) / sizeof(forbidden[0]); ++index)
         if (fstatat(held->directory_fd, forbidden[index], &observed, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return -1;
-    return kans_custody(held);
+    if (kans_custody(held) != 0) return -1;
+    if (held->runtime_witnesses) {
+        if (!rw_source_custody(held->runtime_witnesses)) return -2;
+        if (rw_custody(held->runtime_witnesses) != 0) return -1;
+    } else if (!ka_local_inference_runtime_absent(held)) return -2;
+    return kam_custody(held);
 }
 static int ka_main_context(kernel_archive *held, napi_env env) {
     return kernel_global_main_thread() && ka_process(held) && held->env == env &&
@@ -155,8 +175,14 @@ static int ka_main_context(kernel_archive *held, napi_env env) {
 }
 static int ka_main_check(kernel_archive *held, napi_env env) {
     if (!ka_main_context(held, env) || held->phase == KA_RETIRED || atomic_load(&held->uncertain)) return -1;
-    if (migration_credential_check(held->binding, env) != 0 || ka_custody(held) != 0) {
+    if (migration_credential_check(held->binding, env) != 0) {
         ka_main_poison(held);
+        return -1;
+    }
+    int custody = ka_custody(held);
+    if (custody != 0) {
+        if (custody == -2) held->failed = 1; /* source data refusal, not a fake FD close failure */
+        else ka_main_poison(held);
         return -1;
     }
     return 0;
@@ -233,7 +259,8 @@ static napi_value ka_observation(napi_env env, kernel_archive *held, int sealed)
         !ka_string_member(env, result, "migrationId", held->migration_id) ||
         !ka_string_member(env, result, "archiveId", held->archive_id) ||
         !ka_string_member(env, result, "controlContentDigest", held->control_content_digest) ||
-        !ka_string_member(env, result, "localModelStore", "absent") ||
+        !ka_string_member(env, result, "localInferenceRuntime", held->runtime_witnesses ? "present" : "absent") ||
+        !ka_string_member(env, result, "localModelStore", held->models ? "present" : "absent") ||
         !ka_count_member(env, result, "mode", (uint64_t)((sealed ? held->image.st_mode : held->birth.st_mode) & 07777)) ||
         !ka_count_member(env, result, "linkCount", (uint64_t)(sealed ? held->image.st_nlink : held->birth.st_nlink))) return NULL;
     if (sealed && (!ka_string_member(env, result, "sha256", held->image_digest) ||
@@ -486,7 +513,11 @@ static napi_value ka_end_read(napi_env env, napi_callback_info info) {
 }
 static int ka_retire(kernel_archive *held) {
     if (atomic_load(&held->uncertain) || kernel_archive_active == held || held->main_live || held->journal_live) return -1;
-    if (ka_retire_journal(held) != 0 || kans_retire(held) != 0) return -1;
+    int incomplete_models = !kam_capture_complete(held);
+    if (ka_retire_journal(held) != 0 || kans_retire(held) != 0 || kam_retire(held) != 0) return -1;
+    int incomplete_runtime = held->runtime_witnesses && held->runtime_witnesses->phase != RW_COMPLETE;
+    if (rw_retire(held->runtime_witnesses) != 0) return -1;
+    held->runtime_witnesses = NULL;
     /* Only exact original, empty, private rejection directories are removed.
      * They are not persistent archive data and do not accumulate per attempt.
      * A partial/failed removal is never relabelled as a joined clean scope. */
@@ -521,6 +552,11 @@ static int ka_retire(kernel_archive *held) {
         held->binding->borrowers--;
         held->borrowed = 0;
     }
+    if (held->rollback_source) {
+        if (ci_return_original_archive_loan(held->env, held->rollback_source, held->rollback_reference,
+            held->failed || atomic_load(&held->cancelled) || incomplete_runtime || incomplete_models || !held->readonly) != 0) return -1;
+        held->rollback_source = NULL; held->rollback_reference = NULL;
+    }
     held->phase = KA_RETIRED;
     return 0;
 }
@@ -529,7 +565,9 @@ static napi_value ka_close(napi_env env, napi_callback_info info) {
     if (!held) return NULL;
     if (held->phase == KA_RETIRED) return ka_undefined(env);
     if (ka_main_lock(env, held) != 0) return NULL;
-    int observed = ka_main_check(held, env) == 0;
+    int custody = ka_custody(held);
+    int observed = ka_main_context(held, env) && migration_credential_check(held->binding, env) == 0 &&
+        !atomic_load(&held->uncertain) && (custody == 0 || (custody == -2 && (held->failed || atomic_load(&held->cancelled))));
     /* Namespace descriptors are ours to consume even after custody drift.
      * Consume all of them once, while retaining poisoned Owner/EX rather than
      * confusing a descriptor join with successful archive qualification. */
@@ -555,6 +593,8 @@ static int ka_hold_directory(kernel_archive *held, int parent, const char *leaf,
     return !created || (fsync(*descriptor) == 0 && fsync(parent) == 0) ? 0 : -1;
 }
 #include "kernel-archive-namespace.h"
+#include "kernel-archive-model-store.h"
+#include "kernel-archive-runtime-witness-bindings.h"
 
 static int ka_make_nonce(kernel_archive *held) {
     unsigned char bytes[32];
@@ -574,13 +614,13 @@ static int ka_make_nonce(kernel_archive *held) {
     return 0;
 }
 static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
-    size_t count = 5;
-    napi_value arguments[5];
+    size_t count = 6;
+    napi_value arguments[6];
     bool tagged = false, buffer = false;
     migration_credential_gate *binding = NULL;
     void *control = NULL;
     size_t control_size;
-    if (!kernel_global_main_thread() || napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || count != 4 ||
+    if (!kernel_global_main_thread() || napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || (count != 4 && count != 5) ||
         napi_check_object_type_tag(env, arguments[0], &migration_credential_tag, &tagged) != napi_ok || !tagged ||
         napi_unwrap(env, arguments[0], (void **)&binding) != napi_ok || migration_credential_check(binding, env) != 0 ||
         binding->borrowers == UINT_MAX || kernel_archive_generation == UINT64_MAX ||
@@ -598,6 +638,7 @@ static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
     held->pid = getpid(); held->uid = geteuid(); held->gid = getegid(); held->main_thread = pthread_self();
     held->generation = ++kernel_archive_generation;
     held->root_fd = binding->owner->root_fd; held->root = binding->owner->root;
+    held->runtime_fd = binding->owner->runtime_fd; held->runtime = binding->owner->runtime;
     held->gate_fd = binding->gate->gate_fd; held->gate = binding->gate->file;
     held->owner_lock_fd = binding->owner->lock_fd; held->owner_lock = binding->owner->lock;
     held->migration_fd = held->collection_fd = held->directory_fd = held->control_fd = -1;
@@ -605,7 +646,23 @@ static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
     if (!read_component(env, arguments[1], held->migration_id, sizeof(held->migration_id), 43) ||
         !read_component(env, arguments[2], held->archive_id, sizeof(held->archive_id), 43)) goto failed;
     struct stat cwd;
-    if (stat(".", &cwd) != 0 || !same_inode(&cwd, &held->root) || !ka_local_model_store_absent(held)) goto failed;
+    if (stat(".", &cwd) != 0 || !same_inode(&cwd, &held->root) ||
+        !ka_named_directory(held, held->root_fd, "runtime", held->runtime_fd, &held->runtime)) goto failed;
+    napi_valuetype model_type = napi_null;
+    if (count == 5 && napi_typeof(env, arguments[4], &model_type) != napi_ok) goto failed;
+    if (model_type != napi_null) {
+        int loan = ci_take_original_archive_loan(env, arguments[4], binding, &held->rollback_source, &held->rollback_reference);
+        if (loan < 0) goto failed;
+        if (loan == 0) {
+            current_migration_inspection *source = held->rollback_source->inspection;
+            if (strcmp(held->migration_id, held->rollback_source->migration_id) || strcmp(held->archive_id, source->archive_id)) goto failed;
+            if (source->model_source && kam_attach(held, NULL, source->model_source) != 0) goto failed;
+            if (source->runtime_witnesses && (rw_open_source(env, binding, &held->runtime_witnesses) != 0 ||
+                !source_metadata_same(&source->runtime_witnesses->source, &held->runtime_witnesses->source))) goto failed;
+        } else if (kam_attach(held, arguments[4], NULL) != 0) goto failed;
+    }
+    if ((!held->models && !ka_local_model_store_absent(held)) ||
+        (!held->runtime_witnesses && !ka_local_inference_runtime_absent(held))) goto failed;
     if (napi_create_reference(env, arguments[0], 1, &held->binding_ref) != napi_ok) {
         ka_main_poison(held);
         return ka_error(env, held, "archive parent reference was not retained");
@@ -627,7 +684,8 @@ static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
         ka_hold_directory(held, held->root_fd, "file:", &held->rejection_parent_fd, &held->rejection_parent, 0) != 0 ||
         ka_hold_directory(held, held->rejection_parent_fd, held->rejection_leaf, &held->rejection_fd, &held->rejection, 1) != 0 ||
         ka_hold_directory(held, held->migration_fd, "kernel-archives", &held->collection_fd, &held->collection, 0) != 0 ||
-        ka_hold_directory(held, held->collection_fd, held->archive_id, &held->directory_fd, &held->directory, 1) != 0) goto failed;
+        ka_hold_directory(held, held->collection_fd, held->archive_id, &held->directory_fd, &held->directory, 1) != 0 ||
+        (held->runtime_witnesses && rw_bind_archive(held->runtime_witnesses, held->directory_fd, &held->directory) != 0)) goto failed;
     held->image_fd = openat(held->directory_fd, "kernel.sqlite3", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (held->image_fd < 0 || fstat(held->image_fd, &held->birth) != 0 || !ka_regular(held, &held->birth, 0600) ||
         held->birth.st_size != 0 || held->birth.st_dev != held->root.st_dev) goto failed;
@@ -648,11 +706,26 @@ static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
         {"identity", NULL, ka_identity, NULL, NULL, NULL, napi_default, NULL},
         {"beginRead", NULL, ka_begin_read, NULL, NULL, NULL, napi_default, NULL},
         {"endRead", NULL, ka_end_read, NULL, NULL, NULL, napi_default, NULL},
-        {"beginCasCapture", NULL, kans_begin, NULL, NULL, NULL, napi_default, NULL},
-        {"captureCasNext", NULL, kans_next, NULL, NULL, NULL, napi_default, NULL},
+        {"beginModelCapture", NULL, kam_begin, NULL, NULL, NULL, napi_default, NULL},
+        {"captureModelNext", NULL, kam_next, NULL, NULL, NULL, napi_default, NULL},
+        {"modelCaptureIdentity", NULL, kam_identity, NULL, NULL, NULL, napi_default, NULL},
+        {"beginModelVerification", NULL, kam_begin_verify, NULL, NULL, NULL, napi_default, NULL},
+        {"verifyModelNext", NULL, kam_verify_next, NULL, NULL, NULL, napi_default, NULL},
+        {"beginRuntimeWitnessCapture", NULL, karw_begin, NULL, NULL, NULL, napi_default, NULL},
+        {"beginRetiredRuntimeWitnessObservation", NULL, karw_begin_observe, NULL, NULL, NULL, napi_default, NULL},
+        {"observeRetiredRuntimeWitnessNext", NULL, karw_observe_next, NULL, NULL, NULL, napi_default, NULL},
+        {"retiredRuntimeWitnessObservation", NULL, karw_observation, NULL, NULL, NULL, napi_default, NULL},
+        {"beginRuntimeWitnessEntry", NULL, karw_begin_entry, NULL, NULL, NULL, napi_default, NULL},
+        {"captureRuntimeWitnessEntryNext", NULL, karw_copy_next, NULL, NULL, NULL, napi_default, NULL},
+        {"beginRuntimeWitnessSeal", NULL, karw_seal, NULL, NULL, NULL, napi_default, NULL},
+        {"verifyRuntimeWitnessPackNext", NULL, karw_verify_next, NULL, NULL, NULL, napi_default, NULL},
+        {"runtimeWitnessCaptureIdentity", NULL, karw_identity, NULL, NULL, NULL, napi_default, NULL},
+        {"beginRuntimeWitnessRecheck", NULL, karw_recheck, NULL, NULL, NULL, napi_default, NULL},
+        {"beginCasCapture", NULL, kam_begin_cas, NULL, NULL, NULL, napi_default, NULL},
+        {"captureCasNext", NULL, kam_cas_next, NULL, NULL, NULL, napi_default, NULL},
         {"casCaptureIdentity", NULL, kans_identity, NULL, NULL, NULL, napi_default, NULL},
         {"readCasCaptureEntries", NULL, kans_entries, NULL, NULL, NULL, napi_default, NULL},
-        {"beginManifest", NULL, kans_begin_manifest, NULL, NULL, NULL, napi_default, NULL},
+        {"beginManifest", NULL, kam_begin_manifest, NULL, NULL, NULL, napi_default, NULL},
         {"sealManifestNext", NULL, kans_manifest_next, NULL, NULL, NULL, napi_default, NULL},
         {"manifestIdentity", NULL, kans_manifest_identity, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, ka_close, NULL, NULL, NULL, napi_default, NULL}
@@ -668,6 +741,7 @@ static napi_value create_kernel_archive(napi_env env, napi_callback_info info) {
     }
     return result;
 failed:
+    held->failed = 1;
     if (ka_retire(held) != 0) {
         ka_main_poison(held);
         return ka_error(env, held, "archive creation failed with original custody unresolved");

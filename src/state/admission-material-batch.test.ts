@@ -249,14 +249,21 @@ test('installed model material remains inside the original full admission and ca
   const assembly = source.slice(start, end), phases = ['await publishInstalledModelMaterial({', 'await materialFor(installed, reads, assembly, signal, undefined, driver)',
     'validateRunAssembly(', 'verifyToolRuntimeAuthority(', 'const sandboxProfileRef = publishedSandboxRef ??', 'await prepareInstalledVerifierAssembly(',
     'await artifacts.publishCanonical(policy, policy.format)', 'await installed.revalidate(signal)',
-    'await validateControlChannelClosure(reads, owner, identity)', 'assertActiveStateOwner(driver, owner)'];
+    'await validateControlChannelClosure(reads, owner, identity, localModel?.frame)', 'assertActiveStateOwner(driver, owner)'];
   let previous = assembly.indexOf(phases[0]!); assert(previous >= 0);
   for (const phase of phases.slice(1)) { const index = assembly.indexOf(phase, previous + 1); assert(index > previous, phase); previous = index; }
   const parsed = ts.createSourceFile('installed-run.ts', source, ts.ScriptTarget.Latest, true);
   const material = parsed.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'materialFor');
   assert(material?.body);
   const compact = (node: ts.Node) => node.getText(parsed).replace(/\s+/gu, '');
-  assert(compact(material.body).includes('awaitreadInstalledRunDataClosures(artifacts,assembly,endpoint.ownerPrincipalId,installed,signal)'));
+  assert(compact(material.body).includes('childOrigin&&assembly.provider.endpoint.kind===\'local_zero_cost\'?awaitreadInheritedLocalModelAdmissionAssembly(artifacts,assembly,childOrigin):undefined'));
+  assert(compact(material.body).includes('const{principalId,...provider}=awaitreadInstalledProviderMaterial(installed,artifacts,inheritedLocal??assembly,driver)'));
+  assert(compact(material.body).includes('awaitreadInstalledRunDataClosures(artifacts,assembly,principalId,installed,signal)'));
+  const provider = parsed.statements.find((node): node is ts.FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'readInstalledProviderMaterial');
+  assert(provider?.body);
+  assert.match(provider.body.getText(parsed), /principalId: local\.registration\.ownerPrincipalId/u);
+  assert.match(provider.body.getText(parsed), /principalId: endpoint\.ownerPrincipalId/u);
   const closures = parsed.statements.find((node): node is ts.FunctionDeclaration => ts.isFunctionDeclaration(node) && node.name?.text === 'readInstalledRunDataClosures');
   assert(closures?.body);
   const closureSource = compact(closures.body);

@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { CredentialSecretScanner } from './credential-secret-scan.js';
+import { decodeInstalledInstallerDiagnostics, type InstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
+import { createEnrollPhaseObservation, createEnrollWorkObservation } from './installed-enroll-diagnostic.js';
 
 export type InstalledDailyCommandDiagnostic = Readonly<{
   diagnosticOnly: true;
@@ -12,6 +14,8 @@ export type InstalledDailyCommandDiagnostic = Readonly<{
   spawned: boolean; childJoined: boolean; inputWriteJoined: boolean;
   stdinJoined: boolean; stdoutJoined: boolean; stderrJoined: boolean;
   stdoutBytes: number; stderrBytes: number;
+  credentialPhases?: ReturnType<typeof createEnrollPhaseObservation>['result'];
+  installedWork?: ReturnType<typeof createEnrollWorkObservation>['result'];
 }>;
 
 export class InstalledDailyCommandError extends Error {
@@ -25,15 +29,22 @@ export class InstalledDailyCommandError extends Error {
 export async function runInstalledDailyCommand(input: Readonly<{
   executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
   input?: Buffer; deadlineMs: number; scanner: CredentialSecretScanner;
+  fixtureScope?: 'installed_local_setup' | 'installed_local_model' | 'installed_delayed_bootstrap';
+  installerDiagnostics?: (rows: readonly InstalledInstallerDiagnostic[]) => void;
 }>) {
-  assert(Number.isSafeInteger(input.deadlineMs) && input.deadlineMs > 0 && input.deadlineMs <= 90_000);
+  const ceiling = { installed_local_setup: 180_000, installed_local_model: 360_000, installed_delayed_bootstrap: 180_000 };
+  const maximum = input.fixtureScope ? ceiling[input.fixtureScope] : 90_000;
+  assert(Number.isSafeInteger(input.deadlineMs) && input.deadlineMs > 0 && input.deadlineMs <= maximum);
   const started = performance.now(), pipesJoined = [false, false, false];
+  const credentialPhases = createEnrollPhaseObservation(), installedWork = createEnrollWorkObservation();
   let spawned = false, childJoined = false, inputWriteJoined = false, stdoutBytes = 0, stderrBytes = 0;
   let result: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   const diagnostic = (reason: InstalledDailyCommandDiagnostic['reason']): InstalledDailyCommandDiagnostic => Object.freeze({
     diagnosticOnly: true, reason, code: result?.code ?? null, signal: result?.signal ?? null,
     elapsedMs: Math.floor(performance.now() - started), spawned, childJoined, inputWriteJoined,
-    stdinJoined: pipesJoined[0]!, stdoutJoined: pipesJoined[1]!, stderrJoined: pipesJoined[2]!, stdoutBytes, stderrBytes });
+    stdinJoined: pipesJoined[0]!, stdoutJoined: pipesJoined[1]!, stderrJoined: pipesJoined[2]!, stdoutBytes, stderrBytes,
+    ...(credentialPhases.result.length ? { credentialPhases: credentialPhases.result } : {}),
+    ...(installedWork.result ? { installedWork: installedWork.result } : {}) });
   let out: ReturnType<typeof input.scanner.openStream> | undefined, err: ReturnType<typeof input.scanner.openStream>;
   try { out = input.scanner.openStream(); err = input.scanner.openStream(); }
   catch { out?.close(); throw new InstalledDailyCommandError(false, diagnostic('scan')); }
@@ -51,7 +62,7 @@ export async function runInstalledDailyCommand(input: Readonly<{
   const closed = new Promise<NonNullable<typeof result>>(resolve => child.once('close', (code, signal) => {
     childJoined = true; result = { code, signal }; resolve(result);
   }));
-  const stdout: Buffer[] = [], stderr: Buffer[] = []; let size = 0, failure = false;
+  const stdout: Buffer[] = [], stderr: Buffer[] = []; let size = 0, failure = false, outputValid = true;
   let reason: InstalledDailyCommandDiagnostic['reason'] | undefined;
   let rejectFailure!: () => void;
   // This wake-up is internal. Only the original owner constructs a diagnostic
@@ -61,14 +72,18 @@ export async function runInstalledDailyCommand(input: Readonly<{
   const refuse = (observed: InstalledDailyCommandDiagnostic['reason']) => { failure = true; reason ??= observed; rejectFailure(); };
   for (const [stream, parts, scan] of [[child.stdout, stdout, out], [child.stderr, stderr, err]] as const) stream.on('data', (bytes: Buffer) => {
     if (stream === child.stdout) stdoutBytes += bytes.length; else stderrBytes += bytes.length;
-    try { scan.scan(bytes); } catch { refuse('scan'); return; }
+    try { scan.scan(bytes); } catch { outputValid = false; refuse('scan'); return; }
+    if (stream === child.stderr) {
+      const elapsed = Math.floor(performance.now() - started);
+      credentialPhases.write(bytes, elapsed); installedWork.write(bytes, elapsed);
+    }
     size += bytes.length;
-    if (size > 2 * 1024 * 1024) { refuse('output_bound'); return; }
-    try { parts.push(Buffer.from(bytes)); } catch { refuse('stream'); }
+    if (size > 2 * 1024 * 1024) { outputValid = false; refuse('output_bound'); return; }
+    try { parts.push(Buffer.from(bytes)); } catch { outputValid = false; refuse('stream'); }
   });
   child.on('error', () => { if (!spawned) reason = 'spawn'; refuse(spawned ? 'stream' : 'spawn'); });
   child.stdin.on('error', () => refuse('input'));
-  for (const stream of [child.stdout, child.stderr]) stream.on('error', () => refuse('stream'));
+  for (const stream of [child.stdout, child.stderr]) stream.on('error', () => { outputValid = false; refuse('stream'); });
   const written = new Promise<void>((resolve, reject) => child.stdin.end(input.input, (error?: Error | null) => error ? reject(error) : resolve()));
   void written.then(() => { inputWriteJoined = true; }, () => { inputWriteJoined = true; refuse('input'); });
   const timer = setTimeout(() => refuse('deadline'), Math.max(0, input.deadlineMs - (performance.now() - started)));
@@ -103,7 +118,15 @@ export async function runInstalledDailyCommand(input: Readonly<{
       // neither terminates it nor changes the retained failure classification.
       if (stdiosJoined && performance.now() - started >= input.deadlineMs) child.unref();
     }
-    finally { clearTimeout(joinTimer); out.close(); err.close(); }
+    finally { clearTimeout(joinTimer); out.close(); err.close(); credentialPhases.finish(); installedWork.finish(); }
+  }
+  if (input.installerDiagnostics && spawned && joined && outputValid) {
+    let captured: Buffer | undefined;
+    try {
+      captured = Buffer.concat(stderr);
+      input.installerDiagnostics(decodeInstalledInstallerDiagnostics(captured));
+    } catch { /* Optional fixed observations cannot replace the original command outcome. */ }
+    finally { captured?.fill(0); }
   }
   if (failure || !joined || !result) {
     stdout.forEach(bytes => bytes.fill(0)); stderr.forEach(bytes => bytes.fill(0));

@@ -1,14 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { CONTROL_FRAME_BYTES as FRAME_BYTES, CONTROL_METHODS_V1 as METHODS, INSTALLED_CONTROL_FEATURES, decodeControlHelloRequest as hello,
   decodeControlFrame, decodeInstalledControlRequest, type ControlRangeV1 as Range, type ControlMethodV1,
-  type InstalledControlErrorV1, type InstalledControlResponseV1 } from '../kernel/control-wire.js';
+  type InstalledControlErrorV1, type InstalledControlResponseV1, type InstalledMigrationProgressV1,
+  type InstalledMigrationRequestV1 } from '../kernel/control-wire.js';
 export type { RuntimeBundlePublicSummaryV1, SupervisorHelloV1, SupervisorStatusV1,
   ControlMethodV1, InstalledControlResultV1, InstalledControlErrorV1, InstalledControlResponseV1 } from '../kernel/control-wire.js';
 import { normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
-import type { LocalControlConnection } from './control-channel.js';
+import type { AuthenticatedControlIdentity, LocalControlConnection } from './control-channel.js';
 import { EventCursorExpiredError, ResultUnavailableError, type ReadControlRequest } from './control-read.js';
-import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
+import { CredentialFinalizationTimeError, InstalledMigrationQuiescenceError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import type { StateStore } from './store.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 import { InstalledRunAuthorityError } from './installed-run.js';
@@ -30,6 +31,7 @@ const DELIVERY_FEATURES = ['run.apply', 'run.reconcile'];
 const SESSION_FEATURES = ['session.list', 'session.fork', 'session.compact', 'session.handoff.create'];
 const LIST_FEATURES = ['run.list', 'authorization.list'];
 const MCP_FEATURES = ['mcp.register', 'mcp.refresh', 'mcp.list'];
+const MIGRATION_FEATURES = ['state.migrate', 'state.rollback'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
@@ -55,7 +57,7 @@ let controlRetirementFailure: ResourceRetirementError | undefined;
 /** Bounded v1 native UDS service. Installed composition alone advertises the
  * fixed Run recipe; authenticated channels never supply principal authority. */
 export function openInstalledControl(store: StateStore,
-  options: Readonly<{ serverBuild: string }>, onError: (error: Error) => void): InstalledControlService {
+  options: Readonly<{ serverBuild: string; onRollbackComplete?: () => void }>, onError: (error: Error) => void): InstalledControlService {
   if (controlRetirementFailure) throw controlRetirementFailure;
   const serverBuild = text(options.serverBuild);
   if (typeof onError !== 'function') throw new TypeError('control service requires an error reporter');
@@ -66,9 +68,22 @@ export function openInstalledControl(store: StateStore,
   let closing: Promise<void> | undefined;
   let stopped = false;
   let retirementFailure: ResourceRetirementError | undefined;
+  let rollbackReply: Connection | undefined;
+  let rollbackReplyTimer: ReturnType<typeof setTimeout> | undefined;
+  let rollbackExitQueued = false;
   const report = (error: unknown) => {
     try { onError(error instanceof Error ? error : new Error('control service failed', { cause: error })); }
     catch { /* A consumer reporter cannot escape a socket/native callback. */ }
+  };
+  const finishRollbackReply = () => {
+    clearTimeout(rollbackReplyTimer);
+    rollbackReplyTimer = undefined;
+    if (closing || rollbackExitQueued) return;
+    rollbackExitQueued = true;
+    stopped = true;
+    queueMicrotask(() => {
+      try { options.onRollbackComplete?.(); } catch (error) { report(error); }
+    });
   };
   const retire = (connection: Connection) => {
     if (connection.closed) return;
@@ -91,6 +106,7 @@ export function openInstalledControl(store: StateStore,
       // retrying consumed native descriptors or calling retirement successful.
       if (!connection.channel.socket.destroyed) connection.channel.socket.destroy();
     }
+    if (connection === rollbackReply) finishRollbackReply();
   };
   const errorResult = (error: unknown, credential = false): InstalledControlErrorV1 => {
     if (error instanceof ListCursorError || error instanceof ListCutCapacityError || error instanceof ListCutBusyError) return error.controlError;
@@ -135,6 +151,65 @@ export function openInstalledControl(store: StateStore,
     report(error);
     return { schemaVersion: 1, code: 'INTERNAL', retryable: false, messageCode: 'control.internal', errorId: randomUUID() };
   };
+  const writeFrame = async (connection: Connection, value: InstalledControlResponseV1 | InstalledMigrationProgressV1): Promise<void> => {
+    if (controlRetirementFailure) throw controlRetirementFailure;
+    if (connection.closed || stopped) return;
+    const body = canonicalJsonBytes(value);
+    if (body.byteLength > FRAME_BYTES || reservedBytes + body.byteLength > BUFFER_BYTES) throw new Error('control response exceeds the wire bound');
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.byteLength);
+    reservedBytes += body.byteLength;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let remaining = 2;
+        let failure: unknown;
+        const done = (error?: Error | null) => {
+          failure ??= error ?? undefined;
+          if (--remaining === 0) failure ? reject(failure) : resolve();
+        };
+        // Join both original writes even if socket destruction fails one first.
+        for (const bytes of [header, body]) {
+          try { connection.channel.socket.write(bytes, done); }
+          catch (error) { done(error instanceof Error ? error : new Error('control write failed', { cause: error })); }
+        }
+      });
+    } finally { reservedBytes -= body.byteLength; }
+  };
+  const migrate = async (connection: Connection, request: InstalledMigrationRequestV1,
+    identity: AuthenticatedControlIdentity): Promise<InstalledControlResponseV1> => {
+    const operation = request.method === 'state.migrate'
+      ? store.migrateInstalledLegacy(request, identity).then(result => result.response)
+      : store.rollbackInstalledKernel(request, identity).then(receipt => ({
+        method: 'state.rollback' as const, requestId: request.requestId, receiptRef: canonicalSha256(receipt), receipt
+      }));
+    let progressSequence = 0;
+    let writing: Promise<void> | undefined;
+    const pulse = () => {
+      if (writing || connection.closed || stopped) return;
+      const next = async () => {
+        store.assertInstalledMigrationProgress(identity);
+        await writeFrame(connection, { protocolVersion: 1, method: request.method, requestId: request.requestId,
+          progressSequence: ++progressSequence });
+      };
+      writing = next().catch(error => {
+        if (!connection.closed && !stopped) { report(error); retire(connection); }
+      }).finally(() => { writing = undefined; });
+    };
+    const timer = setInterval(pulse, 10_000);
+    pulse();
+    try {
+      const result = await operation;
+      if (request.method === 'state.rollback') {
+        rollbackReply = connection;
+        if (connection.closed) finishRollbackReply();
+        else rollbackReplyTimer = setTimeout(() => { retire(connection); }, 30_000);
+      }
+      return { protocolVersion: 1, ok: true, result };
+    } finally {
+      clearInterval(timer);
+      await writing;
+    }
+  };
   const respond = async (pending: Pending): Promise<void> => {
     if (controlRetirementFailure) throw controlRetirementFailure;
     const connection = pending.connection;
@@ -161,6 +236,7 @@ export function openInstalledControl(store: StateStore,
               (!LIST_FEATURES.includes(feature) || store.supportsSessionContinuity()) &&
               (!DELIVERY_FEATURES.includes(feature) || store.supportsInstalledDelivery()) &&
               (!MCP_FEATURES.includes(feature) || store.supportsInstalledMcp()) &&
+              (!MIGRATION_FEATURES.includes(feature) || (options.onRollbackComplete !== undefined && store.supportsInstalledMigration())) &&
               (!RUN_FEATURES.includes(feature) || store.supportsInstalledRuns())) }
           } satisfies InstalledControlResponseV1;
         }
@@ -177,6 +253,13 @@ export function openInstalledControl(store: StateStore,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (MCP_FEATURES.includes(method) && !store.supportsInstalledMcp()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (method === 'state.migrate' || method === 'state.rollback') {
+          if (!options.onRollbackComplete || !store.supportsInstalledMigration()) return { protocolVersion: 1, ok: false, method,
+            error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+          const migration = decodeInstalledControlRequest(request);
+          if (migration.method !== method) throw new TypeError('invalid installed migration method');
+          return await migrate(connection, migration, identity);
+        }
         if (method === 'mcp.register' || method === 'mcp.refresh') return await store.mutateMcpRegistration(decodeInstalledControlRequest(request) as import('../kernel/mcp.js').McpMutationRequestV1, identity);
         if (method === 'mcp.list') return await store.listMcpRegistrations(decodeInstalledControlRequest(request) as import('../kernel/control-wire.js').McpListRequestV1, identity);
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
@@ -203,6 +286,10 @@ export function openInstalledControl(store: StateStore,
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
+        if (method === 'state.migrate' && error instanceof InstalledMigrationQuiescenceError) {
+          return { protocolVersion: 1, ok: false, method, error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
+            retryable: false, messageCode: 'migration.legacy_quiescence_required' } } satisfies InstalledControlResponseV1;
+        }
         if ((method === 'run.submit' || method === 'credential.finalize') && error instanceof CredentialScopeBusyError) {
           return { protocolVersion: 1, ok: false, method: knownMethod, error: error.controlError } satisfies InstalledControlResponseV1;
         }
@@ -228,34 +315,12 @@ export function openInstalledControl(store: StateStore,
           error: sessionContextRequestLimitRefusal(knownMethod, error) ?? errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
       }
     });
-    if (controlRetirementFailure) throw controlRetirementFailure;
-    if (connection.closed || stopped) return;
-    const body = canonicalJsonBytes(response);
-    if (body.byteLength > FRAME_BYTES || reservedBytes + body.byteLength > BUFFER_BYTES) throw new Error('control response exceeds the wire bound');
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(body.byteLength);
-    reservedBytes += body.byteLength;
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let remaining = 2;
-        let failure: unknown;
-        const done = (error?: Error | null) => {
-          failure ??= error ?? undefined;
-          if (--remaining === 0) failure ? reject(failure) : resolve();
-        };
-        // Avoid an extra large concat allocation. Both writes are joined,
-        // including when socket destruction rejects one before the other.
-        for (const bytes of [header, body]) {
-          try { connection.channel.socket.write(bytes, done); }
-          catch (error) { done(error instanceof Error ? error : new Error('control write failed', { cause: error })); }
-        }
-      });
-    } finally { reservedBytes -= body.byteLength; }
+    await writeFrame(connection, response);
   };
   const work = (connection: Connection) => {
-    if (connection.running || stopped || connection.closed) return;
+    if (connection.running || stopped || connection.closed || rollbackReply) return;
     const running = (async () => {
-      while (!stopped && !connection.closed && connection.queued.length > 0) {
+      while (!stopped && !connection.closed && !rollbackReply && connection.queued.length > 0) {
         const body = connection.queued.shift()!;
         try { await respond({ connection, body }); }
         catch (error) { report(error); retire(connection); }
@@ -276,7 +341,7 @@ export function openInstalledControl(store: StateStore,
     if (stopped || controlRetirementFailure) { retire(connection); return; }
     channel.socket.once('close', () => retire(connection));
     channel.socket.on('data', (chunk: Buffer) => {
-      if (stopped || connection.closed) return;
+      if (stopped || connection.closed || rollbackReply) return;
       try {
         let offset = 0;
         while (offset < chunk.byteLength && !connection.closed) {
@@ -307,6 +372,7 @@ export function openInstalledControl(store: StateStore,
     if (this !== service) return Promise.reject(new TypeError('invalid control service'));
     if (closing) return closing;
     stopped = true;
+    clearTimeout(rollbackReplyTimer);
     for (const connection of connections) retire(connection);
     closing = (async () => {
       const results = await Promise.allSettled([...active, Promise.resolve().then(() => listener.close())]);

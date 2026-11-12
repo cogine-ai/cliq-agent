@@ -52,6 +52,15 @@ export class InstalledModelAuthorizationError extends KernelStorageError {
   }
 }
 
+/** The original native quiescence refusal, after the Store has proved no
+ * control publication and restored its normal shared account ownership. */
+export class InstalledMigrationQuiescenceError extends KernelStorageError {
+  constructor(cause: unknown) {
+    super('RECOVERY_REQUIRED', 'Legacy migration requires a verifiably quiescent account', { cause });
+    this.name = 'InstalledMigrationQuiescenceError';
+  }
+}
+
 /** Internal resource-retirement failure, not an inspection outcome or a
  * caller-supplied proof. It must survive operation error handling so that an
  * unsettled descriptor/process cleanup can never mint a joined receipt. */

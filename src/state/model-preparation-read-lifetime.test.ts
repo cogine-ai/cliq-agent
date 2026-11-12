@@ -29,6 +29,14 @@ function methods(source: ts.SourceFile, name: string) {
   };
   visit(source); assert.equal(result.length, 1); return result[0]!;
 }
+function credentialScope(source: ts.SourceFile) {
+  const result: ts.FunctionDeclaration[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.body && node.name?.text === 'performCredentialScope') result.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert.equal(result.length, 1); return result[0]!;
+}
 function expression(code: string, dependencies: Record<string, unknown>) {
   const names = Object.keys(dependencies), output = ts.transpileModule(code, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
@@ -134,10 +142,11 @@ test('the signed broker loader passes preparation cancellation through both comp
 });
 
 test('credential preparation forwards the original cancellation before entering any native scope or business callback', async () => {
-  const source = await parsed('installed-runtime.ts'), method = methods(source, 'credentialScope');
+  const source = await parsed('installed-runtime.ts'), method = methods(source, 'credentialScope'), scope = credentialScope(source);
   const entered = gate(), release = gate(), stop = new AbortController(), reason = new Error('original credential preparation cancelled');
   let loaderJoined = false, touched = false;
-  const invoke = expression(`return ({${method.getText(source)}}).credentialScope;`, {
+  const invoke = expression(`${scope.getText(source)}
+    return ({${method.getText(source)}}).credentialScope;`, {
     enqueue: (operation: () => Promise<unknown>) => operation(), isMainThread: true, isSea: () => true,
     process: { versions: { node: '24.21.0' } }, rememberRetirement: () => {},
     loadSelectedNative: async (signal?: AbortSignal) => {
@@ -147,8 +156,11 @@ test('credential preparation forwards the original cancellation before entering 
     withHeldCredentialNativeScope: () => { touched = true; throw new Error('no native scope exists in this data fixture'); }
   }) as (operation: () => Promise<void>, signal?: AbortSignal) => Promise<unknown>;
   const pending = invoke(async () => { touched = true; }, stop.signal);
-  await entered.promise; stop.abort(reason); release.release(); await assert.rejects(pending, error => error === reason);
-  assert.equal(loaderJoined, true); assert.equal(touched, false);
+  try {
+    await Promise.race([entered.promise, pending]); stop.abort(reason); release.release();
+    await assert.rejects(pending, error => error === reason);
+    assert.equal(loaderJoined, true); assert.equal(touched, false);
+  } finally { release.release(); await Promise.allSettled([pending]); }
 });
 
 test('native transport ownership is the cancellation boundary: claim, response, fence and result custody remain raw', async () => {
@@ -171,12 +183,15 @@ test('native transport ownership is the cancellation boundary: claim, response, 
     'failInvocationBeforeDispatch(this.driver, this.artifacts, this.owner,',
     'return await withCredentialAuthorityLock(selected, dispatch, preparationSignal)'
   ]) assert(body.includes(original), original);
-  const runtime = await parsed('installed-runtime.ts'), scope = methods(runtime, 'credentialScope').getText(runtime);
-  assert(scope.indexOf('await checkedRevalidate(preparationSignal); credential.assertHeld();') < scope.indexOf('runInstalledCredentialAuthority(physical, operation)'));
-  assert(scope.includes('const result = await runInstalledCredentialAuthority(physical, operation);\n                  await checkedRevalidate(); credential.assertHeld();'));
+  const runtime = await parsed('installed-runtime.ts'), scope = credentialScope(runtime).getText(runtime);
+  const before = scope.indexOf('await checkedRevalidate(preparationSignal); credential.assertHeld();');
+  const invoke = scope.indexOf('await runInstalledCredentialAuthority(physical, operation);');
+  const after = scope.indexOf('await checkedRevalidate(); credential.assertHeld();');
+  assert(before >= 0 && invoke > before && after > invoke);
+  assert.match(scope, /const result = await runInstalledCredentialAuthority\(physical, operation\);\s+await checkedRevalidate\(\); credential\.assertHeld\(\);/u);
   assert.equal((scope.match(/preparationSignal/gu) ?? []).length, 5,
     'only loader/precallback checks use cancellation; original scope/result finalizers remain unchanged');
-  assert(!scope.includes('Promise.race') && !body.includes('Promise.race'));
+  assert(!scope.includes('Promise.race') && !methods(runtime, 'credentialScope').getText(runtime).includes('Promise.race') && !body.includes('Promise.race'));
 });
 
 

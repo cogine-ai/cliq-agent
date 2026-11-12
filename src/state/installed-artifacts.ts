@@ -18,6 +18,7 @@ import { isNpmAdapterEntry, isNpmDataEntry, NPM_DEPENDENCY_RECIPE } from '../san
 import { MCP_ADMIN_HELPER_ENTRY_ID, MCP_ADMIN_HELPER_RELATIVE_PATH } from './mcp-broker-native.js';
 import { verifyMcpRecoveryAdapterAuthority } from '../policy/mcp-recovery-authority.js';
 import { decodeMcpRecoveryPredicate } from '../kernel/mcp-recovery.js';
+import { bindLocalInferenceRuntime, localInferenceRuntimeRoots, LOCAL_INFERENCE_RUNTIME_KIND } from './local-inference-runtime.js';
 
 function mismatch(message: string, cause?: unknown): never {
   throw new KernelStorageError('ARTIFACT_MISMATCH', message, cause === undefined ? undefined : { cause });
@@ -88,14 +89,16 @@ function boundedText(value: unknown): string {
 function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
   if (bundle.structuredArtifacts.length > 65) mismatch('installed structured root inventory exceeds its bound');
   bundledSkillRoots(bundle); // The skill family also remains inside all original aggregate bounds.
+  localInferenceRuntimeRoots(bundle);
   const roots: StructuredRoot[] = [], identities = new Set<string>(), entries = new Set<string>();
   let previous: Buffer | undefined;
   for (const root of bundle.structuredArtifacts) {
     const prompt = root.kind === 'system_prompt' || root.kind === 'compaction_prompt';
     const recovery = root.kind === 'mcp_recovery_adapter';
+    const local = root.kind === LOCAL_INFERENCE_RUNTIME_KIND;
     if (!exactKeys(root, ['artifactId', 'rootEntryId', 'artifactRef', 'semanticDigest', 'memberRefs', 'kind',
       ...(prompt ? ['provider', 'model'] : []), ...(recovery ? ['executableEntryId'] : [])]) ||
-        (!prompt && !recovery && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill'))
+        (!prompt && !recovery && !local && root.kind !== 'policy_engine_profile' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill'))
       mismatch('installed runtime contains an unsupported structured root');
     boundedText(root.artifactId); boundedText(root.rootEntryId);
     if (prompt && (!['openai', 'anthropic', 'openrouter', 'openai-compatible', 'zhipu', 'ollama'].includes(boundedText(root.provider)) ||
@@ -107,11 +110,11 @@ function structuredMetadata(bundle: RuntimeBundleManifest): StructuredRoot[] {
       mismatch('installed structured roots are unordered or ambiguous');
     previous = key; identities.add(identity); entries.add(root.rootEntryId);
     const entry = bundle.entries.find(entry => entry.entryId === root.rootEntryId);
-    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind === 'bundled_skill' ? 'skill_bundle' : recovery ? 'mcp_recovery_profile' : root.kind;
+    const role = root.kind === 'policy_engine_profile' ? 'policy_engine' : root.kind === 'bundled_skill' ? 'skill_bundle' : recovery ? 'mcp_recovery_profile' : local ? 'bundle_object' : root.kind;
     if (!entry || entry.executable || entry.role !== role || entry.digest !== root.artifactRef || entry.byteCount > 1048576 ||
-        !Array.isArray(root.memberRefs) || root.memberRefs.length > (root.kind === 'bundled_skill' ? 129 : recovery ? 384 : 3) ||
+        !Array.isArray(root.memberRefs) || root.memberRefs.length > (root.kind === 'bundled_skill' ? 129 : recovery ? 384 : local ? 30 : 3) ||
         root.memberRefs.some((ref, index) => { assertArtifactRef(ref); return ref === root.artifactRef || (index > 0 && ref <= root.memberRefs[index - 1]!); }) ||
-        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill' && !recovery && root.memberRefs.length !== 0))
+        (root.kind !== 'compaction_prompt' && root.kind !== 'guest_toolchain' && root.kind !== 'bundled_skill' && !recovery && !local && root.memberRefs.length !== 0))
       mismatch('installed structured root does not bind its complete signed entry');
     roots.push(root);
   }
@@ -175,6 +178,12 @@ export function validateInstalledStructuredArtifacts(bundle: RuntimeBundleManife
         metadata.set(root.artifactRef, manifest.format);
         metadata.set(manifest.signatureRef, 'cliq-ed25519-signature-v1');
         metadata.set(manifest.guestImageRef, 'cliq-guest-image-raw-ext4-v1');
+      } else if (root.kind === LOCAL_INFERENCE_RUNTIME_KIND) {
+        const profile = bindLocalInferenceRuntime(bundle, root.artifactRef, value);
+        // Full code bytes are streamed and verified by their original image
+        // owners, not buffered as structured JSON in this data decoder.
+        members.add(root.artifactRef);
+        metadata.set(root.artifactRef, profile.format);
       } else if (root.kind === 'mcp_recovery_adapter') {
         if (!releaseKeys) mismatch('installed MCP profile requires the original immutable release trust keys');
         const manifest = verifyMcpRecoveryAdapterAuthority({ bundle, releaseKeys, adapterId: root.artifactId, adapterRef: root.artifactRef, manifest: value });

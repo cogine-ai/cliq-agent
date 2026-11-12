@@ -21,6 +21,11 @@ export function decodeClientPreferences(value: unknown): ClientPreferencesV1 {
   if (data.schemaVersion !== 1 || !Array.isArray(data.modelSelections) || data.modelSelections.length > CLIENT_MODEL_SELECTION_LIMIT)
     throw new TypeError('client preferences are outside their closed format');
   const modelSelections = data.modelSelections.map(value => {
+    const identity = record(value, ['alias', 'provider', 'model'], ['endpointRegistrationId', 'credentialGrantId']);
+    if (identity.provider === 'ollama') {
+      const local = record(value, ['alias', 'provider', 'model']);
+      return { alias: text(local.alias), provider: 'ollama' as const, model: text(local.model, 512) };
+    }
     const selected = record(value, ['alias', 'provider', 'model', 'endpointRegistrationId', 'credentialGrantId']);
     if (selected.provider !== 'openai-compatible') throw new TypeError('client selection requires a supported installed provider');
     return { alias: text(selected.alias), provider: 'openai-compatible' as const, model: text(selected.model, 512),

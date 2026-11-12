@@ -72,11 +72,11 @@ import { beginInstalledApplyDiagnostic, beginInstalledSubmitDiagnostic, beginIns
 import { ContentAddressedStore } from './cas.js';
 import { openLocalControlListener, type AuthenticatedControlIdentity, type LocalControlConnection, type LocalControlListener } from './control-channel.js';
 import { readControl, type ReadControlRequest } from './control-read.js';
-import { assertKernelEntryAllowsStateOwner } from './migration-pre-owner.js';
-import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
+import { assertKernelEntryAllowsStateOwner, readKernelRollbackArchiveReadyPreOwner, readKernelRollbackPreOwner } from './migration-pre-owner.js';
+import { CredentialFinalizationTimeError, InstalledMigrationQuiescenceError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import { assertInstalledCredentialScope, assertInstalledMigrationCredentialScope, installedCredentialProvenance, observeInstalledCredentialProducer,
   type InstalledCredentialScope, type InstalledCredentialProvenance,
-  withHeldInstalledRuntime, withInstalledWorkerRoot, readInstalledRuntimeObservation, type HeldInstalledAnchor,
+  withHeldInstalledRuntime, withInstalledMigrationModelStore, withInstalledWorkerRoot, readInstalledRuntimeObservation, type HeldInstalledAnchor,
   type HeldInstalledRuntime, type InstalledRuntimeBorrow, type InstalledRuntimeObservation } from './installed-runtime.js';
 import { CredentialScopeBusyError, withCredentialAuthorityLock, loadInstalledCredentialPlatform, loadInstalledModelBroker } from './installed-runtime.js';
 import { assertDependencyBrokerQuiescence } from './dependency-invocation-owner.js';
@@ -93,8 +93,10 @@ import { installedWorkerSlotAvailable, InstalledWorkerCapacityError } from './wo
 import { ReconciliationProbeCapacityError } from './reconciliation-capacity.js';
 import type { SupervisorHelloV1, SupervisorStatusV1 } from './installed-control.js';
 import { assertStateOwnerLock, loadNativeStateOwner, stateRootIdentityFromDescriptor,
-  acquireHeldMigrationFilesystem, releaseHeldMigrationLegacyLocks, type HeldMigrationFilesystem, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
+  acquireHeldMigrationFilesystem, assertHeldMigrationGateOwner, inspectHeldKernelMigrationEntry, releaseHeldMigrationLegacyLocks,
+  type HeldMigrationCredentialGate, type HeldMigrationFilesystem, type HeldStateOwnerLock, type NativeStateOwner } from './native-owner.js';
 import { decodeOwnedLegacyImportRequest } from '../kernel/owned-import-data.js';
+import { decodeInstalledRollbackRequest } from '../kernel/kernel-rollback-records.js';
 import { holdInstalledAccountParticipant, inspectInstalledAccountBeforeOwner, type HeldInstalledAccountParticipant } from './installed-account-participant.js';
 import {
   decodeControlChannel,
@@ -148,22 +150,28 @@ import { verifierOperationId } from './verifier-policy.js';
 import type { RunResultPhase } from './run-result.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, type BeginWorkerRecoveryInput } from './reducers/worker-recovery.js';
 import { readControlRequest, readRun, readSession, readSessionPrincipalId } from './rows.js';
-import { applyKernelSchema, assertPristineKernelSchema, KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
+import { applyKernelSchema, assertKernelSchemaVersion, assertPristineKernelSchema, KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL, readSchemaUserVersion } from './schema.js';
 import { iterateNodeSqliteStatement, openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import {
   assertActiveStateOwner,
   assertContiguousStateOwnerHistory,
+  commitGracefulStateOwnerRelease,
   contextFromStateOwner,
   gracefullyReleaseStateOwner,
   readActiveStateOwner,
   readLatestStateOwner,
+  readStateOwner,
   insertStateOwnerArtifacts,
+  prepareGracefulStateOwnerRelease,
   terminalStateOwnerRecord,
+  type PreparedGracefulStateOwnerRelease,
   type StateOwnerContext
 } from './state-owner.js';
 import { hostPlatform } from './workspace-identity.js';
 import { verifyRetainedInstalledEndpointData, verifyRetainedInstalledCurrentProducerData } from './installed-credential-history.js';
-import { readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readStateOwnerProcess } from './state-owner-history.js';
+import { bindStateOwnerRollbackHistory, readRetainedStateOwnerHistory, readRetainedStateOwnerProcess as readStateOwnerProcess,
+  rollbackStateOwnerTail, type StateOwnerRollbackHistory } from './state-owner-history.js';
+import { withInstalledBorrowRollbackTail } from './installed-runtime.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstallation, type RunRetirementPhase, type RunPublicationPhase } from './run-execution.js';
 import { retireAbandonedPreactivations } from './preactivation-retirement.js';
@@ -181,7 +189,15 @@ import { readVerifiedDeliverySource } from './delivery-source-authority.js';
 import { admitInstalledDelivery, prepareInstalledDelivery, replayInstalledDeliveryAdmission, type AdmitDeliveryResult } from './reducers/delivery-admission.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-import { assertCurrentControlFrame, validateControlChannelClosure } from './control-channel.js';
+import { assertCurrentControlFrame, pinLocalInferenceAdmissionFrame, validateControlChannelClosure } from './control-channel.js';
+import { InstalledLocalInferenceCoordinator } from './local-inference-coordinator.js';
+import { InstalledLocalInferenceServices } from './local-inference-service.js';
+import { localInferenceRuntimeRoots } from './local-inference-runtime.js';
+import { readUnclosedLocalInference } from './local-inference-rows.js';
+import { matchesLocalInferenceFrontier, prepareLocalInferenceFrontierFailure } from './local-inference-frontier.js';
+import { assertRetiredGenerationCut } from './generation-retirement.js';
+import { decodeLocalModelRegistration, type LocalModelRegistrationV1 } from '../kernel/local-inference.js';
+import type { LocalZeroCostProvenanceV1 } from '../model/pricing.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from './repositories/journal.js';
 import { assertModelGrantDispatch } from './model-grant.js';
 import { readCheckpoint } from './rows.js';
@@ -200,6 +216,8 @@ type InstalledContinuation = AgentRunState | DeliveryContinuation;
 // Connected for the fixed supported Linux recipe; unsupported input contracts
 // still refuse at admission. This is not installed or release qualification.
 const INSTALLED_DELIVERY_COMPOSITION_COMPLETE = true;
+// Process-wide Legacy quiescence is still required before exposing cutover.
+const INSTALLED_MIGRATION_COMPOSITION_COMPLETE = false;
 
 /** Physical authority-store scope, not an authenticated channel or credential
  * grant. Its SQL, data descriptors, URI and retirement never escape. */
@@ -1721,7 +1739,8 @@ async function stateOwnerContextFromArtifacts(
   stateRoot: string,
   artifacts: ArtifactCatalog,
   owner: Extract<StateOwnerRecordV1, { state: 'active' }>,
-  heldLock: HeldStateOwnerLock
+  heldLock: HeldStateOwnerLock,
+  rollback?: StateOwnerRollbackHistory
 ): Promise<StateOwnerContext> {
   const { lockIdentity, filesystem } = await stateOwnerFilesystemFromArtifacts(
     stateRoot,
@@ -1729,7 +1748,7 @@ async function stateOwnerContextFromArtifacts(
     owner,
     heldLock
   );
-  await readStateOwnerProcess(artifacts, owner);
+  await readStateOwnerProcess(artifacts, owner, rollback);
   return contextFromStateOwner(
     owner,
     filesystem,
@@ -1775,6 +1794,54 @@ type InstalledCredentialFinalizer = { driver: SqliteDriver; owner: StateOwnerCon
   inspectionJoin?: Promise<void>; retirementFailure?: ResourceRetirementError };
 const installedCredentialFinalizers = new WeakMap<StateStore, InstalledCredentialFinalizer>();
 
+function revokeInstalledCredentialInspection(credential: InstalledCredentialFinalizer | undefined): void {
+  if (!credential?.inspection || credential.inspectionJoin) return;
+  try {
+    credential.inspectionJoin = credential.inspection.cancelAndJoin();
+    void credential.inspectionJoin.catch(error => {
+      credential.retirementFailure ??= error instanceof ResourceRetirementError ? error :
+        new ResourceRetirementError('credential inspection cancellation did not retire', error);
+    });
+  } catch (error) {
+    credential.retirementFailure ??= new ResourceRetirementError('credential inspection cancellation did not start', error);
+  }
+}
+
+declare const exclusiveReadSource: unique symbol;
+export type InstalledExclusiveReadSource = Readonly<{ [exclusiveReadSource]: true }>;
+const installedExclusiveReadSources = new WeakMap<InstalledExclusiveReadSource, Readonly<{
+  driver: SqliteDriver; owner: StateOwnerContext; assertHeld(): void;
+}>>();
+
+/** Current SQL readers use the original quiescent Store and continuous EX.
+ * An archived database or a copied Owner record cannot satisfy this check. */
+export function assertInstalledExclusiveReadSource(source: InstalledExclusiveReadSource, driver: SqliteDriver,
+  owner: StateOwnerContext): void {
+  const original = installedExclusiveReadSources.get(source);
+  if (!original || original.driver !== driver || original.owner !== owner)
+    throw new TypeError('exclusive read requires its original Store, driver, and Owner');
+  original.assertHeld();
+}
+
+declare const rollbackFinalization: unique symbol;
+export type InstalledRollbackFinalization = Readonly<{ [rollbackFinalization]: true }>;
+const installedRollbackFinalizations = new WeakMap<InstalledRollbackFinalization, Readonly<{
+  native: NativeStateOwner; gate: HeldMigrationCredentialGate; filesystem: HeldStateOwnerLock;
+  controlDigest: string; markerDigest: string;
+}>>();
+type InstalledRollbackStartup = Readonly<{ gate: HeldMigrationCredentialGate; controlDigest: string }>;
+
+/** Final marker preparation cannot borrow an earlier SQL row, structural
+ * callback, or a receipt from another exact restoring plan. */
+export function assertInstalledRollbackFinalization(finalization: InstalledRollbackFinalization, native: NativeStateOwner,
+  gate: HeldMigrationCredentialGate, restoringControlDigest: string, preparedLegacyAuthorityMarkerDigest: string): void {
+  const original = installedRollbackFinalizations.get(finalization);
+  if (!original || original.native !== native || original.gate !== gate || original.controlDigest !== restoringControlDigest ||
+      original.markerDigest !== preparedLegacyAuthorityMarkerDigest)
+    throw new TypeError('rollback publication requires its exact original SQL commit and database retirement');
+  assertHeldMigrationGateOwner(native, gate, original.filesystem);
+}
+
 /** Private physical producer registry. Entries outlive ordinary caller errors
  * until every actual native preparation/release/retirement has joined. */
 type InstalledBrokerOwner = { driver: SqliteDriver; owner: StateOwnerContext;
@@ -1819,6 +1886,9 @@ export class StateStore {
   private migrationFenced = false;
   private migrationRunning = false;
   private migrationFilesystem?: HeldMigrationFilesystem;
+  private rollbackDriverRetired = false;
+  private rollbackStartup?: InstalledRollbackStartup;
+  private rollbackComplete = false;
   private closeRevocationFailure: ResourceRetirementError | undefined;
   private readonly controlListeners = new Set<LocalControlListener>();
   // Reserve the Run through validation and join that opening during shutdown.
@@ -1853,6 +1923,8 @@ export class StateStore {
     preparedSeq: number; failedSeq: number; requestRef: string; settlementRef: string }>();
   private schedulerStarted = false;
   private installedModelAdmissionReady = false;
+  private localInference?: InstalledLocalInferenceCoordinator;
+  private localInferenceConfigured = false;
   private schedulerFailure: unknown;
   private readonly installedQueue: BoundedRunQueue;
   private readonly runScheduling: RunSchedulingV1;
@@ -1885,6 +1957,15 @@ export class StateStore {
   supportsInstalledRuns(): boolean { return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed &&
     !this.migrationFenced && (this.accountParticipant?.isShared() ?? true); }
   supportsInstalledDelivery(): boolean { return INSTALLED_DELIVERY_COMPOSITION_COMPLETE && this.supportsInstalledRuns(); }
+  supportsInstalledMigration(): boolean {
+    return !!(INSTALLED_MIGRATION_COMPOSITION_COMPLETE && this.installedRuntime && this.installedNative && this.accountParticipant?.isShared() &&
+      !this.migrationFenced && !this.closeRequested && !this.closed && !this.released);
+  }
+  assertInstalledMigrationProgress(identity: AuthenticatedControlIdentity): void {
+    if (!this.migrationRunning || this.closeRequested || this.closed || this.released)
+      throw new KernelStorageError('LEASE_FENCED', 'the original installed migration is no longer in progress');
+    assertCurrentControlFrame(this.owner, identity);
+  }
   supportsInstalledMcp(): boolean {
     if (!this.supportsInstalledRuns() || !this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority) return false;
     try { assertInstalledMcpBrokerProcess(); } catch { return false; }
@@ -2229,77 +2310,297 @@ export class StateStore {
     this.accountParticipant?.assertShared();
   }
 
-  /** Internal controlled-cohort composition, deliberately not registered as a
-   * public command until the canonical Legacy lock/quiescence and restart
-   * reader are connected. The same original Store owns every task, EX borrow,
-   * candidate and unique commit. This never opens a second Owner or database. */
+  private assertNoRollbackRuns(): void {
+    if (this.driver.prepare("SELECT 1 FROM runs WHERE status IN ('queued','running','waiting') LIMIT 1").get())
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'rollback requires all Runs to be terminal');
+  }
+
+  private assertNoPendingLocalInference(): void {
+    if (readUnclosedLocalInference(this.driver).cycles.length)
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'installed exclusion awaits the original local inference activation cycle');
+  }
+
+  private assertLocalInferenceRetired(connection: import('./sqlite-driver.js').SqliteConnection = this.driver): void {
+    const local = readUnclosedLocalInference(connection);
+    if (this.localInference || local.cycles.length || local.launches.length)
+      throw new ResourceRetirementError('installed exclusion lacks complete original local inference retirement', undefined);
+  }
+
+  private openLocalInferenceCoordinator(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor): InstalledLocalInferenceCoordinator {
+    return new InstalledLocalInferenceCoordinator(this.driver, this.artifacts, this.owner, selected,
+      new InstalledLocalInferenceServices(this.driver, this.artifacts, this.owner, selected, anchor),
+      (cycle, participant, detailRef) => prepareLocalInferenceFrontierFailure(this.driver, this.artifacts, cycle, participant, detailRef),
+      (runId, assembled) => { this.retainInstalledAgent(runId, assembled.material); this.scheduleInstalledRun(runId); });
+  }
+
+  private restoreLocalInferenceAfterExclusive(): void {
+    if (this.closeRequested || this.closed || this.released) return;
+    if (this.localInference) this.localInference.restoreAfterExclusiveRefusal();
+    else if (this.localInferenceConfigured && this.installedRuntime && this.installedAnchor) {
+      this.assertLocalInferenceRetired();
+      this.localInference = this.openLocalInferenceCoordinator(this.installedRuntime, this.installedAnchor);
+    }
+  }
+
+  private assertInstalledExclusiveFence(signal: AbortSignal, listeners: readonly LocalControlListener[]): void {
+    signal.throwIfAborted();
+    if (!this.migrationRunning || !this.migrationFenced || this.closed || this.closeRequested || this.released)
+      throw new KernelStorageError('LEASE_FENCED', 'StateStore has left its original exclusive cut');
+    listeners.forEach(listener => listener.assertFencedForMigration());
+  }
+
+  private mintInstalledExclusiveReadSource(gate: HeldMigrationCredentialGate, signal: AbortSignal,
+    listeners: readonly LocalControlListener[]): InstalledExclusiveReadSource {
+    const native = this.installedNative!;
+    this.assertInstalledExclusiveFence(signal, listeners);
+    assertActiveStateOwner(this.driver, this.owner);
+    this.assertLocalInferenceRetired();
+    const source = Object.freeze({}) as InstalledExclusiveReadSource;
+    installedExclusiveReadSources.set(source, {
+      driver: this.driver, owner: this.owner,
+      assertHeld: () => {
+        this.assertInstalledExclusiveFence(signal, listeners);
+        assertHeldMigrationGateOwner(native, gate, this.owner.filesystem);
+      }
+    });
+    assertInstalledExclusiveReadSource(source, this.driver, this.owner);
+    return source;
+  }
+
+  private async enterInstalledExclusiveReadSource(signal: AbortSignal, listeners: readonly LocalControlListener[],
+    purpose: 'owned_import' | 'rollback'):
+    Promise<Readonly<{ gate: HeldMigrationCredentialGate; source: InstalledExclusiveReadSource }>> {
+    if (!this.migrationFenced || !this.migrationRunning || !this.installedNative || !this.accountParticipant)
+      throw new TypeError('exclusive read requires its fenced installed Store');
+    if (!this.localInference || purpose === 'owned_import') this.assertNoPendingLocalInference();
+    this.localInference?.sealForExclusive();
+    // This owns the original accepted cycle while old submit handlers wait
+    // for their responses. Waiting for those handlers first would deadlock.
+    const localDrain = this.localInference?.drainForExclusive();
+    const participant = this.accountParticipant;
+    clearTimeout(this.installedMaintenanceTimer);
+    this.installedMaintenanceTimer = undefined;
+    const previous = [...this.installedAdmissionTasks].filter(task => task.abort.signal !== signal);
+    const inspections = [...this.sourceInspectionTasks];
+    const credential = installedCredentialFinalizers.get(this);
+    for (const task of previous) task.abort.abort(new KernelStorageError('LEASE_FENCED', 'StateStore is entering migration exclusion'));
+    for (const task of inspections) task.abort.abort();
+    revokeInstalledCredentialInspection(credential);
+    const joins = await Promise.allSettled([
+      ...listeners.map(listener => listener.fenceForMigration()), ...previous.map(task => task.promise),
+      ...inspections.map(task => task.promise), credential?.task, this.installedMaintenance,
+      closeMcpAdminOperations(this.driver), closeMcpStdioRecoveries(this.driver), localDrain
+    ]);
+    const retirement = joins.find(row => row.status === 'rejected' && row.reason instanceof ResourceRetirementError);
+    if (retirement?.status === 'rejected') throw retirement.reason;
+    if (credential?.retirementFailure) throw credential.retirementFailure;
+    this.assertInstalledExclusiveFence(signal, listeners);
+    if (purpose === 'rollback') this.assertNoRollbackRuns();
+    if (this.executions.size || this.loadedExecutionScopes.size || this.installedRunTasks.size || this.installedAgentLoads.size ||
+        this.installedAgents.size || this.modelOperations.size || this.modelTransports.size || this.installedModelCompletions.size ||
+        this.installedModelClosures.size || this.sourceInspectionTasks.size || this.installedMaintenance || credential?.active ||
+        [...this.installedAdmissionTasks].some(task => task.abort.signal !== signal))
+      throw new ResourceRetirementError('StateStore retains an earlier productive resource at the exclusive cut', undefined);
+    // Model transports, settlements and all accepted callers are now joined.
+    // The original live SQL owner still records the actual service retirement.
+    if (this.localInference) {
+      await this.localInference.close();
+      this.localInference = undefined;
+    }
+    this.assertInstalledExclusiveFence(signal, listeners);
+    this.assertLocalInferenceRetired();
+    const gate = participant.enterExclusive(this.owner.filesystem);
+    return Object.freeze({ gate, source: this.mintInstalledExclusiveReadSource(gate, signal, listeners) });
+  }
+
+  private finalizeInstalledRollback(source: InstalledExclusiveReadSource, gate: HeldMigrationCredentialGate,
+    restoringControlDigest: string, preparedLegacyAuthorityMarkerDigest: string, prepared: PreparedGracefulStateOwnerRelease,
+    rooted: readonly PublishedArtifact[]): InstalledRollbackFinalization {
+    assertArtifactRef(restoringControlDigest); assertArtifactRef(preparedLegacyAuthorityMarkerDigest);
+    const native = this.installedNative!;
+    assertInstalledExclusiveReadSource(source, this.driver, this.owner);
+    assertHeldMigrationGateOwner(native, gate, this.owner.filesystem);
+    installedExclusiveReadSources.delete(source);
+    this.driver.transaction(connection => {
+      if (connection.prepare("SELECT 1 FROM runs WHERE status IN ('queued','running','waiting') LIMIT 1").get())
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback finalization cannot close an active Run');
+      this.assertLocalInferenceRetired(connection);
+      commitGracefulStateOwnerRelease(this.driver, connection, this.owner, prepared, rooted);
+    });
+    this.released = true;
+    try { this.driver.close(); }
+    catch (error) { throw new ResourceRetirementError('rollback original SQLite driver did not retire', error); }
+    this.rollbackDriverRetired = true;
+    assertHeldMigrationGateOwner(native, gate, this.owner.filesystem);
+    const finalized = Object.freeze({}) as InstalledRollbackFinalization;
+    installedRollbackFinalizations.set(finalized, { native, gate, filesystem: this.owner.filesystem,
+      controlDigest: restoringControlDigest, markerDigest: preparedLegacyAuthorityMarkerDigest });
+    return finalized;
+  }
+
+  private async finishPreparedInstalledRollback(prepared: import('./kernel-rollback.js').PreparedInstalledRollback,
+    source: InstalledExclusiveReadSource, gate: HeldMigrationCredentialGate) {
+    const { assertPreparedInstalledRollback, publishPreparedInstalledRollback } = await import('./kernel-rollback.js');
+    assertPreparedInstalledRollback(prepared, source, this.driver, this.owner);
+    const release = await prepareGracefulStateOwnerRelease(this.driver, this.artifacts, this.owner, prepared.tail);
+    await prepared.tail.close();
+    assertPreparedInstalledRollback(prepared, source, this.driver, this.owner);
+    const finalized = this.finalizeInstalledRollback(source, gate, prepared.restoring.controlDigest,
+      prepared.restoring.preparedLegacyAuthorityMarkerDigest, release, prepared.retained);
+    publishPreparedInstalledRollback(prepared, finalized);
+    return prepared.receipt;
+  }
+
+  completedKernelRollback(): boolean { return this.rollbackComplete; }
+
+  private async resumeStartupRollback(startup: InstalledRollbackStartup, signal: AbortSignal): Promise<void> {
+    const { resumeInstalledRollback } = await import('./installed-runtime.js');
+    const { gate, controlDigest } = startup;
+    this.assertNoRollbackRuns();
+    const source = this.mintInstalledExclusiveReadSource(gate, signal, []);
+    try {
+      await resumeInstalledRollback(this.installedRuntime!, { source, gate, driver: this.driver, artifacts: this.artifacts,
+        owner: this.owner, restoringControlDigest: controlDigest, ...(this.installedAnchor ? { anchor: this.installedAnchor } : {}) },
+      prepared => this.finishPreparedInstalledRollback(prepared, source, gate), signal);
+      this.accountParticipant!.retireExclusive(gate);
+      this.rollbackStartup = undefined;
+      this.migrationRunning = false;
+      this.rollbackComplete = true;
+    } finally { installedExclusiveReadSources.delete(source); }
+  }
+
+  /** The same current frame and Store retain the whole rollback. An ordinary
+   * nonterminal refusal restores service before any durable intent can exist. */
+  rollbackInstalledKernel(request: unknown, identity: AuthenticatedControlIdentity) {
+    this.assertOrdinaryMutation();
+    const selected = this.installedRuntime, account = this.accountParticipant;
+    if (!selected || !this.installedNative || !account || this.closed || this.closeRequested || this.released)
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'rollback requires its live original installed Store');
+    const rollback = decodeInstalledRollbackRequest(request);
+    assertCurrentControlFrame(this.owner, identity);
+    assertActiveStateOwner(this.driver, this.owner);
+    this.assertNoRollbackRuns();
+    return this.ownInstalledAdmission(async signal => {
+      this.migrationFenced = true;
+      this.migrationRunning = true;
+      const listeners = [...this.controlListeners];
+      let cut: Awaited<ReturnType<StateStore['enterInstalledExclusiveReadSource']>> | undefined;
+      let isRefusedBeforeControl: typeof import('./kernel-rollback.js')['isInstalledRollbackRefusalBeforeControl'] | undefined;
+      let enteredDurableProducer = false;
+      try {
+        cut = await this.enterInstalledExclusiveReadSource(signal, listeners, 'rollback');
+        this.assertNoRollbackRuns();
+        const { gate, source } = cut;
+        const { prepareInstalledRollback } = await import('./installed-runtime.js');
+        ({ isInstalledRollbackRefusalBeforeControl: isRefusedBeforeControl } = await import('./kernel-rollback.js'));
+        assertInstalledExclusiveReadSource(source, this.driver, this.owner);
+        enteredDurableProducer = true;
+        const receipt = await prepareInstalledRollback(selected, { source, gate, driver: this.driver, artifacts: this.artifacts,
+          owner: this.owner, request: rollback, identity, ...(this.installedAnchor ? { anchor: this.installedAnchor } : {}) },
+        prepared => this.finishPreparedInstalledRollback(prepared, source, gate), signal);
+        account.retireExclusive(gate);
+        this.migrationRunning = false;
+        this.rollbackComplete = true;
+        return receipt;
+      } catch (error) {
+        const safeRefusal = cut && isRefusedBeforeControl?.(error, cut.source, this.driver, this.owner);
+        if (cut) installedExclusiveReadSources.delete(cut.source);
+        if ((enteredDurableProducer && !safeRefusal) || error instanceof ResourceRetirementError) throw error;
+        try {
+          account.restoreShared();
+          this.restoreLocalInferenceAfterExclusive();
+          if (!this.closeRequested) listeners.forEach(listener => listener.resumeAfterMigration());
+        } catch (cause) {
+          throw new ResourceRetirementError('rollback refusal could not restore its original service exclusion',
+            new AggregateError([error, cause]));
+        }
+        this.migrationRunning = false;
+        this.migrationFenced = false;
+        this.armInstalledMaintenance();
+        throw error;
+      }
+    });
+  }
+
+  /** The same original Store owns every task, exclusive borrow, candidate and
+   * unique commit. The Legacy root is rechecked under its actual native locks. */
   migrateInstalledLegacy(request: unknown, identity: AuthenticatedControlIdentity) {
     this.assertOrdinaryMutation();
-    if (!this.installedRuntime || !this.installedNative || !this.accountParticipant || this.closed || this.closeRequested || this.released)
+    const selected = this.installedRuntime, native = this.installedNative, account = this.accountParticipant;
+    if (!selected || !native || !account || this.closed || this.closeRequested || this.released)
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'owned import requires its live original installed Store cohort');
     const normalized = decodeOwnedLegacyImportRequest(request);
     assertCurrentControlFrame(this.owner, identity); assertActiveStateOwner(this.driver, this.owner);
     for (const table of KERNEL_AUTHORITY_TABLES) if (!['canonical_time_fence', 'state_owners', 'artifacts'].includes(table) &&
         this.driver.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get() !== undefined)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'owned import requires all original business families empty');
+    this.assertNoPendingLocalInference();
     return this.ownInstalledAdmission(async signal => {
       // No await separates the ordinary entry check from this synchronous
       // fence. Previously accepted operations remain registered and must join.
       this.migrationFenced = true;
       this.migrationRunning = true;
       const listeners = [...this.controlListeners];
-      const previous = [...this.installedAdmissionTasks].filter(task => task.abort.signal !== signal);
-      for (const task of previous) task.abort.abort(new KernelStorageError('LEASE_FENCED', 'StateStore is entering owned import'));
-      for (const task of this.sourceInspectionTasks) task.abort.abort();
       let result: Awaited<ReturnType<typeof import('./owned-import-producer.js')['produceInstalledOwnedLegacyImport']>> | undefined;
       let failure: unknown;
+      let quiescenceRefusal: unknown;
       try {
-        const joins = await Promise.allSettled([
-          ...listeners.map(listener => listener.fenceForMigration()), ...previous.map(task => task.promise),
-          ...[...this.sourceInspectionTasks].map(task => task.promise),
-          ...(installedCredentialFinalizers.get(this)?.task ? [installedCredentialFinalizers.get(this)!.task!] : [])
-        ]);
-        const retirement = joins.find(row => row.status === 'rejected' && row.reason instanceof ResourceRetirementError);
-        if (retirement?.status === 'rejected') throw retirement.reason;
-        signal.throwIfAborted(); listeners.forEach(listener => listener.assertFencedForMigration());
+        const { gate, source } = await this.enterInstalledExclusiveReadSource(signal, listeners, 'owned_import');
+        assertInstalledExclusiveReadSource(source, this.driver, this.owner);
+        installedExclusiveReadSources.delete(source);
         // This path is only the business-empty first import. It must not
         // silently stop/drain an existing Kernel Run to manufacture emptiness.
         for (const table of KERNEL_AUTHORITY_TABLES) if (!['canonical_time_fence', 'state_owners', 'artifacts'].includes(table) &&
             this.driver.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get() !== undefined)
           throw new KernelStorageError('RECOVERY_REQUIRED', 'owned import requires all original business families empty');
-        if (this.executions.size || this.loadedExecutionScopes.size || this.installedRunTasks.size || this.installedAgentLoads.size ||
-            this.installedAgents.size || this.modelOperations.size || this.modelTransports.size || this.installedModelCompletions.size ||
-            this.installedModelClosures.size || this.sourceInspectionTasks.size ||
-            [...this.installedAdmissionTasks].some(task => task.abort.signal !== signal))
-          throw new ResourceRetirementError('owned import retains an earlier original Store producer', undefined);
-        const gate = this.accountParticipant!.enterExclusive(this.owner.filesystem);
-        // Acquisition has no protected pre-EX data cut. The producer repeats
-        // all actual source/Owner/empty/schema checks under this genuine EX.
-        this.migrationFilesystem = acquireHeldMigrationFilesystem(this.installedNative!, gate,
-          normalized.migrationId, normalized.legacyRootCanonicalAbsolutePath);
-        const { produceInstalledOwnedLegacyImport } = await import('./owned-import-producer.js');
-        result = await produceInstalledOwnedLegacyImport(this.driver, this.artifacts.withReadSignal(signal), this.owner,
-          this.installedRuntime!, gate, this.migrationFilesystem, normalized, identity, signal);
+        const { produceInstalledOwnedLegacyImport, isInstalledImportRefusalBeforeControl } = await import('./owned-import-producer.js');
+        result = await withInstalledMigrationModelStore(selected, gate, async owningSignal => {
+          const filesystem = acquireHeldMigrationFilesystem(native, gate, normalized.migrationId, normalized.legacyRootCanonicalAbsolutePath);
+          this.migrationFilesystem = filesystem;
+          let operationFailure: unknown;
+          try {
+            return await produceInstalledOwnedLegacyImport(this.driver, this.artifacts.withReadSignal(owningSignal), this.owner,
+              selected, gate, filesystem, normalized, identity, owningSignal);
+          } catch (error) {
+            operationFailure = error;
+            if (isInstalledImportRefusalBeforeControl(error, gate, this.owner) &&
+                inspectHeldKernelMigrationEntry(native, this.owner.filesystem).kind === 'unmigrated') quiescenceRefusal = error;
+            throw error;
+          } finally {
+            // The model EX surrounds actual Legacy retirement. A producer
+            // with uncertain children retains both original native owners.
+            if (!(operationFailure instanceof ResourceRetirementError)) {
+              try {
+                await releaseHeldMigrationLegacyLocks(filesystem);
+                filesystem.close();
+                this.migrationFilesystem = undefined;
+              } catch (error) {
+                throw new ResourceRetirementError('the original Legacy migration scope did not retire', error);
+              }
+            }
+          }
+        }, signal);
         listeners.forEach(listener => listener.assertFencedForMigration());
       } catch (error) { failure = error; }
-      // Actual scope and every private credential/candidate child retire
-      // before the genuine EX can close. A failed join remains strongly owned
-      // by this Store and its admission registry; no reused FD is retried.
+      if (failure instanceof ResourceRetirementError) throw failure;
+      const safelyRefusedBeforeControl = failure !== undefined && failure === quiescenceRefusal;
+      const canResume = failure === undefined && result !== undefined || safelyRefusedBeforeControl;
       try {
-        if (this.migrationFilesystem) {
-          await releaseHeldMigrationLegacyLocks(this.migrationFilesystem);
-          this.migrationFilesystem.close(); this.migrationFilesystem = undefined;
+        account.restoreShared();
+        if (canResume && !this.closeRequested) {
+          this.restoreLocalInferenceAfterExclusive();
+          listeners.forEach(listener => listener.resumeAfterMigration());
         }
-        this.accountParticipant!.restoreShared();
       } catch (error) {
         throw new ResourceRetirementError('owned import account cohort did not retire',
           failure === undefined ? error : new AggregateError([failure, error], 'owned import and original cohort retirement failed'));
       }
       this.migrationRunning = false;
+      if (canResume) this.migrationFenced = false;
+      this.armInstalledMaintenance();
+      if (safelyRefusedBeforeControl) throw new InstalledMigrationQuiescenceError(failure);
       if (failure !== undefined) throw failure;
       if (!result) throw new KernelStorageError('RECOVERY_REQUIRED', 'owned import has no original committed response');
-      this.migrationFenced = false;
-      listeners.forEach(listener => listener.resumeAfterMigration());
       return result;
     });
   }
@@ -2315,7 +2616,11 @@ export class StateStore {
       diagnosis?.stage('submit_preflight_authority');
       await validateControlChannelClosure(reads, this.owner, identity);
       signal.throwIfAborted();
-      const { replayInstalledRunAdmission, admitInstalledRun } = await import('./reducers/admission.js');
+      const { replayInstalledRunAdmission, admitInstalledRun, prepareLocalRunAdmission } = await import('./reducers/admission.js');
+      const model = normalized.request.model;
+      const localInference = model.provider === 'ollama' ? this.localInference : undefined;
+      const localReplay = await this.localInference?.replay(normalized, identity);
+      if (localReplay) return { response: localReplay };
       const replay = await replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity, this.runtimeAuthority, signal, diagnosis?.stage);
       if (replay) {
         if ('run' in replay) {
@@ -2351,13 +2656,44 @@ export class StateStore {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'installed Run source refusal changed before replay response');
         return { response };
       }
-      const { assembleInstalledRun, assertInstalledRunRecipe, InstalledRunAuthorityError } = await import('./installed-run.js');
+      const { assembleInstalledRun, assertInstalledLocalRunRecipe, assertInstalledRunRecipe, assertInstalledRunDependencyAuthority,
+        InstalledRunAuthorityError } = await import('./installed-run.js');
+      const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
+      if (model.provider === 'ollama') {
+        if (!localInference) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run lacks its fixed signed local inference recipe');
+        assertInstalledLocalRunRecipe(normalized.request);
+        const frame = pinLocalInferenceAdmissionFrame(this.owner, identity);
+        diagnosis?.stage('submit_source_capture');
+        const source = await this.captureSubmittedSource({ request, identity });
+        if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
+        if (source.outcome.kind !== 'captured') {
+          const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
+          const response = await readSourceInspectionErrorResponse(reads, source);
+          await validateControlChannelClosure(reads, this.owner, identity, frame);
+          assertCurrentControlFrame(this.owner, identity, frame); assertActiveStateOwner(this.driver, this.owner);
+          return { response };
+        }
+        const result = await localInference.submit(normalized, { identity, frame,
+          replay: () => replayInstalledRunAdmission(this.driver, this.artifacts, this.owner, normalized, identity,
+            this.runtimeAuthority, signal, diagnosis?.stage),
+          prepare: async registration => {
+          diagnosis?.stage('submit_assembly');
+          const assembled = await assembleInstalledRun({ selected, driver: this.driver, owner: this.owner, artifacts: this.artifacts,
+            identity, request: normalized.request, originalRequest: normalized.originalRequest, source, controlledHome,
+            localModel: { registration, services: localInference.services, frame } }, signal, diagnosis?.stage);
+          diagnosis?.stage('submit_final_admission');
+          const cut = await prepareLocalRunAdmission(this.driver, this.artifacts, this.owner, assembled, identity, this.runtimeAuthority, signal);
+          return { assembled, cut, ...(assembled.dependencyPolicyRef ? {
+            assertCredentials: (token: HeldCredentialAuthorityLock) =>
+              assertInstalledRunDependencyAuthority(assembled, this.driver, this.owner, identity, token),
+          } : {}) };
+        } });
+        return result;
+      }
       if (!this.installedModelAdmissionReady) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
       const assertRecipe: typeof assertInstalledRunRecipe = assertInstalledRunRecipe;
       assertRecipe(normalized.request);
-      const model = normalized.request.model;
       if (model.provider !== 'openai-compatible') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed Run requires its fixed signed model recipe');
-      const selected = this.installedRuntime, controlledHome = this.runtimeAuthority.sourceInspection.controlledHome;
       // Refuse invalid credential intent before publishing source or assembly
       // CAS objects. This read is not the final admission or release authority.
       const authority = await withCredentialAuthorityLock(selected, async token => {
@@ -2426,7 +2762,7 @@ export class StateStore {
     if (this.migrationFenced) return;
     if (this.schedulerStarted) throw new TypeError('installed scheduler is already started');
     if (!this.installedRuntime || !this.installedAnchor || !this.runtimeAuthority?.sourceInspection) return;
-    const isClosing = () => this.closeRequested || this.closed || this.released;
+    const isClosing = () => this.migrationFenced || this.closeRequested || this.closed || this.released;
     if (isClosing()) return;
     await this.ownInstalledAdmission(async signal => {
       await retireRetainedMcpAdminOperations(this.driver, this.artifacts.withReadSignal(signal), this.owner,
@@ -2438,14 +2774,24 @@ export class StateStore {
     if (isClosing()) return;
     const recipe = await withHeldInstalledRuntime(this.installedRuntime, async installed => {
       await installed.revalidate();
-      return { hasDiscovery: installed.modelAuthority !== undefined,
+      return { hasDiscovery: installed.modelAuthority !== undefined, hasLocal: localInferenceRuntimeRoots(installed.bundle).length === 1,
         hasBroker: installed.bundle.entries.some(entry => entry.entryId === MODEL_BROKER_ENTRY_ID &&
           entry.role === 'provider_adapter' && entry.executable) };
     });
     if (isClosing() || !recipe.hasBroker) return;
-    await loadInstalledModelBroker(this.installedRuntime);
+    const broker = await loadInstalledModelBroker(this.installedRuntime);
     if (isClosing()) return;
     this.installedAnchor.assertHeld(); assertActiveStateOwner(this.driver, this.owner);
+    const retainedLocal = readUnclosedLocalInference(this.driver);
+    if (recipe.hasLocal || retainedLocal.cycles.length || retainedLocal.launches.length) {
+      if (process.platform !== 'linux' || process.arch !== 'x64' || broker.localModelInterfaceVersion !== 1 ||
+          typeof broker.prepareLocalModelTransport !== 'function' || typeof broker.prepareLocalHealthTransport !== 'function')
+        throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'retained local inference requires its exact installed native broker');
+      this.localInferenceConfigured = recipe.hasLocal;
+      this.localInference = this.openLocalInferenceCoordinator(this.installedRuntime, this.installedAnchor);
+      await this.localInference.start();
+      if (isClosing()) return;
+    }
     const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?")
       .all<{ id: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
     if (rows.length > INSTALLED_RUN_INVENTORY_LIMIT) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed scheduler retained inventory exceeds its bounded cut');
@@ -2514,9 +2860,10 @@ export class StateStore {
   }
 
   private supportsInstalledOwnerMaintenance(): boolean {
-    // Fencing productive work for account EX does not pause the original
-    // canonical clock. There is no separate Owner lease or alternate clock.
-    return this.schedulerStarted && this.schedulerFailure === undefined && !this.closeRequested && !this.closed && !this.released;
+    // The exclusive migration cut joins this SQL writer. Real wall time and
+    // the canonical checks on each migration transaction remain unchanged.
+    return this.schedulerStarted && this.schedulerFailure === undefined && !this.migrationRunning &&
+      !this.closeRequested && !this.closed && !this.released;
   }
 
   private async maintainInstalledRuns(): Promise<void> {
@@ -2542,6 +2889,7 @@ export class StateStore {
       throw this.schedulerFailure;
     }
     if (!(this.accountParticipant?.isShared() ?? true)) return;
+    await this.localInference?.services.maintain();
     const rows = this.driver.prepare("SELECT id FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at,id LIMIT ?")
       .all<{ id: string }>(INSTALLED_RUN_INVENTORY_LIMIT + 1);
     if (rows.length > INSTALLED_RUN_INVENTORY_LIMIT) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed maintenance inventory exceeds its bounded cut');
@@ -3155,34 +3503,78 @@ export class StateStore {
       // explicit/recovery drive may retry a validated free failure; only the
       // automatic maintenance wake additionally requires its original hint.
       if (progress === 'retain') return;
-      const native = await nativeExecution();
-      if (current.status === 'queued') {
-        this.installedRunPhases.set(runId, 'drive_worker_activate');
-        current = await native.activateCurrentWorker({ expectedRunRevision: current.revision });
+      const local = material?.localProvenance?.value;
+      let modelProducer: Readonly<{ close(): void }> | undefined;
+      if (local && progress !== 'candidate') {
+        const coordinator = this.localInference;
+        if (!coordinator) throw new KernelStorageError('RECOVERY_REQUIRED', 'local model frontier has no installed service owner');
+        const registration = await this.readFrozenLocalRegistration(reads, local);
+        if (readRun(this.driver, runId).revision !== current.revision) continue;
+        if (!coordinator.services.ownsActive(registration)) {
+          if (current.activeWorkerLaunchId) {
+            // This is the existing physical recovery path. It fences the
+            // old lease and positively retires the exact worker/generation
+            // before the unchanged queued frontier can join a service cycle.
+            current = await (await nativeExecution()).recoverWorker({ expectedRunRevision: current.revision });
+            if (current.status === 'waiting') return;
+            continue;
+          }
+          if (!current.frontierRef || current.status !== 'queued')
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'local model restart requires a queued lease-free original frontier');
+          const participant = { kind: 'run_model_frontier' as const, runId, runRevisionAtJoin: current.revision,
+            frontierRef: current.frontierRef, joinedAt: sampleCanonicalNow() };
+          const cut = await readRecoveryClosure(this.driver, reads, runId);
+          if (!matchesLocalInferenceFrontier(cut.run, participant)) continue;
+          assertRetiredGenerationCut(this.driver, cut.run, cut.workspaceGenerations);
+          const activation = coordinator.joinFrontier(registration, participant, connection => {
+            const run = readRun(connection, runId);
+            if (!matchesLocalInferenceFrontier(run, participant))
+              throw new KernelStorageError('REVISION_CONFLICT', 'local model frontier changed before activation joined');
+            assertRetiredGenerationCut(connection, run, cut.workspaceGenerations);
+          });
+          void activation.then(() => this.scheduleInstalledRun(runId), error => {
+            if (!this.closeRequested) this.installedRunFailures.set(runId, error);
+          });
+          return;
+        }
+        modelProducer = coordinator.services.tryOwnModelProducer(registration);
+        if (!modelProducer) return; // The existing maintenance owner wakes a still-current frontier.
       }
-      if (progress === 'candidate') {
-        await native.finishCurrentFinalTurn({ expectedRunRevision: current.revision }); continue;
-      }
-      let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
-      this.installedRunPhases.set(runId, 'drive_model_prepare');
-      try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal); }
-      catch (error) {
-        if (!(error instanceof AgentContextExhaustedError)) throw error;
-        // A typed planning refusal is not itself stop authority. Reproduce the
-        // exact current retained cause before entering the ordinary proof-backed drain.
-        await agent.stopForResourceFailure({ expectedRunRevision: current.revision });
-        this.requestInstalledRunStop(runId);
-        continue;
-      }
-      try { await this.dispatchInstalledModel(native, agent, prepared, readSignal); }
-      catch (error) {
-        if (error instanceof ResourceRetirementError) throw error;
-        const stopped = readRun(this.driver, runId);
-        const entries = readInvocationAttempt(this.driver, runId, prepared.entry.opId, prepared.entry.attempt);
-        if (stopped.stopIntentRef && entries.every(entry => entry.phase !== 'unknown') &&
-          ['completed', 'failed'].includes(entries.at(-1)?.phase ?? '')) continue;
+      let joined = true;
+      try {
+        const native = await nativeExecution();
+        if (current.status === 'queued') {
+          this.installedRunPhases.set(runId, 'drive_worker_activate');
+          current = await native.activateCurrentWorker({ expectedRunRevision: current.revision });
+        }
+        if (progress === 'candidate') {
+          await native.finishCurrentFinalTurn({ expectedRunRevision: current.revision }); continue;
+        }
+        let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
+        this.installedRunPhases.set(runId, 'drive_model_prepare');
+        try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal); }
+        catch (error) {
+          if (!(error instanceof AgentContextExhaustedError) &&
+              !(error instanceof KernelStorageError && error.code === 'BUDGET_EXHAUSTED')) throw error;
+          // A typed planning refusal is not itself stop authority. Reproduce the
+          // exact current retained cause before entering the ordinary proof-backed drain.
+          await agent.stopForResourceFailure({ expectedRunRevision: current.revision });
+          this.requestInstalledRunStop(runId);
+          continue;
+        }
+        try { await this.dispatchInstalledModel(native, agent, prepared, readSignal); }
+        catch (error) {
+          if (error instanceof ResourceRetirementError) throw error;
+          const stopped = readRun(this.driver, runId);
+          const entries = readInvocationAttempt(this.driver, runId, prepared.entry.opId, prepared.entry.attempt);
+          if (stopped.stopIntentRef && entries.every(entry => entry.phase !== 'unknown') &&
+            ['completed', 'failed'].includes(entries.at(-1)?.phase ?? '')) continue;
+          throw error;
+        }
+      } catch (error) {
+        if (error instanceof ResourceRetirementError) joined = false;
         throw error;
-      }
+      } finally { if (joined) modelProducer?.close(); }
     }
   }
 
@@ -3292,7 +3684,7 @@ export class StateStore {
         const original = retainedCredentialChannel(held, operation);
         // Closing may have won while the genuine selection/scope opened.
         // A committed replay above does not need a new inspection or grant.
-        if (this.closeRequested || this.closed || this.released)
+        if (this.migrationFenced || this.closeRequested || this.closed || this.released)
           throw new KernelStorageError('RECOVERY_REQUIRED', 'credential StateOwner is closing');
         const inspection = platform.secretService({ kind: 'inspect',
           selector: credentialSelector(held, operation), expectedObservation: expected });
@@ -3333,7 +3725,8 @@ export class StateStore {
         // All async closure/platform work is finished. No await, externally
         // supplied callback, D-Bus or CAS operation occurs until readback.
         const cut = heldOwner.driver.transaction(connection => {
-          if (this.closeRequested || this.closed || this.released) throw new KernelStorageError('RECOVERY_REQUIRED', 'credential StateOwner is closing');
+          if (this.migrationFenced || this.closeRequested || this.closed || this.released)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'credential StateOwner is fenced or closing');
           token.assertHeld();
           const frame = assertCurrentControlFrame(heldOwner.owner, identity), peer = frame.processIdentity;
           if (peer.platform !== original.processIdentity.platform || peer.ownerUid !== original.processIdentity.ownerUid ||
@@ -3491,6 +3884,10 @@ export class StateStore {
           return opening;
         }, openingSignal) : await StateStore.openCore(stateRoot, runtimeAuthority, undefined, undefined, undefined, undefined, undefined, openingSignal);
       opening = store;
+      if (store.rollbackStartup) {
+        await store.resumeStartupRollback(store.rollbackStartup, openingSignal ?? new AbortController().signal);
+        return store;
+      }
       // Worker loaders enqueue on the same installed handle. Join the initial
       // borrow first, then retire old native resources before publishing Store.
       const authority = store.runtimeAuthority;
@@ -3540,13 +3937,20 @@ export class StateStore {
     if (installed && (!accountParticipant || !installedNative))
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed StateOwner requires its original account participant');
     accountParticipant?.assertShared();
+    let rollback: Readonly<{ controlBytes: Buffer; authorityBytes: Buffer; controlDigest: string;
+      phase: 'rollback_archive_ready' | 'rollback_restoring' }> | undefined;
     if (installed && accountParticipant) {
       // Before acquireLock and every SQLite statement. A Legacy-authority
       // generation cannot receive a new Kernel Owner to discover rollback.
       const observed = await inspectInstalledAccountBeforeOwner(accountParticipant, installed, openingSignal);
       const identity = stateRootIdentityFromDescriptor(stateRoot, installed.stateRoot);
-      assertKernelEntryAllowsStateOwner(observed, { canonicalAbsolutePath: stateRoot,
-        identityRef: canonicalSha256(identity), identityDigest: identity.identityDigest });
+      const root = { canonicalAbsolutePath: stateRoot, identityRef: canonicalSha256(identity), identityDigest: identity.identityDigest };
+      const control = readKernelRollbackPreOwner(observed, root)?.restoring ??
+        readKernelRollbackArchiveReadyPreOwner(observed, root)?.ready;
+      if (control && observed.kind === 'controlled' && observed.authorityBytes) {
+        rollback = { controlBytes: observed.controlBytes, authorityBytes: observed.authorityBytes,
+          controlDigest: control.controlDigest, phase: control.phase };
+      } else assertKernelEntryAllowsStateOwner(observed, root);
     }
     const native = installedNative ?? (installed ? await installed.loadStateOwner() : await loadNativeStateOwner(runtimeAuthority?.bundle));
     if (runtimeAuthority) {
@@ -3564,6 +3968,7 @@ export class StateStore {
       if (error.code === 'ENOENT') return false;
       throw error;
     });
+    if (rollback && !databaseExists) throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback cannot create a missing original database');
     let heldLock: HeldStateOwnerLock;
     openingSignal?.throwIfAborted();
     try {
@@ -3576,6 +3981,47 @@ export class StateStore {
     try {
       assertStateOwnerLock(heldLock);
       if (installed) await assertInstalledRootBinding(stateRoot, heldLock, installed);
+      if (rollback && installed && accountParticipant && installedRuntime) {
+        const original = rollback;
+        const gate = accountParticipant.enterExclusive(heldLock);
+        try {
+          const current = inspectHeldKernelMigrationEntry(native, heldLock);
+          if (current.kind !== 'controlled' || !current.controlBytes.equals(original.controlBytes) ||
+              !current.authorityBytes?.equals(original.authorityBytes))
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback startup documents changed across the original EX acquisition');
+          await ensurePrivateDirectory(casRoot, false);
+          const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot), openingSignal, runtimeAuthority?.releaseKeys);
+          return await withInstalledBorrowRollbackTail(installed, gate, async tail => {
+            const { readRetainedRollbackArchiveReady, readRetainedRollbackRecords } = await import('./kernel-rollback-history.js');
+            const control = original.phase === 'rollback_archive_ready'
+              ? (await readRetainedRollbackArchiveReady(current.controlBytes, current.authorityBytes!, tail, openingSignal)).ready
+              : (await readRetainedRollbackRecords(current.controlBytes, current.authorityBytes!, tail, openingSignal)).restoring;
+            if (control.controlDigest !== original.controlDigest || control.phase !== original.phase)
+              throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback startup lost its exact original control');
+            const history = await bindStateOwnerRollbackHistory(tail, control);
+            const opened = openSqliteDriver(databasePath); driver = opened;
+            assertKernelSchemaVersion(opened, 8);
+            if (control.phase === 'rollback_restoring') {
+              const preparer = readStateOwner(opened, control.preparerOwnerEpoch);
+              if (!preparer || preparer.acquisitionEvidenceRef !== control.preparerOwnerAcquisitionEvidenceRef ||
+                  preparer.acquisitionEvidenceDigest !== control.preparerOwnerAcquisitionEvidenceDigest)
+                throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback restoring lost its original preparing Owner');
+            }
+            const owner = await acquireOrBootstrapStateOwner(stateRoot, opened, artifacts, native, heldLock,
+              runtimeAuthority?.bundle, installed, history);
+            const ownerContext = await stateOwnerContextFromArtifacts(stateRoot, artifacts, owner, heldLock, history);
+            const store = new StateStore(stateRoot, opened, artifacts, ownerContext, runtimeAuthority, installedRuntime,
+              installedAnchor, accountParticipant, native);
+            store.migrationFenced = true; store.migrationRunning = true;
+            store.rollbackStartup = { gate, controlDigest: original.controlDigest };
+            return store;
+          }, openingSignal);
+        } catch (error) {
+          // A successor acquisition or tail join may have reached its real
+          // durable boundary. Retain the original EX/OS Owner until exit.
+          throw new ResourceRetirementError('installed rollback startup did not complete its exclusive recovery', error);
+        }
+      }
       driver = openSqliteDriver(databasePath);
       const preflightSchemaVersion = readSchemaUserVersion(driver);
       if (preflightSchemaVersion === 1) {
@@ -3765,6 +4211,17 @@ export class StateStore {
     return completed;
   }
 
+  private async readFrozenLocalRegistration(artifacts: ArtifactCatalog, source: LocalZeroCostProvenanceV1):
+    Promise<Extract<LocalModelRegistrationV1, { state: 'active' }>> {
+    const value = decodeLocalModelRegistration(await artifacts.readCanonical(source.localModelRegistrationRef));
+    if (value.state !== 'active' || canonicalSha256(value) !== source.localModelRegistrationRef ||
+        value.registrationDigest !== source.localModelRegistrationDigest || value.ownerPrincipalId !== source.ownerPrincipalId ||
+        value.model !== source.model || value.expectedServiceSpecRef !== source.serviceSpecRef ||
+        value.serviceSpec.serviceSpecDigest !== source.serviceSpecDigest)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'managed local model changed its original frozen registration');
+    return value;
+  }
+
   private async dispatchInstalledModelOwned(execution: RunExecution, agent: AgentRunState,
     attempt: Awaited<ReturnType<AgentRunState['prepareModel']>>, preparationSignal: AbortSignal) {
     const selected = this.installedRuntime;
@@ -3776,13 +4233,16 @@ export class StateStore {
     this.installedRunPhases.set(runId, 'drive_broker_prepare');
     const broker = await loadInstalledModelBroker(selected, preparationSignal);
     const initial = await readModelClaimCut(this.driver, reads, prepared);
-    if (initial.assembly.provider.name !== 'openai-compatible' || initial.authority.target.format !== 'cliq-endpoint-registration-v1' ||
-        attempt.prepared.outbound.requestPath !== '/chat/completions')
+    const target = initial.authority.target, provider = initial.assembly.provider.name, requestPath = attempt.prepared.outbound.requestPath;
+    const remote = target.format === 'cliq-endpoint-registration-v1' && provider === 'openai-compatible' && requestPath === '/chat/completions'
+      ? target : undefined;
+    const local = target.format === 'cliq-local-zero-cost-v1' && provider === 'ollama' && requestPath === '/api/chat' &&
+      initial.assembly.provider.credentialGrantRefs.length === 0 && initial.request.reservation.costMicros === 0 ? target : undefined;
+    if (!remote && !local)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'model request does not select the exact installed broker recipe');
-    const target = initial.authority.target;
-    const frozen = await reads.mapReads(initial.assembly.provider.credentialGrantRefs, async ref =>
-      decodeEndpointCredentialGrantBinding(await reads.readCanonical(ref)));
-    const trustStoreBytes = await reads.readBytes(target.tls.trustStoreRef);
+    const frozen = remote ? await reads.mapReads(initial.assembly.provider.credentialGrantRefs, async ref =>
+      decodeEndpointCredentialGrantBinding(await reads.readCanonical(ref))) : [];
+    const trustStoreBytes = remote && await reads.readBytes(remote.tls.trustStoreRef);
     const failPreparation = async (retryError?: KernelStorageError | CredentialScopeBusyError, retainedErrorRef?: string) => {
       const input = { runId, opId: prepared.opId, attempt: prepared.attempt, expectedRunRevision: readRun(this.driver, runId).revision };
       const evidence = { schemaVersion: 1, format: 'cliq-invocation-error-v1', runId, opId: prepared.opId, attempt: prepared.attempt,
@@ -3803,9 +4263,9 @@ export class StateStore {
       }
     };
     let callbackEntered = false;
-    const dispatch = async (token: HeldCredentialAuthorityLock) => {
+    const dispatch = async (token?: HeldCredentialAuthorityLock) => {
       callbackEntered = true;
-      const held = checkedCredentialToken(token);
+      const held = token && checkedCredentialToken(token);
       // No transport, claim or response exists yet. After this synchronous
       // boundary, the native owner's existing revocation/join takes over.
       preparationSignal.throwIfAborted();
@@ -3815,16 +4275,37 @@ export class StateStore {
       let receivedResponse = false;
       let preparationError: KernelStorageError | undefined;
       try {
-        const authority = currentModelAuthority(held, initial.authority.principalId, target.endpointRegistrationId,
-          frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: target, bindings: frozen });
+        const registration = local && await this.readFrozenLocalRegistration(reads, local);
+        const observeLocal = async () => {
+          if (!registration || !this.localInference)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'model broker has no original managed local service');
+          return this.localInference.services.observeRegistration(registration, 'model');
+        };
+        const observation = local && await observeLocal();
+        const authority = remote && held ? currentModelAuthority(held, initial.authority.principalId, remote.endpointRegistrationId,
+          frozen.map(binding => binding.credentialGrantId), sampleCanonicalNow(), { endpoint: remote, bindings: frozen }) : undefined;
+        const assertAuthority = (connection?: import('./sqlite-driver.js').SqliteConnection, at = sampleCanonicalNow()) => {
+          if (observation) observation.assertCurrent(connection);
+          else if (token && held && remote) {
+            token.assertHeld();
+            currentModelAuthority(held, initial.authority.principalId, remote.endpointRegistrationId,
+              frozen.map(value => value.credentialGrantId), at, { endpoint: remote, bindings: frozen });
+          } else throw new KernelStorageError('ARTIFACT_MISMATCH', 'model release lost its original broker authority');
+        };
         try {
           if (this.closeRequested || this.closed || this.released) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
           this.installedRunPhases.set(runId, 'drive_broker_prepare');
-          transport = broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
-            expectedObservation: authority.observation, target: { hostAscii: target.target.hostAscii, port: target.target.port,
-              basePath: target.target.basePath, serverNameAscii: target.tls.serverNameAscii, spkiSha256Pins: target.tls.spkiSha256Pins },
-            trustStoreBytes, trustStoreDigest: target.tls.trustStoreRef, requestPath: '/chat/completions',
-            bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+          if (remote && authority && trustStoreBytes) {
+            transport = broker.prepareModelTransport({ provider: 'openai-compatible', selector: authority.selector,
+              expectedObservation: authority.observation, target: { hostAscii: remote.target.hostAscii, port: remote.target.port,
+                basePath: remote.target.basePath, serverNameAscii: remote.tls.serverNameAscii, spkiSha256Pins: remote.tls.spkiSha256Pins },
+              trustStoreBytes, trustStoreDigest: remote.tls.trustStoreRef, requestPath: '/chat/completions',
+              bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+          } else if (observation && broker.localModelInterfaceVersion === 1 && typeof broker.prepareLocalModelTransport === 'function') {
+            observation.assertCurrent();
+            transport = broker.prepareLocalModelTransport({ provider: 'ollama', peer: observation.controller.retainModelPeer(),
+              bodyBytes, bodyBytesDigest: initial.request.bodyBytesRef });
+          } else throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed model broker lacks its exact transport');
           // No await between acquiring and registering the real owner: stop,
           // expiry and shutdown can revoke even an in-flight local redemption.
           this.modelTransports.set(runId, transport);
@@ -3837,7 +4318,8 @@ export class StateStore {
           throw error;
         }
         if (this.closeRequested || this.closed) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing');
-        token.assertHeld();
+        if (token) token.assertHeld();
+        else assertAuthority();
         // Retain the real original token/mutex before a permanent SQL claim.
         // Transport close still joins I/O immediately, but cannot destroy the
         // sole live no-release proof owner before its settlement transaction.
@@ -3861,9 +4343,10 @@ export class StateStore {
             if (!this.supportsInstalledRuns() || this.released) throw new KernelStorageError('LEASE_FENCED', 'model broker is closing or its lane is unavailable');
             const now = sampleCanonicalNow();
             assertActiveStateOwner(connection, this.owner);
-            token.assertHeld();
-            currentModelAuthority(held, cut.authority.principalId, target.endpointRegistrationId,
-              frozen.map(value => value.credentialGrantId), now, { endpoint: target, bindings: frozen });
+            if (cut.authority.targetRef !== initial.authority.targetRef || cut.authority.targetDigest !== initial.authority.targetDigest ||
+                cut.authority.principalId !== initial.authority.principalId)
+              throw new KernelStorageError('ARTIFACT_MISMATCH', 'model claim changed its exact original target or principal');
+            assertAuthority(connection, now);
             fence = advanceTimeFence(connection, this.owner.ownerEpoch, now);
             if (fence !== 'healthy') return;
             const live = assertLiveDispatchState(connection, this.owner, runId, cut.run.revision, binding.leaseEpoch, now);
@@ -3880,7 +4363,8 @@ export class StateStore {
           });
           requireHealthyFence(fence);
           execution.assertCurrentModelWorker(workerCut);
-          token.assertHeld();
+          if (token) token.assertHeld();
+          else assertAuthority();
           return release();
         };
         // Only local credential redemption happened before the permanent claim.
@@ -3892,7 +4376,7 @@ export class StateStore {
         receivedResponse = true;
         await transport.close();
         this.modelTransports.delete(runId);
-        token.assertHeld();
+        token?.assertHeld();
         try {
           const reader = agent.model.start(attempt.prepared, { status: response.status, mediaType: response.mediaType });
           reader.push(response.bodyBytes);
@@ -3921,11 +4405,11 @@ export class StateStore {
           ...(claimed ? { dispatchId: claimed.dispatchId, dispatchJournalSeq: claimed.seq } : {}), reason: error.reason }).toString('utf8'));
         const last = readInvocationAttempt(this.driver, runId, prepared.opId, prepared.attempt).at(-1);
         if (pendingClosure) {
-          token.assertHeld();
+          token?.assertHeld();
           await this.settleInstalledModelClosure(runId);
           fenceRetained = false;
         } else if (last?.phase === 'prepared') {
-          if (error instanceof InstalledModelAuthorizationError) {
+          if (error instanceof InstalledModelAuthorizationError && token) {
             const { publishInstalledCredentialRedemptionRefusal } = await import('./credential-redemption-failure.js');
             const refusal = await publishInstalledCredentialRedemptionRefusal(this.driver, this.artifacts, this.owner, token, prepared);
             await failPreparation(undefined, refusal.ref);
@@ -3953,8 +4437,11 @@ export class StateStore {
       if (sha256Bytes(bodyBytes) !== initial.request.bodyBytesRef || bodyBytes.length !== initial.request.bodyByteCount)
         throw new KernelStorageError('ARTIFACT_MISMATCH', 'model compiled body differs from the permanent prepared request');
       reads.assertReadActive();
-      this.installedRunPhases.set(runId, 'drive_credential_prepare');
-      return await withCredentialAuthorityLock(selected, dispatch, preparationSignal);
+      if (remote) {
+        this.installedRunPhases.set(runId, 'drive_credential_prepare');
+        return await withCredentialAuthorityLock(selected, dispatch, preparationSignal);
+      }
+      return await dispatch();
     } catch (error) {
       // Only the real non-reentrant guard can refuse before this callback
       // enters. No native owner or permanent claim was created by this call.
@@ -4182,6 +4669,7 @@ export class StateStore {
   }
 
   recoverCanonicalTime(): TimeFenceAdvance {
+    this.assertOrdinaryMutation();
     let outcome!: TimeFenceAdvance;
     this.driver.transaction((connection) => {
       assertActiveStateOwner(connection, this.owner);
@@ -4214,6 +4702,7 @@ export class StateStore {
     // The gate is synchronous: existing execution references cannot dispatch
     // while listeners/opening resources are being joined.
     this.closeRequested = true;
+    this.localInference?.beginClose();
     clearTimeout(this.installedMaintenanceTimer); this.installedMaintenanceTimer = undefined;
     for (const scope of this.installedAgents.values())
       scope.readAbort?.abort(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
@@ -4230,21 +4719,9 @@ export class StateStore {
       this.closeRevocationFailure ??= error instanceof ResourceRetirementError ? error :
         new ResourceRetirementError('MCP stdio current-checker revocation did not join', error);
     });
-    const credential = installedCredentialFinalizers.get(this);
-    if (credential?.inspection && !credential.inspectionJoin) {
-      try {
-        // Enter the exact native inspection owner's cancellation before the
-        // service joins its handler. The handler retains and reawaits this
-        // memoized join inside its still-held credential authority scope.
-        credential.inspectionJoin = credential.inspection.cancelAndJoin();
-        void credential.inspectionJoin.catch(error => {
-          credential.retirementFailure ??= error instanceof ResourceRetirementError ? error :
-            new ResourceRetirementError('credential inspection cancellation did not retire', error);
-        });
-      } catch (error) {
-        credential.retirementFailure ??= new ResourceRetirementError('credential inspection cancellation did not start', error);
-      }
-    }
+    // Enter the exact native cancellation before the service joins the
+    // handler. That handler reawaits the same join under its credential lock.
+    revokeInstalledCredentialInspection(installedCredentialFinalizers.get(this));
     for (const transport of this.modelTransports.values()) {
       try {
         // Native close starts revocation synchronously and memoizes its join.
@@ -4290,6 +4767,7 @@ export class StateStore {
         if (!agent || agent.operation !== 'agent') throw new KernelStorageError('RECOVERY_REQUIRED', 'received model result retains its original agent owner');
         await this.settleInstalledModelCompletion(runId, agent);
       }));
+      const localInferenceJoins = await Promise.allSettled(this.localInference ? [this.localInference.close()] : []);
       const results = await Promise.allSettled([
         ...[...this.controlListeners].map(listener => listener.close()),
         ...[...this.sourceInspectionTasks].map(async task => {
@@ -4316,7 +4794,7 @@ export class StateStore {
       // A failed broker join cannot skip independent listener/source/worker
       // revocation. Every owner is joined, but StateOwner stays held on any
       // retirement uncertainty; neither failure becomes a positive receipt.
-      const failure = [...brokerJoins, ...mcpAdminJoins, ...closureJoins, ...completionJoins,
+      const failure = [...brokerJoins, ...mcpAdminJoins, ...closureJoins, ...completionJoins, ...localInferenceJoins,
         ...admissionJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...producerJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
         ...driverJoins.filter(result => result.status === 'rejected' && result.reason instanceof ResourceRetirementError),
@@ -4338,7 +4816,7 @@ export class StateStore {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
       }
-      this.driver.close();
+      if (!this.rollbackDriverRetired) this.driver.close();
       this.owner.filesystem.close();
       this.accountParticipant?.close();
       this.closed = true;
@@ -4434,7 +4912,8 @@ async function acquireOrBootstrapStateOwner(
   native: NativeStateOwner,
   heldLock: HeldStateOwnerLock,
   runtimeBundle?: RuntimeBundleManifest,
-  installed?: InstalledRuntimeBorrow
+  installed?: InstalledRuntimeBorrow,
+  rollback?: StateOwnerRollbackHistory
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
   assertContiguousStateOwnerHistory(driver);
   const existingOwner = readActiveStateOwner(driver);
@@ -4459,8 +4938,9 @@ async function acquireOrBootstrapStateOwner(
         retainedRuntime.format !== 'cliq-kernel-schema-manifest-v1') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'reopen requires the same signed Supervisor authority; runtime upgrades need their own transition');
     }
-    return acquireSuccessorStateOwner(stateRoot, driver, artifacts, latestOwner, native, heldLock);
+    return acquireSuccessorStateOwner(stateRoot, driver, artifacts, latestOwner, native, heldLock, rollback);
   }
+  if (rollback) throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback successor lacks its original Owner');
   if (fence !== undefined) {
     throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence exists without state owner history');
   }
@@ -4696,10 +5176,12 @@ export async function acquireSuccessorStateOwner(
   artifacts: ArtifactCatalog,
   prior: StateOwnerRecordV1,
   native: NativeStateOwner,
-  heldLock: HeldStateOwnerLock
+  heldLock: HeldStateOwnerLock,
+  rollback?: StateOwnerRollbackHistory
 ): Promise<Extract<StateOwnerRecordV1, { state: 'active' }>> {
+  const publication = rollback ? rollbackStateOwnerTail(rollback) : artifacts;
   await stateOwnerFilesystemFromArtifacts(stateRoot, artifacts, prior, heldLock);
-  const history = await readRetainedStateOwnerHistory(driver, artifacts, prior.ownerEpoch);
+  const history = await readRetainedStateOwnerHistory(driver, artifacts, prior.ownerEpoch, rollback);
   const priorProcess = history.entries.at(-1)!.process;
 
   const currentFence = readTimeFence(driver);
@@ -4712,7 +5194,7 @@ export async function acquireSuccessorStateOwner(
     ? acquiredAt
     : currentFence.lastAcceptedAt;
   const processIdentity = await currentProcessIdentity(native, acquiredAt);
-  const processArtifact = await artifacts.publishCanonical(
+  const processArtifact = await publication.publishCanonical(
     processIdentity,
     'cliq-platform-process-identity-v1'
   );
@@ -4740,7 +5222,7 @@ export async function acquireSuccessorStateOwner(
       successorInstanceNonceDigest: instanceNonceDigest
     };
     transition.evidenceDigest = digestOmitting(transition, 'evidenceDigest');
-    transitionArtifact = await artifacts.publishCanonical(transition, 'cliq-state-owner-transition-evidence-v1');
+    transitionArtifact = await publication.publishCanonical(transition, 'cliq-state-owner-transition-evidence-v1');
     terminal = terminalStateOwnerRecord(prior, transition, transitionArtifact.ref, artifactCreatedAt);
   } else {
     terminal = prior;
@@ -4768,7 +5250,7 @@ export async function acquireSuccessorStateOwner(
     priorTransitionEvidenceDigest: terminal.transitionEvidenceDigest
   };
   acquisition.evidenceDigest = digestOmitting(acquisition, 'evidenceDigest');
-  const acquisitionArtifact = await artifacts.publishCanonical(
+  const acquisitionArtifact = await publication.publishCanonical(
     acquisition,
     'cliq-state-owner-acquisition-evidence-v1'
   );

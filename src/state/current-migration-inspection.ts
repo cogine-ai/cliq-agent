@@ -13,6 +13,7 @@ import { assertHeldMigrationGateOwner, openHeldCurrentMigrationInspector, verify
   type NativeStateOwner, type HeldMigrationCredentialGate } from './native-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import type { StateOwnerContext } from './state-owner.js';
+import type { NativeLocalModelStore } from './local-model-store-native.js';
 
 type CurrentLegacy = Awaited<ReturnType<typeof verifyHeldCurrentMigrationLegacy>>;
 type CurrentArchive = Awaited<ReturnType<typeof verifyHeldCurrentKernelArchive>>;
@@ -30,7 +31,7 @@ function invalid(): never { throw new KernelStorageError('RECOVERY_REQUIRED', 'c
  * No operation/verification callback or caller truth value grants authority. */
 export async function inspectInstalledOriginalKernelArchive<T>(native: NativeStateOwner, gate: HeldMigrationCredentialGate,
   context: StateOwnerContext, driver: SqliteDriver, artifacts: ArtifactCatalog, original: CompleteOriginalKernelArchive<T>,
-  signal?: AbortSignal): Promise<HeldInstalledMigrationInspection> {
+  signal?: AbortSignal, modelScope: NativeLocalModelStore | null = null): Promise<HeldInstalledMigrationInspection> {
   assertHeldMigrationGateOwner(native, gate, context.filesystem);
   assertOriginalCompletedKernelArchive(original, native, gate, driver);
   const history = await readInstalledCompletedImportUnderExclusive(native, context, gate, driver, artifacts, signal);
@@ -45,7 +46,7 @@ export async function inspectInstalledOriginalKernelArchive<T>(native: NativeSta
     backupRoot: history.backup.backupRoot, entryCount: history.inventory.entryCount,
     controlBytes: history.originalDocuments.currentControlBytes, authorityBytes: history.originalDocuments.authorityBytes,
     rendezvousBytes: history.originalDocuments.authorityBytes, authMarkerBytes: history.originalDocuments.authMarkerBytes
-  });
+  }, modelScope);
   let source: CurrentLegacy, archive: CurrentArchive;
   try {
     async function* originalEntries() {

@@ -11,6 +11,7 @@ import { digestOmitting } from '../kernel/identity.js';
 import type { LocalControlChannelIdentityV1, SessionContextProjection, SessionItem } from '../kernel/types.js';
 import { insertArtifactMetadata } from './artifacts.js';
 import { openInstalledControl } from './installed-control.js';
+import type { LocalControlConnection } from './control-channel.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import type { StateStore } from './store.js';
 import { createQueuedFixture, disposeFixture } from './testing/fixtures.js';
@@ -106,6 +107,47 @@ function byteFrame(body: Buffer): Buffer {
 
 const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBuild: 'wire-client-fixture',
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
+
+test('the current migration frame joins earlier authenticated dispatches and fences new ones', async t => {
+  const fixture = await createQueuedFixture('wire-migration-fence');
+  t.after(() => disposeFixture(fixture));
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>(done => { resolve = done; });
+    return { promise, resolve };
+  }
+  const accepted = [deferred<LocalControlConnection>(), deferred<LocalControlConnection>()];
+  const errors: Error[] = [];
+  let next = 0;
+  const listener = fixture.store.openLocalControl(connection => accepted[next++]!.resolve(connection), error => errors.push(error));
+  t.after(() => listener.close());
+  const socket = path.join(fixture.stateRoot, 'runtime/control-v1.sock');
+  await connectPeer(t, socket);
+  const prior = await bounded(accepted[0]!.promise);
+  await connectPeer(t, socket);
+  const original = await bounded(accepted[1]!.promise);
+  await assert.rejects(listener.fenceForMigration(), /current control frame/);
+  const started = deferred<void>(), release = deferred<void>(), fenced = deferred<void>();
+  const earlier = prior.dispatch(async () => { started.resolve(); await release.promise; return 'prior joined'; });
+  await bounded(started.promise);
+  const migration = original.dispatch(async () => {
+    const joining = listener.fenceForMigration();
+    fenced.resolve();
+    await joining;
+    listener.assertFencedForMigration();
+    listener.resumeAfterMigration();
+    return 'original joined';
+  });
+  try {
+    await bounded(fenced.promise);
+    assert.throws(() => listener.assertFencedForMigration(), /has not actually joined/);
+    await assert.rejects(prior.dispatch(async () => assert.fail('fenced dispatch entered')), { code: 'LEASE_FENCED' });
+  } finally { release.resolve(); await bounded(Promise.allSettled([earlier, migration])); }
+  assert.equal(await earlier, 'prior joined');
+  assert.equal(await migration, 'original joined');
+  assert.equal(await prior.dispatch(async () => 'resumed'), 'resumed');
+  assert.deepEqual(errors, []);
+});
 
 test('a real accepted peer prepares its complete closure before the first frame without granting frame authority', async t => {
   const fixture = await createQueuedFixture('wire-ap');

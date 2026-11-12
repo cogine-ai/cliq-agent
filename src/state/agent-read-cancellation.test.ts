@@ -32,8 +32,11 @@ test('installed waits retain reconciliation but let an actually registered Stop 
   }; visit(file); assert(method?.body);
   const guards: ts.IfStatement[] = [];
   const choose = (node: ts.Node) => {
-    if (ts.isIfStatement(node) && ts.isReturnStatement(node.thenStatement) &&
-        /^current\.status === 'waiting'/u.test(node.expression.getText(file))) guards.push(node);
+    if (ts.isIfStatement(node) && ts.isReturnStatement(node.thenStatement)) {
+      const condition = node.expression.getText(file);
+      if (/^current\.status === 'waiting'/u.test(condition) &&
+          condition.includes("current.waitingReason === 'reconciliation'") && condition.includes('!current.stopIntentRef')) guards.push(node);
+    }
     ts.forEachChild(node, choose);
   }; choose(method.body); assert.equal(guards.length, 1);
   const holds = new Function('current', `return (${guards[0]!.expression.getText(file)});`) as (current: unknown) => boolean;
@@ -185,8 +188,11 @@ test('installed admission scopes only its read-only CAS work and retains origina
     assert.doesNotMatch(body, /readCanonicalArtifact(?:<[^\n]+?>)?\(artifacts|artifacts\.(?:readBytes|readCanonical|describe)\(|validateControlChannelClosure\(artifacts/u);
     assert.match(body, /await artifacts\.publishCanonical\(/u, 'read cancellation cannot replace the original publication catalog');
   }
-  assert.match(internal, /driver\.transaction\(\(connection\) => \{\s*signal\?\.throwIfAborted\(\);/u,
-    'the original final-transaction signal check must remain in place');
+  assert.match(internal, /const finalAdmission = \(connection: SqliteConnection\) => \{\s*signal\?\.throwIfAborted\(\);/u,
+    'the synchronous final admission cut must check the original signal before observing or writing admission state');
+  assert.match(internal, /driver\.transaction\(connection => \{\s*if \(finalAdmission\(connection\)\) return;\s*assertAdmissionInputs\(connection\);/u);
+  assert.match(internal, /assertSqliteConnectionOwnedBy\(driver, connection\);\s*const existing = finalAdmission\(connection\);/u,
+    'the local cycle must run the same signal check on its original SQLite transaction');
 });
 
 test('source capture preflight scopes reads without retaining an aborted catalog for genuine birth and retirement', () => {
@@ -570,10 +576,12 @@ test('MCP admission and frozen material preserve their preparing signal and comp
   const assembly = between(installed, 'export async function assembleInstalledRun(', '/** Same genuine installed preparation,');
   assert.match(assembly, /readMcpAdmissionSelections\(driver, reads, identity\.principalId,\s*request\.registeredMcpServerIds, captureRuntime\.bundle, signal\)/u);
   const material = between(installed, 'async function materialFor(', 'export async function loadInstalledRunMaterial(');
-  assert.match(material, /readFrozenMcpSelections\(driver, artifacts, endpoint\.ownerPrincipalId,\s*assembly\.mcpServers, installed\.bundle, signal\)/u);
-  const final = installed.slice(installed.indexOf('export function readInstalledRunAdmission('));
-  assert.match(final, /binding\.signal\?\.throwIfAborted\(\);\s*assertActiveStateOwner\(connection, owner\);\s*for \(const selected of binding\.mcp\) selected\.assertUnchanged\(connection\)/u,
-    'the original sole admission transaction still rechecks the frozen selection and owner');
+  assert.match(material, /const \{ principalId, \.\.\.provider \} = await readInstalledProviderMaterial\(installed, artifacts, inheritedLocal \?\? assembly, driver\);\s*const mcp = driver \? await readFrozenMcpSelections\(driver, artifacts, principalId, assembly\.mcpServers, installed\.bundle, signal\)/u);
+  const final = between(installed, 'export function readInstalledRunAdmission(', 'export function recheckInstalledRunWorkspace(');
+  const active = final.indexOf('assertActiveStateOwner(connection, owner);');
+  assert(final.indexOf('binding.signal?.throwIfAborted();') >= 0 && final.indexOf('binding.signal?.throwIfAborted();') < active);
+  assert(active >= 0 && final.indexOf('for (const selected of binding.mcp) selected.assertUnchanged(connection);') > active,
+    'both installed provider paths recheck the frozen selection after the same original signal and owner');
 });
 
 test('preparation and recovery bind full CAS reads to their actual task while received checkpoints keep their original catalog', () => {
@@ -591,6 +599,13 @@ test('preparation and recovery bind full CAS reads to their actual task while re
   const checkpoint = between(execution, 'function checkpointRetirement(', 'async function retireToCheckpoint(');
   assert.doesNotMatch(checkpoint, /withReadSignal/u);
   assert.match(checkpoint, /readRecoveryClosure\(driver, artifacts, runId\)/u);
+});
+
+test('installed model budget refusal rechecks resource Stop before requesting the normal drain', () => {
+  const preparation = between(source('./store.ts'), 'let prepared: Awaited<ReturnType<AgentRunState[\'prepareModel\']>>;',
+    'try { await this.dispatchInstalledModel(');
+  assert.match(preparation, /if \(!\(error instanceof AgentContextExhaustedError\)\s*&&\s*!\(error instanceof KernelStorageError && error\.code === 'BUDGET_EXHAUSTED'\)\) throw error;/u);
+  assert.match(preparation, /await agent\.stopForResourceFailure\(\{ expectedRunRevision: current\.revision \}\);\s*this\.requestInstalledRunStop\(runId\);\s*continue;/u);
 });
 
 test('the final candidate and verifier/tool preparation use only their preparing signal, never the received completion signal', () => {

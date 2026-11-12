@@ -27,9 +27,54 @@ import { hostPlatform } from './workspace-identity.js';
 import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
 import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES, type BundledSkillClosureV1 } from '../kernel/skill.js';
 import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
+import { decodeOwnedKernelArchiveWitness, type KernelRollbackRestoringControlV1, type OwnedKernelArchiveWitnessV1 } from '../kernel/kernel-rollback-records.js';
+import type { KernelRollbackArchiveReadyControlV1 } from '../kernel/kernel-rollback-handoff.js';
+import { assertHeldMigrationTailArtifacts, type MigrationTailArtifacts } from './installed-runtime.js';
 
 type Entry = { owner: StateOwnerRecordV1; process: PlatformProcessIdentityV1;
   acquisition: StateOwnerAcquisitionEvidenceV1; transition?: StateOwnerTransitionEvidenceV1 };
+declare const rollbackHistoryBrand: unique symbol;
+export type StateOwnerRollbackHistory = Readonly<{ [rollbackHistoryBrand]: true }>;
+const rollbackHistories = new WeakMap<StateOwnerRollbackHistory, Readonly<{
+  tail: MigrationTailArtifacts; archive: OwnedKernelArchiveWitnessV1;
+}>>();
+
+/** Used only in the explicitly fenced restoring startup. The archive
+ * witness's Owner is the fixed boundary between productive and tail objects. */
+export async function bindStateOwnerRollbackHistory(tail: MigrationTailArtifacts,
+  control: KernelRollbackRestoringControlV1 | KernelRollbackArchiveReadyControlV1): Promise<StateOwnerRollbackHistory> {
+  assertHeldMigrationTailArtifacts(tail);
+  const archive = decodeOwnedKernelArchiveWitness(await tail.readCanonical(control.archivedKernelGenerationRef));
+  if (canonicalSha256(archive) !== control.archivedKernelGenerationRef || archive.witnessDigest !== control.archivedKernelGenerationDigest ||
+      archive.migrationId !== control.migrationId || archive.archiveId !== control.archiveId ||
+      archive.kernelGenerationId !== control.kernelGenerationId || archive.drainingControlRef !== control.drainingControlRef ||
+      archive.drainingControlDigest !== control.drainingControlDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback Owner history differs from its exact archived cut');
+  assertHeldMigrationTailArtifacts(tail);
+  const scope = Object.freeze({}) as StateOwnerRollbackHistory;
+  rollbackHistories.set(scope, { tail, archive }); return scope;
+}
+
+function rollbackHistory(scope: StateOwnerRollbackHistory) {
+  const held = rollbackHistories.get(scope);
+  if (!held) throw new TypeError('rollback Owner history requires its genuine original source');
+  assertHeldMigrationTailArtifacts(held.tail);
+  return held;
+}
+
+export function rollbackStateOwnerTail(scope: StateOwnerRollbackHistory): MigrationTailArtifacts {
+  return rollbackHistory(scope).tail;
+}
+
+function readOwnerArtifact(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, ref: string,
+  purpose: 'frame' | 'transition', rollback?: StateOwnerRollbackHistory): Promise<unknown> {
+  if (rollback) {
+    const { archive, tail } = rollbackHistory(rollback);
+    if (owner.ownerEpoch > archive.ownerEpoch || purpose === 'transition' && owner.ownerEpoch === archive.ownerEpoch)
+      return tail.readCanonical(ref);
+  }
+  return readCanonicalArtifact(artifacts, ref);
+}
 export type RetainedStateOwnerHistory = Readonly<{
   throughEpoch: number; entries: readonly Entry[];
   lockIdentity: StateLockIdentityV1; rootIdentity: StateRootIdentityV1;
@@ -272,9 +317,9 @@ async function readRuntime(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1
   return 'signed';
 }
 
-async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<Entry> {
-  const processIdentity = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, owner.processIdentityRef));
-  const acquisition = decodeStateOwnerAcquisitionEvidence(await readCanonicalArtifact(artifacts, owner.acquisitionEvidenceRef));
+async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, rollback?: StateOwnerRollbackHistory): Promise<Entry> {
+  const processIdentity = decodePlatformProcessIdentity(await readOwnerArtifact(artifacts, owner, owner.processIdentityRef, 'frame', rollback));
+  const acquisition = decodeStateOwnerAcquisitionEvidence(await readOwnerArtifact(artifacts, owner, owner.acquisitionEvidenceRef, 'frame', rollback));
   if (processIdentity.identityDigest !== owner.processIdentityDigest ||
       processIdentity.executableImageDigest !== owner.supervisorExecutableDigest ||
       typeof process.geteuid !== 'function' || processIdentity.ownerUid !== process.geteuid() ||
@@ -291,13 +336,14 @@ async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1):
 }
 
 /** The original one-frame check used when constructing an already-owned Store context. */
-export async function readRetainedStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<PlatformProcessIdentityV1> {
-  return (await readFrame(artifacts, owner)).process;
+export async function readRetainedStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  rollback?: StateOwnerRollbackHistory): Promise<PlatformProcessIdentityV1> {
+  return (await readFrame(artifacts, owner, rollback)).process;
 }
 
 async function readTransition(artifacts: ArtifactCatalog, prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
-  successor?: StateOwnerRecordV1): Promise<StateOwnerTransitionEvidenceV1> {
-  const transition = decodeStateOwnerTransitionEvidence(await readCanonicalArtifact(artifacts, prior.transitionEvidenceRef));
+  successor?: StateOwnerRecordV1, rollback?: StateOwnerRollbackHistory): Promise<StateOwnerTransitionEvidenceV1> {
+  const transition = decodeStateOwnerTransitionEvidence(await readOwnerArtifact(artifacts, prior, prior.transitionEvidenceRef, 'transition', rollback));
   if (transition.kind !== prior.terminalReason || transition.evidenceDigest !== prior.transitionEvidenceDigest ||
       transition.priorOwnerEpoch !== prior.ownerEpoch || transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
       transition.priorProcessIdentityRef !== prior.processIdentityRef || transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
@@ -328,8 +374,8 @@ function readRows(connection: SqliteConnection, throughEpoch: number): StateOwne
 /** A single consistent SQL prefix followed by immutable artifact rewalks.
  * The synchronous comparator is a CAS guard, never a physical proof. */
 export async function readRetainedStateOwnerHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  throughEpoch: number): Promise<RetainedStateOwnerHistory> {
-  try { return await readHistory(driver, artifacts, throughEpoch); }
+  throughEpoch: number, rollback?: StateOwnerRollbackHistory): Promise<RetainedStateOwnerHistory> {
+  try { return await readHistory(driver, artifacts, throughEpoch, rollback); }
   catch (error) {
     if (error instanceof TypeError || error instanceof SyntaxError)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'retained StateOwner history is not a closed typed graph', { cause: error });
@@ -340,7 +386,7 @@ export async function readRetainedStateOwnerHistory(driver: SqliteDriver, artifa
 }
 
 async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  throughEpoch: number): Promise<RetainedStateOwnerHistory> {
+  throughEpoch: number, rollback?: StateOwnerRollbackHistory): Promise<RetainedStateOwnerHistory> {
   if (!Number.isSafeInteger(throughEpoch) || throughEpoch < 1) invalid('invalid retained StateOwner history epoch');
   const owners = driver.readSnapshot(connection => {
     const prefix = readRows(connection, throughEpoch), last = prefix.at(-1)!;
@@ -351,9 +397,16 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
     }
     return prefix;
   });
+  if (rollback) {
+    const { archive } = rollbackHistory(rollback);
+    const original = owners[archive.ownerEpoch - 1];
+    if (!original || original.acquisitionEvidenceRef !== archive.ownerAcquisitionEvidenceRef ||
+        original.acquisitionEvidenceDigest !== archive.ownerAcquisitionEvidenceDigest)
+      invalid('rollback Owner history has no exact archive-producing Owner');
+  }
   const casThroughEpoch = owners.length;
   const entries: Entry[] = [];
-  for (const owner of owners) entries.push(await readFrame(artifacts, owner));
+  for (const owner of owners) entries.push(await readFrame(artifacts, owner, rollback));
   const first = entries[0]!.owner;
   const lockIdentity = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, first.stateLockIdentityRef));
   const rootIdentity = decodeStateRootIdentity(await readCanonicalArtifact(artifacts, lockIdentity.stateRootIdentityRef));
@@ -404,7 +457,7 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
         invalid('StateOwner acquisition does not match its retained predecessor');
     }
     if (index < throughEpoch && entry.owner.state === 'terminal')
-      entry.transition = await readTransition(artifacts, entry.owner, entries[index + 1]?.owner);
+      entry.transition = await readTransition(artifacts, entry.owner, entries[index + 1]?.owner, rollback);
   }
   const retained = immutableSnapshot({ throughEpoch, entries: entries.slice(0, throughEpoch), lockIdentity, rootIdentity,
     ...(entries[throughEpoch] ? { successorWitness: entries[throughEpoch] } : {}) });

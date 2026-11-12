@@ -1,16 +1,19 @@
 // Original frozen local selection only. Current model-store heads are for new
 // admission and never participate in this retained Run/claim reader.
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { sha256Bytes } from '../kernel/identity.js';
-import { decodeLocalModelRegistration, decodeLocalInferenceBoundary, localStableServiceIdentity } from '../kernel/local-inference.js';
+import { addCanonicalDuration, sha256Bytes } from '../kernel/identity.js';
+import { decodeLocalModelRegistration, decodeLocalInferenceBoundary, localStableServiceIdentity,
+  type LocalInferenceBoundaryEvidenceV1 } from '../kernel/local-inference.js';
 import type { RunAssemblyV1 } from '../kernel/types.js';
 import { negotiateModelCapabilities, type ModelCapabilityEvidenceV1 } from '../model/capabilities.js';
 import { decodeLocalZeroCostProvenanceData, type LocalZeroCostProvenanceV1 } from '../model/pricing.js';
+import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { verifyLocalModelManifestAuthority } from '../policy/local-model-authority.js';
 import { requireEqual, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeStateRootIdentity } from './decoders.js';
+import type { ChildAdmissionData } from './child-admission.js';
 
 async function readSignature(artifacts: ArtifactCatalog, ref: string): Promise<Buffer> {
   const pieces: Buffer[] = []; let total = 0;
@@ -18,6 +21,31 @@ async function readSignature(artifacts: ArtifactCatalog, ref: string): Promise<B
   const bytes = Buffer.concat(pieces);
   if (total !== 64 || sha256Bytes(bytes) !== ref) throw new TypeError('local detached signature differs from its original complete bytes');
   return bytes;
+}
+
+/** Admission-time physical evidence remains historical for the Run lifetime.
+ * Model dispatch separately requires a fresh observation of its live service. */
+export function assertRetainedLocalAdmissionBoundary(boundary: LocalInferenceBoundaryEvidenceV1, provenance: LocalZeroCostProvenanceV1,
+  serviceSpecRef: string, admittedAt: string): void {
+  if (canonicalSha256(boundary) !== provenance.boundaryEvidenceRef || boundary.evidenceDigest !== provenance.boundaryEvidenceDigest ||
+      boundary.stableServiceIdentityDigest !== provenance.stableServiceIdentityDigest || boundary.serviceSpecRef !== serviceSpecRef ||
+      boundary.serviceSpecRef !== provenance.serviceSpecRef || boundary.serviceSpecDigest !== provenance.serviceSpecDigest ||
+      provenance.createdAt !== admittedAt || boundary.validThrough !== addCanonicalDuration(boundary.observedAt, 5000) ||
+      boundary.observedAt > admittedAt || admittedAt >= boundary.validThrough)
+    throw new TypeError('local original admission boundary differs from its complete stable source or fresh admission cut');
+}
+
+/** Children narrow the original assembly and keep its exact model authority.
+ * Their new creation time cannot replace the root's physical admission cut. */
+export async function readInheritedLocalModelAdmissionAssembly(artifacts: ArtifactCatalog, assembly: RunAssemblyV1,
+  child: ChildAdmissionData): Promise<RunAssemblyV1> {
+  const { rootOrigin } = child;
+  const original = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, rootOrigin.spec.assemblyRef));
+  if (canonicalSha256(assembly) !== child.spec.assemblyRef || original.provider.endpoint.kind !== 'local_zero_cost' ||
+      original.createdAt !== rootOrigin.run.createdAt || rootOrigin.run.deadlineAt < child.run.deadlineAt)
+    throw new TypeError('child model authority has no complete original root admission');
+  requireEqual(assembly.provider, original.provider, 'child exact original local model authority');
+  return original;
 }
 
 /** Static cryptographic/source history, not a live model mount or no-egress
@@ -70,9 +98,7 @@ export async function readRetainedLocalModelRegistration(artifacts: ArtifactCata
   for (const key of ['mode', 'nativeToolCalling', 'streaming', 'trustedUsageEvidence', 'contextLimitTokens', 'maxOutputTokens'] as const)
     if (selected[key] !== negotiated.negotiation[key]) throw new TypeError('local capability differs from the frozen Run negotiation');
   const boundary = decodeLocalInferenceBoundary(await readCanonicalArtifact(artifacts, provenance.boundaryEvidenceRef));
-  if (canonicalSha256(boundary) !== provenance.boundaryEvidenceRef || boundary.evidenceDigest !== provenance.boundaryEvidenceDigest ||
-      boundary.stableServiceIdentityDigest !== provenance.stableServiceIdentityDigest || boundary.serviceSpecRef !== registration.expectedServiceSpecRef ||
-      boundary.observedAt > provenance.createdAt || boundary.validThrough < provenance.validThrough)
-    throw new TypeError('local original admission boundary differs from its complete stable source/lifetime');
+  if (provenance.createdAt > input.assembly.createdAt) throw new TypeError('local provenance follows its retaining Run assembly');
+  assertRetainedLocalAdmissionBoundary(boundary, provenance, registration.expectedServiceSpecRef, provenance.createdAt);
   return { provenance, registration, service, manifest, closure, bundle, capability, boundary };
 }

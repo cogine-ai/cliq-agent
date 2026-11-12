@@ -1,12 +1,13 @@
 import path from 'node:path';
-import { closeSync, writeSync } from 'node:fs';
-import { getAsset, isSea } from 'node:sea';
+import { closeSync, fstatSync, statSync, writeSync } from 'node:fs';
+import * as installedSea from 'node:sea';
 import { assertArtifactRef, assertRequestId, normalizeAbsolutePath } from '../kernel/identity.js';
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { decodeEndpointAuthorityCommandCore, type EndpointAuthorityCommandCoreV1 } from '../kernel/credential-authority.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { openInstalledControl, type InstalledControlService } from './installed-control.js';
+import { INSTALLED_LOCAL_MODEL_EXIT, INSTALLED_LOCAL_MODEL_MODE, INSTALLED_LOCAL_MODEL_RESPONSE_LIMIT } from './installed-local-model-role.js';
 import { acquireInstalledAnchor, createInstalledRuntime, upgradeInstalledRuntime, verifyInstalledUpgradeOriginalControl, initializeInstalledKeeper, withHeldInstalledRuntime,
   commitEndpointAuthority, readEndpointAuthority, readCredentialAuthority, withCredentialAuthorityLock,
   type HeldInstalledAnchor, type HeldInstalledKeeper, type HeldInstalledRuntime } from './installed-runtime.js';
@@ -19,6 +20,7 @@ import { decodeCredentialWriteRequest, writeCredentialAuthority, decodeCredentia
 import { installServices } from './installed-services.js';
 import { loadInstalledCredentialPlatform } from './installed-runtime.js';
 import { installedSandboxProfile } from './installed-sandbox-profile.js';
+import { localInferenceRuntimeRoots } from './local-inference-runtime.js';
 import { noteInstalledCredentialPhase } from './installed-diagnostics.js';
 import { installedRuntimeUpgradeFailureMarker, type InstalledRuntimeUpgradePhase } from './installed-upgrade-diagnostics.js';
 import { openInstalledClientDirectory } from '../client/installed-data.js';
@@ -29,6 +31,7 @@ import { DEFAULT_RUN_SCHEDULING, type RunSchedulingV1 } from '../kernel/run-sche
 // embedded at image construction, never selected by argv/environment/control.
 // The signed companion enables the fixed Run recipe; without it the original
 // credential/read-only composition remains, never a legacy execution fallback.
+const { getAsset, isSea } = installedSea;
 let selected: HeldInstalledRuntime | undefined;
 let store: StateStore | undefined;
 let service: InstalledControlService | undefined;
@@ -36,12 +39,75 @@ let keeper: HeldInstalledKeeper | undefined;
 let anchor: HeldInstalledAnchor | undefined;
 let containmentHealth: ReturnType<typeof setInterval> | undefined;
 let closing: Promise<void> | undefined;
-let supervisorStopRequested = false;
-const supervisorStartupStop = new AbortController();
+let serviceStopRequested = false;
+const serviceStartupStop = new AbortController();
 let credentialRole = false;
 
-function stopSupervisorStartup(): boolean {
-  if (!supervisorStopRequested) return false;
+async function runLocalModelRole(runtime: ReturnType<typeof createInstalledRuntime>, executable: string): Promise<void> {
+  const stop = new AbortController(), cancel = () => stop.abort();
+  process.once('SIGTERM', cancel);
+  process.once('SIGINT', cancel);
+  let selection: HeldInstalledRuntime | undefined;
+  try {
+    // The inherited descriptor must be the file actually executing this
+    // process. Its transport lifetime ends before any registry work.
+    const inherited = fstatSync(3, { bigint: true });
+    const actual = statSync('/proc/self/exe', { bigint: true });
+    if (!inherited.isFile() || inherited.dev !== actual.dev || inherited.ino !== actual.ino)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed model role is not running its inherited image');
+    try { closeSync(3); }
+    catch (error) { throw new ResourceRetirementError('installed model image descriptor did not retire', error); }
+    if (process.argv.length !== 7)
+      throw new KernelStorageError('INVALID_REQUEST', 'installed model role requires its fixed invocation');
+    const [rawRoot, bundle, locator, command] = process.argv.slice(3) as [string, string, string, string];
+    const stateRoot = normalizeAbsolutePath(rawRoot);
+    if (stateRoot !== rawRoot || !/^(0|[1-9][0-9]*):[1-9][0-9]*:(0|[1-9][0-9]*)$/u.test(locator))
+      throw new KernelStorageError('INVALID_REQUEST', 'installed model role requires its canonical root locator');
+    assertArtifactRef(bundle);
+    const { decodeInstalledLocalModelCommand, decodeInstalledLocalModelSummaries, executeInstalledLocalModelOperation } =
+      await import('./local-model-operations.js');
+    const request = decodeInstalledLocalModelCommand(command);
+    stop.signal.throwIfAborted();
+    const held = await runtime.openSelected(stateRoot);
+    selection = held;
+    await withHeldInstalledRuntime(held, async installed => {
+      const image = installed.bundle.entries.find(entry => entry.role === 'supervisor')!;
+      if (bundle !== installed.bundleDigest || executable !== path.join(stateRoot, 'runtime/bundles', bundle, image.relativePath) ||
+          locator !== `${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}`)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed model role differs from its original signed selection');
+      const native = await installed.loadStateOwner(stop.signal);
+      if ((await native.observeCurrentProcess()).executableImageDigest !== image.digest)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'installed model role is not the selected executable');
+    }, stop.signal);
+    const result = await executeInstalledLocalModelOperation(held, request, stop.signal);
+    selection = undefined;
+    try { await held.close(); }
+    catch (error) { throw new ResourceRetirementError('installed model selection did not retire', error); }
+    stop.signal.throwIfAborted();
+    const response = canonicalJsonBytes(decodeInstalledLocalModelSummaries(result));
+    if (response.byteLength > INSTALLED_LOCAL_MODEL_RESPONSE_LIMIT)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model response exceeds its bound');
+    await new Promise<void>((resolve, reject) => process.stdout.write(response, error => error ? reject(error) : resolve()));
+  } catch (error) {
+    let failure = error;
+    if (selection) {
+      try { await selection.close(); }
+      catch (cause) { failure = new ResourceRetirementError('installed model selection did not retire', cause); }
+    }
+    process.exitCode = failure instanceof ResourceRetirementError ? INSTALLED_LOCAL_MODEL_EXIT.retirement
+      : stop.signal.aborted && failure === stop.signal.reason ? INSTALLED_LOCAL_MODEL_EXIT.cancelled
+      : failure instanceof KernelStorageError && failure.code === 'NOT_FOUND' ? INSTALLED_LOCAL_MODEL_EXIT.notFound
+      : failure instanceof KernelStorageError && failure.code === 'UNSUPPORTED_PLATFORM' ? INSTALLED_LOCAL_MODEL_EXIT.unavailable
+      : failure instanceof KernelStorageError && failure.code === 'INVALID_REQUEST' ? INSTALLED_LOCAL_MODEL_EXIT.invalidRequest
+      : INSTALLED_LOCAL_MODEL_EXIT.refused;
+  } finally {
+    process.removeListener('SIGTERM', cancel);
+    process.removeListener('SIGINT', cancel);
+  }
+}
+
+function stopServiceStartup(): boolean {
+  if (!serviceStopRequested) return false;
   store?.beginClose();
   return true;
 }
@@ -154,13 +220,15 @@ async function start(): Promise<void> {
     // Credential preparation has no native cancellation receipt. Outside the
     // hidden prompt's own joined terminal lifetime, retain real OS termination
     // and recover the persisted original setup request on an explicit retry.
-    const gracefulSignals = !helpOnly && mode !== 'models';
+    const localModels = mode === 'models' && (process.argv[3] === undefined || process.argv[3] === 'list' ||
+      process.argv[3] === 'retire' || process.argv[3] === 'add' && ['--local', '--manifest'].includes(process.argv[5] ?? ''));
+    const gracefulSignals = !helpOnly && (mode !== 'models' || localModels);
     if (gracefulSignals) { process.once('SIGTERM', stopping); process.once('SIGINT', stopping); }
     try {
       const { runInstalledDaily } = await import('../client/daily.js');
       const { MODEL_SETUP_PROFILES_ASSET, decodeModelSetupProfiles } = await import('../client/model-setup-profile.js');
       let profiles: ReturnType<typeof decodeModelSetupProfiles>['profiles'] = [];
-      if (mode === 'models') {
+      if (mode === 'models' && (installedSea.getAssetKeys?.().includes(MODEL_SETUP_PROFILES_ASSET) ?? true)) {
         const bytes = getAsset(MODEL_SETUP_PROFILES_ASSET);
         if (bytes.byteLength > 1_048_576) throw new TypeError('embedded model setup profiles exceed their data bound');
         profiles = decodeModelSetupProfiles(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes))).profiles;
@@ -186,6 +254,7 @@ async function start(): Promise<void> {
     } finally { process.removeListener('SIGTERM', cancel); }
     return;
   }
+  if (mode === INSTALLED_LOCAL_MODEL_MODE) return runLocalModelRole(runtime, executable);
   if (mode === '--installed-client') {
     if (process.argv.length < 5) throw new Error('expected a client StateRoot locator and command');
     const stop = new AbortController(), stopping = () => { stop.abort(); };
@@ -266,9 +335,9 @@ async function start(): Promise<void> {
     throw new Error('expected canonical installed StateRoot locators');
   assertArtifactRef(bundleDigest);
   process.once('SIGTERM', () => {
-    if (mode === '--installed-supervisor') {
-      supervisorStopRequested = true;
-      supervisorStartupStop.abort();
+    if (mode === '--installed-supervisor' || mode === '--installed-keeper') {
+      serviceStopRequested = true;
+      serviceStartupStop.abort();
       store?.beginClose();
     }
     // Final retirement still joins the original startup producer before
@@ -276,16 +345,16 @@ async function start(): Promise<void> {
     void starting.then(close, close).catch(error => { report(error); process.exitCode = 1; });
   });
   if (credentialRole) noteInstalledCredentialPhase('open_selected');
-  selected = await runtime.openSelected(stateRoot);
-  if (stopSupervisorStartup()) return;
+  selected = await runtime.openSelected(stateRoot, serviceStartupStop.signal);
+  if (stopServiceStartup()) return;
   const supervisor = selected.bundle.entries.find(entry => entry.role === 'supervisor')!;
   if (selected.bundleDigest !== bundleDigest || executable !== path.join(stateRoot, 'runtime/bundles', bundleDigest, supervisor.relativePath))
     throw new Error('installed Supervisor differs from the fixed selected image');
   await withHeldInstalledRuntime(selected, async installed => {
     if (`${installed.stateRoot.deviceId}:${installed.stateRoot.fileId}:${installed.stateRoot.ownerUid}` !== rootLocator)
       throw new Error('installed StateRoot differs from the pre-exec root');
-  });
-  if (stopSupervisorStartup()) return;
+  }, serviceStartupStop.signal);
+  if (stopServiceStartup()) return;
   if (mode === '--installed-credential') {
     const request = readCredentialRequest(process.argv[6]);
     const response = request.kind === 'install_services' ? { schemaVersion: 1, ...await installServices(selected) }
@@ -308,7 +377,8 @@ async function start(): Promise<void> {
     return;
   }
   if (mode === '--installed-keeper') {
-    keeper = await initializeInstalledKeeper(selected);
+    keeper = await initializeInstalledKeeper(selected, serviceStartupStop.signal);
+    if (stopServiceStartup()) return;
     // An FD alone does not keep Node alive. This referenced timer observes
     // native metadata, not full image/CAS hashing or another authority ledger.
     containmentHealth = setInterval(() => {
@@ -318,38 +388,41 @@ async function start(): Promise<void> {
   }
   // A stale/missing locator or keeper refuses before the first StateOwner
   // transaction. Never reopen a named cgroup root as an acquisition fallback.
-  anchor = await acquireInstalledAnchor(selected);
-  if (stopSupervisorStartup()) return;
+  anchor = await acquireInstalledAnchor(selected, serviceStartupStop.signal);
+  if (stopServiceStartup()) return;
   anchor.assertHeld();
   // Only this selected mode acquires authority. Genesis borrows these newly
   // held, verified descriptors, never the retired bootstrap's historical FDs.
   const runProfile = await withHeldInstalledRuntime(selected, async installed => {
-    if (!installed.modelAuthority) return undefined;
+    if (!installed.modelAuthority && localInferenceRuntimeRoots(installed.bundle).length === 0) return undefined;
     await installed.revalidate();
     return installedSandboxProfile();
-  });
-  if (stopSupervisorStartup()) return;
-  const actualUser = runProfile ? (await loadInstalledCredentialPlatform(selected)).currentUser() : undefined;
-  if (stopSupervisorStartup()) return;
+  }, serviceStartupStop.signal);
+  if (stopServiceStartup()) return;
+  const actualUser = runProfile ? (await loadInstalledCredentialPlatform(selected, serviceStartupStop.signal)).currentUser() : undefined;
+  if (stopServiceStartup()) return;
   let scheduler: RunSchedulingV1 = DEFAULT_RUN_SCHEDULING;
   if (runProfile) {
     let data: Awaited<ReturnType<typeof openInstalledClientDirectory>> | undefined;
-    try { data = await openInstalledClientDirectory(selected, { create: false }); }
+    try { data = await openInstalledClientDirectory(selected, { create: false, signal: serviceStartupStop.signal }); }
     catch (error) { if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') throw error; }
     if (data) {
       try { scheduler = await readRunScheduling(data.directory); }
       finally { await data.directory.close(); }
     }
   }
-  if (stopSupervisorStartup()) return;
+  if (stopServiceStartup()) return;
   store = await openStateStore(stateRoot, { bundle: selected.bundle, releaseKeys,
     scheduler,
-    ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor, supervisorStartupStop.signal);
-  if (stopSupervisorStartup()) return;
+    ...(runProfile ? { sourceInspection: { controlledHome: path.join(actualUser!.home, '.cliq'), sandboxProfile: runProfile } } : {}) }, selected, anchor, serviceStartupStop.signal);
+  if (store.completedKernelRollback()) { await close(); return; }
+  if (stopServiceStartup()) return;
   await store.startInstalledRuns();
-  if (stopSupervisorStartup()) return;
+  if (stopServiceStartup()) return;
   anchor.assertHeld();
-  service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1' }, report);
+  service = openInstalledControl(store, { serverBuild: 'cliq-installed-v1',
+    onRollbackComplete: () => { void close().catch(error => { report(error); process.exitCode = 1; }); }
+  }, report);
   containmentHealth = setInterval(() => {
     try { anchor!.assertHeld(); } catch (error) { void fail(error); }
   }, 1_000);
@@ -357,7 +430,7 @@ async function start(): Promise<void> {
 
 const starting = start();
 void starting.catch(async error => {
-  if (supervisorStopRequested && supervisorStartupStop.signal.aborted && error === supervisorStartupStop.signal.reason) {
+  if (serviceStopRequested && serviceStartupStop.signal.aborted && error === serviceStartupStop.signal.reason) {
     // Only this exact original cancellation can be quiet. A replaced error or
     // failed native/Owner retirement remains a real reported stop failure.
     try { await close(); } catch (retirement) { report(retirement); process.exitCode = 1; }

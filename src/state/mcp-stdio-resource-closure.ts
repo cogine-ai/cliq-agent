@@ -9,18 +9,21 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { KernelStorageError } from './errors.js';
 import type { NativeMcpStdioRunOwner, RunMcpStdioLaunchBinding, NativeMcpStdioRecoveryOwner, McpStdioRecoveryBinding } from './mcp-stdio-broker-native.js';
-import { assertInstalledMcpStdioRunJoined, assertInstalledMcpStdioRecoveryJoined } from './mcp-stdio-native-binding.js';
+import { assertInstalledMcpStdioRunJoined, assertInstalledMcpStdioRecoveryJoined, assertInstalledMcpStdioUnavailableJoined } from './mcp-stdio-native-binding.js';
 import type { HeldRunMcpStdioInput, HeldRecoveryMcpStdioInput } from './native-owner.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 
-async function publishStdioRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+async function publishStdioRetirement<K extends 'linux_original_join' | 'linux_original_response_unavailable'>(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   binding: RunMcpStdioLaunchBinding | McpStdioRecoveryBinding,
-  joined: ReturnType<typeof readInstalledMcpStdioRunJoined> | ReturnType<typeof readInstalledMcpStdioRecoveryJoined>, purpose: 'run' | 'recovery') {
+  joined: ReturnType<typeof readInstalledMcpStdioRunJoined> | ReturnType<typeof readInstalledMcpStdioRecoveryJoined>, purpose: 'run' | 'recovery',
+  closureKind: K) {
   const original = joined.originalLifecycle, physical = joined.joined.observation;
+  const unavailable = closureKind === 'linux_original_response_unavailable';
   if (!original.retirement || !original.joined.deathJoined || !original.joined.outputCustodyRetired || !original.joined.ownerDrained ||
-      original.joined.responseRefused || physical.cgroupPopulated !== 0 ||
+      original.joined.responseRefused !== unavailable || unavailable && (purpose !== 'recovery' || !original.containment || original.progressKind !== 9) ||
+      physical.cgroupPopulated !== 0 ||
       physical.remainingTrackedDescendants !== 0 || original.binding.kind !== purpose)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP original scope has no complete safe local process/pipe/FD retirement');
   requireEqual(original.retirement, physical, 'MCP original immutable retirement and same-scope actual joined observation');
@@ -74,7 +77,7 @@ async function publishStdioRetirement(driver: SqliteDriver, artifacts: ArtifactC
     ? 'cliq-mcp-stdio-native-lifecycle-bytes-v1' : 'cliq-mcp-stdio-recovery-native-lifecycle-bytes-v1');
   const projection = await artifacts.publishCanonical(original, original.format);
   return { joined, original, physical, plan, containment, containmentRef, evidence, evidenceRef: evidenceArtifact.ref,
-    nativeClosure: { kind: 'linux_original_join' as const, lifecycleRawRef: raw.ref, lifecycleProjectionRef: projection.ref },
+    nativeClosure: { kind: closureKind, lifecycleRawRef: raw.ref, lifecycleProjectionRef: projection.ref },
     metadata: [...metadata, evidenceArtifact, raw, projection], observedAt };
 }
 
@@ -82,14 +85,19 @@ export async function publishOriginalMcpStdioRetirement(driver: SqliteDriver, ar
   native: NativeMcpStdioRunOwner, binding: RunMcpStdioLaunchBinding, scope: InstalledMcpStdioRunScope, input: HeldRunMcpStdioInput) {
   const joined = readInstalledMcpStdioRunJoined(scope, input);
   assertInstalledMcpStdioRunJoined(native, joined.ownerJoined, binding); scope.assertJoined(joined.joined);
-  const proof = await publishStdioRetirement(driver, artifacts, owner, binding, joined, 'run');
+  const proof = await publishStdioRetirement(driver, artifacts, owner, binding, joined, 'run', 'linux_original_join');
   return { ...proof, joined, original: joined.originalLifecycle, physical: joined.joined.observation };
 }
 
 export async function publishOriginalMcpStdioRecoveryRetirement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   native: NativeMcpStdioRecoveryOwner, binding: McpStdioRecoveryBinding, scope: InstalledMcpStdioRecoveryScope, input: HeldRecoveryMcpStdioInput) {
   const joined = readInstalledMcpStdioRecoveryJoined(scope, input);
-  assertInstalledMcpStdioRecoveryJoined(native, joined.ownerJoined, binding); scope.assertJoined(joined.joined);
-  const proof = await publishStdioRetirement(driver, artifacts, owner, binding, joined, 'recovery');
+  const ownerJoined = joined.ownerJoined;
+  const unavailable = ownerJoined.kind === 'mcp_stdio_recovery_response_unavailable_joined';
+  if (unavailable) assertInstalledMcpStdioUnavailableJoined(native, ownerJoined, binding);
+  else assertInstalledMcpStdioRecoveryJoined(native, ownerJoined, binding);
+  scope.assertJoined(joined.joined);
+  const proof = await publishStdioRetirement(driver, artifacts, owner, binding, joined, 'recovery',
+    unavailable ? 'linux_original_response_unavailable' : 'linux_original_join');
   return { ...proof, joined, original: joined.originalLifecycle, physical: joined.joined.observation };
 }

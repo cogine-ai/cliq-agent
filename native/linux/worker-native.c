@@ -36,8 +36,8 @@
 static const napi_type_tag IMAGE_TAG = { UINT64_C(0x671ca1bc736f4411), UINT64_C(0xa1d7e8ec9f001820) };
 /* Private wire8/ACK scope layouts never unwrap an older loaded module's
  * controller or scope object, even when both live images share one Node VM. */
-static const napi_type_tag CONTROLLER_TAG = { UINT64_C(0xb49c442ec8a94f24), UINT64_C(0x8402dec45192c418) };
-static const napi_type_tag SCOPE_TAG = { UINT64_C(0xe162b285570c4c44), UINT64_C(0xab9d62c76fbaf11e) };
+static const napi_type_tag CONTROLLER_TAG = {UINT64_C(0xd42a0006992f10b2), UINT64_C(0x9fa389851e870d79)};
+static const napi_type_tag SCOPE_TAG = {UINT64_C(0x38a6bcfa7ac3ced6), UINT64_C(0x31cd5ed015f6871b)};
 static const napi_type_tag SOURCE_INSPECTOR_IMAGE_TAG = { UINT64_C(0x8c67dfb833d0495c), UINT64_C(0x9be2f2fa2fb9d634) };
 
 static const napi_type_tag BUILTIN_SCRIPT_IMAGE_TAG = { UINT64_C(0x9e40eb5c22474091), UINT64_C(0xa6b77c06b6f9b74f) };
@@ -55,6 +55,10 @@ struct controller;
 struct source_native_scope;
 struct mcp_admin_native_scope;
 struct mcp_stdio_native_scope;
+struct local_native_service;
+static void local_native_joined(struct controller *controller);
+static void local_native_complete(napi_env env, struct controller *controller);
+static void local_native_dispose(struct controller *controller);
 static void mcp_stdio_native_joined(struct controller *controller);
 static void mcp_stdio_native_complete(napi_env env, struct controller *controller);
 static void mcp_admin_native_joined(struct controller *controller);
@@ -66,7 +70,7 @@ static void preparation_native_joined(struct controller *controller);
 static void preparation_native_complete(napi_env env, struct controller *controller);
 static napi_value preparation_native_retirement(napi_env env, struct source_native_scope *scope);
 struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, ready, cleanup_queued, env_closing, reaped, cleanup_done;
-    int anchor_root, controller_parent, controller_leaf, input_fd, child_socket, transfer[4];
+    int anchor_root, controller_parent, controller_leaf, input_fd, child_socket, transfer[4], local_helper_fd;
     struct stat root_identity, parent_identity, leaf_identity;
     char root_path[PATH_MAX], leaf_name[64];
     bool leaf_owned, leaf_initialized, controller_leaf_retired, constructor_failed, retirement_failed;
@@ -80,6 +84,7 @@ struct controller { int socket, stdout_fd, stderr_fd; pid_t pid; bool closed, re
     struct cliq_worker_packet retained, reservation, reservation_inspection, inspected_reservation;
     bool reservation_bound, inspection_only, retained_observed, reservation_observed;
     napi_env env; pid_t creator_pid; struct mcp_admin_native_scope *mcp_admin; struct mcp_stdio_native_scope *mcp_stdio;
+    struct local_native_service *local_service;
     napi_async_work cleanup_work; napi_async_cleanup_hook_handle cleanup_hook;
     napi_deferred close_deferred; napi_ref close_promise;
 };
@@ -329,7 +334,7 @@ static void retire_controller_leaf(struct controller *controller) {
 }
 
 static void controller_release(struct controller *controller) {
-    if (--controller->references == 0) free(controller);
+    if (--controller->references == 0) { local_native_dispose(controller); free(controller); }
 }
 
 static void scope_release_memory(struct native_scope *scope) {
@@ -379,6 +384,7 @@ static void reap_controller(napi_env env, void *data) {
     if (reaped) source_native_joined(controller);
     if (reaped) mcp_admin_native_joined(controller);
     if (reaped) mcp_stdio_native_joined(controller);
+    if (reaped) local_native_joined(controller);
     if (reaped) retire_controller_leaf(controller);
 }
 
@@ -403,7 +409,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
         controller->reaped = false;
     }
     int *resources[] = { &controller->stdout_fd, &controller->stderr_fd, &controller->input_fd, &controller->child_socket,
-        &controller->controller_leaf, &controller->controller_parent, &controller->anchor_root,
+        &controller->controller_leaf, &controller->controller_parent, &controller->anchor_root, &controller->local_helper_fd,
         &controller->transfer[0], &controller->transfer[1], &controller->transfer[2], &controller->transfer[3] };
     for (size_t i = 0; i < sizeof(resources) / sizeof(resources[0]); i++)
         if (!retire_descriptor(resources[i])) controller->retirement_failed = true;
@@ -421,6 +427,7 @@ static void cleanup_complete(napi_env env, napi_status status, void *data) {
     source_native_complete(env, controller);
     mcp_admin_native_complete(env, controller);
     mcp_stdio_native_complete(env, controller);
+    local_native_complete(env, controller);
     if (!controller->reaped || controller->retirement_failed) atomic_store(&native_retirement_failed, true);
     settle_controller_close(env, controller);
     controller_release(controller);
@@ -1806,8 +1813,9 @@ static napi_value observe_preparation_birth(napi_env env, napi_callback_info inf
 
 static napi_value controller_close(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct controller *controller;
-    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid held controller");
+    void *family = NULL;
+    if (napi_get_cb_info(env, info, &argc, NULL, &self, &family) != napi_ok) return failure(env, "controller callback unavailable");
+    if (!tagged(env, self, family ? (const napi_type_tag *)family : &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid held controller");
     napi_value promise;
     if (controller->close_promise) { napi_get_reference_value(env, controller->close_promise, &promise); return promise; }
     /* Productive revocation must not erase a genuine result already delivered
@@ -1854,16 +1862,18 @@ static napi_value controller_close(napi_env env, napi_callback_info info) {
 
 static napi_value controller_pid(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self, result; struct controller *controller;
-    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+    void *family = NULL;
+    if (napi_get_cb_info(env, info, &argc, NULL, &self, &family) != napi_ok) return failure(env, "controller callback unavailable");
+    if (!tagged(env, self, family ? (const napi_type_tag *)family : &CONTROLLER_TAG, (void **)&controller) ||
         napi_create_double(env, (double)controller->pid, &result) != napi_ok) return failure(env, "controller PID unavailable");
     return result;
 }
 
 static napi_value controller_token(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self, result; struct controller *controller;
-    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller) ||
+    void *family = NULL;
+    if (napi_get_cb_info(env, info, &argc, NULL, &self, &family) != napi_ok) return failure(env, "controller callback unavailable");
+    if (!tagged(env, self, family ? (const napi_type_tag *)family : &CONTROLLER_TAG, (void **)&controller) ||
         napi_create_string_utf8(env, controller->token, NAPI_AUTO_LENGTH, &result) != napi_ok)
         return failure(env, "controller start lifetime unavailable");
     return result;
@@ -1871,8 +1881,9 @@ static napi_value controller_token(napi_env env, napi_callback_info info) {
 
 static napi_value controller_poll_ready(napi_env env, napi_callback_info info) {
     size_t argc = 0; napi_value self; struct controller *controller;
-    napi_get_cb_info(env, info, &argc, NULL, &self, NULL);
-    if (!tagged(env, self, &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid starting controller");
+    void *family = NULL;
+    if (napi_get_cb_info(env, info, &argc, NULL, &self, &family) != napi_ok) return failure(env, "controller callback unavailable");
+    if (!tagged(env, self, family ? (const napi_type_tag *)family : &CONTROLLER_TAG, (void **)&controller)) return failure(env, "invalid starting controller");
     /* Revocation is main-thread-only and precedes queueing cleanup. Do not
      * read worker-written retirement state once that join is in flight. */
     if (controller->closed) return failure(env, "invalid starting controller");
@@ -1947,7 +1958,10 @@ static napi_value controller_invocation_capacity(napi_env env, napi_callback_inf
     return napi_get_boolean(env, controller->next_scope < CLIQ_WORKER_MAX_SCOPES, &result) == napi_ok ? result : NULL;
 }
 
-static napi_value open_controller(napi_env env, napi_callback_info info) {
+#include "local-inference-native.h"
+#include "local-inference-peer-native.h"
+#include "local-inference-data.h"
+static napi_value open_controller_family(napi_env env, napi_callback_info info, bool local_service) {
     if (atomic_load(&native_retirement_failed)) return failure(env, "native resource retirement remains uncertain");
     size_t argc = 2; napi_value args[2]; struct image *helper; uint64_t root;
     napi_get_cb_info(env, info, &argc, args, NULL, NULL);
@@ -1957,7 +1971,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
     if (!controller) return failure(env, "controller allocation failed");
     controller->env = env; controller->creator_pid = getpid();
     controller->socket = controller->stdout_fd = controller->stderr_fd = controller->input_fd = controller->child_socket = -1;
-    controller->anchor_root = controller->controller_parent = controller->controller_leaf = -1;
+    controller->anchor_root = controller->controller_parent = controller->controller_leaf = controller->local_helper_fd = -1;
     for (size_t i = 0; i < 4; i++) controller->transfer[i] = -1;
     controller->references = 1; controller->next_scope = 1; controller->pending = CLIQ_CONTROLLER_HELLO;
     napi_value result, resource;
@@ -1998,11 +2012,33 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         { "observePreparationBirth", NULL, observe_preparation_birth, NULL, NULL, NULL, napi_default, NULL },
         { "close", NULL, controller_close, NULL, NULL, NULL, napi_default, NULL }
     };
+    const napi_property_descriptor local_properties[] = {
+        {"pid", NULL, NULL, controller_pid, NULL, NULL, napi_default, (void *)&LOCAL_CONTROLLER_TAG},
+        {"processStartToken", NULL, NULL, controller_token, NULL, NULL, napi_default, (void *)&LOCAL_CONTROLLER_TAG},
+        {"pollReady", NULL, controller_poll_ready, NULL, NULL, NULL, napi_default, (void *)&LOCAL_CONTROLLER_TAG},
+        {"captureOrigin", NULL, local_native_origin, NULL, NULL, NULL, napi_default, NULL},
+        {"reserveService", NULL, local_native_reserve, NULL, NULL, NULL, napi_default, NULL},
+        {"cleanupRetainedService", NULL, local_native_cleanup_retained, NULL, NULL, NULL, napi_default, NULL},
+        {"beginPreparation", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_PREPARE},
+        {"beginPreparedObservation", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_POLL_PREPARED},
+        {"beginCreateBlocked", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_CREATE_BLOCKED},
+        {"beginReleaseEngine", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_RELEASE_ENGINE},
+        {"beginPublishActive", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_PUBLISH_ACTIVE},
+        {"beginStop", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_STOP},
+        {"beginActiveObservation", NULL, local_native_command, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_SERVICE_INSPECT_ACTIVE},
+        {"retainHealthPeer", NULL, local_peer_create, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_PEER_HEALTH},
+        {"retainModelPeer", NULL, local_peer_create, NULL, NULL, NULL, napi_default, (void *)(uintptr_t)CLIQ_LOCAL_PEER_MODEL},
+        {"pollReply", NULL, local_native_poll, NULL, NULL, NULL, napi_default, NULL},
+        {"retirementObservation", NULL, local_native_retirement, NULL, NULL, NULL, napi_default, NULL},
+        {"close", NULL, controller_close, NULL, NULL, NULL, napi_default, (void *)&LOCAL_CONTROLLER_TAG},
+    };
+    const napi_property_descriptor *selected = local_service ? local_properties : properties;
+    size_t property_count = local_service ? sizeof(local_properties) / sizeof(local_properties[0]) : sizeof(properties) / sizeof(properties[0]);
     /* All receiver allocation/branding and async ownership precede the first
      * child. Subsequent construction failures return this joinable receiver;
      * the public wrapper rejects pollReady and awaits its exact close. */
-    if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &CONTROLLER_TAG) != napi_ok ||
-        napi_define_properties(env, result, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok ||
+    if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, local_service ? &LOCAL_CONTROLLER_TAG : &CONTROLLER_TAG) != napi_ok ||
+        napi_define_properties(env, result, property_count, selected) != napi_ok ||
         napi_create_string_utf8(env, "cliq-controller-join", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
         napi_create_async_work(env, NULL, resource, reap_controller, cleanup_complete, controller, &controller->cleanup_work) != napi_ok ||
         napi_add_async_cleanup_hook(env, cleanup_hook, controller, &controller->cleanup_hook) != napi_ok ||
@@ -2017,7 +2053,8 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         return failure(env, "controller asynchronous lifetime is unavailable");
     }
     controller->references++; /* Async cleanup hook owns the join until done. */
-    if (!create_controller_leaf(controller, (int)root) || !prepare_controller_io(controller)) {
+    if ((local_service && (controller->local_helper_fd = fcntl(helper->fd, F_DUPFD_CLOEXEC, 4)) < 0) ||
+        !create_controller_leaf(controller, (int)root) || !prepare_controller_io(controller)) {
         controller->constructor_failed = true; (void)close_controller(controller); return result;
     }
     struct clone_args birth;
@@ -2032,7 +2069,7 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
         if (executable < 0 || dup2(controller->transfer[0], 0) < 0 || dup2(controller->transfer[1], 1) < 0 ||
             dup2(controller->transfer[2], 2) < 0 || dup2(controller->transfer[3], 3) < 0) _exit(70);
         if (!cliq_close_range(4, (unsigned int)executable - 1) || !cliq_close_range((unsigned int)executable + 1, UINT_MAX)) _exit(70);
-        char *const arguments[] = { "cliq-linux-worker-controller", NULL };
+        char *const arguments[] = { "cliq-linux-worker-controller", local_service ? "--local-inference-controller" : NULL, NULL };
         char *const environment[] = { "LANG=C", "LC_ALL=C", NULL };
         fexecve(executable, arguments, environment); _exit(70);
     }
@@ -2043,6 +2080,8 @@ static napi_value open_controller(napi_env env, napi_callback_info info) {
     if (controller->retirement_failed) (void)close_controller(controller);
     return result;
 }
+static napi_value open_controller(napi_env env, napi_callback_info info) { return open_controller_family(env, info, false); }
+static napi_value open_local_controller(napi_env env, napi_callback_info info) { return open_controller_family(env, info, true); }
 
 static napi_value initialize(napi_env env, napi_value exports) {
     napi_value verifier_version;
@@ -2057,12 +2096,14 @@ static napi_value initialize(napi_env env, napi_value exports) {
         { "sealMcpHttpAdminProbe", NULL, seal_mcp_admin_script, NULL, NULL, NULL, napi_default, NULL },
         { "sealMcpStdioServer", NULL, seal_mcp_stdio_server, NULL, NULL, NULL, napi_default, NULL },
         { "openController", NULL, open_controller, NULL, NULL, NULL, napi_default, NULL },
+        { "openLocalInferenceController", NULL, open_local_controller, NULL, NULL, NULL, napi_default, NULL },
+        { "encodeLocalInferenceInput", NULL, local_data_encode, NULL, NULL, NULL, napi_default, NULL },
         { "verifierInterfaceVersion", NULL, NULL, NULL, NULL, verifier_version, napi_default, NULL }
     };
     if (napi_define_properties(env, exports, sizeof(properties) / sizeof(properties[0]), properties) != napi_ok) return NULL;
     set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "sourceInterfaceVersion", 1);
     set_number(env, exports, "preparationInterfaceVersion", 1); set_number(env, exports, "builtinToolInterfaceVersion", 2); set_number(env, exports, "dependencyInterfaceVersion", 1); set_number(env,exports,"mcpAdminInterfaceVersion",1);
-    set_number(env, exports, "mcpStdioInterfaceVersion", 1); return exports;
+    set_number(env, exports, "mcpStdioInterfaceVersion", 1); set_number(env, exports, "localInferenceInterfaceVersion", 3); return exports;
 }
 #else
 static napi_value unsupported(napi_env env, napi_callback_info info) {

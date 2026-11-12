@@ -8,10 +8,10 @@
 #if defined(NAPI_VERSION)
 static const napi_type_tag CLIQ_MCP_STDIO_ADMIN_RECIPE_TAG = {UINT64_C(0xc5c315e54f214693), UINT64_C(0xa73106c84d2291f7)};
 static const napi_type_tag CLIQ_MCP_STDIO_RUN_RECIPE_TAG = {UINT64_C(0xf86b203a75c84901), UINT64_C(0x89b7d14d2a33e6c0)};
-static const napi_type_tag CLIQ_MCP_STDIO_ADMIN_PEER_TAG = {UINT64_C(0xd17314b674cb4359), UINT64_C(0x8b09068c549ce214)};
-static const napi_type_tag CLIQ_MCP_STDIO_RUN_PEER_TAG = {UINT64_C(0x3c9531c970594bf8), UINT64_C(0xaf5bd01da37091a2)};
+static const napi_type_tag CLIQ_MCP_STDIO_ADMIN_PEER_TAG = {UINT64_C(0xbcd04b9749dc7c0d), UINT64_C(0x1930f0c83cf159d3)};
+static const napi_type_tag CLIQ_MCP_STDIO_RUN_PEER_TAG = {UINT64_C(0x7362212a70459936), UINT64_C(0x35bc3fdf7ee0533c)};
 static const napi_type_tag CLIQ_MCP_STDIO_RECOVERY_RECIPE_TAG = {UINT64_C(0x05247ea5b88b40eb), UINT64_C(0xad45add924031bf7)};
-static const napi_type_tag CLIQ_MCP_STDIO_RECOVERY_PEER_TAG = {UINT64_C(0xe139e5a702b947ae), UINT64_C(0x8736e0ae83cd2c72)};
+static const napi_type_tag CLIQ_MCP_STDIO_RECOVERY_PEER_TAG = {UINT64_C(0x4f409fba7e8af15a), UINT64_C(0x200a2d09f08af744)};
 static const napi_type_tag CLIQ_MCP_STDIO_SERVER_TAG = {UINT64_C(0x2d78569810374d63), UINT64_C(0xa9476ae18b7fd305)};
 #endif
 struct cliq_mcp_stdio_launch_binding {

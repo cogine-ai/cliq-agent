@@ -21,13 +21,14 @@ export function installedClientDataPath(accountHome: string, stateRoot: PendingR
 /** One actual installed host owns these files through the complete client join.
  * Preferences and original requests are private data, never StateOwner, Trust,
  * credentials or a permission to retry. No environment home override exists. */
-export async function openInstalledClientDirectory(selected: HeldInstalledRuntime, options: Readonly<{ create?: boolean }> = { create: true }) {
+export async function openInstalledClientDirectory(selected: HeldInstalledRuntime,
+  options: Readonly<{ create?: boolean; signal?: AbortSignal }> = { create: true }) {
   const { context, native } = await withHeldInstalledRuntime(selected, async installed => {
     const roots = guestToolchainRoots(installed.bundle);
     return { native: await installed.loadStateOwner(),
       context: immutableSnapshot({ stateRoot: installed.stateRoot, sourceBundleDigest: installed.bundleDigest,
         ...(roots.length === 1 ? { guestToolchainManifestId: roots[0]!.artifactId } : {}) }) };
-  });
+  }, options.signal);
   const user = os.userInfo();
   if (process.platform !== 'linux' || process.geteuid?.() !== user.uid || context.stateRoot.ownerUid !== user.uid)
     throw new TypeError('installed client data belongs to another operating-system account');

@@ -2718,6 +2718,8 @@ type LocalInferenceActivationParticipantV1 =
       requestId: string
       requestDigest: string
       runSubmitRequestRef: ArtifactRef
+      channelIdentityRef: ArtifactRef
+      channelIdentityDigest: string
       admissionKey: string
       admissionIntentDigest: string
       joinedAt: string
@@ -2744,6 +2746,7 @@ type LocalInferenceActivationFailureV1 = {
     | 'health_mismatch'
     | 'capability_mismatch'
     | 'containment_unprovable'
+    | 'activation_cancelled_for_migration'
   launchIds: string[]
   evidenceRefs: ArtifactRef[]
   observedAt: string
@@ -2825,6 +2828,7 @@ type LocalInferenceServiceLaunchBaseV1 = {
   activationNonceDigest: string
   containmentPlanRef: ArtifactRef
   sandboxLaunchSpecRef: ArtifactRef
+  nativeInputRef: ArtifactRef
   rowVersion: number
   leaseVersion: number
   createdAt: string

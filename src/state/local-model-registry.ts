@@ -3,10 +3,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import { setImmediate as yieldImmediate } from 'node:timers/promises';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting, identityHash, sha256Bytes } from '../kernel/identity.js';
 import { controlWireInteger, controlWireRecord, controlWireRef, controlWireText } from '../kernel/control-wire-data.js';
 import { decodeLocalInferenceServiceSpec, decodeLocalModelManifest, decodeLocalModelObjectClosure,
-  decodeLocalModelRegistration, decodeLocalModelRegistryHead, type LocalInferenceServiceSpecV1,
+  decodeLocalModelRegistration, decodeLocalModelRegistryHead, localServiceSpecCoreDigest,
   type LocalModelManifestV1, type LocalModelObjectClosureV1, type LocalModelRegistrationV1,
   type LocalModelRegistryHeadV1, type LocalModelObjectV1 } from '../kernel/local-inference.js';
 import type { StateRootIdentityV1 } from '../kernel/types.js';
@@ -14,11 +14,13 @@ import { verifyLocalModelManifestAuthority } from '../policy/local-model-authori
 import { requireEqual, verifyRuntimeBundle, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
-import { withInstalledLocalModelStore, type InstalledRuntimeBorrow } from './installed-runtime.js';
+import { withInstalledLocalModelStore, withInstalledExistingLocalModelStore, withInstalledLocalAdmissionCredentialLock,
+  type HeldCredentialAuthorityLock, type InstalledRuntimeBorrow } from './installed-runtime.js';
 import type { NativeLocalModelStore } from './local-model-store-native.js';
-import { validateLocalModelRegistryStep, assertLocalModelRetiredCopy, type LocalModelRegistryStep } from './local-model-registry-data.js';
+import { validateLocalModelRegistryStep, assertLocalModelRetiredCopy, nextLocalModelPort, type LocalModelRegistryStep } from './local-model-registry-data.js';
 import { installedLocalInferenceProfile } from './local-inference-profile.js';
 import { decodeSandboxProfile } from './execution-closure.js';
+import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 
 const URI = 'file:cliq-local-model-registry?vfs=cliq-local-model-store-v1';
 const TABLE = `CREATE TABLE model_registry (
@@ -47,12 +49,13 @@ export type LocalModelRegistry = Readonly<{
   retainedRegistrations(): Promise<readonly LocalModelRegistrationV1[]>;
   readOriginalRegistration(reference: string, digest: string): LocalModelRegistrationV1;
   readObject(reference: string): Buffer;
+  retainForRun(registration: LocalModelRegistrationV1, artifacts: ArtifactCatalog): Promise<readonly PublishedArtifact[]>;
+  withAdmissionCredentials<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>): Promise<T>;
   importPackage(manifestPath: string, signal?: AbortSignal): Promise<Readonly<{
     manifest: LocalModelManifestV1; closure: LocalModelObjectClosureV1 }>>;
-  /** The service spec comes from the fixed signed service producer. The
-   * registry independently verifies every immutable edge and signature. */
+  /** The original lock chooses the signed recipe and retained port. */
   enroll(manifest: LocalModelManifestV1, closure: LocalModelObjectClosureV1,
-    service: LocalInferenceServiceSpecV1, committedAt: string): Promise<RetainedLocalModel>;
+    committedAt: string): Promise<RetainedLocalModel>;
   retire(model: string, committedAt: string): Promise<RetainedLocalModel>;
 }>;
 function mismatch(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
@@ -151,7 +154,7 @@ async function importOriginalPackage(scope: NativeLocalModelStore, installed: In
       failed ? new AggregateError([failure, error]) : error); }
   }
 }
-function initializeDatabase(scope: NativeLocalModelStore): DatabaseSync {
+function initializeDatabase(scope: NativeLocalModelStore, allowInitialize: boolean): DatabaseSync {
   scope.assertHeld();
   const db = new DatabaseSync(URI, { allowExtension: false });
   try {
@@ -160,7 +163,7 @@ function initializeDatabase(scope: NativeLocalModelStore): DatabaseSync {
     if (databases.length !== 1 || databases[0]?.name !== 'main' || databases[0]?.file !== '/cliq-local-model-registry')
       mismatch('model registry pager did not use its fixed original-descriptor VFS');
     const entries = db.prepare("SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all();
-    if (entries.length === 0) db.exec(TABLE);
+    if (entries.length === 0 && allowInitialize) db.exec(TABLE);
     else if (entries.length !== 1 || entries[0]?.type !== 'table' || entries[0]?.name !== 'model_registry' || entries[0]?.sql !== TABLE)
       mismatch('model registry must have exactly its fixed six-field pointer schema');
     scope.assertHeld(); return db;
@@ -176,8 +179,20 @@ function initializeDatabase(scope: NativeLocalModelStore): DatabaseSync {
  * readOriginalRegistration and never substitute today's pointer. */
 export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
   operation: (registry: LocalModelRegistry) => Promise<T>, signal?: AbortSignal): Promise<T> {
-  return withInstalledLocalModelStore(installed, async (scope, origin) => {
-    const db = initializeDatabase(scope); let active = true;
+  return withInstalledLocalModelStore(installed, (scope, origin) => useLocalModelRegistry(installed, scope, origin, operation, true, signal), signal);
+}
+/** Source-only selection/revocation does not initialize an absent/incomplete
+ * store. Each historical registration verifies its original signed runtime;
+ * today's local-engine support is an enrollment/execution concern. */
+export function withExistingLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
+  operation: (registry: LocalModelRegistry | undefined) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  return withInstalledExistingLocalModelStore(installed, (scope, origin) => scope
+    ? useLocalModelRegistry(installed, scope, origin, operation, false, signal) : operation(undefined), signal);
+}
+async function useLocalModelRegistry<T>(installed: InstalledRuntimeBorrow, scope: NativeLocalModelStore,
+  origin: Readonly<{ rootIdentity: StateRootIdentityV1; ownerPrincipalId: string }>, operation: (registry: LocalModelRegistry) => Promise<T>,
+  allowInitialize: boolean, signal?: AbortSignal): Promise<T> {
+    const db = initializeDatabase(scope, allowInitialize); let active = true;
     const assertHeld = () => { if (!active) throw new TypeError('original model registry callback ended'); scope.assertHeld(); };
     const readRegistration = (reference: string, digest: string): LocalModelRegistrationV1 => {
       assertHeld(); const registration = decodeObject(scope, reference, decodeLocalModelRegistration);
@@ -269,6 +284,63 @@ export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
     const track = <R>(pending: Promise<R>): Promise<R> => {
       jobs.push(pending); void pending.catch(() => undefined); return pending;
     };
+    let mutationActive = false;
+    const trackMutation = <R>(mutate: () => Promise<R>): Promise<R> => {
+      assertHeld();
+      if (mutationActive) throw new TypeError('the original model-store mutation is already in progress');
+      mutationActive = true;
+      return track(Promise.resolve().then(mutate).finally(() => { mutationActive = false; }));
+    };
+    const retainForRun = async (registration: LocalModelRegistrationV1, artifacts: ArtifactCatalog): Promise<readonly PublishedArtifact[]> => {
+      const reference = canonicalSha256(registration);
+      const frozen = readRegistration(reference, registration.registrationDigest);
+      if (frozen.state !== 'active') mismatch('Run source requires its exact original active local model registration');
+      requireEqual(frozen, registration, 'original local model registration selected for Run');
+      if (typeof scope.openObjectSource !== 'function')
+        throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original bounded model object source is unavailable');
+      const closure = frozen.objectClosure, service = frozen.serviceSpec;
+      const structured: readonly (readonly [string, string])[] = [
+        [reference, frozen.format], [frozen.expectedServiceSpecRef, service.format], [frozen.expectedObjectClosureRef, closure.format],
+        [closure.stateRootIdentityRef, 'cliq-state-root-identity-v1'], [service.runtimeBundleRef, 'cliq-runtime-bundle-v1'],
+        [service.sandboxProfileRef, 'cliq-sandbox-profile-v1'],
+      ];
+      const metadata = await artifacts.mapReads(structured, async ([ref, format]) => {
+        signal?.throwIfAborted(); assertHeld();
+        const bytes = scope.readSmallObject(ref), artifact = await artifacts.publishBytes(bytes, 'application/json', format);
+        if (artifact.ref !== ref || artifact.byteLength !== bytes.length) mismatch('Run local model metadata differs from the original store');
+        return artifact;
+      });
+      for (const object of closure.objects) {
+        signal?.throwIfAborted(); assertHeld();
+        const source = scope.openObjectSource(object.artifactRef, object.sizeBytes);
+        let failed = false, failure: unknown;
+        try {
+          const chunks = async function* () {
+            for (;;) {
+              signal?.throwIfAborted();
+              const bytes = source.readChunk();
+              if (bytes === null) return;
+              if (!Buffer.isBuffer(bytes) || !bytes.length || bytes.length > 65536) mismatch('native model source exceeded its fixed chunk bound');
+              yield bytes;
+            }
+          };
+          const kind = object.kind === 'model_manifest' ? frozen.modelManifest.format :
+            object.kind === 'model_signature' ? 'cliq-ed25519-signature-v1' :
+            object.kind === 'tokenizer' ? 'cliq-local-model-tokenizer-v1' : 'cliq-local-model-file-v1';
+          const artifact = await artifacts.publishChunks(chunks(), object.kind === 'model_manifest' ? 'application/json' : 'application/octet-stream',
+            kind, object.sizeBytes);
+          if (artifact.ref !== object.artifactRef || artifact.byteLength !== object.sizeBytes) mismatch('Run CAS differs from the original model object bytes');
+          metadata.push(artifact);
+        } catch (error) { failed = true; failure = error; throw error; }
+        finally {
+          try { source.close(); }
+          catch (error) {
+            throw new ResourceRetirementError('original Run model object source did not retire', failed ? new AggregateError([failure, error]) : error);
+          }
+        }
+      }
+      assertHeld(); signal?.throwIfAborted(); return Object.freeze(metadata);
+    };
     const implementation: LocalModelRegistry = {
       rootIdentity: origin.rootIdentity, ownerPrincipalId: origin.ownerPrincipalId,
       assertHeld() { if (this !== registry) throw new TypeError('invalid local registry receiver'); assertHeld(); },
@@ -288,25 +360,27 @@ export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
       },
       readOriginalRegistration(reference, digest) { return readRegistration(reference, digest); },
       readObject(reference) { assertHeld(); return Buffer.from(scope.readSmallObject(controlWireRef(reference))); },
+      retainForRun,
+      withAdmissionCredentials(operation) {
+        assertHeld();
+        return withInstalledLocalAdmissionCredentialLock(installed, scope, operation, signal);
+      },
       importPackage(manifestPath, importSignal) {
-        assertHeld(); return importOriginalPackage(scope, installed, origin.rootIdentity, manifestPath,
+        assertHeld();
+        if (!allowInitialize) return Promise.reject(new TypeError('existing model-store selection/revocation cannot import a model'));
+        return importOriginalPackage(scope, installed, origin.rootIdentity, manifestPath,
           signal && importSignal ? AbortSignal.any([signal, importSignal]) : signal ?? importSignal);
       },
-      async enroll(manifestValue, closureValue, serviceValue, committedAt) {
+      async enroll(manifestValue, closureValue, committedAt) {
         assertHeld();
-        const manifest = decodeLocalModelManifest(manifestValue), closure = decodeLocalModelObjectClosure(closureValue, manifest),
-          service = decodeLocalInferenceServiceSpec(serviceValue);
+        if (!allowInitialize) throw new TypeError('existing model-store selection/revocation cannot enroll a model');
+        const manifest = decodeLocalModelManifest(manifestValue), closure = decodeLocalModelObjectClosure(closureValue, manifest);
         const profile = installedLocalInferenceProfile();
-        if (service.backend !== profile.backend || service.sandboxProfileRef !== canonicalSha256(profile) || service.sandboxProfileDigest !== profile.profileDigest)
-          mismatch('model enrollment requires its exact fixed local-service sandbox profile');
-        requireEqual(service.resources, profile.resources, 'fixed managed local inference resource limits');
-        if (service.ownerPrincipalId !== origin.ownerPrincipalId || service.runtimeBundleRef !== installed.bundleDigest ||
-            service.runtimeBundleManifestDigest !== installed.bundle.manifestDigest || service.modelManifestRef !== canonicalSha256(manifest) ||
-            service.modelManifestDigest !== manifest.modelManifestDigest || closure.stateRootIdentityRef !== canonicalSha256(origin.rootIdentity) ||
-            closure.stateRootIdentityDigest !== origin.rootIdentity.identityDigest || service.createdAt > committedAt)
-          mismatch('model enrollment service differs from its original signed root, owner or model');
+        if (closure.stateRootIdentityRef !== canonicalSha256(origin.rootIdentity) || closure.stateRootIdentityDigest !== origin.rootIdentity.identityDigest)
+          mismatch('model enrollment source differs from its original signed root');
         const entry = installed.bundle.entries.filter(value => value.entryId === 'ollama_local_inference' && value.role === 'local_inference' && value.executable);
-        if (entry.length !== 1 || entry[0]!.digest !== service.executableDigest || entry[0]!.version !== service.executableVersion)
+        const executable = entry[0];
+        if (entry.length !== 1 || !executable)
           mismatch('model enrollment requires its exact unique signed service executable');
         requireEqual(decodeObject(scope, canonicalSha256(manifest), decodeLocalModelManifest), manifest, 'original imported model manifest');
         requireEqual(decodeObject(scope, canonicalSha256(closure), value => decodeLocalModelObjectClosure(value, manifest)), closure, 'original imported model closure');
@@ -314,7 +388,23 @@ export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
           manifestBytes: canonicalJsonBytes(manifest), signatureBytes: scope.readSmallObject(manifest.signatureRef) });
         const previous = await registry.select(manifest.model);
         if (previous && previous.head.committedAt > committedAt) mismatch('model enrollment wall clock regressed');
-        if (previous?.active?.serviceSpec.serviceSpecCoreDigest === service.serviceSpecCoreDigest) return previous;
+        const requestedService = (port: number) => {
+          const core = {
+            schemaVersion: 1 as const, format: 'cliq-local-inference-service-v1' as const, ownerPrincipalId: origin.ownerPrincipalId,
+            runtimeBundleRef: installed.bundleDigest, runtimeBundleManifestDigest: installed.bundle.manifestDigest,
+            executableId: 'ollama_local_inference' as const, executableVersion: executable.version, executableDigest: executable.digest,
+            modelManifestRef: canonicalSha256(manifest), modelManifestDigest: manifest.modelManifestDigest,
+            endpoint: { scheme: 'http' as const, host: '127.0.0.1' as const, port },
+            backend: profile.backend, sandboxProfileRef: canonicalSha256(profile), sandboxProfileDigest: profile.profileDigest,
+            resources: profile.resources,
+          };
+          const serviceSpecCoreDigest = localServiceSpecCoreDigest(core);
+          return decodeLocalInferenceServiceSpec(withDigest({ ...core, createdAt: committedAt, serviceSpecCoreDigest,
+            serviceId: identityHash(origin.ownerPrincipalId, 'ollama', manifest.model, serviceSpecCoreDigest), serviceSpecDigest: '' }, 'serviceSpecDigest'));
+        };
+        if (previous?.active && requestedService(previous.active.serviceSpec.endpoint.port).serviceSpecCoreDigest === previous.active.serviceSpec.serviceSpecCoreDigest)
+          return previous;
+        const service = requestedService(nextLocalModelPort(await registry.retainedRegistrations()));
         const priorRegistration = previous?.active ?? previous?.retired;
         const activeRegistration = decodeLocalModelRegistration(withDigest({ schemaVersion: 1, format: 'cliq-local-model-registration-v1',
           ownerPrincipalId: origin.ownerPrincipalId, provider: 'ollama', model: manifest.model,
@@ -361,13 +451,17 @@ export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
       select(model: string) { return track(implementation.select.call(registry, model)); },
       list() { return track(implementation.list.call(registry)); },
       retainedRegistrations() { return track(implementation.retainedRegistrations.call(registry)); },
+      retainForRun(registration: LocalModelRegistrationV1, artifacts: ArtifactCatalog) { return track(retainForRun(registration, artifacts)); },
+      withAdmissionCredentials<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>) {
+        return track(implementation.withAdmissionCredentials(operation));
+      },
       importPackage(manifestPath: string, importSignal?: AbortSignal) {
         return track(implementation.importPackage.call(registry, manifestPath, importSignal));
       },
-      enroll(manifest: LocalModelManifestV1, closure: LocalModelObjectClosureV1, service: LocalInferenceServiceSpecV1, committedAt: string) {
-        return track(implementation.enroll.call(registry, manifest, closure, service, committedAt));
+      enroll(manifest: LocalModelManifestV1, closure: LocalModelObjectClosureV1, committedAt: string) {
+        return trackMutation(() => implementation.enroll.call(registry, manifest, closure, committedAt));
       },
-      retire(model: string, committedAt: string) { return track(implementation.retire.call(registry, model, committedAt)); }
+      retire(model: string, committedAt: string) { return trackMutation(() => implementation.retire.call(registry, model, committedAt)); }
     });
     let failed = false, failure: unknown;
     try {
@@ -384,5 +478,4 @@ export function withLocalModelRegistry<T>(installed: InstalledRuntimeBorrow,
       try { db.close(); }
       catch (error) { throw new ResourceRetirementError('original model registry pager did not join', failed ? new AggregateError([failure, error]) : error); }
     }
-  }, signal);
 }

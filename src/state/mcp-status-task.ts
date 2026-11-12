@@ -11,7 +11,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-import { sealInstalledMcpStdioServer, type HeldInstalledRuntime, type HeldInstalledAnchor } from './installed-runtime.js';
+import { sealInstalledMcpRecoveryAdapter, type HeldInstalledRuntime, type HeldInstalledAnchor } from './installed-runtime.js';
 import { loadInstalledMcpStdioBroker, assertInstalledMcpStdioRecoveryOwner } from './mcp-stdio-native-binding.js';
 import type { NativeMcpStdioRecoveryOwner, NativeMcpStdioServerImage } from './mcp-stdio-broker-native.js';
 import { openRecoveryMcpStdioInput, type HeldRecoveryMcpStdioInput } from './native-owner.js';
@@ -41,7 +41,10 @@ export function readMcpStatusProbeNativeJoin(driver: SqliteDriver, artifacts: Ar
     throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP status producer has no complete actual original physical/native retirement');
   assertInstalledMcpStdioRecoveryOwner(held.native, held.prepared.binding);
   const actual = readInstalledMcpStdioRecoveryJoined(held.scope, held.input);
-  held.native.assertJoined(actual.ownerJoined, held.prepared.binding); held.scope.assertJoined(actual.joined);
+  if (actual.ownerJoined.kind === 'mcp_stdio_recovery_response_unavailable_joined')
+    held.native.assertUnavailableJoined(actual.ownerJoined, held.prepared.binding);
+  else held.native.assertJoined(actual.ownerJoined, held.prepared.binding);
+  held.scope.assertJoined(actual.joined);
   return { ...held, native: held.native, prepared: held.prepared, scope: held.scope, input: held.input, actual };
 }
 export function readMcpStatusProbeTask(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, task: McpStatusProbeTask) {
@@ -86,10 +89,10 @@ export function prepareMcpStatusProbeTask(input: Readonly<{
   const publishResult = () => publishing ??= (async () => {
     if (held.working || !held.prepared || !held.native || !held.scope || !held.input)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP status durable nonce has no complete original native birth; recovery must retain the wait');
-    const actual = readInstalledMcpStdioRecoveryJoined(held.scope, held.input);
-    held.native.assertJoined(actual.ownerJoined, held.prepared.binding); held.scope.assertJoined(actual.joined);
+    const { actual } = readMcpStatusProbeNativeJoin(driver, artifacts, owner, task);
     held.retirement ??= await publishMcpStatusRetirement(driver, artifacts, owner, held.native, held.prepared.binding, held.scope, held.input);
-    if (!held.capture && hasReceivedMcpStatusResponse(held.native, held.prepared.binding))
+    if (actual.ownerJoined.kind === 'mcp_stdio_recovery_owner_joined' && !held.capture &&
+        hasReceivedMcpStatusResponse(held.native, held.prepared.binding))
       held.capture = await publishMcpStatusCapture(driver, artifacts, owner, held.native, held.prepared.binding, held.scope, held.input, held.retirement);
   })().finally(() => { publishing = undefined; });
   // Promise scheduling is deliberate: RunExecution retains the receiver
@@ -104,7 +107,7 @@ export function prepareMcpStatusProbeTask(input: Readonly<{
       const resources = decodeSandboxProfile(await readCanonicalArtifact(reads, source.spec.sandboxProfileRef)).resources;
       const broker = await track(loadInstalledMcpStdioBroker(input.selected, signal)); assertOpen();
       if (!broker.prepareRecoveryStdio) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed signed status broker recipe is unavailable');
-      image = await track(sealInstalledMcpStdioServer(input.selected, source.executable.executableId, signal)); assertOpen();
+      image = await track(sealInstalledMcpRecoveryAdapter(input.selected, source.manifest.entryId, signal)); assertOpen();
       launcher = await track(openInstalledLinuxWorkerLauncher(input.selected, input.anchor, { signal })); assertOpen();
       controllerOpening = track(launcher.startController({ signal })); controller = await controllerOpening; assertOpen();
       const probeStartedAt = sampleCanonicalNow(), frames = [mcpInitializeRequestData(1, '0.15.0'), mcpInitializedNotificationData(),
@@ -169,13 +172,17 @@ export function prepareMcpStatusProbeTask(input: Readonly<{
     acknowledge() {
       if (this !== task) throw new KernelStorageError('ARTIFACT_MISMATCH', 'invalid MCP status acknowledgement receiver');
       if (held.acknowledged) return;
-      readMcpStatusProbeTask(driver, artifacts, owner, task);
+      const { actual, native } = readMcpStatusProbeTask(driver, artifacts, owner, task);
       const current = readRun(driver, input.runId);
       if (current.waitingOnRef === held.prepared!.run.waitingOnRef || current.revision <= held.prepared!.run.revision)
         throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP status original native domain cannot be released before durable nonce/outcome closure');
       // The unique owning writer calls this only after durable nonce close
       // or signed outcome commit. No public request can obtain this method.
-      if (domainRetained) { held.native!.releaseDomain(); domainRetained = false; }
+      if (domainRetained) {
+        if (actual.ownerJoined.kind === 'mcp_stdio_recovery_response_unavailable_joined') native.releaseUnavailableDomain();
+        else native.releaseDomain();
+        domainRetained = false;
+      }
       try { held.input!.close(); }
       catch (error) { throw new ResourceRetirementError('MCP status committed completion did not close its original input descriptor', error); }
       held.acknowledged = true;

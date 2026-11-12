@@ -1160,6 +1160,8 @@ NAPI_MODULE(cliq_linux_credential_platform, initialize)
 /* A distinct signed provider image. Its private handle owns the token, key,
  * copied request, connection and cancellation. No native call selects SQL
  * authority: the installed Supervisor performs both committed release gates. */
+#define CLIQ_MODEL_OWNER_LOCAL_SERVICE 1
+#include "local-inference-owner-bridge.h"
 #define BROKER_BODY_CAP 1048576
 #define BROKER_HEADER_CAP 65536
 #define BROKER_TRUST_CAP (16 * 1048576)
@@ -1206,12 +1208,17 @@ struct broker {
   const char *media_type;
   _Atomic(const char *) error;
   struct broker *unretired_next;
+  bool managed_local, local_health, local_version, local_connect_pending, local_peer_joined, local_peer_uncertain;
+  struct cliq_local_service_peer *local_peer;
+  napi_ref local_peer_reference;
+  GSocket *local_unretired_socket;
 };
 /* struct task is embedded in broker. Its upgrade fields change the private
  * native layout, so old-image owners/fences cannot borrow this image's methods.
  * Public transport semantics and retained evidence formats are unchanged. */
-static const napi_type_tag broker_tag = { UINT64_C(0x4d7fbd63748b4ad2), UINT64_C(0xa753e6e27e73a7d1) };
-static const napi_type_tag broker_fence_tag = { UINT64_C(0x81ef3e57441645e2), UINT64_C(0x97ab33b325569920) };
+static const napi_type_tag broker_tag = { UINT64_C(0x67b974e0c6de44ad), UINT64_C(0x84e6e6a5351472eb) };
+static const napi_type_tag broker_fence_tag = { UINT64_C(0x15d0d05cfc294307), UINT64_C(0xa9a4f66d98e6aeb0) };
+static const napi_type_tag broker_health_tag = { UINT64_C(0x38ec45b489df481b), UINT64_C(0xbb9bc5b7db757d72) };
 struct broker_fence {
   struct broker *broker; napi_env env; napi_ref original; struct broker_binding binding; pid_t creator_pid; bool active;
 };
@@ -1220,6 +1227,9 @@ static void broker_begin_close(struct broker *broker);
 static bool broker_queue(struct broker *broker, enum broker_stage stage);
 static void broker_finish_close(struct broker *broker);
 static void broker_free(napi_env env, struct broker *broker);
+static bool broker_start_local_connection(struct broker *broker);
+static void broker_poll_local(struct broker *broker);
+static bool broker_local_cancel_join(struct broker *broker);
 static void broker_retire_callbacks(struct broker *broker) {
   if (!broker->retired || !broker->close_finished || (broker->timer_ready && !broker->timer_closed) ||
       broker->callbacks.depth || broker->callbacks.retiring) return;
@@ -1357,11 +1367,16 @@ static bool broker_exchange(struct broker *broker) {
   size_t capacity = strlen(broker->path) + strlen(broker->host) + broker->platform.secret_size + 512;
   unsigned char *headers = malloc(capacity);
   if (!headers) return broker_fail(broker, "broker_worker_unavailable");
-  int prefix = snprintf((char *)headers, capacity, "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\nAuthorization: Bearer ",
-    broker->path, broker->host, broker->port, broker->body_size);
-  bool valid = prefix > 0 && (size_t)prefix + broker->platform.secret_size + 4 <= capacity;
+  int prefix = broker->managed_local ?
+    snprintf((char *)headers, capacity, "%s %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\n",
+      broker->local_health && broker->local_version ? "GET" : "POST", broker->path, broker->host, broker->port, broker->body_size) :
+    snprintf((char *)headers, capacity, "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\nAuthorization: Bearer ",
+      broker->path, broker->host, broker->port, broker->body_size);
+  size_t suffix = broker->managed_local ? 2 : broker->platform.secret_size + 4;
+  bool valid = prefix > 0 && (size_t)prefix + suffix <= capacity;
   size_t size = valid ? (size_t)prefix : 0;
-  if (valid) { memcpy(headers + size, broker->platform.secret, broker->platform.secret_size); size += broker->platform.secret_size; memcpy(headers + size, "\r\n\r\n", 4); size += 4; }
+  if (valid && broker->managed_local) { memcpy(headers + size, "\r\n", 2); size += 2; }
+  else if (valid) { memcpy(headers + size, broker->platform.secret, broker->platform.secret_size); size += broker->platform.secret_size; memcpy(headers + size, "\r\n\r\n", 4); size += 4; }
   valid = valid && broker_write(broker, headers, size) && broker_write(broker, broker->body, broker->body_size);
   wipe(headers, capacity); free(headers);
   return valid && broker_response(broker);
@@ -1460,7 +1475,7 @@ static napi_value broker_stage_call(napi_env env, napi_callback_info info, enum 
       broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
     }
   }
-  if (broker->error || !broker_queue(broker, stage)) {
+  if (broker->error || !(broker->managed_local && stage == BROKER_CONNECT ? broker_start_local_connection(broker) : broker_queue(broker, stage))) {
     napi_reject_deferred(env, broker->phase_deferred, broker_error_value(broker)); broker->phase_deferred = NULL;
     broker_begin_close(broker);
   }
@@ -1468,10 +1483,7 @@ static napi_value broker_stage_call(napi_env env, napi_callback_info info, enum 
 }
 static napi_value broker_connect_call(napi_env env, napi_callback_info info) { return broker_stage_call(env, info, BROKER_CONNECT); }
 static napi_value broker_release_call(napi_env env, napi_callback_info info) { return broker_stage_call(env, info, BROKER_EXCHANGE); }
-static napi_value broker_close_call(napi_env env, napi_callback_info info) {
-  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
-  if (!broker) return NULL;
-  if (argc) { napi_throw_type_error(env, NULL, "Installed model broker close accepts no fields"); return NULL; }
+static napi_value broker_close_owned(napi_env env, struct broker *broker) {
   napi_value promise;
   if (broker->close_promise) { napi_get_reference_value(env, broker->close_promise, &promise); return promise; }
   if (napi_create_promise(env, &broker->close_deferred, &promise) != napi_ok ||
@@ -1482,6 +1494,22 @@ static napi_value broker_close_call(napi_env env, napi_callback_info info) {
     broker->close_deferred = NULL;
   } else broker_begin_close(broker);
   return promise;
+}
+static napi_value broker_close_call(napi_env env, napi_callback_info info) {
+  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
+  if (!broker) return NULL;
+  if (argc) { napi_throw_type_error(env, NULL, "Installed model broker close accepts no fields"); return NULL; }
+  return broker_close_owned(env, broker);
+}
+static napi_value broker_health_close_call(napi_env env, napi_callback_info info) {
+  size_t count = 1; napi_value argument, self; bool tagged = false; struct broker *broker = NULL;
+  if (napi_get_cb_info(env, info, &count, &argument, &self, NULL) != napi_ok || count ||
+      napi_check_object_type_tag(env, self, &broker_health_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, self, (void **)&broker) != napi_ok || !broker || !broker->local_health || !broker->managed_local ||
+      broker->env != env || broker->creator_pid != getpid() || syscall(SYS_gettid) != getpid()) {
+    napi_throw_type_error(env, NULL, "Invalid original local activation-health owner"); return NULL;
+  }
+  return broker_close_owned(env, broker);
 }
 static napi_value broker_retain_fence_call(napi_env env, napi_callback_info info) {
   napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
@@ -1639,6 +1667,16 @@ static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
   if (napi_create_reference(broker->env, handle, 1, &broker->handle) != napi_ok || napi_object_freeze(broker->env, handle) != napi_ok) return NULL;
   return handle;
 }
+static napi_value broker_health_value(struct broker *broker, napi_value result) {
+  napi_value handle;
+  const napi_property_descriptor methods[] = {{"close", NULL, broker_health_close_call, NULL, NULL, NULL, napi_default, NULL}};
+  if (napi_create_object(broker->env, &handle) != napi_ok || napi_type_tag_object(broker->env, handle, &broker_health_tag) != napi_ok ||
+      napi_define_properties(broker->env, handle, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+      napi_set_named_property(broker->env, handle, "result", result) != napi_ok ||
+      napi_wrap(broker->env, handle, broker, broker_finalize, NULL, NULL) != napi_ok ||
+      napi_create_reference(broker->env, handle, 1, &broker->handle) != napi_ok || napi_object_freeze(broker->env, handle) != napi_ok) return NULL;
+  return handle;
+}
 static void broker_timer_closed(uv_handle_t *timer) {
   struct broker *broker = timer->data; struct native_callback_scope scope;
   callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
@@ -1717,7 +1755,7 @@ static void broker_worker(napi_env env, void *data) {
   (void)env; struct broker *broker = data;
   if (broker->stage == BROKER_RETIRE) broker_retire(broker);
   else if (!broker_live(broker)) return;
-  else if (broker->stage == BROKER_PREPARE) (void)broker_read_key(broker);
+  else if (broker->stage == BROKER_PREPARE) { if (!broker->managed_local) (void)broker_read_key(broker); }
   else if (broker->stage == BROKER_CONNECT) (void)broker_connect(broker);
   else (void)broker_exchange(broker);
   if (broker->stage != BROKER_RETIRE && broker->platform.error && !broker->error) broker_fail(broker, "credential_redemption_refused");
@@ -1733,6 +1771,14 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
   broker->work = NULL;
   if (status != napi_ok) broker_fail(broker, "broker_worker_unavailable");
   if (broker->stage == BROKER_RETIRE) {
+    if (broker->local_peer && broker->unsafe) broker->local_peer_uncertain = true;
+    if (broker->local_peer && !broker->local_peer_uncertain) {
+      if (!broker->local_peer_joined || broker->local_peer->release(broker->local_peer) != 0) {
+        broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      } else if (broker->local_peer_reference && napi_delete_reference(env, broker->local_peer_reference) != napi_ok) {
+        broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      } else { broker->local_peer_reference = NULL; broker->local_peer = NULL; }
+    }
     if (pthread_mutex_lock(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
     else {
       broker->token_revoked = true; broker->active_releases = 0;
@@ -1741,6 +1787,11 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
     broker->retired = true; broker_close_timer(broker); broker_finish_close(broker); return;
   }
   if (!broker_live(broker) || broker->closing) broker_fail(broker, "broker_cancelled_or_expired");
+  if (!broker->error && !broker->closing && broker->stage == BROKER_PREPARE && !broker->env_closing && broker->local_health) {
+    broker->prepared = true; broker->network_started = true;
+    if (!broker_start_local_connection(broker)) { broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); }
+    return;
+  }
   if (!broker->error && !broker->closing && broker->stage == BROKER_PREPARE && !broker->env_closing && broker->ready_deferred) {
     napi_value result = NULL;
     napi_get_undefined(env, &result);
@@ -1749,6 +1800,11 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
       broker->prepared = true;
       napi_resolve_deferred(env, broker->ready_deferred, result); broker->ready_deferred = NULL;
     }
+  }
+  if (!broker->error && !broker->closing && broker->stage == BROKER_CONNECT && !broker->env_closing && broker->local_health) {
+    broker->connected = true; broker->request_started = true; broker->exchanged = true;
+    if (!broker_queue(broker, BROKER_EXCHANGE)) broker_begin_close(broker);
+    return;
   }
   if (!broker->error && !broker->closing && broker->stage == BROKER_CONNECT && !broker->env_closing && broker->phase_deferred) {
     napi_value result = NULL;
@@ -1774,6 +1830,56 @@ static bool broker_queue(struct broker *broker, enum broker_stage stage) {
   }
   broker->working = true; return true;
 }
+static bool broker_start_local_connection(struct broker *broker) {
+  if (!broker->managed_local || !broker->local_peer || broker->local_connect_pending || broker->closing || broker->working ||
+      !broker->local_peer->borrowed || !broker->local_peer->assert_current(broker->local_peer) || !broker_live(broker))
+    return broker_fail(broker, "broker_transport_interrupted");
+  broker->stage = BROKER_CONNECT; broker->local_connect_pending = true;
+  if (broker->local_peer->begin_connection(broker->local_peer) == 0) return true;
+  return broker_fail(broker, "broker_transport_interrupted");
+}
+static bool broker_local_cancel_join(struct broker *broker) {
+  if (!broker->local_peer || broker->local_peer_joined || broker->local_peer_uncertain) return true;
+  if (broker->local_peer->cancel(broker->local_peer) != 0) {
+    broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement"); return true;
+  }
+  int joined = broker->local_peer->poll_joined(broker->local_peer);
+  if (joined == 0) return false;
+  broker->local_connect_pending = false;
+  if (joined == 1) { broker->local_peer_joined = true; return true; }
+  broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement"); return true;
+}
+static void broker_poll_local(struct broker *broker) {
+  if (broker->retired) return;
+  if (broker->closing) { broker_begin_close(broker); return; }
+  if (!broker->local_connect_pending || broker->working) return;
+  int descriptor = -1;
+  int status = broker->local_peer->poll_connection(broker->local_peer, &descriptor);
+  if (!status) return;
+  broker->local_connect_pending = false;
+  if (status != 1 || descriptor < 0 || !broker_live(broker)) {
+    if (!retired_close(&broker->platform, &descriptor)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    broker_fail(broker, broker->local_health && status == CLIQ_LOCAL_PEER_NOT_LISTENING
+      ? "local_service_not_listening" : "broker_transport_interrupted");
+    broker_begin_close(broker); return;
+  }
+  GError *error = NULL; GSocket *socket = g_socket_new_from_fd(descriptor, &error); g_clear_error(&error);
+  if (!socket) {
+    if (!retired_close(&broker->platform, &descriptor)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); return;
+  }
+  descriptor = -1; /* This exact original description is now owned by GSocket. */
+  broker->connection = g_socket_connection_factory_create_connection(socket);
+  if (!broker->connection) {
+    if (!g_socket_close(socket, &error)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    g_clear_error(&error);
+    if (broker->unsafe) broker->local_unretired_socket = socket;
+    else g_object_unref(socket);
+    broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); return;
+  }
+  broker->socket = g_socket_connection_get_socket(broker->connection); g_object_unref(socket); g_socket_set_blocking(broker->socket, FALSE);
+  if (!broker_queue(broker, BROKER_CONNECT)) broker_begin_close(broker);
+}
 static void broker_begin_close(struct broker *broker) {
   if (broker->retired) return;
   broker->closing = true; atomic_store(&broker->cancelled, true);
@@ -1786,6 +1892,7 @@ static void broker_begin_close(struct broker *broker) {
   /* No descriptor is closed concurrently with a native worker. Cancellable
    * DNS/TCP and short monotonic TLS polls wake, then the sole retire worker
    * consumes descriptors only after the preceding worker has completed. */
+  if (broker->managed_local && !broker_local_cancel_join(broker)) return;
   if (!broker->working && !broker->retired && !broker_queue(broker, BROKER_RETIRE)) {
     broker->unsafe = true; atomic_store(&retirement_failed, true); broker->retired = true;
     if (broker->platform.secret) { wipe(broker->platform.secret, broker->platform.secret_size); free(broker->platform.secret); broker->platform.secret = NULL; }
@@ -1795,7 +1902,8 @@ static void broker_begin_close(struct broker *broker) {
 static void broker_deadline(uv_timer_t *timer) {
   struct broker *broker = timer->data; struct native_callback_scope scope;
   callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
-  broker_begin_close(broker);
+  if (!broker->managed_local || remaining(&broker->platform) <= 0) broker_begin_close(broker);
+  else broker_poll_local(broker);
   callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
 }
 static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
@@ -1844,7 +1952,36 @@ static bool broker_input(napi_env env, napi_value input, struct broker *broker) 
   if (!digest_hex(broker->trust, broker->trust_size, digest) || strcmp(digest, broker->trust_digest)) return false;
   return digest_hex(broker->body, broker->body_size, digest) && !strcmp(digest, broker->body_digest);
 }
-static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
+static bool broker_local_input(napi_env env, napi_value input, struct broker *broker, unsigned purpose, napi_value *original_peer) {
+  const char *model_keys[] = {"provider", "peer", "bodyBytes", "bodyBytesDigest"};
+  const char *health_keys[] = {"provider", "peer", "requestKind"};
+  const char *show_keys[] = {"provider", "peer", "requestKind", "bodyBytes", "bodyBytesDigest"};
+  char provider[32], kind[32]; bool tagged = false; struct cliq_local_service_peer *peer = NULL;
+  if ((purpose != CLIQ_LOCAL_PEER_HEALTH && purpose != CLIQ_LOCAL_PEER_MODEL) ||
+      !field_text(env, input, "provider", provider, sizeof(provider)) || strcmp(provider, "ollama") ||
+      !member(env, input, "peer", original_peer) || napi_check_object_type_tag(env, *original_peer,
+        purpose == CLIQ_LOCAL_PEER_HEALTH ? &CLIQ_LOCAL_HEALTH_PEER_TAG : &CLIQ_LOCAL_MODEL_PEER_TAG, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, *original_peer, (void **)&peer) != napi_ok || !peer || peer->abi != CLIQ_LOCAL_OWNER_ABI || peer->purpose != purpose ||
+      peer->creator_pid != getpid() || peer->environment != env || peer->borrowed || !peer->assert_current || !peer->assert_current(peer) ||
+      !peer->begin_connection || !peer->poll_connection || !peer->cancel || !peer->poll_joined || !peer->release) return false;
+  bool health = purpose == CLIQ_LOCAL_PEER_HEALTH, version = false;
+  if (health) {
+    if (!field_text(env, input, "requestKind", kind, sizeof(kind)) || (strcmp(kind, "version") && strcmp(kind, "model_show"))) return false;
+    version = !strcmp(kind, "version");
+    if (!fields(env, input, version ? health_keys : show_keys, version ? 3 : 5)) return false;
+  } else if (!fields(env, input, model_keys, 4)) return false;
+  if (!version && (!broker_buffer(env, input, "bodyBytes", BROKER_BODY_CAP, &broker->body, &broker->body_size) ||
+      !broker_digest(env, input, "bodyBytesDigest", broker->body_digest))) return false;
+  char digest[65];
+  if (!digest_hex(broker->body, broker->body_size, digest) || (!version && strcmp(digest, broker->body_digest))) return false;
+  if (version) memcpy(broker->body_digest, digest, sizeof(broker->body_digest));
+  if (!peer->assert_current(peer) || peer->borrowed || peer->binding.port < 49152 || peer->binding.port > 65535) return false;
+  strcpy(broker->host, "127.0.0.1"); broker->port = peer->binding.port;
+  strcpy(broker->path, health ? version ? "/api/version" : "/api/show" : "/api/chat");
+  broker->managed_local = true; broker->local_health = health; broker->local_version = version; broker->local_peer = peer;
+  return true;
+}
+static napi_value broker_prepare_owned(napi_env env, napi_callback_info info, unsigned local_purpose) {
   size_t argc = 2; napi_value args[2];
   if (atomic_load(&retirement_failed) || syscall(SYS_gettid) != getpid() ||
       napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 1) {
@@ -1855,15 +1992,25 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   broker->env = env; broker->creator_pid = getpid(); broker->platform.runtime_fd = -1;
   atomic_init(&broker->cancelled, false); atomic_init(&broker->unsafe, false); atomic_init(&broker->error, NULL);
   atomic_init(&broker->fence_retained, false);
+  napi_value local_peer = NULL;
   bool valid = current_user(&broker->platform.uid, &broker->platform.gid, broker->platform.home) &&
-    broker_input(env, args[0], broker) && RAND_bytes(broker->token, sizeof(broker->token)) == 1 &&
+    (local_purpose ? broker_local_input(env, args[0], broker, local_purpose, &local_peer) : broker_input(env, args[0], broker)) && RAND_bytes(broker->token, sizeof(broker->token)) == 1 &&
     clock_gettime(CLOCK_MONOTONIC, &broker->platform.deadline) == 0;
   if (valid) {
     broker->platform.deadline.tv_sec += DEADLINE_SECONDS;
     valid = digest_hex(broker->token, sizeof(broker->token), broker->token_digest) && pthread_mutex_init(&broker->release_mutex, NULL) == 0;
     broker->mutex_ready = valid;
   }
+  if (valid && local_purpose) {
+    valid = broker->local_peer && !broker->local_peer->borrowed && broker->local_peer->assert_current(broker->local_peer) &&
+      napi_create_reference(env, local_peer, 1, &broker->local_peer_reference) == napi_ok;
+    if (valid) broker->local_peer->borrowed = true;
+  }
   if (!valid) {
+    if (broker->local_peer_reference || (broker->mutex_ready && pthread_mutex_destroy(&broker->release_mutex))) {
+      broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      broker->unretired_next = unretired_brokers; unretired_brokers = broker; napi_throw(env, broker_error_value(broker)); return NULL;
+    }
     if (broker->body) { wipe(broker->body, broker->body_size); free(broker->body); }
     if (broker->trust) { wipe(broker->trust, broker->trust_size); free(broker->trust); }
     wipe(broker, sizeof(*broker)); free(broker);
@@ -1871,7 +2018,8 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   }
   broker->platform.cancel = g_cancellable_new();
   napi_value ready, handle = NULL; uv_loop_t *loop;
-  if (napi_create_promise(env, &broker->ready_deferred, &ready) == napi_ok) handle = broker_handle_value(broker, ready);
+  if (napi_create_promise(env, broker->local_health ? &broker->phase_deferred : &broker->ready_deferred, &ready) == napi_ok)
+    handle = broker->local_health ? broker_health_value(broker, ready) : broker_handle_value(broker, ready);
   if (!handle ||
       napi_add_async_cleanup_hook(env, broker_cleanup, broker, &broker->cleanup_hook) != napi_ok ||
       !callbacks_init(&broker->callbacks, env, "cliq model broker callbacks") ||
@@ -1881,7 +2029,8 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
     napi_throw(env, broker_error_value(broker)); return NULL;
   }
   broker->timer_ready = true; broker->timer.data = broker; uv_update_time(loop);
-  if (uv_timer_start(&broker->timer, broker_deadline, (uint64_t)remaining(&broker->platform), 0) || !broker_queue(broker, BROKER_PREPARE)) {
+  if (uv_timer_start(&broker->timer, broker_deadline, broker->managed_local ? 0 : (uint64_t)remaining(&broker->platform), broker->managed_local ? 5 : 0) ||
+      !broker_queue(broker, BROKER_PREPARE)) {
     broker_fail(broker, "broker_worker_unavailable");
     broker_begin_close(broker);
   }
@@ -1889,13 +2038,18 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
    * await credential I/O. Even queued/executing preparation can now be closed. */
   return handle;
 }
+static napi_value broker_prepare_call(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, 0); }
+static napi_value broker_prepare_local_model(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, CLIQ_LOCAL_PEER_MODEL); }
+static napi_value broker_prepare_local_health(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, CLIQ_LOCAL_PEER_HEALTH); }
 static napi_value initialize_broker(napi_env env, napi_value exports) {
   if (!OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL)) { napi_throw_error(env, NULL, "Installed model broker TLS initialization unavailable"); return NULL; }
   const napi_property_descriptor methods[] = {
     {"prepareModelTransport", NULL, broker_prepare_call, NULL, NULL, NULL, napi_default, NULL},
+    {"prepareLocalModelTransport", NULL, broker_prepare_local_model, NULL, NULL, NULL, napi_default, NULL},
+    {"prepareLocalHealthTransport", NULL, broker_prepare_local_health, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 3); return exports;
+  set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "localModelInterfaceVersion", 1); return exports;
 }
 NAPI_MODULE(cliq_linux_model_broker, initialize_broker)
 #endif

@@ -9,9 +9,12 @@ import path from 'node:path';
  * remains occupied through original child close, pipe drain and process-group
  * disappearance. Meson keeps --jobs 1, so it never adds a second compiler lane.
  * This is build-process custody, not an installed resource/death authority. */
+// Build-only wall time includes queueing and process-group retirement.
+export const WORKER_BUILD_TIMEOUT_MS = 8 * 60_000;
+
 export function createWorkerBuildScope(signal) {
   const cancellation = new AbortController(), queued = [], active = new Set(), waiters = [];
-  const deadline = performance.now() + 60000;
+  const deadline = performance.now() + WORKER_BUILD_TIMEOUT_MS;
   let refused, revoked = false, disposed = false;
   const retirementErrors = [];
   const groupExists = pid => {
@@ -33,7 +36,7 @@ export function createWorkerBuildScope(signal) {
     idle();
   }
   function assertActive() {
-    if (!revoked && performance.now() >= deadline) abort(new Error('Production native build exceeded 60000ms'));
+    if (!revoked && performance.now() >= deadline) abort(new Error(`Production native build exceeded ${WORKER_BUILD_TIMEOUT_MS}ms`));
     if (revoked) throw refused;
     if (disposed) throw new Error('Production native build is already joined');
   }
@@ -99,11 +102,11 @@ export function createWorkerBuildScope(signal) {
   const interrupted = () => abort(new Error('Production native build received SIGINT'));
   process.on('SIGTERM', terminated); process.on('SIGINT', interrupted);
   signal?.addEventListener('abort', externalAbort, { once: true });
-  const timer = setTimeout(() => abort(new Error('Production native build exceeded 60000ms')), 60000);
+  const timer = setTimeout(() => abort(new Error(`Production native build exceeded ${WORKER_BUILD_TIMEOUT_MS}ms`)), WORKER_BUILD_TIMEOUT_MS);
   if (signal?.aborted) externalAbort();
   return Object.freeze({
     signal: cancellation.signal, abort, assertActive,
-    run(binary, args, { cwd, env, inherit = false, timeout = 60000 } = {}) {
+    run(binary, args, { cwd, env, inherit = false, timeout = WORKER_BUILD_TIMEOUT_MS } = {}) {
       try { assertActive(); } catch (error) { return Promise.reject(error); }
       return new Promise((resolve, reject) => {
         queued.push({ binary, args, cwd, env, inherit, timeout, resolve, reject,

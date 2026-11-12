@@ -8,9 +8,9 @@ import type { StateOwnerRecordV1 } from './types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { decodeStateOwnerRecord } from '../state/decoders.js';
 import type { HeldMigrationBackupEntry, PreparedImportImageObservation } from '../state/native-owner.js';
+export { decodeOwnedLegacyImportRequest, decodeOwnedLegacyImportResponse,
+  type OwnedLegacyImportRequestV1, type OwnedLegacyImportResponseV1 } from './migration-control-wire.js';
 
-export type OwnedLegacyImportRequestV1 = Readonly<{ protocolVersion: 1; method: 'state.migrate'; requestId: string;
-  migrationId: string; legacyRootCanonicalAbsolutePath: string }>;
 export type OwnedLegacyImportPreparationV1 = Readonly<{
   schemaVersion: 1; format: 'cliq-owned-legacy-import-preparation-v1'; migrationId: string; principalId: string;
   requestId: string; requestRef: string; requestDigest: string; channelIdentityRef: string; channelIdentityDigest: string;
@@ -69,9 +69,6 @@ export type OwnedLegacyImportReceiptV1 = Readonly<{ schemaVersion: 1; format: 'c
   legacyRootIdentityRef: string; legacyRootIdentityDigest: string; preparationRef: string; preparationDigest: string;
   kernelGenerationIdentityRef: string; kernelGenerationIdentityDigest: string; candidateRef: string; candidateDigest: string;
   importedRowSetDigest: string; credentialReadyRef: string; credentialReadyDigest: string; completedAt: string; receiptDigest: string }>;
-export type OwnedLegacyImportResponseV1 = Readonly<{ protocolVersion: 1; method: 'state.migrate'; status: 'completed';
-  requestId: string; migrationId: string; preparationRef: string; preparationDigest: string; receiptRef: string; receiptDigest: string;
-  completedAt: string }>;
 function invalid(): never { throw new TypeError('owned import differs from its exact closed retained-data contract'); }
 function id(value: unknown): void { if (!/^[A-Za-z0-9_-]{43}$/u.test(controlWireText(value))) invalid(); }
 function path(value: unknown): void { const text = controlWireText(value, 4096); if (normalizeAbsolutePath(text) !== text) invalid(); }
@@ -98,12 +95,6 @@ export function decodeOwnedImportRootDescriptor(value: unknown): OwnedImportRoot
   path(data.canonicalAbsolutePath); controlWireInteger(data.ownerUid); controlWireInteger(data.mode, 0, 4095);
   for (const key of ['deviceId', 'directoryFileId']) if (!/^(0|[1-9][0-9]*)$/u.test(controlWireText(data[key]))) invalid();
   if (data.openedNoFollow !== true) invalid(); return immutableSnapshot(data) as OwnedImportRootDescriptor;
-}
-export function decodeOwnedLegacyImportRequest(value: unknown): OwnedLegacyImportRequestV1 {
-  const data = record(value, ['protocolVersion', 'method', 'requestId', 'migrationId', 'legacyRootCanonicalAbsolutePath']);
-  if (data.protocolVersion !== 1 || data.method !== 'state.migrate') invalid();
-  assertRequestId(controlWireText(data.requestId)); id(data.migrationId); path(data.legacyRootCanonicalAbsolutePath);
-  return immutableSnapshot(data) as OwnedLegacyImportRequestV1;
 }
 export function decodeOwnedLegacyImportPreparation(value: unknown): OwnedLegacyImportPreparationV1 {
   const data = record(value, ['schemaVersion', 'format', 'migrationId', 'principalId', 'requestId', 'requestRef', 'requestDigest',
@@ -253,12 +244,5 @@ export function decodeOwnedLegacyImportReceipt(value: unknown): OwnedLegacyImpor
     'cliq-owned-legacy-import-receipt-v1');
   if (data.kind !== 'kernel_cutover') invalid(); id(data.migrationId); controlWireText(data.principalId); assertRequestId(controlWireText(data.requestId));
   time(data.completedAt); digest(data, 'receiptDigest'); return immutableSnapshot(data) as OwnedLegacyImportReceiptV1;
-}
-export function decodeOwnedLegacyImportResponse(value: unknown): OwnedLegacyImportResponseV1 {
-  const data = record(value, ['protocolVersion', 'method', 'status', 'requestId', 'migrationId', 'preparationRef', 'preparationDigest',
-    'receiptRef', 'receiptDigest', 'completedAt']);
-  if (data.protocolVersion !== 1 || data.method !== 'state.migrate' || data.status !== 'completed') invalid();
-  assertRequestId(controlWireText(data.requestId)); id(data.migrationId); time(data.completedAt);
-  return immutableSnapshot(data) as OwnedLegacyImportResponseV1;
 }
 

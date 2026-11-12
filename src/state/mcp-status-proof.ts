@@ -4,7 +4,7 @@ import { assertControlWireJson, controlWireRecord, controlWireRef, controlWireIn
 import { digestOmitting, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import { assertBoundedJsonValue } from '../kernel/json.js';
 import { immutableSnapshot } from '../model/immutable.js';
-import type { McpStdioRecoveryBinding, NativeMcpStdioRecoveryJoined } from './mcp-stdio-broker-native.js';
+import type { McpStdioRecoveryBinding, McpStdioRecoveryUnavailableJoinData, NativeMcpStdioRecoveryJoined } from './mcp-stdio-broker-native.js';
 import type { ReconciliationProbeEvidenceV1, ReconciliationProbeCancellationClosureV1, ReconciliationProbeTimeoutClosureV1 } from '../kernel/reconciliation.js';
 
 export type McpStatusRetirementV1 = Readonly<{
@@ -14,12 +14,19 @@ export type McpStatusRetirementV1 = Readonly<{
   joined: NativeMcpStdioRecoveryJoined; creatorProcessDomain?: never;
   nativeClosure: Readonly<{ kind: 'linux_original_join'; lifecycleRawRef: string; lifecycleProjectionRef: string }>;
 }> | Readonly<{
+  joined: McpStdioRecoveryUnavailableJoinData; creatorProcessDomain?: never;
+  nativeClosure: Readonly<{ kind: 'linux_original_response_unavailable'; lifecycleRawRef: string; lifecycleProjectionRef: string }>;
+}> | Readonly<{
   joined?: never;
   creatorProcessDomain: Readonly<{ authorityDomain: 'linux_installed_native_creator_process_v1'; processObservation: 'absent_or_start_token_mismatch';
     creatorSupervisorInstanceId: string; creatorStateOwnerEpoch: number; creatorProcessIdentityRef: string; creatorProcessIdentityDigest: string;
     inspectorStateOwnerEpoch: number; observedAt: string }>;
-  nativeClosure: Readonly<{ kind: 'linux_successor_cleanup'; lifecycleRawRef: string; lifecycleProjectionRef: string; cleanupRawRef: string; cleanupProjectionRef: string }>;
+  nativeClosure: Readonly<{ kind: 'linux_successor_cleanup' | 'linux_successor_response_unavailable_cleanup';
+    lifecycleRawRef: string; lifecycleProjectionRef: string; cleanupRawRef: string; cleanupProjectionRef: string }>;
 }>);
+export function isMcpStatusUnavailableRetirement(value: McpStatusRetirementV1): boolean {
+  return value.nativeClosure.kind === 'linux_original_response_unavailable' || value.nativeClosure.kind === 'linux_successor_response_unavailable_cleanup';
+}
 const bindingTexts = ['runId', 'principalId', 'probeKind', 'brokerDispatchId', 'inspectorSupervisorInstanceId', 'originalOpId', 'originalDispatchId',
   'effectServerToolName', 'adapterExecutableId', 'profileId', 'statusOperationName'] as const;
 const bindingRefs = ['previousWaitingSubjectRef', 'waitingSubjectRef', 'reconciliationSubjectDigest', 'probeNonceDigest', 'probeDispatchDigest',
@@ -41,7 +48,11 @@ export function decodeMcpStatusBinding(value: unknown): McpStdioRecoveryBinding 
 }
 export function decodeMcpStatusRetirement(value: unknown): McpStatusRetirementV1 {
   assertControlWireJson(value); assertBoundedJsonValue(value, 'MCP status retirement');
-  const successor = (value as { nativeClosure?: { kind?: unknown } } | null)?.nativeClosure?.kind === 'linux_successor_cleanup';
+  const kind = (value as { nativeClosure?: { kind?: unknown } } | null)?.nativeClosure?.kind;
+  const successor = kind === 'linux_successor_cleanup' || kind === 'linux_successor_response_unavailable_cleanup';
+  const unavailable = kind === 'linux_original_response_unavailable' || kind === 'linux_successor_response_unavailable_cleanup';
+  if (kind !== 'linux_original_join' && !successor && !unavailable)
+    throw new TypeError('MCP native retirement changed its exact XOR purpose');
   const data = controlWireRecord(value, ['schemaVersion', 'format', 'binding', 'nativeClosure', 'retirementEvidenceRef', 'observedAt', 'retirementDigest',
     successor ? 'creatorProcessDomain' : 'joined'],
     ['processContainmentRef']);
@@ -49,15 +60,18 @@ export function decodeMcpStatusRetirement(value: unknown): McpStatusRetirementV1
     throw new TypeError('MCP status retirement has no exact closed native-source projection');
   const binding = decodeMcpStatusBinding(data.binding);
   if (!successor) {
-  const joined = controlWireRecord(data.joined, ['kind', 'purpose', 'execReleased', 'setupReleased',
-    'statusReleased', 'releaseFenceTokenDigest', 'completedStages', 'tokenRevoked', 'matchingActiveReleaseCount', 'processJoined', 'pipesJoined', 'tasksJoined', 'outputCustodyRetired']);
-  const phases = ['initialize', 'initialized', 'tools_list', 'tools_call'];
-  if (joined.kind !== 'mcp_stdio_recovery_owner_joined' || joined.purpose !== 'recovery' || joined.releaseFenceTokenDigest !== binding.brokerFenceTokenDigest ||
-      joined.tokenRevoked !== true || joined.matchingActiveReleaseCount !== 0 || joined.processJoined !== true || joined.pipesJoined !== true ||
-      joined.tasksJoined !== true || joined.outputCustodyRetired !== true || ['execReleased', 'setupReleased', 'statusReleased'].some(key => typeof joined[key] !== 'boolean') ||
-      !Array.isArray(joined.completedStages) || joined.completedStages.length > 4 || joined.completedStages.some((phase, index) => phase !== phases[index]) ||
-      joined.statusReleased === true && (joined.execReleased !== true || joined.setupReleased !== true) || joined.setupReleased === true && joined.execReleased !== true)
-    throw new TypeError('MCP status retirement substitutes a purpose or incomplete native token/process/pipe/task join');
+    const joined = controlWireRecord(data.joined, ['kind', 'purpose', 'execReleased', 'setupReleased',
+      'statusReleased', 'releaseFenceTokenDigest', 'completedStages', 'tokenRevoked', 'matchingActiveReleaseCount', 'processJoined', 'pipesJoined', 'tasksJoined',
+      'outputCustodyRetired', ...(unavailable ? ['reason'] : [])]);
+    const phases = ['initialize', 'initialized', 'tools_list', 'tools_call'];
+    const expectedKind = unavailable ? 'mcp_stdio_recovery_response_unavailable_joined' : 'mcp_stdio_recovery_owner_joined';
+    if (joined.kind !== expectedKind || joined.purpose !== 'recovery' || joined.releaseFenceTokenDigest !== binding.brokerFenceTokenDigest ||
+        joined.tokenRevoked !== true || joined.matchingActiveReleaseCount !== 0 || joined.processJoined !== true || joined.pipesJoined !== true ||
+        joined.tasksJoined !== true || joined.outputCustodyRetired !== true || ['execReleased', 'setupReleased', 'statusReleased'].some(key => typeof joined[key] !== 'boolean') ||
+        !Array.isArray(joined.completedStages) || joined.completedStages.length > 4 || joined.completedStages.some((phase, index) => phase !== phases[index]) ||
+        joined.statusReleased === true && (joined.execReleased !== true || joined.setupReleased !== true) || joined.setupReleased === true && joined.execReleased !== true ||
+        unavailable && (joined.reason !== 'native_response_refused' || joined.execReleased !== true))
+      throw new TypeError('MCP status retirement substitutes a purpose or incomplete native token/process/pipe/task join');
   } else {
     const domain = controlWireRecord(data.creatorProcessDomain, ['authorityDomain', 'processObservation', 'creatorSupervisorInstanceId', 'creatorStateOwnerEpoch',
       'creatorProcessIdentityRef', 'creatorProcessIdentityDigest', 'inspectorStateOwnerEpoch', 'observedAt']);
@@ -68,10 +82,11 @@ export function decodeMcpStatusRetirement(value: unknown): McpStatusRetirementV1
     controlWireRef(domain.creatorProcessIdentityRef); controlWireRef(domain.creatorProcessIdentityDigest);
   }
   const closure = controlWireRecord(data.nativeClosure, ['kind', 'lifecycleRawRef', 'lifecycleProjectionRef', ...(successor ? ['cleanupRawRef', 'cleanupProjectionRef'] : [])]);
-  if (closure.kind !== (successor ? 'linux_successor_cleanup' : 'linux_original_join')) throw new TypeError('MCP native retirement changed its exact XOR purpose');
+  if (closure.kind !== kind) throw new TypeError('MCP native retirement changed its exact XOR purpose');
   controlWireRef(closure.lifecycleRawRef); controlWireRef(closure.lifecycleProjectionRef); controlWireRef(data.retirementEvidenceRef); controlWireRef(data.retirementDigest);
   if (successor) { controlWireRef(closure.cleanupRawRef); controlWireRef(closure.cleanupProjectionRef); }
   if (data.processContainmentRef !== undefined) controlWireRef(data.processContainmentRef);
+  else if (unavailable) throw new TypeError('MCP unavailable response requires its original spawned containment');
   if (parseCanonicalTime(controlWireText(data.observedAt)) < binding.probeStartedAtMs)
     throw new TypeError('MCP status physical retirement predates its original source intent');
   return immutableSnapshot(data) as McpStatusRetirementV1;

@@ -9,9 +9,13 @@ import { MCP_RECOVERY_EFFECT, MCP_RECOVERY_STATUS } from './installed-mcp-recove
 import { MCP_RETRY_HTTP_TOOL, MCP_RETRY_HTTP_RESULT } from './installed-mcp-retry-http.js';
 
 type Data = Record<string, any>;
-export const INSTALLED_MCP_RECOVERY_CASES = ['signed_status_completed', 'retry_server_capacity', 'http_retry_completed', 'signed_status_owning_stop'] as const;
-export type InstalledMcpRecoveryCase = typeof INSTALLED_MCP_RECOVERY_CASES[number];
-export const INSTALLED_MCP_RECOVERY_MODEL_POSTS = 8;
+export const INSTALLED_MCP_RECOVERY_CASES = ['signed_status_completed', 'signed_status_failed', 'retry_server_capacity', 'http_retry_completed',
+  'signed_status_refused_successor', 'signed_status_unresolved', 'signed_status_refused_timeout',
+  'signed_status_owning_stop', 'signed_status_refused_owning_stop'] as const;
+export const INSTALLED_MCP_STATUS_USER_REPLAY_CASE = 'signed_status_user_replay_after_exhaustion';
+export type InstalledMcpRecoveryCase = typeof INSTALLED_MCP_RECOVERY_CASES[number] | typeof INSTALLED_MCP_STATUS_USER_REPLAY_CASE;
+const modelCases: readonly InstalledMcpRecoveryCase[] = [...INSTALLED_MCP_RECOVERY_CASES, INSTALLED_MCP_STATUS_USER_REPLAY_CASE];
+export const INSTALLED_MCP_RECOVERY_MODEL_POSTS = 15;
 export const installedMcpRecoveryRegistration = (kind: InstalledMcpRecoveryCase) => `owned-recovery-${kind}`;
 export const installedMcpRecoveryObjective = (kind: InstalledMcpRecoveryCase) =>
   `Owned installed MCP recovery case: ${kind}. Call the original no-op effect before editing example.txt; never repeat a tool call from the model.`;
@@ -22,12 +26,13 @@ export function createInstalledMcpRecoveryModelResponder(model: string, builtins
     begin(kind: InstalledMcpRecoveryCase) { assert(!posts.has(kind)); posts.set(kind, 0); },
     posts(kind: InstalledMcpRecoveryCase) { const count = posts.get(kind); assert(count !== undefined); return count; },
     respond(body: Data): Data | undefined {
-      const matches = INSTALLED_MCP_RECOVERY_CASES.filter(kind => body.messages.some((entry: Data) =>
+      const matches = modelCases.filter(kind => body.messages.some((entry: Data) =>
         entry.role === 'user' && entry.content === installedMcpRecoveryObjective(kind)));
       if (!matches.length) return;
       assert.equal(matches.length, 1); const kind = matches[0]; if (!kind) assert.fail('missing fixed recovery case');
       const previous = posts.get(kind); assert(previous !== undefined);
-      const http = kind === 'http_retry_completed', known = kind === 'signed_status_completed' || http;
+      const http = kind === 'http_retry_completed', failed = kind === 'signed_status_failed',
+        known = kind === 'signed_status_completed' || failed || http;
       const registration = installedMcpRecoveryRegistration(kind), effect = mcpExposedToolName(registration, http ? MCP_RETRY_HTTP_TOOL : MCP_RECOVERY_EFFECT),
         status = mcpExposedToolName(registration, MCP_RECOVERY_STATUS), names = body.tools.map((entry: Data) => entry.function.name);
       assert.equal(canonicalSha256([...names].sort()), canonicalSha256([...builtins(), effect, ...(!http ? [status] : [])].sort()));
@@ -41,8 +46,9 @@ export function createInstalledMcpRecoveryModelResponder(model: string, builtins
         if (ordinal === 2) {
           if (http) assert(results[0].content.includes(MCP_RETRY_HTTP_RESULT), 'the model must consume the actual later claimed HTTP result rather than an old UNKNOWN');
           else assert.deepEqual(parseJsonStrict(results[0].content), {
-            code: 'TOOL_RESULT_UNAVAILABLE', effect: 'confirmed_completed', originalResponse: 'unavailable',
-          }, 'the model must consume truthful signed completion without an invented old effect payload');
+            code: failed ? 'TOOL_EXECUTION_FAILED' : 'TOOL_RESULT_UNAVAILABLE',
+            effect: failed ? 'confirmed_failed' : 'confirmed_completed', originalResponse: 'unavailable',
+          }, 'the model must consume the actual signed disposition without an invented old effect payload');
         }
       }
       posts.set(kind, ordinal);

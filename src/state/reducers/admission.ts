@@ -31,7 +31,8 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { assertCurrentControlFrame, readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity } from '../control-channel.js';
+import { assertCurrentControlFrame, readRetainedControlChannelClosure, validateControlChannelClosure, type AuthenticatedControlIdentity,
+  type LocalInferenceAdmissionFrame } from '../control-channel.js';
 import { readCurrentSessionContextGraph, assertCurrentSessionContextGraph } from '../session-context-stream.js';
 import {
   decodeAdmittedContext,
@@ -51,7 +52,7 @@ import {
 import { KernelStorageError } from '../errors.js';
 import type { InstalledApplyDiagnosticStage } from '../installed-run-diagnostics.js';
 import { readCanonicalArtifact } from '../agent-context.js';
-import { readInstalledRunAdmission, recheckInstalledRunWorkspace, readInstalledRunDependency, consumeInstalledRunDependency,
+import { readInstalledRunAdmission, readInstalledRunLocalModel, recheckInstalledRunWorkspace, readInstalledRunDependency, consumeInstalledRunDependency,
   type AssembledInstalledRun } from '../installed-run.js';
 import { assertInstalledRunAdmissionCapacity } from '../installed-run-capacity.js';
 import { normalizeRunSubmitRequest, runSubmitIntentDigest } from '../source-target.js';
@@ -71,7 +72,7 @@ import {
   readSessionPrincipalId,
   ZERO_BUDGET
 } from '../rows.js';
-import type { SqliteDriver } from '../sqlite-driver.js';
+import { assertSqliteConnectionOwnedBy, type SqliteConnection, type SqliteDriver } from '../sqlite-driver.js';
 import { recaptureLiveWorkspaceIdentity } from '../workspace-identity.js';
 import type { SourceInspectionTarget } from '../../kernel/execution.js';
 import { readRetainedSourceInspectionTarget } from '../source-target.js';
@@ -459,6 +460,23 @@ export async function replayInstalledRunAdmission(
 
 type InstalledAdmission = Readonly<{ prepared: AssembledInstalledRun; identity: AuthenticatedControlIdentity;
   data: ReturnType<typeof readInstalledRunAdmission> }>;
+type AdmittedLocalRunCut = Readonly<{ result: AdmitRunResult; responseRef: string }>;
+export type PreparedLocalRunAdmission = Readonly<{
+  assertCurrent(connection: SqliteConnection, freshNow: string): void;
+  commit(connection: SqliteConnection, freshNow: string, earlier?: AdmittedLocalRunCut): AdmittedLocalRunCut;
+}>;
+type LocalBatch = Readonly<{ frame: LocalInferenceAdmissionFrame; metadata: readonly PublishedArtifact[] }>;
+
+/** Prepare the same admission cut as the ordinary installed producer. The
+ * original service cycle owns the final transaction and canonical-time sample. */
+export function prepareLocalRunAdmission(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  prepared: AssembledInstalledRun, identity: AuthenticatedControlIdentity, runtime?: AuthorizationRuntime,
+  signal?: AbortSignal): Promise<PreparedLocalRunAdmission> {
+  const data = readInstalledRunAdmission(prepared, driver, owner, identity);
+  const local = readInstalledRunLocalModel(prepared, driver, owner, identity);
+  if (!local) throw new KernelStorageError('ARTIFACT_MISMATCH', 'local admission lacks its original native service and frame');
+  return admitRunInternal(driver, artifacts, owner, data.input, { prepared, identity, data }, runtime, signal, local);
+}
 
 /** Public-id production path. The private WeakMap friend, not caller refs or
  * an arbitrary digest override, binds the exact authenticated original frame. */
@@ -474,6 +492,11 @@ export function admitRun(driver: SqliteDriver, artifacts: ArtifactCatalog, owner
   return admitRunInternal(driver, artifacts, owner, input, undefined, runtime, signal);
 }
 
+function admitRunInternal(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: AdmitRunInput, installed?: InstalledAdmission, runtime?: AuthorizationRuntime, signal?: AbortSignal): Promise<AdmitRunResult>;
+function admitRunInternal(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  input: AdmitRunInput, installed: InstalledAdmission, runtime: AuthorizationRuntime | undefined, signal: AbortSignal | undefined,
+  local: LocalBatch): Promise<PreparedLocalRunAdmission>;
 async function admitRunInternal(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
@@ -481,8 +504,9 @@ async function admitRunInternal(
   input: AdmitRunInput,
   installed?: InstalledAdmission,
   runtime?: AuthorizationRuntime,
-  signal?: AbortSignal
-): Promise<AdmitRunResult> {
+  signal?: AbortSignal,
+  local?: LocalBatch
+): Promise<AdmitRunResult | PreparedLocalRunAdmission> {
   signal?.throwIfAborted();
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   if (input.dependencyPolicyRef !== undefined && !installed)
@@ -521,7 +545,7 @@ async function admitRunInternal(
   const replay = () => installed ? replayInstalledRunAdmission(driver, artifacts, owner, installed.data.normalized, installed.identity, runtime, signal) :
     replayAdmitRun(driver, reads, owner, input, admissionIntentDigest, requestDigest);
 
-  const replayed = await replay();
+  const replayed = local ? undefined : await replay();
   if (replayed !== undefined) {
     if (input.verifierRequests?.length) {
       if (!runtime) throw new TypeError('verifier replay has no retained runtime roots');
@@ -530,7 +554,7 @@ async function admitRunInternal(
     return replayed;
   }
 
-  const channelClosure = await validateControlChannelClosure(reads, owner, input);
+  const channelClosure = await validateControlChannelClosure(reads, owner, input, local?.frame);
   const channel = channelClosure.channel;
 
   const sessionContext = await readCurrentSessionContextGraph(driver, reads, input.principalId, input.sessionId, input.expectedContextRevision,
@@ -700,7 +724,8 @@ async function admitRunInternal(
     objectiveDigest: ''
   };
   objective.objectiveDigest = digestOmitting(objective, 'objectiveDigest');
-  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata, ...skillMetadata, ...(dependency?.metadata ?? [])];
+  const published: PublishedArtifact[] = [...channelClosure.metadata, ...referencedMetadata, ...skillMetadata,
+    ...(dependency?.metadata ?? []), ...(local?.metadata ?? [])];
   if (verifierPreparation && verifierConsumption) published.push(...verifierPreparation.metadata, ...verifierConsumption.metadata);
   decodeRunObjective(objective);
 
@@ -733,6 +758,7 @@ async function admitRunInternal(
   decodeWorkspaceState(workspaceState);
 
   let objectiveArtifact: PublishedArtifact, admittedContextArtifact: PublishedArtifact, workspaceStateArtifact: PublishedArtifact;
+  let installedRequestArtifact: PublishedArtifact | undefined;
   if (installed) {
     const { requestDigest: _digest, ...core } = installed.data.normalized.originalRequest as Record<string, unknown>;
     if (canonicalSha256(core) !== requestDigest)
@@ -743,7 +769,7 @@ async function admitRunInternal(
       { value: admittedContext, schemaKind: 'cliq-admitted-context-v1' },
       { value: workspaceState, schemaKind: 'cliq-workspace-state-v1' }
     ]);
-    published.push(requestArtifact); objectiveArtifact = objectiveValue;
+    published.push(requestArtifact); installedRequestArtifact = requestArtifact; objectiveArtifact = objectiveValue;
     admittedContextArtifact = contextValue; workspaceStateArtifact = workspaceValue;
   } else {
     const requestArtifact = await publish(admitRequestCore(input, workspacePath, objectiveText, budgets), 'cliq-run-submit-internal-request-core-v1');
@@ -898,16 +924,14 @@ async function admitRunInternal(
     ...(verifierConsumption?.templates.length ? { verifierTemplates: verifierConsumption.templates } : {})
   });
 
-  let committed = false;
-  let fenceOutcome: TimeFenceAdvance | undefined;
-  driver.transaction((connection) => {
+  const finalAdmission = (connection: SqliteConnection) => {
     signal?.throwIfAborted();
     const control = readControlRequest(connection, input.principalId, 'run.submit', input.requestId);
     if (control !== undefined) {
       if (control.requestDigest !== requestDigest) {
         throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.submit requestId was reused with different bytes');
       }
-      return;
+      return { control };
     }
     const admission = readAdmissionReplay(connection, 'runs', input.principalId, 'run.submit', input.admissionKey);
     if (admission !== undefined) {
@@ -917,9 +941,13 @@ async function admitRunInternal(
           'run.submit admissionKey was reused with a different intent'
         );
       }
-      return;
+      return { admission };
     }
+    return undefined;
+  };
 
+  const assertAdmissionInputs = (connection: SqliteConnection) => {
+    signal?.throwIfAborted();
     const lockedSession = readSession(connection, input.sessionId);
     assertCurrentSessionContextGraph(connection, sessionContext.cut);
     if (readSessionPrincipalId(connection, input.sessionId) !== input.principalId) {
@@ -930,16 +958,19 @@ async function admitRunInternal(
     }
 
     assertActiveStateOwner(connection, owner);
-    const freshNow = sampleCanonicalNow();
-    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, freshNow);
-    if (fenceOutcome !== 'healthy') return;
+  };
+
+  const assertInstalledCut = (connection: SqliteConnection, freshNow: string, sameAdmission = false) => {
     if (installed) {
-      assertCurrentControlFrame(owner, installed.identity);
+      assertCurrentControlFrame(owner, installed.identity, local?.frame);
       recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity, connection);
       if (freshNow < now || freshNow >= deadlineAt)
         throw new KernelStorageError('INVALID_REQUEST', 'installed admission interval is not current at its final time fence');
-      assertInstalledRunAdmissionCapacity(connection);
+      if (!sameAdmission) assertInstalledRunAdmissionCapacity(connection);
     }
+  };
+
+  const write = (connection: SqliteConnection, freshNow: string): AdmittedLocalRunCut => {
     for (const artifact of published) insertArtifactMetadata(connection, artifact, now);
     verifierConsumption?.commit(connection, freshNow);
     if (installed) consumeInstalledRunDependency(installed.prepared, driver, owner, installed.identity, connection,
@@ -993,7 +1024,47 @@ async function admitRunInternal(
       responseRef: responseArtifact.ref,
       committedAt: now
     });
-    committed = true;
+    return { result: { replayed: false, run, response }, responseRef: responseArtifact.ref };
+  };
+
+  if (local && installed && installedRequestArtifact) {
+    const requestArtifact = installedRequestArtifact;
+    const check = (connection: SqliteConnection, freshNow: string) => {
+      assertSqliteConnectionOwnedBy(driver, connection);
+      const existing = finalAdmission(connection);
+      if (existing?.control) throw new KernelStorageError('RECOVERY_REQUIRED', 'local cycle participant already has a committed response');
+      assertAdmissionInputs(connection);
+      assertInstalledCut(connection, freshNow, existing?.admission !== undefined);
+      return existing?.admission;
+    };
+    return Object.freeze({ assertCurrent(connection: SqliteConnection, freshNow: string) { check(connection, freshNow); },
+      commit(connection: SqliteConnection, freshNow: string, earlier?: AdmittedLocalRunCut) {
+        const existing = check(connection, freshNow);
+        if (!existing) return write(connection, freshNow);
+        if (!earlier || earlier.result.run.id !== runId || existing.admissionRequestId === null)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'same-cycle admission lacks its original synchronous result');
+        const original = readControlRequest(connection, input.principalId, 'run.submit', existing.admissionRequestId);
+        if (!original || original.responseRef !== earlier.responseRef)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'same-cycle admission result differs from its original response');
+        for (const artifact of [...channelClosure.metadata, requestArtifact]) insertArtifactMetadata(connection, artifact, freshNow);
+        insertControlRequest(connection, { principalId: input.principalId, method: 'run.submit', requestId: input.requestId,
+          channelIdentityRef: input.channelIdentityRef, channelIdentityDigest: input.channelIdentityDigest, requestDigest,
+          responseRef: earlier.responseRef, committedAt: freshNow });
+        return { ...earlier, result: { ...earlier.result, replayed: true } };
+      }
+    });
+  }
+
+  let committed: AdmittedLocalRunCut | undefined;
+  let fenceOutcome: TimeFenceAdvance | undefined;
+  driver.transaction(connection => {
+    if (finalAdmission(connection)) return;
+    assertAdmissionInputs(connection);
+    const freshNow = sampleCanonicalNow();
+    fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, freshNow);
+    if (fenceOutcome !== 'healthy') return;
+    assertInstalledCut(connection, freshNow);
+    committed = write(connection, freshNow);
   });
 
   if (fenceOutcome === 'clock_regressed') {
@@ -1002,7 +1073,7 @@ async function admitRunInternal(
   if (fenceOutcome === 'still_regressed') {
     throw new KernelStorageError('INVALID_REQUEST', 'canonical clock is still in clock_regressed');
   }
-  if (committed) return { replayed: false, run, response };
+  if (committed) return committed.result;
   const raced = await replay();
   if (raced !== undefined) return raced;
   throw new KernelStorageError('RECOVERY_REQUIRED', 'run.submit transaction committed no Run');

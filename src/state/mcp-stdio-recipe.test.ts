@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
 import { sha256Bytes } from '../kernel/identity.js';
+import type { McpResolvedTransportV1 } from '../kernel/mcp.js';
 import { mcpInitializeRequestData, mcpInitializedNotificationData, mcpToolsListRequestData, mcpToolsCallRequestData } from '../kernel/mcp-wire.js';
 import { encodeMcpStdioRecipe, decodeMcpStdioRecipeData, MCP_STDIO_RECIPE_HEADER_BYTES } from './mcp-stdio-recipe.js';
 import type { FrozenMcpStdioInput } from './mcp-stdio-broker-native.js';
+import { assertMcpStdioRecipeData } from './mcp-stdio-recipe-audit.js';
 function input(run = false): FrozenMcpStdioInput {
   const frames = [mcpInitializeRequestData(1, '1'), mcpInitializedNotificationData(), mcpToolsListRequestData(2)];
   if (run) frames.push(mcpToolsCallRequestData(3, 'echo', { message: 'value' }));
@@ -79,4 +82,24 @@ test('fixed recovery recipe has its distinct purpose 3 and cannot omit its exact
   assert.throws(() => encodeMcpStdioRecipe(input(false), 'recovery'));
   const invalid = Buffer.from(recovery.bytes); invalid.writeUInt32LE(4, 8);
   assert.throws(() => decodeMcpStdioRecipeData(invalid));
+});
+test('the status recipe executes its signed adapter while retaining the registered server identity', () => {
+  const originalServer = 'a'.repeat(64), adapter = 'b'.repeat(64), argumentsValue = { key: 'fixed' };
+  const transport: Extract<McpResolvedTransportV1, { kind: 'stdio' }> = { kind: 'stdio', executionIdentityGrantId: 'original-grant',
+    executionIdentityConsumptionReceiptRef: 'c'.repeat(64), executionIdentityConsumptionReceiptDigest: 'd'.repeat(64),
+    executable: { kind: 'runtime_bundle', runtimeBundleRef: 'e'.repeat(64), executableId: 'original-server',
+      executableDigest: originalServer, executionPath: '/runtime/mcp-server' }, argv: [{ kind: 'non_secret_literal', value: 'fixed-profile' }] };
+  const frames = [mcpInitializeRequestData(1, '0.15.0'), mcpInitializedNotificationData(), mcpToolsListRequestData(2),
+    mcpToolsCallRequestData(3, 'inspect-status', argumentsValue)];
+  const material = { argv: ['fixed-profile'], serverDigest: adapter, serverByteCount: 512, maximumResponseBytes: 1_048_576,
+    maximumOutputBytes: DEFAULT_SANDBOX_RESOURCES.maxInvocationOutputBytes, remainingDeadlineMs: 30_000,
+    recipe: frames.map(frame => ({ phase: frame.phase, bodyBytes: Buffer.from(frame.json), bodyBytesDigest: frame.digest })) };
+  const inspect = (value: typeof material) => decodeMcpStdioRecipeData(encodeMcpStdioRecipe(value, 'recovery').bytes);
+  const expected = { purpose: 'recovery' as const, transport, adapterExecutableDigest: adapter, serverByteCount: 512,
+    resources: DEFAULT_SANDBOX_RESOURCES, effectServerToolName: 'perform-effect', statusOperationName: 'inspect-status', arguments: argumentsValue };
+  assert.doesNotThrow(() => assertMcpStdioRecipeData(inspect(material), expected));
+  assert.throws(() => assertMcpStdioRecipeData(inspect({ ...material, serverDigest: originalServer }), expected));
+  assert.throws(() => assertMcpStdioRecipeData(inspect({ ...material, serverDigest: originalServer }),
+    { ...expected, adapterExecutableDigest: originalServer }));
+  assert.throws(() => assertMcpStdioRecipeData(inspect(material), { ...expected, statusOperationName: 'perform-effect' }));
 });

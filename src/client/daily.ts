@@ -4,23 +4,27 @@ import { lstat } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { normalizeAbsolutePath } from '../kernel/identity.js';
-import { parseClientInvocation } from './commands.js';
+import { mutationIdentity, parseClientInvocation } from './commands.js';
 import { clientWriter, type ClientIO } from './entry.js';
 import { openInstalledClientStdio } from './stdio.js';
 import { openInstalledClientHost } from './installed-host.js';
 import { openInstalledClientData } from './installed-data.js';
 import { configureInstalledModel } from './model-settings.js';
+import { configureInstalledLocalModel, listInstalledLocalModels, retireInstalledLocalModelAlias, selectInstalledLocalModel } from './local-model-settings.js';
+import { modelCommand } from './model-command.js';
 import type { ModelSetupProfileV1 } from './model-setup-profile.js';
 import { openPrivateClientDirectory } from './private-files.js';
 import { readClientPreferences } from './preferences.js';
 import { readRunScheduling, schedulingCommand, writeRunScheduling } from './run-scheduling.js';
 import { terminalText } from './view.js';
 import { installServices, observeInstalledCredentialSupervisor } from '../state/installed-services.js';
-import type { createInstalledRuntime } from '../state/installed-runtime.js';
+import { openInstalledControlTransport } from '../state/installed-control-transport.js';
+import type { createInstalledRuntime, HeldInstalledRuntime } from '../state/installed-runtime.js';
 import { joinResourceOperations } from '../state/errors.js';
 import { createWorkspaceTrustContext, readPersistedWorkspaceTrust, writePersistedWorkspaceTrust } from '../session/trust.js';
+import { decodeInstalledControlRequest, type InstalledMigrationRequestV1 } from '../kernel/control-wire.js';
 
-const HELP = `Cliq installed preview\n\nsetup\nmodels list | models add <alias> [--profile <id>] [--api-key-stdin]\nrun <objective> [--model <alias>] --check-node <relative.mjs> [--policy default|accept-edits|plan|yolo] --budget-usd <amount> [--budget-tokens <count>] [--detach]\nresult <runId> --wait\napply <runId> [--result <ref>] [--detach]\n\nlist | status <runId> | attach <runId> | cancel <runId> | tui\nrequests | requests show|replay|acknowledge <requestId>\nsupervisor start | supervisor status\n\nThe first task asks for Workspace Trust. Automation may use --trust-workspace.\nSelecting a Node check requests its identity; default and accept-edits ask before executing each candidate.\nVerifier execution and applying a complete Delivery plan have separate approvals.\nOther control commands remain available through the installed client.\n`;
+const HELP = `Cliq installed preview\n\nsetup\nmodels list | models add <alias> [--profile <id>] [--api-key-stdin]\nmodels add <alias> --manifest <model-manifest.json> | --local <enrolled-model>\nmodels retire <local-alias>\nrun <objective> [--model <alias>] --check-node <relative.mjs> [--policy default|accept-edits|plan|yolo] --budget-usd <amount> [--budget-tokens <count>] [--detach]\nresult <runId> --wait\napply <runId> [--result <ref>] [--detach]\n\nlist | status <runId> | attach <runId> | cancel <runId> | tui\nrequests | requests show|replay|acknowledge <requestId>\nsupervisor start | supervisor status\nstate migrate | state rollback --to-legacy <migrationId> [--allow-plaintext-legacy-credentials]\n\nThe first task asks for Workspace Trust. Automation may use --trust-workspace.\nSelecting a Node check requests its identity; default and accept-edits ask before executing each candidate.\nVerifier execution and applying a complete Delivery plan have separate approvals.\nOther control commands remain available through the installed client.\n`;
 type Runtime = Pick<ReturnType<typeof createInstalledRuntime>, 'openSelected' | 'installInitial'>;
 const missing = (error: unknown) => (error as NodeJS.ErrnoException)?.code === 'ENOENT';
 
@@ -51,6 +55,42 @@ async function write(io: ClientIO, value: unknown): Promise<void> {
   } finally { io.signal?.removeEventListener('abort', cancel); await writer.join(); }
 }
 
+function migrationCommand(argv: readonly string[], legacyRootCanonicalAbsolutePath: string): InstalledMigrationRequestV1 {
+  const { requestId, admissionKey } = mutationIdentity();
+  const [command, action, flag, migrationId, plaintext] = argv;
+  if (command !== 'state') throw new TypeError('invalid state command');
+  if (action === 'migrate' && argv.length === 2)
+    return decodeInstalledControlRequest({ protocolVersion: 1, method: 'state.migrate', requestId,
+      migrationId: admissionKey, legacyRootCanonicalAbsolutePath }) as InstalledMigrationRequestV1;
+  if (action === 'rollback' && flag === '--to-legacy' && migrationId &&
+      (argv.length === 4 || argv.length === 5 && plaintext === '--allow-plaintext-legacy-credentials'))
+    return decodeInstalledControlRequest({ protocolVersion: 1, method: 'state.rollback', requestId, migrationId,
+      allowPlaintextLegacyCredentials: plaintext !== undefined }) as InstalledMigrationRequestV1;
+  throw new TypeError('use state migrate or state rollback --to-legacy <migrationId>');
+}
+
+async function runMigration(selected: HeldInstalledRuntime, request: InstalledMigrationRequestV1, io: ClientIO): Promise<number> {
+  io.signal?.throwIfAborted();
+  const control = await openInstalledControlTransport(selected, 'control', 3);
+  const failures: unknown[] = [];
+  const cancel = () => { void control.close().catch(() => {}); };
+  io.signal?.addEventListener('abort', cancel, { once: true });
+  try {
+    io.signal?.throwIfAborted();
+    await write({ ...io, output: io.diagnostic }, `${request.method} · request ${request.requestId} · migration ${request.migrationId}\n`);
+    io.signal?.throwIfAborted();
+    const result = request.method === 'state.migrate' ? await control.request<'state.migrate'>(request)
+      : await control.request<'state.rollback'>(request);
+    await write(io, result.ok ? result.result : result.error);
+    return result.ok ? 0 : 1;
+  } catch (error) { failures.push(error); }
+  finally {
+    io.signal?.removeEventListener('abort', cancel);
+    await closeDaily(failures, [() => control.close()]);
+  }
+  throw new Error('migration ended without a complete response');
+}
+
 async function confirm(io: ClientIO, question: string): Promise<boolean> {
   if (!(io.input as { isTTY?: boolean }).isTTY || !io.output.isTTY)
     throw new TypeError('this decision requires an interactive terminal or its explicit command option');
@@ -73,22 +113,6 @@ export async function trustDailyWorkspace(io: ClientIO, workspacePath: string, c
   await writePersistedWorkspaceTrust(context, accepted ? 'trusted' : 'denied');
   if (!accepted) throw new TypeError('workspace access was declined');
   return context.workspaceRealPath;
-}
-
-function modelCommand(argv: readonly string[]) {
-  if (argv[1] === 'list' && argv.length === 2) return { kind: 'list' as const };
-  if (argv[1] !== 'add' || !argv[2] || argv[2].startsWith('--')) throw new TypeError('use models add <alias> or models list');
-  let profileId = 'default', input: 'stdin' | 'terminal' = 'terminal';
-  const used = new Set<string>();
-  for (let index = 3; index < argv.length; index++) {
-    const flag = argv[index]!;
-    if (used.has(flag)) throw new TypeError('model setup option may be supplied only once'); used.add(flag);
-    if (flag === '--api-key-stdin') input = 'stdin';
-    else if (flag === '--profile') {
-      const value = argv[++index]; if (!value || value.startsWith('--')) throw new TypeError('model setup profile needs one id'); profileId = value;
-    } else throw new TypeError('model setup accepts only --profile and --api-key-stdin; a key is never a command argument');
-  }
-  return { kind: 'add' as const, alias: argv[2], profileId, input };
 }
 
 /** Separate one explicit Trust option without reinterpreting a positional
@@ -117,9 +141,10 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
   if (argv.length > 1000 || argv.reduce((sum, arg) => sum + Buffer.byteLength(arg), 0) > 1_048_576)
     throw new TypeError('daily client arguments exceed the existing control bound');
   if (!argv.length || ['help', '--help'].includes(argv[0]!)) {
-    await write(io, HELP + '\nsettings [--run-concurrency <1..32>]  Configure Run capacity for the next Supervisor start.\n'); return 0;
+    await write(io, HELP + '\nsettings [--run-concurrency 1]  Configure the Linux preview for one active task on the next Supervisor start.\n'); return 0;
   }
   const locations = dailyInstalledLocations(), command = argv[0]!;
+  const migration = command === 'state' ? migrationCommand(argv, locations.controlledHome) : undefined;
   if (command === 'setup') {
     if (argv.length !== 1) throw new TypeError('setup has no root, key or package override');
     let exists = true;
@@ -145,6 +170,10 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
   const failures: unknown[] = [];
   let stdio: Awaited<ReturnType<typeof openInstalledClientStdio>> | undefined;
   try {
+    if (migration) {
+      stdio = await openInstalledClientStdio(selected, io);
+      return await runMigration(selected, migration, stdio.io);
+    }
     if (command === 'models' || command === 'settings' || command === 'requests' && argv[1] !== 'replay' || command === 'supervisor' && argv[1] === 'start') {
       stdio = await openInstalledClientStdio(selected, io); io = stdio.io;
     }
@@ -165,8 +194,20 @@ export async function runInstalledDaily(runtime: Runtime, argv: readonly string[
         const request = modelCommand(argv);
         if (request.kind === 'list') {
           const preferences = await readClientPreferences(data.directory);
+          const local = await listInstalledLocalModels(selected, io.signal);
           await write(io, { models: preferences.modelSelections.map(({ alias, provider, model }) => ({ alias, provider, model })),
+            localModels: local.map(({ provider, model, state }) => ({ provider, model, state })),
             profiles: profiles.map(({ id, provider, model }) => ({ id, provider, model })) }); return 0;
+        }
+        if (request.kind === 'enroll' || request.kind === 'local') {
+          const configured = request.kind === 'enroll'
+            ? await configureInstalledLocalModel(selected, data, request.alias, path.resolve(io.workspacePath, request.manifestPath), io.signal)
+            : await selectInstalledLocalModel(selected, data, request.alias, request.model, io.signal);
+          await write(io, `Local model ${terminalText(configured.choice.alias)} configured.\n`); return 0;
+        }
+        if (request.kind === 'retire') {
+          const model = await retireInstalledLocalModelAlias(selected, data, request.alias, io.signal);
+          await write(io, `Local model ${terminalText(model.model)} retired for new Runs.\n`); return 0;
         }
         const profile = profiles.find(value => value.id === request.profileId);
         if (!profile) throw new TypeError('the signed image has no selected model setup profile');

@@ -334,7 +334,7 @@ test('the fixed fixture banner writes only known credential phase markers and co
 });
 
 test('the work banner emits only bounded fixed counters and catches its own closed-pipe errors', async () => {
-  for (const closeStderr of [false, true]) {
+  for (const args of [['--installed-credential'], ['models', 'add']]) for (const closeStderr of [false, true]) {
     const bundled = await build({ stdin: { contents: `
       import { channel } from 'node:diagnostics_channel';
       import { closeSync } from 'node:fs';
@@ -348,7 +348,7 @@ test('the work banner emits only bounded fixed counters and catches its own clos
         process.stdout.write('diagnostic-only-complete') })();
     `, resolveDir: fileURLToPath(new URL('../../..', import.meta.url)) },
     bundle: true, write: false, platform: 'node', format: 'cjs', banner: { js: INSTALLED_WORK_DIAGNOSTIC_BANNER } });
-    const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text, '--', 'fixed-image', '--installed-credential'],
+    const child = spawnSync(process.execPath, ['-e', bundled.outputFiles[0]!.text, '--', 'fixed-image', ...args],
       { encoding: 'utf8', timeout: 5000 });
     assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
     assert.equal(child.stdout, 'diagnostic-only-complete');

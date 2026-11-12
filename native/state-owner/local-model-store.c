@@ -33,6 +33,7 @@ typedef struct lms_context {
   napi_ref reference;
   lms_package *package;
   char root_path[PATH_MAX];
+  int existing_only;
 } lms_context;
 static struct {
   _Atomic(lms_context *) active;
@@ -44,6 +45,7 @@ static struct {
 } lms_process;
 static const napi_type_tag lms_tag = {0xdcf6f655dca1400cULL, 0xbad76882225b79f9ULL};
 static const napi_type_tag lms_package_tag = {0x78c3ff0740d04e98ULL, 0xb4a471d015554412ULL};
+static const napi_type_tag lms_object_source_tag = {0xbfdc193841024832ULL, 0x99b34c958c22045aULL};
 static const napi_type_tag lms_exclusive_tag = {0x47af7abda9f14539ULL, 0x9235d10d8401db85ULL};
 static const char lms_vfs_name[] = "cliq-local-model-store-v1";
 static const char lms_main_name[] = "/cliq-local-model-registry";
@@ -218,7 +220,7 @@ failed:
 }
 static int lms_hold_directory(lms_context *ctx, int parent, const char *leaf, int role) {
   int created = 0;
-  if (!ctx->exclusive) {
+  if (!ctx->exclusive && !ctx->existing_only) {
     created = mkdirat(parent, leaf, 0700) == 0;
     if (!created && errno != EEXIST) return -1;
   }
@@ -228,7 +230,7 @@ static int lms_hold_directory(lms_context *ctx, int parent, const char *leaf, in
 }
 static int lms_hold_file(lms_context *ctx, int role) {
   int created = 0;
-  if (ctx->exclusive) {
+  if (ctx->exclusive || ctx->existing_only) {
     ctx->fd[role] = openat(ctx->fd[LMS_STORE], lms_leaves[role], O_RDWR | O_NOFOLLOW | O_CLOEXEC);
   } else {
     created = 1;
@@ -617,7 +619,8 @@ failed:
 /* Package capture and bounded 64 KiB copy are defined below, under this same
  * original store holder. No source descriptor is exposed to JavaScript. */
 static napi_value lms_open_package(napi_env env, napi_callback_info info);
-static napi_value acquire_local_model_store(napi_env env, napi_callback_info info) {
+static napi_value lms_open_object_source(napi_env env, napi_callback_info info);
+static napi_value acquire_local_model_store_fixed(napi_env env, napi_callback_info info, int existing_only) {
   int expected = 0;
   if (!atomic_compare_exchange_strong(&lms_process.acquiring, &expected, 1))
     return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "model-store holder is active, uncertain or foreign");
@@ -630,10 +633,11 @@ static napi_value acquire_local_model_store(napi_env env, napi_callback_info inf
   if (!ctx) { atomic_store(&lms_process.acquiring, 0); return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "model-store allocation failed"); }
   for (int i = 0; i < LMS_ROLES; ++i) ctx->fd[i] = -1;
   ctx->env = env; ctx->pid = getpid(); ctx->uid = geteuid(); ctx->gid = getegid(); ctx->thread = pthread_self();
+  ctx->existing_only = existing_only;
   size_t count = 5, length; napi_value arguments[5]; double descriptor;
   bool array = false, lossless; uint32_t tuple_length; uint64_t tuple[5]; int busy = 0, wrapped = 0, absent = 0;
   const char *code = "ERR_CLIQ_LOCAL_MODEL_STORE";
-  if (napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || (count != 3 && count != 4) ||
+  if (napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || (count != 3 && (existing_only || count != 4)) ||
       napi_get_value_double(env, arguments[0], &descriptor) != napi_ok || !(descriptor >= 0 && descriptor <= INT_MAX) || descriptor != (int)descriptor ||
       napi_get_value_string_utf8(env, arguments[1], NULL, 0, &length) != napi_ok || length < 2 || length >= sizeof(ctx->root_path) ||
       napi_get_value_string_utf8(env, arguments[1], ctx->root_path, sizeof(ctx->root_path), &length) != napi_ok || strlen(ctx->root_path) != length ||
@@ -658,7 +662,7 @@ static napi_value acquire_local_model_store(napi_env env, napi_callback_info inf
   ctx->identity[LMS_ROOT] = original; ctx->fd[LMS_ROOT] = fcntl((int)descriptor, F_DUPFD_CLOEXEC, 0);
   if (ctx->exclusive && (strcmp(ctx->exclusive->original->owner->path, ctx->root_path) != 0 ||
       !same_inode(&ctx->exclusive->original->owner->root, &original))) goto failed;
-  if (ctx->exclusive) {
+  if (ctx->exclusive || ctx->existing_only) {
     struct stat store;
     if (fstatat(ctx->fd[LMS_ROOT], "local-models", &store, AT_SYMLINK_NOFOLLOW) != 0) {
       absent = errno == ENOENT; goto failed;
@@ -671,6 +675,12 @@ static napi_value acquire_local_model_store(napi_env env, napi_callback_info inf
   if (lms_hold_directory(ctx, ctx->fd[LMS_STORE], "objects", LMS_OBJECTS) != 0 ||
       lms_hold_file(ctx, LMS_MAIN) != 0 || lms_inode_guard(ctx, LMS_MAIN) != 0 ||
       lms_hold_file(ctx, LMS_JOURNAL) != 0 || lms_inode_guard(ctx, LMS_JOURNAL) != 0) goto failed;
+  if (ctx->existing_only) {
+    unsigned char header[100];
+    if (ctx->identity[LMS_MAIN].st_size < (off_t)sizeof(header) ||
+        cliq_fd_sqlite_read(ctx->fd[LMS_MAIN], header, sizeof(header), 0, NULL) != SQLITE_OK ||
+        memcmp(header, "SQLite format 3\0", 16) || header[18] != 1 || header[19] != 1) goto failed;
+  }
   if (lms_process.generation == UINT64_MAX) { lms_poison(ctx); goto failed; }
   ctx->generation = ++lms_process.generation; ctx->prepared = 1;
   atomic_store(&lms_process.active, ctx);
@@ -680,6 +690,7 @@ static napi_value acquire_local_model_store(napi_env env, napi_callback_info inf
     {"readSmallObject", NULL, lms_read_small, NULL, NULL, NULL, napi_default, NULL},
     {"publishSmallObject", NULL, lms_publish_small, NULL, NULL, NULL, napi_default, NULL},
     {"openPackage", NULL, lms_open_package, NULL, NULL, NULL, napi_default, NULL},
+    {"openObjectSource", NULL, lms_open_object_source, NULL, NULL, NULL, napi_default, NULL},
     {"close", NULL, lms_close, NULL, NULL, NULL, napi_default, NULL}
   };
   napi_value result;
@@ -699,6 +710,8 @@ failed:
   return lms_error(env, busy ? "ERR_CLIQ_LOCAL_MODEL_BUSY" : code,
     busy ? "original model-store or account gate is busy" : "model-store acquisition refused; original custody retained if uncertain");
 }
+static napi_value acquire_local_model_store(napi_env env, napi_callback_info info) { return acquire_local_model_store_fixed(env, info, 0); }
+static napi_value inspect_existing_local_model_store(napi_env env, napi_callback_info info) { return acquire_local_model_store_fixed(env, info, 1); }
 
 typedef struct { char reference[65]; struct stat original; int copied; } lms_package_entry;
 struct lms_package {
@@ -961,9 +974,9 @@ static int lms_package_join(lms_package *package) {
   return 0;
 }
 static napi_value lms_package_close(napi_env env, napi_callback_info info) {
-  size_t count = 1; napi_value argument, self, result; bool tagged = false; lms_package *package = NULL;
-  if (napi_get_cb_info(env, info, &count, &argument, &self, NULL) != napi_ok || count ||
-      napi_check_object_type_tag(env, self, &lms_package_tag, &tagged) != napi_ok || !tagged ||
+  size_t count = 1; napi_value argument, self, result; bool tagged = false; lms_package *package = NULL; void *purpose;
+  if (napi_get_cb_info(env, info, &count, &argument, &self, &purpose) != napi_ok || count ||
+      napi_check_object_type_tag(env, self, purpose ? &lms_object_source_tag : &lms_package_tag, &tagged) != napi_ok || !tagged ||
       napi_unwrap(env, self, (void **)&package) != napi_ok || !package || !lms_owner(package->ctx, env))
     return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_PACKAGE", "invalid original package close");
   if (lms_package_join(package) != 0) return lms_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "original model package resources did not join; store retained");
@@ -1024,6 +1037,79 @@ failed:
   if (!ctx->uncertain && lms_package_join(package) == 0) { if (!wrapped) { --ctx->package_handles; free(package); } }
   else lms_poison(ctx);
   return lms_error(env, ctx->uncertain ? "ERR_CLIQ_RESOURCE_RETIREMENT" : "ERR_CLIQ_LOCAL_MODEL_PACKAGE", "original package acquisition refused");
+}
+
+/* The retained source borrows the existing package custody slot and actual
+ * close/finalizer. Its distinct tag exposes no import, target or pager methods. */
+static int lms_object_source_current(lms_package *source) {
+  lms_context *ctx = source->ctx; struct stat held, named;
+  if (source->closed || source->source_fd < 0 || ctx->package != source ||
+      source->generation != ctx->generation || lms_check(ctx) != 0 ||
+      fstat(source->source_fd, &held) != 0 || !lms_object_file(&held) ||
+      !source_metadata_same(&held, &source->source) ||
+      fstatat(ctx->fd[LMS_OBJECTS], source->current_ref, &named, AT_SYMLINK_NOFOLLOW) != 0 ||
+      !source_metadata_same(&held, &named)) return -1;
+  return 0;
+}
+static napi_value lms_object_source_read(napi_env env, napi_callback_info info) {
+  size_t count = 1; napi_value argument, self, result; bool tagged = false; lms_package *source = NULL;
+  if (napi_get_cb_info(env, info, &count, &argument, &self, NULL) != napi_ok || count ||
+      napi_check_object_type_tag(env, self, &lms_object_source_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, self, (void **)&source) != napi_ok || !source || !lms_owner(source->ctx, env) ||
+      source->completed < 0 || lms_object_source_current(source) != 0)
+    return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model object source is invalid or changed");
+  if (source->offset == source->source.st_size) {
+    if (!source->completed) {
+      char digest[65]; publication_hash_hex(&source->hash, digest);
+      if (strcmp(digest, source->current_ref) != 0) {
+        source->completed = -1;
+        return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model object source complete bytes differ");
+      }
+      source->completed = 1;
+    }
+    return napi_get_null(env, &result) == napi_ok ? result : NULL;
+  }
+  unsigned char bytes[65536]; off_t remaining = source->source.st_size - source->offset;
+  size_t size = remaining < (off_t)sizeof(bytes) ? (size_t)remaining : sizeof(bytes);
+  if (cliq_fd_sqlite_read(source->source_fd, bytes, (int)size, (sqlite3_int64)source->offset, NULL) != SQLITE_OK ||
+      lms_object_source_current(source) != 0 || napi_create_buffer_copy(env, size, bytes, NULL, &result) != napi_ok) {
+    source->completed = -1;
+    return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model object source did not provide its next complete chunk");
+  }
+  sha256_update(&source->hash, bytes, size); source->offset += (off_t)size; return result;
+}
+static napi_value lms_open_object_source(napi_env env, napi_callback_info info) {
+  size_t count = 3; napi_value arguments[3], self, result; char reference[65]; double length;
+  if (napi_get_cb_info(env, info, &count, arguments, &self, NULL) != napi_ok || count != 2 ||
+      lms_ref(env, arguments[0], reference) != 0 || napi_get_value_double(env, arguments[1], &length) != napi_ok ||
+      !(length >= 1 && length <= 268435456) || (off_t)length != length)
+    return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model source requires an exact content reference and bounded size");
+  lms_context *ctx = lms_receiver(env, self); if (!ctx) return NULL;
+  if (ctx->exclusive || ctx->package || ctx->package_handles == UINT_MAX || atomic_load(&ctx->archive_held))
+    return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model source custody is unavailable");
+  lms_package *source = calloc(1, sizeof(*source));
+  if (!source) return lms_error(env, "ERR_CLIQ_LOCAL_MODEL_STORE", "original model source allocation failed");
+  source->ctx = ctx; source->generation = ctx->generation; ++ctx->package_handles; ctx->package = source;
+  source->root_fd = source->objects_fd = source->manifest_fd = source->target_fd = -1;
+  source->source_fd = openat(ctx->fd[LMS_OBJECTS], reference, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  memcpy(source->current_ref, reference, sizeof(reference)); sha256_init(&source->hash);
+  int wrapped = 0, flags = source->source_fd < 0 ? -1 : fcntl(source->source_fd, F_GETFL);
+  if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY || fstat(source->source_fd, &source->source) != 0 ||
+      source->source.st_size != (off_t)length || lms_object_source_current(source) != 0) goto failed;
+  const napi_property_descriptor methods[] = {
+    {"readChunk", NULL, lms_object_source_read, NULL, NULL, NULL, napi_default, NULL},
+    {"close", NULL, lms_package_close, NULL, NULL, NULL, napi_default, (void *)&lms_object_source_tag},
+  };
+  if (napi_create_object(env, &result) != napi_ok || napi_type_tag_object(env, result, &lms_object_source_tag) != napi_ok ||
+      napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+      napi_wrap(env, result, source, lms_package_finalize, NULL, NULL) != napi_ok) goto failed;
+  wrapped = 1;
+  if (napi_create_reference(env, result, 1, &source->reference) != napi_ok) goto failed;
+  return result;
+failed:
+  if (!ctx->uncertain && lms_package_join(source) == 0) { if (!wrapped) { --ctx->package_handles; free(source); } }
+  else lms_poison(ctx);
+  return lms_error(env, ctx->uncertain ? "ERR_CLIQ_RESOURCE_RETIREMENT" : "ERR_CLIQ_LOCAL_MODEL_STORE", "original model object source acquisition refused");
 }
 
 #include "local-model-store-archive.c"

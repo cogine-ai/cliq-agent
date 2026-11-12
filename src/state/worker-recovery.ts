@@ -118,7 +118,9 @@ export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]
 export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
   journal: readonly InvocationJournalEntry[]): boolean {
   const provider = assembly.provider;
-  if (provider.name !== 'openai-compatible' || provider.endpoint.kind !== 'registered' ||
+  const installed = provider.name === 'openai-compatible' && provider.endpoint.kind === 'registered' ||
+    provider.name === 'ollama' && provider.endpoint.kind === 'local_zero_cost' && provider.credentialGrantRefs.length === 0;
+  if (!installed ||
       provider.adapter.adapterId !== MODEL_BROKER_ENTRY_ID || provider.adapter.version !== '1' ||
       provider.negotiation.streaming !== false) return false;
   const open = openWorkerInvocations(journal);

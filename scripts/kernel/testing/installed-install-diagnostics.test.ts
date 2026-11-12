@@ -8,6 +8,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { INSTALLED_INSTALL_PHASE_CHANNEL, INSTALLED_INSTALL_PHASES, noteInstalledInstallPhase,
   noteInstalledWorkRead, observeInstalledWork } from '../../../src/state/installed-work-diagnostics.js';
+import { createCredentialSecretScanner } from './credential-secret-scan.js';
+import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic, observeInstalledInstallerDiagnostics } from './installed-install-diagnostics.js';
 
 const prefix = 'CLIQ_INSTALLED_INSTALL_V1:';
@@ -100,7 +102,6 @@ test('the actual parent scans both original output buffers before any fixed proj
 
 
 test('parent forwarding reproduces only the exact already-scanned frame, including a key-name needle', async () => {
-  const { createCredentialSecretScanner } = await import('./credential-secret-scan.js');
   const needle = Buffer.from('packageStarted');
   const scanner = createCredentialSecretScanner([needle], { maxBytes: 65536, maxStreams: 8 });
   try {
@@ -117,4 +118,27 @@ test('parent forwarding reproduces only the exact already-scanned frame, includi
     const poisoned = Object.defineProperty({}, 'phase', { enumerable: true, get() { throw new Error('must not execute'); } });
     assert.throws(() => encodeInstalledInstallerDiagnostic(poisoned as never));
   } finally { scanner.close(); needle.fill(0); }
+});
+
+for (const reason of ['deadline', 'scan'] as const) test(`joined installer diagnostics preserve the original ${reason} refusal`, async () => {
+  const needle = 'owned-test-secret-not-for-diagnostics';
+  const scanner = createCredentialSecretScanner([Buffer.from(needle)], { maxBytes: 65_536, maxStreams: 2 });
+  let observed: readonly string[] | undefined, streamsClosed: number | undefined;
+  const tail = reason === 'deadline' ? 'setInterval(() => {}, 20)' : `process.stdout.write(${JSON.stringify(needle)})`;
+  try {
+    await assert.rejects(runInstalledDailyCommand({
+      executable: process.execPath, cwd: os.tmpdir(), env: {}, scanner, deadlineMs: 1_000,
+      args: ['--input-type=module', '-e', `process.stderr.write(${JSON.stringify(frame(good))}, () => { ${tail}; });`],
+      installerDiagnostics: rows => {
+        observed = rows.map(encodeInstalledInstallerDiagnostic);
+        streamsClosed = scanner.stats().streamsClosed;
+      }
+    }), error => {
+      assert(error instanceof InstalledDailyCommandError);
+      assert.equal(error.diagnostic.reason, reason); assert.equal(error.launcherAndPipesJoined, true);
+      return true;
+    });
+    assert.deepEqual(observed, reason === 'deadline' ? [frame(good).trimEnd()] : undefined);
+    assert.equal(streamsClosed, reason === 'deadline' ? 2 : undefined);
+  } finally { scanner.close(); }
 });

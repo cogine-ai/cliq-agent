@@ -6,7 +6,7 @@ import { readRunScheduling, schedulingCommand, writeRunScheduling } from './run-
 
 test('one closed account preference configures the next start without accepting workspace or permission fields', () => {
   assert.equal(schedulingCommand(['settings']), undefined);
-  for (const value of [1, 2, 32]) assert.deepEqual(schedulingCommand(['settings', '--run-concurrency', String(value)]),
+  for (const value of [1]) assert.deepEqual(schedulingCommand(['settings', '--run-concurrency', String(value)]),
     { schemaVersion: 1, maxConcurrentRuns: value });
   for (const args of [['settings', '--run-concurrency', '0'], ['settings', '--run-concurrency', '33'],
     ['settings', '--run-concurrency', '02'], ['settings', '--run-concurrency', '2e0'],
@@ -23,7 +23,7 @@ test('the actual private-file port preserves strict UTF-8/JCS and never defaults
   const directory = { async read(name: string, maximum: number) { assert.equal(maximum, 1024); file = name; return bytes; },
     async replace(name: string, value: Uint8Array) { file = name; bytes = Buffer.from(value); } };
   assert.equal(await readRunScheduling(directory), DEFAULT_RUN_SCHEDULING);
-  const settings = await writeRunScheduling(directory, { schemaVersion: 1, maxConcurrentRuns: 2 });
+  const settings = await writeRunScheduling(directory, { schemaVersion: 1, maxConcurrentRuns: 1 });
   assert.equal(file, 'run-scheduling.json'); assert.deepEqual(bytes, canonicalJsonBytes(settings));
   assert.deepEqual(await readRunScheduling(directory), settings);
   for (const bad of [Buffer.from('{"schemaVersion":1,"maxConcurrentRuns":2}'), Buffer.from([0xff]), Buffer.alloc(1025),
@@ -32,4 +32,17 @@ test('the actual private-file port preserves strict UTF-8/JCS and never defaults
   }
   const failure = new Error('actual private write failed');
   await assert.rejects(writeRunScheduling({ async replace() { throw failure; } }, settings), error => error === failure);
+});
+
+test('preview refuses unsupported capacity before persistence or Supervisor startup without rewriting old preferences', async () => {
+  for (const maxConcurrentRuns of [2, 32]) {
+    const settings = { schemaVersion: 1, maxConcurrentRuns };
+    let writes = 0;
+    assert.throws(() => schedulingCommand(['settings', '--run-concurrency', String(maxConcurrentRuns)]), /one active task/u);
+    await assert.rejects(writeRunScheduling({ async replace() { writes++; } }, settings), /one active task/u);
+    assert.equal(writes, 0);
+    const bytes = canonicalJsonBytes(settings), original = Buffer.from(bytes);
+    await assert.rejects(readRunScheduling({ async read() { return bytes; } }), /one active task/u);
+    assert.deepEqual(bytes, original);
+  }
 });

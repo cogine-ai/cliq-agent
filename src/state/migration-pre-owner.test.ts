@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { assertKernelEntryAllowsStateOwner } from './migration-pre-owner.js';
 import { inspectInstalledAccountBeforeOwner } from './installed-account-participant.js';
@@ -74,4 +74,35 @@ test('current archive consumers reject copied/structural issuers before reading 
   assert.throws(() => assertInstalledCurrentMigrationInspection(foreign, foreign, foreign, foreign, context), {
     name: 'TypeError', message: 'current migration inspection requires its genuine original Store issuer' });
   assert.equal(calls, 0);
+});
+test('even well-formed raw draining control refuses before ordinary Owner acquisition without a complete handoff', () => {
+  const markerCore = { schemaVersion: 1, format: 'cliq-state-authority-v1', authority: 'kernel', generationId: 'c'.repeat(43),
+    migrationId: 'a'.repeat(43), receiptRef: '1'.repeat(64), receiptDigest: '2'.repeat(64), stateRootIdentityRef: root.identityRef,
+    stateRootIdentityDigest: root.identityDigest, stateRootCanonicalAbsolutePath: root.canonicalAbsolutePath,
+    publishedAt: '2026-10-02T00:00:00.000Z', candidateRef: '3'.repeat(64), candidateDigest: '4'.repeat(64),
+    kernelGenerationIdentityRef: '5'.repeat(64), kernelGenerationIdentityDigest: '6'.repeat(64) };
+  const marker = { ...markerCore, markerDigest: canonicalSha256(markerCore) };
+  const controlCore = { schemaVersion: 1, format: 'cliq-kernel-rollback-control-v1', phase: 'rollback_draining', controlRevision: 1,
+    migrationId: marker.migrationId, archiveId: 'b'.repeat(43), kernelGenerationId: marker.generationId,
+    stateRootIdentityRef: root.identityRef, stateRootIdentityDigest: root.identityDigest, stateRootCanonicalAbsolutePath: root.canonicalAbsolutePath,
+    requestRef: '7'.repeat(64), requestDigest: '8'.repeat(64), originalImportControlRef: '9'.repeat(64), originalImportControlDigest: '0'.repeat(64),
+    originalKernelAuthorityRef: canonicalSha256(marker), originalKernelAuthorityDigest: marker.markerDigest, preparedAt: '2026-10-02T00:00:01.000Z' };
+  const observation = (change: Record<string, unknown> = {}, authority = marker) => {
+    const core = { ...controlCore, ...change };
+    return { kind: 'controlled' as const, controlBytes: canonicalJsonBytes({ ...core, controlDigest: canonicalSha256(core) }),
+      authorityBytes: canonicalJsonBytes(authority) };
+  };
+  assert.throws(() => assertKernelEntryAllowsStateOwner(observation(), root), { code: 'RECOVERY_REQUIRED' });
+  for (const change of [{ phase: 'rollback_restoring' }, { kernelGenerationId: 'x'.repeat(43) }, { migrationId: 'x'.repeat(43) },
+    { originalKernelAuthorityRef: 'f'.repeat(64) }, { originalKernelAuthorityDigest: 'f'.repeat(64) },
+    { preparedAt: '2026-10-01T23:59:59.999Z' }, { stateRootIdentityDigest: 'f'.repeat(64) }, { unknown: true }])
+    assert.throws(() => assertKernelEntryAllowsStateOwner(observation(change), root), { code: 'RECOVERY_REQUIRED' });
+  assert.throws(() => assertKernelEntryAllowsStateOwner({ kind: 'controlled', controlBytes: observation().controlBytes }, root),
+    { code: 'RECOVERY_REQUIRED' });
+  const { candidateRef: _candidateRef, candidateDigest: _candidateDigest, kernelGenerationIdentityRef: _generationRef,
+    kernelGenerationIdentityDigest: _generationDigest, ...common } = markerCore;
+  const legacyCore = { ...common, authority: 'legacy', legacyGenerationRef: '7'.repeat(64), legacyGenerationDigest: '8'.repeat(64) };
+  const legacy = { ...legacyCore, markerDigest: canonicalSha256(legacyCore) };
+  assert.throws(() => assertKernelEntryAllowsStateOwner({ ...observation(), authorityBytes: canonicalJsonBytes(legacy) }, root),
+    { code: 'RECOVERY_REQUIRED' });
 });

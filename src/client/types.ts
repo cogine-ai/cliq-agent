@@ -7,10 +7,9 @@ import type { ClientRequests } from './request-data.js';
 
 /** Copied user choices only; no filesystem factory or authority is part of
  * the SDK's command-default data contract. */
-export type ClientModelSelectionV1 = Readonly<{
-  alias: string; provider: 'openai-compatible'; model: string;
-  endpointRegistrationId: string; credentialGrantId: string;
-}>;
+export type ClientModelSelectionV1 = Readonly<{ alias: string; model: string }> & (
+  Readonly<{ provider: 'openai-compatible'; endpointRegistrationId: string; credentialGrantId: string }> |
+  Readonly<{ provider: 'ollama' }>);
 export type ClientPreferencesV1 = Readonly<{
   schemaVersion: 1; modelSelections: readonly ClientModelSelectionV1[];
   defaultModelAlias?: string; budgetDefaults?: Readonly<RunSpec['budgets']>;

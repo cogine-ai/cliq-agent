@@ -18,7 +18,8 @@ export type McpStdioAdminLaunchPurpose = Readonly<{ kind: 'admin'; owner: Extrac
 export type McpStdioRunLaunchPurpose = Readonly<{ kind: 'run'; owner: Extract<ProcessContainmentOwner, { kind: 'run_invocation' }>;
   requestRef: string; requestDigest: string; targetRef: string; targetDigest: string; grantRef: string; parentWorkerContainmentRef: string }>;
 export type McpStdioRecoveryLaunchPurpose = Readonly<{ kind: 'recovery'; owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>;
-  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string }>;
+  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string;
+  adapter: Readonly<{ entryId: string; executableDigest: string }> }>;
 type RecipeInput = Readonly<{
   purpose: McpStdioAdminLaunchPurpose | McpStdioRunLaunchPurpose | McpStdioRecoveryLaunchPurpose; bundle: RuntimeBundleManifest;
   originalController: Readonly<{ subreaperStartToken: string }>; cgroupParent: string; ownerUid: number;
@@ -37,6 +38,15 @@ async function recipeData(artifacts: ArtifactCatalog, input: RecipeInput) {
       roots.length !== 1 || roots[0]!.role !== 'sandbox_root_profile' || roots[0]!.executable ||
       launcher.length !== 1 || launcher[0]!.role !== 'platform_helper' || !launcher[0]!.executable)
     throw new TypeError('MCP stdio launch substitutes an execution role or fixed signed isolation recipe');
+  let program = server[0]!;
+  if (purpose.kind === 'recovery') {
+    const adapter = purpose.adapter;
+    const entries = bundle.entries.filter(entry => entry.entryId === adapter.entryId), selected = entries[0];
+    if (entries.length !== 1 || !selected || selected.role !== 'mcp_recovery_adapter' || !selected.executable ||
+        selected.digest !== adapter.executableDigest || selected.digest === program.digest || selected.digest === launcher[0]!.digest)
+      throw new TypeError('MCP recovery requires its distinct signed status adapter, original server and containment helper');
+    program = selected;
+  }
   const rootProfile = decodeSandboxRootProfile(await readCanonicalArtifact(artifacts, roots[0]!.digest));
   const rootCore = { schemaVersion: 1 as const, format: 'cliq-sandbox-root-image-v1' as const, runtimeBundleRef: canonicalSha256(bundle),
     runtimeBundleManifestDigest: bundle.manifestDigest, entryId: roots[0]!.entryId, entryVersion: roots[0]!.version, entryDigest: roots[0]!.digest,
@@ -64,34 +74,37 @@ async function recipeData(artifacts: ArtifactCatalog, input: RecipeInput) {
     locale: { lang: 'C', lcAll: 'C' }, home: '/scratch/home', tmpdir: '/scratch/tmp', variables: [], inheritedHostEnvironment: false as const,
     secretMaterial: 'none' as const, brokerAccessAtSpawn: 'none' as const, networkMode: 'none' as const };
   const environment: SanitizedSandboxEnvironmentV1 = { ...environmentCore, environmentDigest: canonicalSha256(environmentCore) };
-  const mounts = [{ kind: 'cas_artifact' as const, artifactRef: executable.executableDigest, artifactDigest: executable.executableDigest,
+  const mounts = [{ kind: 'cas_artifact' as const, artifactRef: program.digest, artifactDigest: program.digest,
     targetPath: '/runtime/mcp-server', access: 'read_only' as const, purpose: 'executable' as const },
   { kind: 'private_ephemeral' as const, privateRootId: identityHash('cliq-mcp-stdio-scratch-v1', purpose.kind, purpose.owner, nonce),
     targetPath: '/scratch', access: 'read_write' as const, purpose: 'output' as const }];
+  const executableCore = { kind: 'runtime_bundle' as const, runtimeBundleRef: canonicalSha256(bundle), runtimeBundleManifestDigest: bundle.manifestDigest,
+    executableId: program.entryId, executionPath: '/runtime/mcp-server', executableDigest: program.digest };
   const base = { schemaVersion: 1 as const, format: 'cliq-sandbox-launch-v1' as const, runtime,
-    executable: { kind: 'runtime_bundle' as const, runtimeBundleRef: canonicalSha256(bundle), runtimeBundleManifestDigest: bundle.manifestDigest,
-      executableId: server[0]!.entryId, role: 'mcp_server' as const, executionPath: '/runtime/mcp-server', executableDigest: server[0]!.digest },
     environment, filesystem: { kind: 'isolated_empty_root' as const, rootImageRef: image.ref, rootImageDigest: rootImage.imageDigest, persistentWritableMounts: false as const },
     mounts, mountsDigest: canonicalSha256(mounts), sandboxProfileRef: profileArtifact.ref, sandboxProfileDigest: profile.profileDigest,
     resources, resourcesDigest: canonicalSha256(resources), containmentPlanRef: planArtifact.ref, containmentPlanDigest: plan.planDigest, createdAt, launchSpecDigest: '' };
   const stdio = { stdin: 'mcp_framed' as const, stdout: 'mcp_framed' as const, stderr: 'captured' as const, extraFileDescriptors: 'none' as const };
   const spec: SandboxLaunchSpecV1 = purpose.kind === 'admin' ? { ...base, owner: purpose.owner, purpose: 'admin_mcp_stdio_probe',
+    executable: { ...executableCore, role: 'mcp_server' },
     processInvocation: { kind: 'admin_probe', purpose: 'admin_mcp_stdio_probe', recipe: 'cliq-admin-mcp-stdio-probe-v1', targetRef: purpose.targetRef,
       targetDigest: purpose.targetDigest, probePayloadCoreRef: purpose.probePayloadCoreRef, argvCwdSource: 'trusted_recipe_decode_of_admin_target_and_probe_core', stdio },
     adminTargetRef: purpose.targetRef, adminTargetDigest: purpose.targetDigest, probePayloadCoreRef: purpose.probePayloadCoreRef }
     : purpose.kind === 'recovery' ? { ...base, owner: purpose.owner, purpose: 'mcp_recovery',
+      executable: { ...executableCore, role: 'mcp_recovery_adapter' },
       processInvocation: { kind: 'reconciliation_probe', purpose: 'mcp_recovery', recipe: 'cliq-mcp-readonly-status-v1',
         requestRef: purpose.requestRef, requestDigest: purpose.requestDigest, targetRef: purpose.targetRef, targetDigest: purpose.targetDigest,
         argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe', stdio },
       requestRef: purpose.requestRef, requestDigest: purpose.requestDigest, targetRef: purpose.targetRef, targetDigest: purpose.targetDigest }
-    : { ...base, owner: purpose.owner, purpose: 'mcp_stdio', processInvocation: { kind: 'run_request', purpose: 'mcp_stdio', recipe: 'cliq-mcp-stdio-launch-v1',
+    : { ...base, owner: purpose.owner, purpose: 'mcp_stdio', executable: { ...executableCore, role: 'mcp_server' },
+      processInvocation: { kind: 'run_request', purpose: 'mcp_stdio', recipe: 'cliq-mcp-stdio-launch-v1',
       requestRef: purpose.requestRef, requestDigest: purpose.requestDigest, targetRef: purpose.targetRef, targetDigest: purpose.targetDigest,
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target', stdio }, operationGrantRef: purpose.grantRef, requestRef: purpose.requestRef,
     requestDigest: purpose.requestDigest, targetRef: purpose.targetRef, targetDigest: purpose.targetDigest, parentWorkerContainmentRef: purpose.parentWorkerContainmentRef };
   spec.launchSpecDigest = digestOmitting(spec, 'launchSpecDigest'); const specArtifact = { ref: canonicalSha256(spec) };
   requireEqual(spec.resources, resources, 'MCP stdio exact original resource bounds');
   return { plan, planArtifact, spec, specArtifact, profile, profileArtifact, rootImage, rootImageArtifact: image,
-    serverEntry: server[0]!, launcherEntry: launcher[0]! };
+    serverEntry: program, launcherEntry: launcher[0]! };
 }
 export async function publishMcpStdioLaunch(artifacts: ArtifactCatalog, input: Omit<RecipeInput, 'originalController' | 'ownerUid'> & Readonly<{
   controller: LinuxWorkerController; lock: HeldStateOwnerLock;

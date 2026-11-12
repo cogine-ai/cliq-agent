@@ -1,12 +1,18 @@
 # Bounded Run scheduling
 
-The installed Linux Supervisor defaults to one concurrent Run. The actual
-account can select an integer from 1 through 32 with the signed entry:
+The installed Linux preview supports one concurrent Run. The actual account
+can inspect or explicitly select this capacity with the signed entry:
 
 ```text
 cliq settings
-cliq settings --run-concurrency 2
+cliq settings --run-concurrency 1
 ```
+
+The 2026-11-13 preview scope defers higher concurrency. The underlying scheduling
+format and queue retain their broader implementation, but installed settings
+reject unsupported capacity before writing, and Supervisor startup rejects an
+existing higher value without rewriting it. Explicitly set the value to one to
+start the preview. This does not retire or discard previously retained workers.
 
 The fixed, canonical `run-scheduling.json` record lives in the existing
 account-owned, installation-bound private client directory. It contains only

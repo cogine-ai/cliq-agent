@@ -19,6 +19,8 @@ import { decodeControlListRequest, decodeControlListResult, validateControlListR
   type ControlListRequestV1, type ControlListResultV1 } from './control-list.js';
 import { assertControlWireJson as json, controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 import { decodeMcpMutationRequest, type McpMutationRequestV1, type McpRegistrySummaryV1 } from './mcp.js';
+import { decodeOwnedLegacyImportRequest, decodeOwnedLegacyImportResponse, decodeInstalledRollbackRequest, decodeLegacyRollbackReceipt,
+  type OwnedLegacyImportRequestV1, type OwnedLegacyImportResponseV1, type KernelRollbackCommandV1, type LegacyRollbackReceiptV1 } from './migration-control-wire.js';
 export { controlWireRecord, controlWireText, controlWireInteger, controlWireRef, decodeControlRange } from './control-wire-data.js';
 
 export const CONTROL_FRAME_BYTES = 1024 * 1024;
@@ -44,9 +46,16 @@ export type McpListRequestV1 = Readonly<{ protocolVersion: 1; method: 'mcp.list'
 /** A continuation of an existing operation, deliberately not MutationBase. */
 export type CredentialFinalizeRequest = Readonly<{ protocolVersion: 1; method: 'credential.finalize';
   requestId: string; operationId: string; attempt: 1 | 2 | 3; commandDigest: string }>;
+export type InstalledMigrationRequestV1 = OwnedLegacyImportRequestV1 | KernelRollbackCommandV1;
+export type InstalledMigrationProgressV1 = Readonly<{
+  protocolVersion: 1; method: InstalledMigrationRequestV1['method']; requestId: string; progressSequence: number;
+}>;
+export type InstalledRollbackResultV1 = Readonly<{
+  method: 'state.rollback'; requestId: string; receiptRef: string; receipt: LegacyRollbackReceiptV1;
+}>;
 export type InstalledControlRequestV1 = ReadControlRequest | ControlHelloRequestV1 | SessionCreateRequestV1 | SessionContinuityRequestV1 | ControlListRequestV1 | RunSubmitRequest |
   RunApplyRequest | RunCancelRequestV1 | RunApproveRequestV1 | RunInputRequestV1 | RunReconcileRequestV1 | McpMutationRequestV1 | McpListRequestV1 | AuthorizationCreateRequest | AuthorizationRevokeRequest | CredentialFinalizeRequest |
-  Readonly<{ protocolVersion: 1; method: 'supervisor.status' }>;
+  InstalledMigrationRequestV1 | Readonly<{ protocolVersion: 1; method: 'supervisor.status' }>;
 
 export type RuntimeBundlePublicSummaryV1 = Readonly<{
   schemaVersion: 1;
@@ -76,11 +85,12 @@ export const CONTROL_METHODS_V1 = Object.freeze(['control.hello', 'session.creat
   'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.get', 'run.attach',
   'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'run.diff', 'run.result', 'run.apply',
   'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
-  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const);
+  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize', 'state.migrate', 'state.rollback'] as const);
 export type ControlMethodV1 = typeof CONTROL_METHODS_V1[number];
 export type InstalledControlResultV1 = SessionContinuityResultV1 | ControlListResultV1 | Extract<ControlResultV1, { method: 'session.get' | 'run.get' | 'run.attach' | 'run.result' | 'run.diff' | 'artifact.get' }> | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.apply' | 'run.approve' | 'run.input' | 'run.cancel' | 'run.reconcile' }> |
   Extract<ControlResultV1, { method: 'mcp.register' | 'mcp.refresh' | 'mcp.list' }> | import('../kernel/authorization.js').AuthorizationResponse['result'] |
-  SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
+  OwnedLegacyImportResponseV1 | InstalledRollbackResultV1 | SupervisorStatusV1 |
+  { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
   method: 'control.hello'; protocolVersion: 1; serverBuild: string;
   controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
 });
@@ -90,7 +100,9 @@ type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
 export type InstalledControlErrorV1 = InvalidError
   | (ErrorBase & { code: 'AUTHORIZATION_REQUIRED'; retryable: false; errorId: string; requiredAuthorization: DependencyInstallScriptsDecisionV1 })
   | import('../kernel/types.js').ResultUnavailableControlErrorV1
-  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true; resourceKind: 'run_queue' | 'state_storage' | 'reconciliation_probes'; retryAfterMs: 1000 })
+  | (ErrorBase & { code: 'RECOVERY_REQUIRED'; retryable: false; recoveryKind: 'local_inference_service'; detailRef: string })
+  | (ErrorBase & { code: 'RESOURCE_EXHAUSTED'; retryable: true;
+    resourceKind: 'run_queue' | 'state_storage' | 'reconciliation_probes' | 'local_inference_activation_cycle'; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'RATE_LIMITED'; retryable: true; retryAfterMs: 1000 })
   | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
       supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: ControlRangeV1;
@@ -111,7 +123,7 @@ export type InstalledControlResponseV1 =
 
 /** Connected composition ceiling; a hello still intersects this with the actual installed Store. */
 export const INSTALLED_CONTROL_FEATURES = Object.freeze(['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list'] as const);
+  'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list', 'state.migrate', 'state.rollback'] as const);
 export type InstalledControlFeature = typeof INSTALLED_CONTROL_FEATURES[number];
 export type InstalledControlMethod = InstalledControlRequestV1['method'];
 export type InstalledControlResultFor<M extends InstalledControlMethod> = Extract<InstalledControlResultV1, { method: M }>;
@@ -339,6 +351,8 @@ export function decodeInstalledControlRequest(value: unknown): InstalledControlR
   assertBoundedJsonValue(value, 'control request');
   if (canonicalJsonBytes(value).byteLength > CONTROL_FRAME_BYTES) throw new TypeError('control request exceeds its bound');
   const source = value as Record<string, unknown>;
+  if (source?.method === 'state.migrate') return decodeOwnedLegacyImportRequest(source);
+  if (source?.method === 'state.rollback') return decodeInstalledRollbackRequest(source);
   if (source?.method === 'control.hello') return immutableSnapshot(decodeControlHelloRequest(source));
   if (source?.method === 'supervisor.status') {
     controlWireRecord(source, ['protocolVersion', 'method']);
@@ -435,6 +449,14 @@ function result(value: unknown, method: InstalledControlMethod): InstalledContro
   const data = value as Record<string, unknown>;
   if (data?.method !== method) throw new TypeError('unexpected installed control response method');
   if (method === 'run.list' || method === 'authorization.list') return decodeControlListResult(value, method);
+  if (method === 'state.migrate') return decodeOwnedLegacyImportResponse(value);
+  if (method === 'state.rollback') {
+    controlWireRecord(data, ['method', 'requestId', 'receiptRef', 'receipt']);
+    assertRequestId(controlWireText(data.requestId));
+    const receipt = decodeLegacyRollbackReceipt(data.receipt);
+    if (controlWireRef(data.receiptRef) !== canonicalSha256(receipt)) throw new TypeError('rollback receipt reference differs from its exact bytes');
+    return Object.freeze({ method, requestId: data.requestId as string, receiptRef: data.receiptRef as string, receipt });
+  }
   if (method === 'control.hello') {
     controlWireRecord(data, ['method', 'protocolVersion', 'serverBuild', 'controlSchemaRange', 'enabledFeatureIds', 'supervisorInstanceId', 'activeRuntimeBundle', 'headlessSchemaRange']);
     const control = decodeControlRange(data.controlSchemaRange); decodeControlRange(data.headlessSchemaRange);
@@ -604,6 +626,19 @@ export function decodeInstalledControlEnvelope<M extends InstalledControlMethod>
   }
   return immutableSnapshot(envelope) as InstalledControlResponseFor<M>;
 }
+
+/** Progress is activity on one original migration frame. It cannot satisfy a
+ * final response, act as a receipt or authorize another request. */
+export function decodeInstalledMigrationProgress(value: unknown, request: InstalledMigrationRequestV1,
+  expectedSequence: number): InstalledMigrationProgressV1 {
+  json(value);
+  const data = controlWireRecord(value, ['protocolVersion', 'method', 'requestId', 'progressSequence']);
+  if (data.protocolVersion !== 1 || data.method !== request.method || data.requestId !== request.requestId ||
+      controlWireInteger(data.progressSequence, 1) !== expectedSequence)
+    throw new TypeError('migration progress differs from its original frame or sequence');
+  return immutableSnapshot(data) as InstalledMigrationProgressV1;
+}
+
 export function decodeInstalledControlResponse<M extends InstalledControlMethod>(value: unknown,
   supplied: Extract<InstalledControlRequestV1, { method: M }>): InstalledControlResponseFor<M> {
   const request = decodeInstalledControlRequest(supplied);
@@ -642,6 +677,12 @@ export function decodeInstalledControlResponse<M extends InstalledControlMethod>
   } else if (request.method === 'credential.finalize' && data.method === request.method) {
     if (data.operation.operationId !== request.operationId || data.operation.requestId !== request.requestId || data.operation.attempt !== request.attempt || data.operation.requestDigest !== request.commandDigest)
       throw new TypeError('credential finalization differs from original operation');
+  } else if (request.method === 'state.migrate' && data.method === request.method) {
+    if (data.requestId !== request.requestId || data.migrationId !== request.migrationId)
+      throw new TypeError('migration result differs from its exact original request');
+  } else if (request.method === 'state.rollback' && data.method === request.method) {
+    if (data.requestId !== request.requestId || data.receipt.migrationId !== request.migrationId)
+      throw new TypeError('rollback result differs from its exact original request');
   } else if (request.method === 'session.fork' && data.method === request.method) {
     if (data.snapshot.session.parentSessionId !== request.sessionId || data.snapshot.session.forkedThroughItemSeq !== request.throughItemSeq ||
         data.snapshot.session.contextRevision !== 1 || data.snapshot.session.latestItemSeq !== request.throughItemSeq || data.snapshot.session.id === request.sessionId)
@@ -721,6 +762,7 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     code === 'INCOMPATIBLE_PROTOCOL' ? ['supportedControlRange', 'supportedHeadlessRange', 'upgradeAction'] :
     code === 'RATE_LIMITED' ? ['retryAfterMs'] : code === 'RESOURCE_EXHAUSTED' ? ['resourceKind', 'retryAfterMs'] :
     code === 'RESULT_UNAVAILABLE' ? ['runId', 'status', ...(error.retryable === true ? ['currentRevision'] : ['terminalDetailRef'])] :
+    code === 'RECOVERY_REQUIRED' ? ['recoveryKind', 'detailRef'] :
     code === 'REVISION_CONFLICT' ? ['currentRevision', 'conflict'] : code === 'EVENT_CURSOR_EXPIRED' ? ['earliestEventSeq', 'latestEventSeq', 'snapshot'] :
     code === 'AUTHORIZATION_REQUIRED' && Object.hasOwn(error, 'requiredAuthorization') ? ['requiredAuthorization', 'errorId'] : [];
   controlWireRecord(error, [...base, ...extra]);
@@ -743,6 +785,10 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     if (error.retryable === true && ['queued', 'running', 'waiting'].includes(error.status as string)) controlWireInteger(error.currentRevision, 1);
     else if (error.retryable === false && ['failed', 'cancelled'].includes(error.status as string)) controlWireRef(error.terminalDetailRef);
     else throw new TypeError('invalid result refusal lifecycle');
+  } else if (code === 'RECOVERY_REQUIRED') {
+    if (method !== 'run.submit' || error.retryable !== false || error.recoveryKind !== 'local_inference_service' ||
+        error.messageCode !== 'run.local_inference_unavailable') throw new TypeError('invalid local inference recovery refusal');
+    controlWireRef(error.detailRef);
   } else if (code === 'RATE_LIMITED' || code === 'RESOURCE_EXHAUSTED') {
     if (method === 'session.list' && code === 'RATE_LIMITED') {
       if (error.retryable !== true || error.retryAfterMs !== 1000 || error.messageCode !== 'control.list_cut_busy') throw new TypeError('invalid list preparation backpressure');
@@ -754,6 +800,9 @@ function decodeInstalledControlError(value: unknown, method: InstalledControlMet
     } else if (method === 'run.reconcile' && code === 'RESOURCE_EXHAUSTED') {
       if (error.retryable !== true || error.retryAfterMs !== 1000 || error.resourceKind !== 'reconciliation_probes' ||
           error.messageCode !== 'run.reconciliation_capacity') throw new TypeError('invalid reconciliation probe capacity refusal');
+    } else if (method === 'run.submit' && code === 'RESOURCE_EXHAUSTED' && error.resourceKind === 'local_inference_activation_cycle') {
+      if (error.retryable !== true || error.retryAfterMs !== 1000 || error.messageCode !== 'run.local_inference_activation_capacity')
+        throw new TypeError('invalid local inference activation capacity refusal');
     } else if (error.retryable !== true || error.retryAfterMs !== 1000 || (method !== 'run.submit' &&
         !(method === 'run.apply' && code === 'RESOURCE_EXHAUSTED') && (code !== 'RATE_LIMITED' || method !== 'credential.finalize')) ||
         (code === 'RATE_LIMITED' ? error.messageCode !== 'run.credential_scope_busy' : error.messageCode !== 'run.queue_capacity' || error.resourceKind !== 'run_queue'))

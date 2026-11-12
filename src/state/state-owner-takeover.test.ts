@@ -11,13 +11,52 @@ import { ContentAddressedStore } from './cas.js';
 import { readTimeFence } from './canonical-time.js';
 import { loadNativeStateOwner } from './native-owner.js';
 import { openSqliteDriver } from './sqlite-driver.js';
-import { readStateOwner } from './state-owner.js';
-import { openStateStore, type StateStoreRuntimeAuthority } from './store.js';
+import { commitGracefulStateOwnerRelease, contextFromStateOwner, prepareGracefulStateOwnerRelease, readStateOwner } from './state-owner.js';
+import { acquireSuccessorStateOwner, openStateStore, stateOwnerFilesystemFromArtifacts, type StateStoreRuntimeAuthority } from './store.js';
 import { makePrivateDir } from './testing/fixtures.js';
 import { childFor, ownerAt } from './testing/state-owner-process.js';
 import { signedToolBundle } from './testing/tool-authority.js';
 
 const native = await loadNativeStateOwner();
+
+test('graceful release and additional evidence commit or roll back together on the genuine original driver', async t => {
+  const root = await makePrivateDir('.cliq-final-owner-transaction-');
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await openStateStore(root);
+  const artifacts = store.artifacts;
+  await store.close();
+  const lock = native.acquireLock(root, false);
+  const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+  const other = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+  try {
+    const previous = readStateOwner(driver, 1)!;
+    assert.equal(previous.state, 'terminal');
+    const active = await acquireSuccessorStateOwner(root, driver, artifacts, previous, native, lock);
+    const { lockIdentity } = await stateOwnerFilesystemFromArtifacts(root, artifacts, active, lock);
+    const owner = contextFromStateOwner(active, lock, { ref: lockIdentity.stateRootIdentityRef, digest: lockIdentity.stateRootIdentityDigest });
+    const prepared = await prepareGracefulStateOwnerRelease(driver, artifacts, owner);
+    const extra = await artifacts.publishCanonical({ retained: 'final-owner-transaction' }, 'cliq-test-final-owner-root');
+    const rooted = () => driver.prepare('SELECT ref FROM artifacts WHERE ref = ?').get(extra.ref);
+    assert.throws(() => other.transaction(connection => commitGracefulStateOwnerRelease(driver, connection, owner, prepared, [extra])),
+      /genuine active issuing driver/u);
+    const abort = new Error('abort the complete original transaction');
+    assert.throws(() => driver.transaction(connection => {
+      const released = commitGracefulStateOwnerRelease(driver, connection, owner, prepared, [extra]);
+      assert.equal(readStateOwner(connection, active.ownerEpoch)?.rowDigest, released.rowDigest);
+      assert.ok(connection.prepare('SELECT ref FROM artifacts WHERE ref = ?').get(extra.ref));
+      throw abort;
+    }), error => error === abort);
+    assert.deepEqual(readStateOwner(driver, active.ownerEpoch), active);
+    assert.equal(rooted(), undefined);
+    const terminal = driver.transaction(connection => commitGracefulStateOwnerRelease(driver, connection, owner, prepared, [extra]));
+    assert.equal(terminal.state, 'terminal');
+    assert.equal(terminal.terminalReason, 'graceful_release');
+    assert.deepEqual(readStateOwner(driver, active.ownerEpoch), terminal);
+    assert.ok(rooted());
+    assert.throws(() => driver.transaction(connection => commitGracefulStateOwnerRelease(driver, connection, owner, prepared, [extra])),
+      { code: 'RECOVERY_REQUIRED' });
+  } finally { other.close(); driver.close(); lock.close(); }
+});
 
 async function startOwner(t: TestContext, authority?: StateStoreRuntimeAuthority, mode: 'store' | 'fixture' | 'fixture_prepared' = 'store') {
   const container = await makePrivateDir('.cliq-owner-takeover-');

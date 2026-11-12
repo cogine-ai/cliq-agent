@@ -26,6 +26,9 @@ struct ci_archive {
     ca_entry **entries;
     size_t count, verified, expected_entries, scan_seen;
     uint64_t total_bytes, expected_bytes, combined_bytes, entry_offset;
+    uint64_t model_bytes;
+    uint64_t runtime_bytes;
+    ma_model_checker *models;
     char entries_digest[65], entry_digest[65];
     struct sha256_context entries_hash, entry_hash;
     DIR *scan;
@@ -48,8 +51,7 @@ static int ca_named_file(int parent, const char *name, int fd, const struct stat
 }
 static int ca_custody(migration_filesystem *scope) {
     ci_archive *archive = scope->inspection->archive; if (!archive) return 0;
-    struct stat absent;
-    if (fstatat(scope->binding->owner->root_fd, "local-models", &absent, AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) return -1;
+    if (archive->models && !(scope->inspection->model_released ? ma_target_custody(archive->models) : ma_custody(archive->models))) return -1;
     if (archive->collection_fd >= 0 && !ca_directory_same(scope, scope->migration_fd, "kernel-archives",
         archive->collection_fd, &archive->collection, 0)) return -1;
     if (archive->directory_fd >= 0 && !ca_directory_same(scope, archive->collection_fd, scope->inspection->archive_id,
@@ -72,6 +74,10 @@ static int ca_close_scan(migration_filesystem *scope) {
 static int ca_retire(migration_filesystem *scope) {
     ci_archive *archive = scope->inspection->archive; if (!archive) return 0;
     int failed = ca_close_scan(scope) != 0;
+    if (archive->models) {
+        if (ma_close_checker(scope->env, archive->models) != 0) { migrate_scope_poison(scope); return -1; }
+        archive->models = NULL;
+    }
     int *const descriptors[] = {&archive->entry_fd, &archive->manifest.reader, &archive->image.reader,
         &archive->manifest.guard, &archive->image.guard, &archive->target_cas_fd, &archive->source_cas_fd,
         &archive->directory_fd, &archive->collection_fd};
@@ -185,16 +191,105 @@ static napi_value ca_read_manifest_chunk(napi_env env, napi_callback_info info) 
     if (step) { archive->manifest_reads++; return napi_get_null(env, &result) == napi_ok ? result : NULL; }
     return napi_create_buffer_copy(env, size, bytes, NULL, &result) == napi_ok ? result : NULL;
 }
+/* The manifest's closed fixed model-store witness is data. The genuine
+ * original EX visitor and fresh readonly target checker close its claims. */
+static napi_value ca_select_models(napi_env env, napi_callback_info info) {
+    napi_value args[2]; size_t count = 2;
+    migration_filesystem *scope = ci_receiver(env, info, &count, args); if (!scope) return NULL;
+    ci_archive *archive = scope->inspection->archive; const unsigned char *p; size_t size;
+    if (count != 1 || ca_current(scope) != 0 || !scope->inspection->model_source || !archive || archive->models ||
+        archive->manifest_reads != 1 || !archive->manifest.verified || archive->payload_selected ||
+        ca_buffer(env, args[0], &p, &size) != 0 || size != 152 || memcmp(p, "CLQMM001", 8) || ci_le32(p + 116))
+        return migrate_scope_error(env, scope, "current model archive requires its original EX source and closed model-store witness");
+    ma_model_witness expected = {
+        .source_device = ci_le64(p + 8), .source_inode = ci_le64(p + 16),
+        .source_objects_device = ci_le64(p + 24), .source_objects_inode = ci_le64(p + 32),
+        .target_device = ci_le64(p + 40), .target_inode = ci_le64(p + 48),
+        .target_objects_device = ci_le64(p + 56), .target_objects_inode = ci_le64(p + 64),
+        .inventory_device = ci_le64(p + 72), .inventory_inode = ci_le64(p + 80),
+        .count = ci_le64(p + 88), .byte_count = ci_le64(p + 96), .inventory_size = ci_le64(p + 104), .uid = ci_le32(p + 112)
+    };
+    ca_digest(p + 120, expected.inventory_digest);
+    if (ma_open_checker(env, scope->binding, scope->inspection->model_source, archive->directory_fd, &archive->directory, &expected,
+        MIGRATION_BACKUP_METADATA_BYTES - scope->backup_metadata_bytes, &archive->models) != 0)
+        return migrate_scope_error(env, scope, "current source and archived model directory identities or shared metadata budget differ");
+    scope->backup_metadata_bytes += archive->models->metadata_bytes;
+    archive->model_bytes = expected.byte_count + expected.inventory_size;
+    return mp_undefined(env);
+}
+static napi_value ca_verify_models_next(napi_env env, napi_callback_info info) {
+    migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL;
+    ci_archive *archive = scope->inspection->archive;
+    if (ca_current(scope) != 0 || !archive || !archive->models || !scope->inspection->model_source ||
+        archive->models->phase == MAC_COMPLETE)
+        return migrate_scope_error(env, scope, "current model archive has no live original verification");
+    int status = ma_checker_step(archive->models);
+    if (status < 0) return migrate_scope_error(env, scope, "original model store full bytes, identities or final census differ");
+    return ca_boolean(env, status);
+}
+/* CLQMW001, source directory dev/ino, pack dev/ino, count, witness bytes,
+ * pack bytes, uid/reserved0, full physical SHA256. */
+static napi_value ca_select_runtime_witnesses(napi_env env, napi_callback_info info) {
+    napi_value args[2]; size_t count = 2;
+    migration_filesystem *scope = ci_receiver(env, info, &count, args); if (!scope) return NULL;
+    ci_archive *archive = scope->inspection->archive; rw_archive *runtime = scope->inspection->runtime_witnesses;
+    const unsigned char *p; size_t size;
+    if (count != 1 || ca_current(scope) != 0 || !archive || !runtime || archive->runtime_bytes ||
+        archive->manifest_reads != 1 || !archive->manifest.verified || archive->payload_selected ||
+        ca_buffer(env, args[0], &p, &size) != 0 || size != 104 || memcmp(p, "CLQMW001", 8) ||
+        !ca_witness(&runtime->source, p + 8) || ci_le32(p + 64) != (uint32_t)geteuid() || ci_le32(p + 68) ||
+        rw_bind_archive(runtime, archive->directory_fd, &archive->directory) != 0 ||
+        rw_open_verified_pack(runtime, ci_le64(p + 24), ci_le64(p + 32), ci_le64(p + 56),
+            ci_le64(p + 40), ci_le64(p + 48), p + 72) != 0)
+        return migrate_scope_error(env, scope, "current runtime witness source and archived pack differ from their original full witness");
+    archive->runtime_bytes = runtime->pack_size;
+    return mp_undefined(env);
+}
+static napi_value ca_verify_runtime_witnesses_next(napi_env env, napi_callback_info info) {
+    migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL;
+    ci_archive *archive = scope->inspection->archive; rw_archive *runtime = scope->inspection->runtime_witnesses;
+    if (ca_current(scope) != 0 || !archive || !runtime || !archive->runtime_bytes || runtime->phase != RW_HASH_READONLY)
+        return migrate_scope_error(env, scope, "current runtime witness pack has no complete original reader");
+    int status = rw_verify_next(runtime);
+    if (status < 0) return migrate_scope_error(env, scope, "current original runtime witness pack bytes, identities or census differ");
+    return ca_boolean(env, status);
+}
+static napi_value ca_begin_retired_runtime_observation(napi_env env, napi_callback_info info) {
+    napi_value args[4]; size_t count = 4;
+    migration_filesystem *scope = ci_receiver(env, info, &count, args); if (!scope) return NULL;
+    rw_archive *runtime = scope->inspection->runtime_witnesses;
+    if (ca_current(scope) != 0 || !runtime || runtime->phase != RW_COMPLETE ||
+        rw_begin_observation_arguments(env, info, runtime) != 0)
+        return migrate_scope_error(env, scope, "current runtime witness requires its exact original Anchor and birth");
+    return mp_undefined(env);
+}
+static napi_value ca_retired_runtime_observation_next(napi_env env, napi_callback_info info) {
+    migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL;
+    if (ca_current(scope) != 0) return migrate_scope_error(env, scope, "current runtime witness lost original custody");
+    int status = rw_retired_observation_next(scope->inspection->runtime_witnesses);
+    if (status < 0) return migrate_scope_error(env, scope, "current original runtime witness is not completely retired");
+    return ca_boolean(env, status);
+}
+static napi_value ca_retired_runtime_observation(napi_env env, napi_callback_info info) {
+    migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL;
+    napi_value result = ca_current(scope) == 0 ? rw_observation_value(env, scope->inspection->runtime_witnesses) : NULL;
+    return result ? result : migrate_scope_error(env, scope, "current retired runtime witness has no real completed observation");
+}
 /* CLQMH001 + image(dev/ino/bytes/hash), sourceCAS(dev/ino), targetCAS(dev/ino),
  * entryCount,totalBytes,combinedPayloadBytes,uid/reserved0,entriesDigest. */
 static napi_value ca_select_payload(napi_env env, napi_callback_info info) {
     napi_value args[2]; size_t count = 2; migration_filesystem *scope = ci_receiver(env, info, &count, args); if (!scope) return NULL;
     ci_archive *archive = scope->inspection->archive; const unsigned char *p; size_t size;
     if (count != 1 || ca_current(scope) != 0 || !archive || archive->manifest_reads != 1 || !archive->manifest.verified ||
-        archive->payload_selected || ca_buffer(env, args[0], &p, &size) != 0 || size != 160 || memcmp(p, "CLQMH001", 8) ||
+        archive->payload_selected || (!!scope->inspection->model_source != !!archive->models) ||
+        (!!scope->inspection->runtime_witnesses != !!archive->runtime_bytes) ||
+        ca_buffer(env, args[0], &p, &size) != 0 || size != 160 || memcmp(p, "CLQMH001", 8) ||
         !ci_le64(p + 24) || ci_le64(p + 24) > CI_SOURCE_BYTES || ci_le64(p + 96) > CA_MAX_ENTRIES ||
         ci_le64(p + 104) > CI_SOURCE_BYTES - ci_le64(p + 24) || ci_le64(p + 112) != ci_le64(p + 24) + ci_le64(p + 104) ||
-        ci_le64(p + 112) > CI_SOURCE_BYTES - archive->manifest.size || ci_le32(p + 120) != (uint32_t)geteuid() || ci_le32(p + 124))
+        ci_le64(p + 112) > CI_SOURCE_BYTES - archive->manifest.size ||
+        archive->model_bytes > CI_SOURCE_BYTES - archive->manifest.size - ci_le64(p + 112) ||
+        archive->runtime_bytes > CI_SOURCE_BYTES - archive->manifest.size - ci_le64(p + 112) - archive->model_bytes ||
+        ci_le32(p + 120) != (uint32_t)geteuid() || ci_le32(p + 124))
         return migrate_scope_error(env, scope, "archive payload requires its complete closed header within the original total bound");
     uint64_t index_bytes = ci_le64(p + 96) * sizeof(*archive->entries);
     if (index_bytes > MIGRATION_BACKUP_METADATA_BYTES - scope->backup_metadata_bytes ||
@@ -347,17 +442,24 @@ static int ca_archive_root(migration_filesystem *scope) {
         if (++steps > 8) { valid = 0; break; }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         unsigned int bit = !strcmp(entry->d_name, "manifest-v1.json") ? 1 : !strcmp(entry->d_name, "kernel.sqlite3") ? 2 :
-            !strcmp(entry->d_name, "cas") ? 4 : 0;
+            !strcmp(entry->d_name, "cas") ? 4 : !strcmp(entry->d_name, "local-models") ? 8 :
+            !strcmp(entry->d_name, RW_PACK_NAME) ? 16 : 0;
         if (!bit || (names & bit)) { valid = 0; break; } names |= bit;
     }
     if (closedir(scan) != 0) { migrate_scope_poison(scope); return -1; }
-    return valid && names == 7 && fsync(archive->directory_fd) == 0 ? 0 : -1;
+    unsigned int expected = 7U | ((archive->models || scope->inspection->model_released) ? 8U : 0U) |
+        (archive->runtime_bytes ? 16U : 0U);
+    return valid && names == expected &&
+        fsync(archive->directory_fd) == 0 ? 0 : -1;
 }
 static napi_value ca_verify_namespace_next(napi_env env, napi_callback_info info) {
     migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL; ci_archive *archive = scope->inspection->archive;
     if (ca_current(scope) != 0 || !archive || !archive->entry_pass || archive->manifest_reads != 2 || !archive->manifest.verified ||
         archive->count != archive->expected_entries || archive->verified != archive->count || archive->entry_fd >= 0 ||
-        archive->total_bytes != archive->expected_bytes || archive->namespace_complete)
+        archive->total_bytes != archive->expected_bytes || archive->namespace_complete ||
+        (scope->inspection->runtime_witnesses && (scope->inspection->runtime_witnesses->phase != RW_COMPLETE ||
+            scope->inspection->runtime_witnesses->retirement ||
+            scope->inspection->runtime_witnesses->physically_observed != scope->inspection->runtime_witnesses->count)))
         return migrate_scope_error(env, scope, "archive namespace lacks the complete joined original entry stream");
     if (!archive->scan) {
         char digest[65]; publication_hash_hex(&archive->entries_hash, digest);
@@ -385,16 +487,42 @@ static napi_value ca_verify_namespace_next(napi_env env, napi_callback_info info
 failed:
     return migrate_scope_error(env, scope, "archive has a missing, replaced, changed or extra physical object");
 }
+/* End the source visitor after its full census and all current readers close.
+ * Keep the readonly target directory/inventory guards with this inspector.
+ * The outer original model scope retains its independent registry lock. */
+static napi_value ca_finish_models(napi_env env, napi_callback_info info) {
+    migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL;
+    current_migration_inspection *state = scope->inspection; ci_archive *archive = state->archive;
+    if (ca_current(scope) != 0 || !archive || !archive->namespace_complete || !archive->models ||
+        archive->models->phase != MAC_COMPLETE || archive->models->failed || !state->model_source || state->model_verified)
+        return migrate_scope_error(env, scope, "model observation cannot retire before its complete original namespace");
+    if (archive->models->current_fd >= 0 || archive->models->inventory_reader >= 0 || archive->models->scan ||
+        archive->models->source_active)
+        return migrate_scope_error(env, scope, "current model observation still owns unfinished readers");
+    /* The actual rollback owner retains its original model lock through the
+     * marker. A standalone readonly observer may end its visitor now. */
+    if (state->rollback_publisher || state->rollback_resume_prepared || state->rollback_resume_archive_ready) {
+        state->model_verified = 1; return mp_undefined(env);
+    }
+    if (cliq_model_store_archive_end(env, state->model_source) != 0) {
+        migrate_scope_poison(scope);
+        return migrate_scope_error(env, scope, "current model source visitor did not retire");
+    }
+    archive->models->source = NULL; state->model_source = NULL; state->model_released = 1; state->model_verified = 1;
+    return mp_undefined(env);
+}
 static napi_value ca_inspect(napi_env env, napi_callback_info info) {
     migration_filesystem *scope = ci_no_arguments(env, info); if (!scope) return NULL; ci_archive *archive = scope->inspection->archive;
     if (ca_current(scope) != 0 || !archive || !archive->namespace_complete || !archive->manifest.verified || !archive->image.verified ||
+        (archive->model_bytes && !scope->inspection->model_verified) ||
+        (scope->inspection->model_source && !scope->inspection->rollback_publisher && !scope->inspection->rollback_resume_prepared) ||
         migrate_legacy_locks_assert_current(scope) != 0)
         return migrate_scope_error(env, scope, "archive is not one complete current original-object observation");
     napi_value result, kind, count, bytes, sha;
     if (napi_create_object(env, &result) != napi_ok ||
         napi_create_string_utf8(env, "current_checked_original_archive", NAPI_AUTO_LENGTH, &kind) != napi_ok ||
         napi_create_double(env, (double)archive->count, &count) != napi_ok ||
-        napi_create_double(env, (double)(archive->combined_bytes + archive->manifest.size), &bytes) != napi_ok ||
+        napi_create_double(env, (double)(archive->combined_bytes + archive->manifest.size + archive->model_bytes + archive->runtime_bytes), &bytes) != napi_ok ||
         napi_create_string_utf8(env, archive->manifest.digest, 64, &sha) != napi_ok ||
         napi_set_named_property(env, result, "kind", kind) != napi_ok ||
         napi_set_named_property(env, result, "entryCount", count) != napi_ok ||

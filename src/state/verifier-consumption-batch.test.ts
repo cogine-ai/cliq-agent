@@ -182,12 +182,19 @@ test('only current installed single-verifier admission uses the new quartet afte
   const metadata = source.indexOf('const referencedMetadata ='), sample = source.indexOf('const now = installed?.data.admittedAt ?? sampleCanonicalNow();', metadata);
   const ordinary = source.indexOf('if (!verifierConsumption && verifierPreparation) verifierConsumption = await prepareVerifierConsumption(', sample);
   assert(metadata >= 0 && sample > metadata && ordinary > sample);
-  const transaction = source.indexOf('  driver.transaction((connection) => {', ordinary);
-  const fresh = source.indexOf('const freshNow = sampleCanonicalNow();', transaction), consume = source.indexOf('verifierConsumption?.commit(connection, freshNow)', fresh);
-  assert(transaction > ordinary && fresh > transaction && consume > fresh);
-  for (const check of ['assertCurrentSessionContextGraph(connection, sessionContext.cut)', 'assertActiveStateOwner(connection, owner)',
-    'assertCurrentControlFrame(owner, installed.identity)', 'recheckInstalledRunWorkspace(installed.prepared, driver, owner, installed.identity, connection)'])
-    assert(source.slice(transaction, consume).includes(check), check);
+  const inputs = source.indexOf('const assertAdmissionInputs = ', ordinary);
+  const installedCut = source.indexOf('const assertInstalledCut = ', inputs);
+  const write = source.indexOf('const write = (connection: SqliteConnection, freshNow: string)', installedCut);
+  const consume = source.indexOf('verifierConsumption?.commit(connection, freshNow)', write);
+  const local = source.indexOf('if (local && installed && installedRequestArtifact)', consume);
+  const transaction = source.indexOf('  driver.transaction(connection => {', local);
+  const finished = source.indexOf("if (fenceOutcome === 'clock_regressed')", transaction);
+  assert(inputs > ordinary && installedCut > inputs && write > installedCut && consume > write &&
+    local > consume && transaction > local && finished > transaction);
+  assert.match(source.slice(inputs, installedCut), /assertCurrentSessionContextGraph\(connection, sessionContext\.cut\);[\s\S]*?assertActiveStateOwner\(connection, owner\);/u);
+  assert.match(source.slice(installedCut, write), /assertCurrentControlFrame\(owner, installed\.identity, local\?\.frame\);\s*recheckInstalledRunWorkspace\(installed\.prepared, driver, owner, installed\.identity, connection\);/u);
+  assert.match(source.slice(local, transaction), /assertSqliteConnectionOwnedBy\(driver, connection\);[\s\S]*?assertAdmissionInputs\(connection\);\s*assertInstalledCut\(connection, freshNow,[^;]+;[\s\S]*?const existing = check\(connection, freshNow\);\s*if \(!existing\) return write\(connection, freshNow\);/u);
+  assert.match(source.slice(transaction, finished), /assertAdmissionInputs\(connection\);\s*const freshNow = sampleCanonicalNow\(\);[\s\S]*?assertInstalledCut\(connection, freshNow\);\s*committed = write\(connection, freshNow\);/u);
 });
 
 for (const fault of ['cancel', 'write', 'retirement'] as const)

@@ -4,5 +4,6 @@ import { runInstalledNodeJourney } from './testing/installed-node-journey.js';
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-assert.equal(mode, '--mcp-recovery-campaign'); assert(filename); assert.deepEqual(extra, []);
-await runInstalledNodeJourney(filename, 'mcp-recovery');
+assert(mode === '--mcp-recovery-campaign' || mode === '--mcp-status-user-replay-campaign');
+assert(filename); assert.deepEqual(extra, []);
+await runInstalledNodeJourney(filename, mode === '--mcp-recovery-campaign' ? 'mcp-recovery' : 'mcp-status-user-replay');

@@ -45,8 +45,12 @@ type LiveChannel = { digest: string; assertCurrent(): void;
 type PreparedChannel = Readonly<{ identity: AuthenticatedControlIdentity;
   processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }>;
 const liveChannels = new WeakMap<StateOwnerContext, Map<string, LiveChannel>>();
-type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel; active: boolean };
+type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel;
+  dispatch: object; active: boolean };
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
+declare const localInferenceFrameBrand: unique symbol;
+export type LocalInferenceAdmissionFrame = Readonly<{ [localInferenceFrameBrand]: true }>;
+const localInferenceAdmissionFrames = new WeakMap<LocalInferenceAdmissionFrame, AuthenticatedFrame>();
 
 async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation, assertOpen: () => void): Promise<string> {
   return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => {
@@ -65,7 +69,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   let migrationFenceJoin: Promise<void> | undefined;
   let drain: Promise<void> | undefined;
   const connections = new Set<LocalControlConnection>();
-  const pending = new Set<Promise<unknown>>();
+  const pending = new Map<Promise<unknown>, object>();
   // A connection owns at most one data-only preparation. These jobs do not
   // consume or enlarge the independent 64-dispatch capacity below.
   const authenticating = new Set<Promise<PreparedChannel>>();
@@ -208,6 +212,8 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
       socket,
       dispatch<T>(operation: (identity: AuthenticatedControlIdentity) => Promise<T>): Promise<T> {
         if (this !== connection || closing || closed || typeof operation !== 'function') return Promise.reject(new TypeError('invalid control connection dispatch'));
+        if (migrationFenced) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'new control dispatch is fenced by migration'));
+        const dispatch = {};
         const running = (async () => {
           if (pending.size >= 64) throw new KernelStorageError('INVALID_REQUEST', 'control dispatch capacity is exhausted');
           const prepared = await prepare();
@@ -219,11 +225,11 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
           }
           const authenticated = identity;
           const authority = channels.get(authenticated.channelIdentityRef)!;
-          const frame: AuthenticatedFrame = { owner, identity: authenticated, channel: authority, active: true };
+          const frame: AuthenticatedFrame = { owner, identity: authenticated, channel: authority, dispatch, active: true };
           try { return await authenticatedFrames.run(frame, () => operation(authenticated)); }
           finally { frame.active = false; }
         })();
-        pending.add(running);
+        pending.set(running, dispatch);
         void running.finally(() => pending.delete(running)).catch(() => {});
         return running;
       },
@@ -263,11 +269,14 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
     fenceForMigration() {
       if (this !== listener || closing) return Promise.reject(new TypeError('invalid control migration fence'));
       if (migrationFenceJoin) return migrationFenceJoin;
-      // Existing authenticated frames (in particular the import's original
-      // frame) remain valid. New peers/first authentication stop synchronously.
-      // Join all original hash/CAS producers before the protected SQL/CAS cut.
+      const original = authenticatedFrames.getStore();
+      if (!original?.active || original.owner !== owner) return Promise.reject(new TypeError('migration must own the current control frame'));
+      assertCurrentControlFrame(owner, original.identity);
+      // Fence new peers and frames, then join every previous producer except
+      // the current migration dispatch which owns this join.
       migrationFenced = true;
-      migrationFenceJoin = Promise.allSettled([...authenticating]).then(results => {
+      const previous = [...pending].filter(([, dispatch]) => dispatch !== original.dispatch).map(([job]) => job);
+      migrationFenceJoin = Promise.allSettled([...authenticating, ...previous]).then(results => {
         for (const result of results) if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError)
           retirementFailure ??= result.reason;
         if (retirementFailure) throw retirementFailure;
@@ -296,7 +305,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         try { connection.close(); } catch (error) { failures.push(error); }
       }
       liveChannels.delete(owner);
-      drain = Promise.allSettled([...authenticating, ...pending]).then(results => {
+      drain = Promise.allSettled([...authenticating, ...pending.keys()]).then(results => {
         failures.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected' &&
           result.reason instanceof ResourceRetirementError).map(result => result.reason));
         if (failures.length) retirementFailure ??= new ResourceRetirementError('control listener resources did not retire', new AggregateError(failures));
@@ -311,9 +320,9 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
 /** Fixed synchronous friend for the final authorization cut. Historical
  * artifacts cannot enter this registry, and an earlier async closure walk
  * cannot substitute for this still-current native frame. */
-export function assertCurrentControlFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity):
+export function assertCurrentControlFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity, pin?: LocalInferenceAdmissionFrame):
   Readonly<{ processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }> {
-  const frame = authenticatedFrames.getStore();
+  const frame = pin ? localInferenceAdmissionFrames.get(pin) : authenticatedFrames.getStore();
   if (!frame?.active || frame.owner !== owner || frame.identity !== identity)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control operation has no current native authenticated frame');
   const live = liveChannels.get(owner)?.get(identity.channelIdentityRef);
@@ -321,6 +330,19 @@ export function assertCurrentControlFrame(owner: StateOwnerContext, identity: Au
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control operation native channel changed');
   live.assertCurrent();
   return Object.freeze({ processIdentity: live.processIdentity, channel: live.channel });
+}
+
+/** The original frame alone can pin itself for its local activation fanout.
+ * The pin cannot keep a socket/frame live, switch its identity or run code
+ * under another participant's AsyncLocalStorage context. */
+export function pinLocalInferenceAdmissionFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity): LocalInferenceAdmissionFrame {
+  assertCurrentControlFrame(owner, identity);
+  const frame = authenticatedFrames.getStore();
+  if (!frame || !frame.active || frame.identity !== identity || frame.owner !== owner)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local inference admission requires its original authenticated frame');
+  const pin = Object.freeze({}) as LocalInferenceAdmissionFrame;
+  localInferenceAdmissionFrames.set(pin, frame);
+  return pin;
 }
 
 /** Rewalk a historical channel against this database's retained StateRoot, without authenticating new input. */
@@ -347,13 +369,14 @@ export async function validateControlChannelClosure(
     channelIdentityRef: string;
     channelIdentityDigest: string;
     principalId: string;
-  }
+  },
+  pin?: LocalInferenceAdmissionFrame,
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
   const closure = await readRetainedControlChannelClosure(artifacts, owner, input);
   const channel = closure.channel;
   if (channel.transport.kind === 'uds_peer') {
     const live = liveChannels.get(owner)?.get(input.channelIdentityRef);
-    const frame = authenticatedFrames.getStore();
+    const frame = pin ? localInferenceAdmissionFrames.get(pin) : authenticatedFrames.getStore();
     if (!live || live.digest !== input.channelIdentityDigest || !frame?.active || frame.owner !== owner ||
         frame.channel !== live || frame.identity.channelIdentityRef !== input.channelIdentityRef ||
         frame.identity.channelIdentityDigest !== input.channelIdentityDigest || frame.identity.principalId !== input.principalId) {

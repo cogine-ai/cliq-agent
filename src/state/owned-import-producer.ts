@@ -21,6 +21,7 @@ import { buildInstalledLegacyImportCandidate } from './legacy-import-source.js';
 import { observeHeldMigrationRoots, publishHeldMigrationInitialSpine, observeHeldMigrationOriginalAuth,
   advanceHeldMigrationControl, publishHeldMigrationAuthCutover, publishHeldMigrationKernelAuthority,
   readHeldMigrationRendezvous, readHeldMigrationControl, assertHeldMigrationCredentialFilesystem, prepareHeldMigrationLegacyLocks,
+  assertHeldEarlyMigrationProcessRefusal, inspectHeldLegacyProcessCut,
   type HeldMigrationCredentialGate, type HeldMigrationFilesystem } from './native-owner.js';
 import { capturePreparedImportBaseline } from './prepared-import-candidate.js';
 import { publishOwnedImportInventory } from './owned-import-inventory.js';
@@ -33,6 +34,14 @@ import { assertSqliteConnectionOwnedBy, type SqliteDriver } from './sqlite-drive
 import { readControlRequest } from './rows.js';
 
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
+const earlyProcessRefusals = new WeakMap<KernelStorageError, Readonly<{ gate: HeldMigrationCredentialGate; owner: StateOwnerContext }>>();
+export function isInstalledImportLegacyQuiescenceRefusal(error: unknown): boolean {
+  return error instanceof KernelStorageError && earlyProcessRefusals.has(error);
+}
+export function isInstalledImportRefusalBeforeControl(error: unknown, gate: HeldMigrationCredentialGate, owner: StateOwnerContext): boolean {
+  const original = error instanceof KernelStorageError ? earlyProcessRefusals.get(error) : undefined;
+  return original?.gate === gate && original.owner === owner;
+}
 /** Real original clock transaction, never an injectable sample or temporary
  * Owner. Clock refusals commit without a productive import row. */
 function prepareTime(driver: SqliteDriver, owner: StateOwnerContext): string {
@@ -64,6 +73,18 @@ export async function produceInstalledOwnedLegacyImport(driver: SqliteDriver, ar
     current(); const artifact = await artifacts.publishCanonical(data, purpose); current(); return artifact;
   };
   current();
+  const earlyProcess = await inspectHeldLegacyProcessCut(filesystem, signal); current();
+  if (earlyProcess.kind !== 'complete') {
+    assertHeldEarlyMigrationProcessRefusal(filesystem);
+    const refusal = new KernelStorageError('RECOVERY_REQUIRED', earlyProcess.kind === 'legacy_process_or_descriptor_open' ?
+      'Legacy process still holds its original executable or state descriptor' : 'complete Legacy process inspection is unavailable');
+    earlyProcessRefusals.set(refusal, { gate, owner }); throw refusal;
+  }
+  const recheckProcessCut = async () => {
+    current(); const observed = await inspectHeldLegacyProcessCut(filesystem, signal); current();
+    if (observed.kind !== 'complete' || observed.digest !== earlyProcess.digest)
+      return invalid('original locked Legacy process cut changed after its initial control');
+  };
   // A new physical package never adopts a previous committed/uncommitted
   // package merely because a request id, path or content happens to match.
   if (readControlRequest(driver, identity.principalId, 'state.migrate', request.requestId))
@@ -119,6 +140,7 @@ export async function produceInstalledOwnedLegacyImport(driver: SqliteDriver, ar
   const initial = decodeOwnedLegacyImportControl({ ...initialCore, controlDigest: digestOmitting(initialCore, 'controlDigest') });
   await publish(initial, initial.format); publishHeldMigrationInitialSpine(filesystem, preparation, initial); current();
   await prepareHeldMigrationLegacyLocks(filesystem, signal); current();
+  await recheckProcessCut();
 
   const observedAt = prepareTime(driver, owner), observation = observeHeldMigrationOriginalAuth(filesystem);
   if (observation.presence !== 'absent')
@@ -207,33 +229,35 @@ export async function produceInstalledOwnedLegacyImport(driver: SqliteDriver, ar
     requestId: request.requestId, migrationId: request.migrationId, preparationRef: preparationArtifact.ref,
     preparationDigest: preparation.preparationDigest, receiptRef: receiptArtifact.ref, receiptDigest: receipt.receiptDigest, completedAt: receipt.completedAt });
   const responseArtifact = await publish(response, 'cliq-owned-legacy-import-response-v1');
-  const committed = await withMigrationCredentialAuthorityLock(selected, gate, credentialAuthority =>
-    commitInstalledOwnedLegacyImport(driver, artifacts, owner, selected, filesystem, { identity, requestRef: requestArtifact.ref,
+  return withMigrationCredentialAuthorityLock(selected, gate, async credentialAuthority => {
+    const committed = await commitInstalledOwnedLegacyImport(driver, artifacts, owner, selected, filesystem, { identity, requestRef: requestArtifact.ref,
       requestDigest: requestArtifact.ref, preparationRef: preparationArtifact.ref, preparationDigest: preparation.preparationDigest,
       controlRef: cutoverArtifact.ref, controlDigest: cutover.controlDigest, receiptRef: receiptArtifact.ref,
-      receiptDigest: receipt.receiptDigest, responseRef: responseArtifact.ref, credentialAuthority, signal }), signal); current();
-  const committedCore = { ...cutover, phase: 'cutover_import_committed', controlRevision: 4,
-    previousControlRef: cutoverArtifact.ref, previousControlDigest: cutover.controlDigest,
-    committedReceiptRef: receiptArtifact.ref, committedReceiptDigest: receipt.receiptDigest,
-    committedResponseRef: responseArtifact.ref, committedResponseDigest: responseArtifact.ref,
-    updatedAt: committed.committedAt, controlDigest: '' };
-  const committedControl = decodeOwnedLegacyImportControl({ ...committedCore, controlDigest: digestOmitting(committedCore, 'controlDigest') });
-  await publish(committedControl, committedControl.format); advanceHeldMigrationControl(filesystem, committedControl); current();
-  publishHeldMigrationAuthCutover(filesystem, authMarker); current();
-  const authorityCore = { schemaVersion: 1, format: 'cliq-state-authority-v1', authority: 'kernel', generationId: generation.generationId,
-    migrationId: request.migrationId, receiptRef: receiptArtifact.ref, receiptDigest: receipt.receiptDigest,
-    stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
-    stateRootCanonicalAbsolutePath: roots.stateRoot.canonicalAbsolutePath,
-    candidateRef: candidateArtifact.ref, candidateDigest: candidate.candidateDigest,
-    kernelGenerationIdentityRef: first.acquisition.kernelGenerationIdentityRef,
-    kernelGenerationIdentityDigest: first.acquisition.kernelGenerationIdentityDigest,
-    publishedAt: prepareTime(driver, owner), markerDigest: '' };
-  const authority = decodeMigrationAuthorityMarker({ ...authorityCore, markerDigest: digestOmitting(authorityCore, 'markerDigest') });
-  publishHeldMigrationKernelAuthority(filesystem, authority); current();
-  const actual = readControlRequest(driver, identity.principalId, 'state.migrate', request.requestId);
-  if (!actual || actual.responseRef !== responseArtifact.ref || actual.requestDigest !== requestArtifact.ref ||
-      actual.committedAt !== committed.committedAt || canonicalSha256(readHeldMigrationControl(filesystem)) !== canonicalSha256(committedControl) ||
-      canonicalSha256(readHeldMigrationRendezvous(filesystem)) !== canonicalSha256(authority))
-    invalid('owned import did not close its original response and physical marker-last lineage');
-  return Object.freeze({ response, committedAt: committed.committedAt });
+      receiptDigest: receipt.receiptDigest, responseRef: responseArtifact.ref, credentialAuthority, signal }); current();
+    const committedCore = { ...cutover, phase: 'cutover_import_committed', controlRevision: 4,
+      previousControlRef: cutoverArtifact.ref, previousControlDigest: cutover.controlDigest,
+      committedReceiptRef: receiptArtifact.ref, committedReceiptDigest: receipt.receiptDigest,
+      committedResponseRef: responseArtifact.ref, committedResponseDigest: responseArtifact.ref,
+      updatedAt: committed.committedAt, controlDigest: '' };
+    const committedControl = decodeOwnedLegacyImportControl({ ...committedCore, controlDigest: digestOmitting(committedCore, 'controlDigest') });
+    await publish(committedControl, committedControl.format); advanceHeldMigrationControl(filesystem, committedControl); current();
+    const authorityCore = { schemaVersion: 1, format: 'cliq-state-authority-v1', authority: 'kernel', generationId: generation.generationId,
+      migrationId: request.migrationId, receiptRef: receiptArtifact.ref, receiptDigest: receipt.receiptDigest,
+      stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
+      stateRootCanonicalAbsolutePath: roots.stateRoot.canonicalAbsolutePath,
+      candidateRef: candidateArtifact.ref, candidateDigest: candidate.candidateDigest,
+      kernelGenerationIdentityRef: first.acquisition.kernelGenerationIdentityRef,
+      kernelGenerationIdentityDigest: first.acquisition.kernelGenerationIdentityDigest,
+      publishedAt: prepareTime(driver, owner), markerDigest: '' };
+    const authority = decodeMigrationAuthorityMarker({ ...authorityCore, markerDigest: digestOmitting(authorityCore, 'markerDigest') });
+    await recheckProcessCut();
+    publishHeldMigrationAuthCutover(filesystem, authMarker); current();
+    publishHeldMigrationKernelAuthority(filesystem, authority); current();
+    const actual = readControlRequest(driver, identity.principalId, 'state.migrate', request.requestId);
+    if (!actual || actual.responseRef !== responseArtifact.ref || actual.requestDigest !== requestArtifact.ref ||
+        actual.committedAt !== committed.committedAt || canonicalSha256(readHeldMigrationControl(filesystem)) !== canonicalSha256(committedControl) ||
+        canonicalSha256(readHeldMigrationRendezvous(filesystem)) !== canonicalSha256(authority))
+      invalid('owned import did not close its original response and physical marker-last lineage');
+    return Object.freeze({ response, committedAt: committed.committedAt });
+  }, signal);
 }

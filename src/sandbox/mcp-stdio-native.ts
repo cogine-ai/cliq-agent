@@ -10,7 +10,7 @@ import { borrowMcpStdioInput, decodeMcpStdioLifecycleData, decodeMcpStdioCleanup
 import type { McpStdioScopeObservation, McpStdioNativeLifecycle, McpStdioNativeCleanup, McpStdioRecoveryNativeLifecycle, McpStdioRecoveryNativeCleanup } from '../state/mcp-stdio-lifecycle.js';
 import type { NativeMcpAdminOriginalRetirement } from './mcp-admin-retirement.js';
 import type { NativeMcpStdioAdminOwner, NativeMcpStdioRunOwner, NativeMcpStdioAdminJoined, NativeMcpStdioRunJoined,
-  NativeMcpStdioRecoveryOwner, NativeMcpStdioRecoveryJoined, NativeMcpStdioPeer, NativeMcpStdioServerImage } from '../state/mcp-stdio-broker-native.js';
+  NativeMcpStdioRecoveryOwner, NativeMcpStdioRecoveryClosure, NativeMcpStdioPeer, NativeMcpStdioServerImage } from '../state/mcp-stdio-broker-native.js';
 import { withInstalledWorkerRoot, type HeldInstalledRuntime, type HeldInstalledAnchor } from '../state/installed-runtime.js';
 import { assertLinuxWorkerController, reserveInstalledMcpStdioAdmin, reserveInstalledMcpStdioRun, reserveInstalledMcpStdioRecovery,
   cleanupInstalledMcpStdioAdmin, cleanupInstalledMcpStdioRun, cleanupInstalledMcpStdioRecovery, type LinuxWorkerController } from './linux-worker.js';
@@ -43,7 +43,7 @@ export type NativeMcpStdioCleanupScope = Readonly<Pick<NativeMcpStdioScope,
 }>;
 type Input = HeldRunMcpStdioInput | HeldAdminMcpStdioInput | HeldRecoveryMcpStdioInput;
 type Owner = NativeMcpStdioRunOwner | NativeMcpStdioAdminOwner | NativeMcpStdioRecoveryOwner;
-type OwnerJoined = NativeMcpStdioRunJoined | NativeMcpStdioAdminJoined | NativeMcpStdioRecoveryJoined;
+type OwnerJoined = NativeMcpStdioRunJoined | NativeMcpStdioAdminJoined | NativeMcpStdioRecoveryClosure;
 type Construction = Readonly<{
   selected: HeldInstalledRuntime; anchor: HeldInstalledAnchor; controller: LinuxWorkerController; lock: HeldStateOwnerLock;
   serverImage: NativeMcpStdioServerImage; resources: SandboxResourceSpec; launchDeadlineMs: number; callDeadlineMs: number; signal?: AbortSignal;
@@ -104,7 +104,8 @@ function prepare(input: Construction, physical: Input, binding: AdminMcpStdioInp
   if (purpose === 'recovery' && 'adapterExecutableId' in binding) {
     const entries = input.selected.bundle.entries.filter(entry => entry.entryId === binding.adapterExecutableId), entry = entries[0];
     if (entries.length !== 1 || !entry || entry.role !== 'mcp_recovery_adapter' || entry.executable !== true ||
-        entry.digest !== binding.adapterExecutableDigest)
+        entry.digest !== binding.adapterExecutableDigest || input.serverImage.identity.sha256 !== entry.digest ||
+        input.serverImage.identity.byteCount !== entry.byteCount)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'recovery inspector is not independently rooted in the current signed Bundle');
   }
   const nativeInput = borrowMcpStdioInput(input.lock, physical, binding, purpose, false), config = resourceBytes(input, purpose);

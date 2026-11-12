@@ -137,6 +137,8 @@ declare const join: unique symbol;
 declare const fence: unique symbol;
 declare const server: unique symbol;
 declare const probeFence: unique symbol;
+declare const unavailableProbeFence: unique symbol;
+declare const unavailableJoin: unique symbol;
 export type NativeMcpStdioReceipt = Readonly<{ readonly [receipt]: true }>;
 export type NativeMcpStdioRecipe = Readonly<{
   readonly [recipe]: true;
@@ -194,13 +196,23 @@ export type NativeMcpStdioAdminJoined = Joined & Readonly<{ purpose: 'admin' }>;
 export type NativeMcpStdioRecoveryJoined = Omit<Joined, 'kind' | 'effectReleased'> & Readonly<{
   kind: 'mcp_stdio_recovery_owner_joined'; purpose: 'recovery'; statusReleased: boolean; releaseFenceTokenDigest: string;
 }>;
+export type McpStdioRecoveryUnavailableJoinData = Omit<NativeMcpStdioRecoveryJoined, 'kind'> & Readonly<{
+  kind: 'mcp_stdio_recovery_response_unavailable_joined'; reason: 'native_response_refused';
+}>;
+export type NativeMcpStdioRecoveryUnavailableJoined = McpStdioRecoveryUnavailableJoinData & Readonly<{ readonly [unavailableJoin]: true }>;
+export type NativeMcpStdioRecoveryClosure = NativeMcpStdioRecoveryJoined | NativeMcpStdioRecoveryUnavailableJoined;
 export type NativeMcpStdioProbeFence = Readonly<{ readonly [probeFence]: true; assertHeld(): void; close(): void }>;
+export type NativeMcpStdioUnavailableProbeFence = Readonly<{ readonly [unavailableProbeFence]: true; assertHeld(): void; close(): void }>;
 export type NativeMcpStdioRecoveryOwner = Omit<NativeMcpStdioProtocolOwner<McpStdioRecoveryBinding, never, NativeMcpStdioRecoveryJoined>,
-  'bindLaunch' | 'assertLaunchBinding'> & Readonly<{
+  'bindLaunch' | 'assertLaunchBinding' | 'close'> & Readonly<{
   releaseFenceTokenDigest: string;
   bindProbe(binding: McpStdioRecoveryBinding): void;
   assertProbeBinding(binding: McpStdioRecoveryBinding): void;
   acquireProbeFence(binding: McpStdioRecoveryBinding): NativeMcpStdioProbeFence;
+  close(): Promise<NativeMcpStdioRecoveryClosure>;
+  assertUnavailableJoined(observation: NativeMcpStdioRecoveryUnavailableJoined, binding: McpStdioRecoveryBinding): void;
+  acquireUnavailableProbeFence(binding: McpStdioRecoveryBinding): NativeMcpStdioUnavailableProbeFence;
+  releaseUnavailableDomain(): void;
 }>;
 export type NativeMcpStdioEffectFence = Readonly<{ readonly [fence]: true; assertHeld(): void; close(): void }>;
 export type NativeMcpStdioProtocolOwner<L, C, J> = Readonly<{

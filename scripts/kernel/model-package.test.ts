@@ -59,3 +59,15 @@ test('unsupported provider, altered model name and missing executable bytes cann
   assert.throws(() => buildInstalledModelPackageEntries(selected, Buffer.alloc(0), edit));
   assert.throws(() => buildInstalledModelPackageEntries(selected, broker, Buffer.alloc(0)));
 });
+
+test('local-only model material uses the fixed native broker and exclusively local prompts', () => {
+  const local = { provider: 'ollama' as const, model: 'functiongemma-cliq:270m-q4-k-m' };
+  const material = buildInstalledModelPackageEntries(local, broker, edit);
+  const remote = buildInstalledModelPackageEntries(selected, broker, edit);
+  assert.deepEqual(material.tools, remote.tools);
+  assert.deepEqual(material.entries.filter(entry => entry.role === 'provider_adapter'),
+    remote.entries.filter(entry => entry.role === 'provider_adapter'));
+  assert.equal(material.structuredArtifacts.length, 2);
+  assert(material.structuredArtifacts.every(root => 'provider' in root && root.provider === 'ollama' && root.model === local.model));
+  assert(material.entries.every(entry => !entry.relativePath.startsWith('model-objects/') && entry.relativePath !== 'model-authority.json'));
+});

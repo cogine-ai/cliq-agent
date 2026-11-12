@@ -7,18 +7,21 @@
 #include "mcp-protocol-data.h"
 _Static_assert(CLIQ_MCP_STDIO_MAX_MESSAGE == MCP_PROTOCOL_BODY_CAP, "same original MCP protocol body bound");
 static napi_value undefined(napi_env env) { napi_value value; napi_get_undefined(env, &value); return value; }
-static const napi_type_tag STDIO_RUN_OWNER_TAG = {UINT64_C(0x9964bd20e2744ed5), UINT64_C(0xa74a21667b951c04)};
-static const napi_type_tag STDIO_ADMIN_OWNER_TAG = {UINT64_C(0x4b85d15c2104454b), UINT64_C(0xb3c7e1ef08a9456a)};
-static const napi_type_tag STDIO_RECOVERY_OWNER_TAG = {UINT64_C(0xc5829f8e285e4e3b), UINT64_C(0x96bbd52345fa8db2)};
-static const napi_type_tag STDIO_RECOVERY_JOIN_TAG = {UINT64_C(0x93d208bc6f904132), UINT64_C(0xb2822df2d8f110d9)};
-static const napi_type_tag STDIO_RECOVERY_FENCE_TAG = {UINT64_C(0x712b3c3f92134e3a), UINT64_C(0xade17e0cd0b98c70)};
-static const napi_type_tag STDIO_RECEIPT_TAG = {UINT64_C(0x2e0290f4e7cb4ec1), UINT64_C(0x9f16a85790d6ac31)};
-static const napi_type_tag STDIO_JOIN_TAG = {UINT64_C(0x64825d614fa548d6), UINT64_C(0xa5fe47922d0e790a)};
-static const napi_type_tag STDIO_RAW_TAG = {UINT64_C(0x8310692cf4e2474c), UINT64_C(0xb0a9d66d5e8c1731)};
-static const napi_type_tag STDIO_UNUSABLE_TAG = {UINT64_C(0xb11da0345a814c4f), UINT64_C(0x851f4f7c9a6b7ee2)};
-static const napi_type_tag STDIO_BYTES_TAG = {UINT64_C(0xc84fb904210b4f42), UINT64_C(0x960aae8166df8d40)};
-static const napi_type_tag STDIO_RESPONSE_JOIN_TAG = {UINT64_C(0x05fd99ad0fdf48b9), UINT64_C(0xa10b3ca9da606ff1)};
-static const napi_type_tag STDIO_FENCE_TAG = {UINT64_C(0xcc427ab598344e9d), UINT64_C(0xa8d905ca6f7b13d0)};
+// Private objects holding this broker or its original proof use the current layout tags.
+static const napi_type_tag STDIO_RUN_OWNER_TAG = {UINT64_C(0x802f897f2e974fc4), UINT64_C(0xeda20d8ffdeb3e18)};
+static const napi_type_tag STDIO_ADMIN_OWNER_TAG = {UINT64_C(0x52cee503ede7445a), UINT64_C(0xf92fcd068ed76776)};
+static const napi_type_tag STDIO_RECOVERY_OWNER_TAG = {UINT64_C(0xdcc9abd1e4bd4f2a), UINT64_C(0xdc53f9cac384afae)};
+static const napi_type_tag STDIO_RECOVERY_JOIN_TAG = {UINT64_C(0x8a993ce3a3734023), UINT64_C(0xf86a011b5e8f32c5)};
+static const napi_type_tag STDIO_RECOVERY_FENCE_TAG = {UINT64_C(0x686008605ef04f2b), UINT64_C(0xe70952e556c7ae6c)};
+static const napi_type_tag STDIO_RECEIPT_TAG = {UINT64_C(0x3749a4ab2b284fd0), UINT64_C(0xd5fe84be16a88e2d)};
+static const napi_type_tag STDIO_JOIN_TAG = {UINT64_C(0x7dc9693e834649c7), UINT64_C(0xef166b7bab705b16)};
+static const napi_type_tag STDIO_RAW_TAG = {UINT64_C(0x9a5b5d733801465d), UINT64_C(0xfa41fa84d8f2352d)};
+static const napi_type_tag STDIO_UNUSABLE_TAG = {UINT64_C(0xa856946b96624d5e), UINT64_C(0xcff763951c155cfe)};
+static const napi_type_tag STDIO_BYTES_TAG = {UINT64_C(0xd1048d5bede84e53), UINT64_C(0xdce28268e0a1af5c)};
+static const napi_type_tag STDIO_RESPONSE_JOIN_TAG = {UINT64_C(0x1cb6adf2c33c49a8), UINT64_C(0xebe310405c1e4ded)};
+static const napi_type_tag STDIO_FENCE_TAG = {UINT64_C(0xd5094eea54d74f8c), UINT64_C(0xe2312923e90531cc)};
+static const napi_type_tag STDIO_RECOVERY_UNAVAILABLE_JOIN_TAG = {UINT64_C(0x7c7846d89b3248b1), UINT64_C(0xa29aedd25cb69584)};
+static const napi_type_tag STDIO_RECOVERY_UNAVAILABLE_FENCE_TAG = {UINT64_C(0x684323a2cc714639), UINT64_C(0x85f31301e4c9ac06)};
 struct broker;
 enum stdio_message_kind { STDIO_NOTIFICATION, STDIO_PING, STDIO_RESPONSE };
 struct stdio_receipt {
@@ -49,12 +52,13 @@ struct broker {
     bool timer_ready, timer_closing, timer_closed, env_closing, finalized;
     bool admin, recovery, status_released, bound, call_bound, exec_released, setup_released, effect_released, retained, fence_locked;
     bool closing, close_finished, retired, unsafe, raw_screened, raw_refused, response_refused, io_aborted;
+    bool payload_refused, refused_output_discarded;
     bool stage_requested, stage_released, stage_written, protocol_complete, protocol_sent, cancel_queued, client_joined, output_eof[2];
     bool await_write, write_ping;
     unsigned command_kind, write_phase;
     unsigned phase, completed, ordinal, ping_count, aggregate_entries, ack_stream;
     unsigned references;
-    uint64_t deadline_ms, stop_deadline_ms;
+    uint64_t deadline_ms, stop_deadline_ms, retired_at_ms;
     unsigned char *output[2], *tx, rx_header[16], *rx;
     size_t output_size[2], parse_at, capture_start, tx_size, tx_at, rx_header_at, rx_size, rx_at;
     unsigned rx_kind;
@@ -75,6 +79,20 @@ static bool broker_fail(struct broker *broker, const char *code) {
     const char *expected = NULL; atomic_compare_exchange_strong(&broker->error, &expected, code); return false;
 }
 #include "no-echo-bytes-mechanism.h"
+enum stdio_received_screen { STDIO_SCREEN_CLEAR, STDIO_SCREEN_REFUSED, STDIO_SCREEN_UNSAFE };
+static enum stdio_received_screen stdio_screen_received(struct broker *broker, const unsigned char *bytes, size_t size) {
+    const char *prior = atomic_exchange(&broker->error, NULL);
+    bool valid = mcp_no_echo_all(broker, bytes, size);
+    const char *screen_error = atomic_exchange(&broker->error, prior);
+    if (valid) return STDIO_SCREEN_CLEAR;
+    if (screen_error && !strcmp(screen_error, "broker_response_refused")) return STDIO_SCREEN_REFUSED;
+    return STDIO_SCREEN_UNSAFE;
+}
+static void stdio_mark_refused(struct broker *broker, bool payload) {
+    broker->response_refused = true;
+    broker->payload_refused = broker->recovery && payload;
+    broker_fail(broker, "mcp_response_refused");
+}
 static bool stdio_current(struct broker *broker, napi_env env) {
     return broker && broker->env == env && broker->creator_pid == getpid() && syscall(SYS_gettid) == getpid();
 }
@@ -273,8 +291,18 @@ static bool stdio_binding_matches(struct broker *broker, napi_value value, bool 
 static struct stdio_receipt *stdio_decode(struct broker *broker, const unsigned char *bytes, size_t size, size_t end) {
     struct mcp_json json;
     // The response ceiling includes its mandatory LF framing byte.
-    if (size >= broker->recipe.header.maximum_response_bytes || !mcp_json_parse(bytes, size, &json)) {
-        broker->response_refused = true; broker_fail(broker, "mcp_response_refused"); return NULL;
+    if (size >= broker->recipe.header.maximum_response_bytes) {
+        stdio_mark_refused(broker, false);
+        return NULL;
+    }
+    if (!mcp_json_parse(bytes, size, &json)) {
+        // This is a complete LF-delimited payload inside an already validated
+        // native packet. Invalid JSON can be discarded after a finite NoEcho
+        // disposition; allocation failure cannot supply that observation.
+        bool payload = broker->recovery && !json.allocation_failed &&
+            stdio_screen_received(broker, bytes, size) != STDIO_SCREEN_UNSAFE;
+        stdio_mark_refused(broker, payload);
+        return NULL;
     }
     unsigned id = mcp_json_member(&json, 1, "id"), result = mcp_json_member(&json, 1, "result"), error = mcp_json_member(&json, 1, "error");
     unsigned method = mcp_json_member(&json, 1, "method"), params = mcp_json_member(&json, 1, "params");
@@ -314,7 +342,14 @@ static struct stdio_receipt *stdio_decode(struct broker *broker, const unsigned 
     }
     // The complete actual event is screened before it can become a JS receipt.
     // Matching detection inside a refused event cannot substitute for this.
-    valid = valid && mcp_no_echo_all(broker, bytes, size);
+    bool payload_refused = false;
+    if (broker->recovery) {
+        enum stdio_received_screen screen = json.allocation_failed ? STDIO_SCREEN_UNSAFE : stdio_screen_received(broker, bytes, size);
+        payload_refused = screen != STDIO_SCREEN_UNSAFE && (!valid || screen == STDIO_SCREEN_REFUSED);
+        valid = valid && screen == STDIO_SCREEN_CLEAR;
+    } else {
+        valid = valid && mcp_no_echo_all(broker, bytes, size);
+    }
     struct stdio_receipt *receipt = valid ? calloc(1, sizeof(*receipt)) : NULL;
     if (receipt) {
         receipt->message = malloc(size); receipt->owner = broker; receipt->phase = broker->phase;
@@ -332,7 +367,7 @@ static struct stdio_receipt *stdio_decode(struct broker *broker, const unsigned 
         else { free(receipt->message); free(receipt->ping_id); free(receipt); receipt = NULL; }
     }
     free(semantic); free(json.nodes);
-    if (!receipt) { broker->response_refused = true; broker_fail(broker, "mcp_response_refused"); }
+    if (!receipt) stdio_mark_refused(broker, payload_refused);
     return receipt;
 }
 static bool stdio_parse_lines(struct broker *broker) {
@@ -348,7 +383,7 @@ static bool stdio_parse_lines(struct broker *broker) {
         size_t end = (size_t)(lf - broker->output[0]) + 1, size = end - broker->parse_at - 1;
         struct stdio_receipt *receipt = stdio_decode(broker, broker->output[0] + broker->parse_at, size, end);
         broker->parse_at = end;
-        if (!receipt) return false;
+        if (!receipt) return broker->payload_refused;
         if (receipt->kind == STDIO_PING) {
             broker->ping_count++;
             if (broker->closing) { receipt->ping_released = true; continue; }
@@ -409,10 +444,16 @@ static napi_value stdio_stage_value(struct broker *broker, bool written) {
     set_string(broker->env, value, "phase", written ? "initialized" : mcp_phase_name(broker->phase));
     napi_object_freeze(broker->env, value); return value;
 }
-static napi_value stdio_join_value(struct broker *broker) {
-    napi_value value, flag, stages, phase; napi_create_object(broker->env, &value);
-    if (!stdio_wrap_proof(broker, value, NULL, broker->recovery ? &STDIO_RECOVERY_JOIN_TAG : &STDIO_JOIN_TAG)) return NULL;
-    set_string(broker->env, value, "kind", broker->recovery ? "mcp_stdio_recovery_owner_joined" : "mcp_stdio_owner_joined"); set_string(broker->env, value, "purpose", broker->admin ? "admin" : broker->recovery ? "recovery" : "run");
+static napi_value stdio_join_value(struct broker *broker, bool unavailable) {
+    napi_value value, flag, stages, phase;
+    if (napi_create_object(broker->env, &value) != napi_ok) return NULL;
+    const napi_type_tag *tag = unavailable ? &STDIO_RECOVERY_UNAVAILABLE_JOIN_TAG : broker->recovery ? &STDIO_RECOVERY_JOIN_TAG : &STDIO_JOIN_TAG;
+    if (!stdio_wrap_proof(broker, value, NULL, tag)) return NULL;
+    const char *kind = unavailable ? "mcp_stdio_recovery_response_unavailable_joined" :
+        broker->recovery ? "mcp_stdio_recovery_owner_joined" : "mcp_stdio_owner_joined";
+    set_string(broker->env, value, "kind", kind);
+    set_string(broker->env, value, "purpose", broker->admin ? "admin" : broker->recovery ? "recovery" : "run");
+    if (unavailable) set_string(broker->env, value, "reason", "native_response_refused");
     napi_get_boolean(broker->env, broker->exec_released, &flag); napi_set_named_property(broker->env, value, "execReleased", flag);
     napi_get_boolean(broker->env, broker->setup_released, &flag); napi_set_named_property(broker->env, value, "setupReleased", flag);
     napi_get_boolean(broker->env, broker->recovery ? broker->status_released : broker->effect_released, &flag); napi_set_named_property(broker->env, value, broker->recovery ? "statusReleased" : "effectReleased", flag);
@@ -437,7 +478,8 @@ static void stdio_deliver(struct broker *broker) {
     else if (!broker->closing && broker->exec_released && !broker->stage_requested && !broker->stage_released && broker->phase < broker->recipe.header.phase_count) {
         broker->stage_requested = true; value = stdio_stage_value(broker, false);
     } else if ((broker->closing && broker->retired) || broker->response_refused || broker->unsafe) {
-        napi_reject_deferred(broker->env, broker->message_deferred, stdio_error(broker, broker->unsafe || broker->response_refused));
+        napi_reject_deferred(broker->env, broker->message_deferred,
+            stdio_error(broker, broker->unsafe || (broker->response_refused && !broker->payload_refused)));
         broker->message_deferred = NULL; return;
     }
     if (value) { napi_resolve_deferred(broker->env, broker->message_deferred, value); broker->message_deferred = NULL; }
@@ -448,7 +490,9 @@ static bool stdio_receive_packet(struct broker *broker, unsigned kind, const uns
         unsigned stream = kind == CLIQ_MCP_STDIO_STDERR ? 1 : 0;
         if (!size || size > CLIQ_MCP_STDIO_CHUNK_BYTES || broker->output_eof[stream] || broker->ack_stream ||
             size > broker->recipe.header.maximum_output_bytes - broker->output_size[0] - broker->output_size[1]) return false;
-        memcpy(broker->output[stream] + broker->output_size[stream], bytes, size); broker->output_size[stream] += size;
+        if (!broker->refused_output_discarded)
+            memcpy(broker->output[stream] + broker->output_size[stream], bytes, size);
+        broker->output_size[stream] += size;
         broker->ack_stream = stream + 1;
         return stream || stdio_parse_lines(broker);
     }
@@ -558,13 +602,53 @@ static bool stdio_queue_command(struct broker *broker) {
     }
     return true;
 }
+static void stdio_discard_refused_output(struct broker *broker) {
+    if (broker->refused_output_discarded) return;
+    broker->refused_output_discarded = true;
+    for (unsigned stream = 0; stream < 2; stream++)
+        wipe(broker->output[stream], broker->output_size[stream]);
+    broker->pending = NULL;
+    stdio_begin_close(broker);
+}
+static bool stdio_screen_recovery_drain(struct broker *broker) {
+    if (!broker->recovery || broker->response_refused || broker->raw_screened) return true;
+    // Commit the disposition before the original controller's last drained
+    // progress and ACK. Later history can verify it from that original record.
+    enum stdio_received_screen out = stdio_screen_received(broker, broker->output[0], broker->output_size[0]);
+    enum stdio_received_screen err = stdio_screen_received(broker, broker->output[1], broker->output_size[1]);
+    if (out == STDIO_SCREEN_UNSAFE || err == STDIO_SCREEN_UNSAFE) return false;
+    broker->raw_screened = true;
+    broker->raw_refused = out == STDIO_SCREEN_REFUSED || err == STDIO_SCREEN_REFUSED;
+    if (broker->raw_refused) {
+        stdio_mark_refused(broker, true);
+        stdio_discard_refused_output(broker);
+    }
+    return true;
+}
+static bool stdio_io_drained(const struct broker *broker) {
+    return broker->closing && broker->client_joined && broker->output_eof[0] && broker->output_eof[1] &&
+        !broker->rx && !broker->rx_header_at && !broker->tx && !broker->ack_stream;
+}
+static void stdio_observe_peer_retirement(struct broker *broker) {
+    struct cliq_mcp_stdio_peer *peer = broker->peer;
+    if (!atomic_load(&peer->physical_joined) || !atomic_load(&peer->output_retired) ||
+        (broker->payload_refused && !atomic_load(&peer->operation_closed))) return;
+    broker->retired = true;
+    if (!broker->retired_at_ms) broker->retired_at_ms = stdio_clock_ms(CLOCK_MONOTONIC);
+}
 static bool stdio_pump_io(struct broker *broker) {
     if (!broker->peer) { if (broker->closing) broker->retired = true; return true; }
     int fd = broker->peer->operation_fd ? broker->peer->operation_fd(broker->peer) : -1;
     if (fd < 0) {
         if (broker->closing && !broker->exec_released) {
             if (!stdio_peer_progress(broker, true)) return false;
-            broker->retired = atomic_load(&broker->peer->physical_joined) && atomic_load(&broker->peer->output_retired);
+            stdio_observe_peer_retirement(broker);
+        } else if (stdio_io_drained(broker) && atomic_load(&broker->peer->io_joined) &&
+            broker->peer->assert_current && broker->peer->assert_current(broker->peer)) {
+            // The actual ACK may retire this operation FD before the next
+            // broker tick. Only already-observed drain and the same original
+            // peer's joined/output facts can close the descriptor-less path.
+            stdio_observe_peer_retirement(broker);
         }
         return true;
     }
@@ -572,11 +656,23 @@ static bool stdio_pump_io(struct broker *broker) {
     if (!stdio_read(broker, fd)) return false;
     if (!stdio_flush_or_join(broker, fd)) return false;
     if (!stdio_parse_lines(broker)) return false;
-    bool drained = broker->closing && broker->client_joined && broker->output_eof[0] && broker->output_eof[1] &&
-        !broker->rx && !broker->rx_header_at && !broker->tx && !broker->ack_stream;
+    bool drained = stdio_io_drained(broker);
+    if (drained && !stdio_screen_recovery_drain(broker)) return false;
     if (!stdio_peer_progress(broker, drained)) return false;
-    if (drained) broker->retired = atomic_load(&broker->peer->physical_joined) && atomic_load(&broker->peer->output_retired);
+    if (drained) stdio_observe_peer_retirement(broker);
     return true;
+}
+static bool stdio_unavailable_joined(const struct broker *broker) {
+    const struct cliq_mcp_stdio_peer *peer = broker->peer;
+    return broker->recovery && broker->bound && broker->exec_released && !broker->effect_released &&
+        broker->response_refused && broker->payload_refused && broker->refused_output_discarded &&
+        broker->close_finished && broker->retired && !broker->unsafe && !broker->io_aborted &&
+        broker->retired_at_ms && broker->retired_at_ms < broker->stop_deadline_ms &&
+        broker->client_joined && broker->output_eof[0] && broker->output_eof[1] &&
+        !broker->rx && !broker->rx_header_at && !broker->tx && !broker->ack_stream &&
+        peer && peer->purpose == CLIQ_MCP_STDIO_RECOVERY && broker->peer->assert_current &&
+        broker->peer->assert_current(broker->peer) && atomic_load(&peer->revoked) && atomic_load(&peer->io_joined) &&
+        atomic_load(&peer->physical_joined) && atomic_load(&peer->output_retired) && atomic_load(&peer->operation_closed);
 }
 static void stdio_close_timer(uv_handle_t *handle) {
     struct broker *broker = handle->data; struct native_callback_scope callback;
@@ -587,8 +683,9 @@ static void stdio_close_timer(uv_handle_t *handle) {
     if (broker->close_promise) { napi_delete_reference(broker->env, broker->close_promise); broker->close_promise = NULL; }
     if (broker->close_deferred && !broker->env_closing) {
         napi_deferred deferred = broker->close_deferred; broker->close_deferred = NULL;
-        if (broker->unsafe || broker->response_refused) napi_reject_deferred(broker->env, deferred, stdio_error(broker, true));
-        else napi_resolve_deferred(broker->env, deferred, stdio_join_value(broker));
+        napi_value joined = broker->unsafe || broker->response_refused ? NULL : stdio_join_value(broker, false);
+        if (joined) napi_resolve_deferred(broker->env, deferred, joined);
+        else napi_reject_deferred(broker->env, deferred, stdio_error(broker, true));
     }
     if (broker->cleanup_hook && (!broker->retained || broker->env_closing)) {
         napi_remove_async_cleanup_hook(broker->cleanup_hook); broker->cleanup_hook = NULL;
@@ -624,7 +721,8 @@ static void stdio_tick(uv_timer_t *timer) {
     if (!broker->closing && !broker_live(broker)) stdio_begin_close(broker);
     if (broker->closing && broker->pending && broker->pending->kind != STDIO_RESPONSE && !broker->message_deferred) broker->pending = NULL;
     if (!broker->io_aborted && !stdio_pump_io(broker)) { broker_fail(broker, "mcp_transport_interrupted"); stdio_abort_io(broker); }
-    if (broker->response_refused || broker->unsafe) stdio_abort_io(broker);
+    if (broker->unsafe || (broker->response_refused && !broker->payload_refused)) stdio_abort_io(broker);
+    else if (broker->payload_refused) stdio_discard_refused_output(broker);
     stdio_deliver(broker);
     if (broker->closing && !broker->retired && stdio_clock_ms(CLOCK_MONOTONIC) >= broker->stop_deadline_ms && !broker->unsafe) {
         broker->unsafe = true; atomic_store(&retirement_failed, true);
@@ -838,13 +936,32 @@ static napi_value stdio_close(napi_env env, napi_callback_info info) {
     if (napi_create_promise(env, &broker->close_deferred, &promise) != napi_ok) return NULL;
     if (broker->close_finished) {
         napi_deferred deferred = broker->close_deferred; broker->close_deferred = NULL;
-        if (broker->unsafe || broker->response_refused) napi_reject_deferred(env, deferred, stdio_error(broker, true));
-        else napi_resolve_deferred(env, deferred, stdio_join_value(broker));
+        napi_value joined = broker->unsafe || broker->response_refused ? NULL : stdio_join_value(broker, false);
+        if (joined) napi_resolve_deferred(env, deferred, joined);
+        else napi_reject_deferred(env, deferred, stdio_error(broker, true));
     } else {
         if (napi_create_reference(env, promise, 1, &broker->close_promise) != napi_ok) return NULL;
         stdio_begin_close(broker);
     }
     return promise;
+}
+static napi_value stdio_read_unavailable_join(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    struct broker *broker = stdio_receiver(env, info, &argc, args);
+    if (!broker) return NULL;
+    if (argc || !stdio_unavailable_joined(broker)) return stdio_throw(broker, true);
+    napi_value result = stdio_join_value(broker, true);
+    return result ? result : stdio_throw(broker, true);
+}
+static napi_value stdio_assert_unavailable_join(napi_env env, napi_callback_info info) {
+    size_t argc = 3; napi_value args[3];
+    struct broker *broker = stdio_receiver(env, info, &argc, args);
+    if (!broker) return NULL;
+    if (argc != 2 || !stdio_unavailable_joined(broker) ||
+        !stdio_unwrap_proof(broker, args[0], &STDIO_RECOVERY_UNAVAILABLE_JOIN_TAG) ||
+        !stdio_binding_matches(broker, args[1], false, false))
+        return stdio_throw(broker, true);
+    return undefined(env);
 }
 static napi_value stdio_assert_join(napi_env env, napi_callback_info info) {
     size_t argc = 3; napi_value args[3]; struct broker *broker = stdio_receiver(env, info, &argc, args);
@@ -945,56 +1062,68 @@ static napi_value stdio_retain(napi_env env, napi_callback_info info) {
     if (broker->retained || broker->closing) return stdio_throw(broker, false);
     broker->retained = true; return undefined(env);
 }
-static napi_value stdio_release_domain(napi_env env, napi_callback_info info) {
-    size_t argc = 0; struct broker *broker = stdio_receiver(env, info, &argc, NULL);
+static napi_value stdio_release_domain_for(napi_env env, napi_callback_info info, bool unavailable) {
+    size_t argc = 1; napi_value args[1]; struct broker *broker = stdio_receiver(env, info, &argc, args);
     if (!broker) return NULL;
-    if (!broker->retained || !broker->close_finished || !broker->retired || broker->unsafe || broker->response_refused || broker->fence_locked)
+    if (!broker->retained || !broker->close_finished || !broker->retired || broker->unsafe || broker->fence_locked ||
+        (unavailable ? argc || !stdio_unavailable_joined(broker) : broker->response_refused))
         return stdio_throw(broker, true);
     broker->retained = false;
     if (broker->cleanup_hook) { napi_remove_async_cleanup_hook(broker->cleanup_hook); broker->cleanup_hook = NULL; }
     if (broker->work_owner) { napi_delete_reference(env, broker->work_owner); broker->work_owner = NULL; }
     return undefined(env);
 }
-static struct stdio_proof *stdio_fence_receiver(napi_env env, napi_callback_info info) {
-    size_t argc = 0; napi_value self; bool tagged = false, recovery = false; struct stdio_proof *proof = NULL;
+static napi_value stdio_release_domain(napi_env e, napi_callback_info i) { return stdio_release_domain_for(e, i, false); }
+static napi_value stdio_release_unavailable_domain(napi_env e, napi_callback_info i) { return stdio_release_domain_for(e, i, true); }
+static struct stdio_proof *stdio_fence_receiver(napi_env env, napi_callback_info info, bool *unavailable) {
+    size_t argc = 0; napi_value self; bool tagged = false, recovery = false, refused = false; struct stdio_proof *proof = NULL;
     if (napi_get_cb_info(env, info, &argc, NULL, &self, NULL) != napi_ok ||
         napi_check_object_type_tag(env, self, &STDIO_FENCE_TAG, &tagged) != napi_ok ||
-        napi_check_object_type_tag(env, self, &STDIO_RECOVERY_FENCE_TAG, &recovery) != napi_ok || (!tagged && !recovery) ||
-        napi_unwrap(env, self, (void **)&proof) != napi_ok || !proof || !stdio_current(proof->owner, env) || proof->owner->recovery != recovery) {
+        napi_check_object_type_tag(env, self, &STDIO_RECOVERY_FENCE_TAG, &recovery) != napi_ok ||
+        napi_check_object_type_tag(env, self, &STDIO_RECOVERY_UNAVAILABLE_FENCE_TAG, &refused) != napi_ok ||
+        (!tagged && !recovery && !refused) || napi_unwrap(env, self, (void **)&proof) != napi_ok || !proof ||
+        !stdio_current(proof->owner, env) || proof->owner->recovery != (recovery || refused)) {
         napi_throw_type_error(env, NULL, "Invalid original MCP stdio release-domain guard"); return NULL;
     }
+    if (unavailable) *unavailable = refused;
     return proof;
 }
 static napi_value stdio_fence_assert(napi_env env, napi_callback_info info) {
-    struct stdio_proof *proof = stdio_fence_receiver(env, info); if (!proof) return NULL;
+    bool unavailable = false;
+    struct stdio_proof *proof = stdio_fence_receiver(env, info, &unavailable); if (!proof) return NULL;
     struct broker *broker = proof->owner;
     if (!proof->fence_active || !broker->fence_locked || !broker->retained || !broker->close_finished || !broker->retired ||
-        !(broker->recovery ? broker->bound && broker->peer && atomic_load(&broker->peer->revoked) : broker->call_bound) || broker->unsafe || broker->response_refused) return stdio_throw(broker, true);
+        !(broker->recovery ? broker->bound && broker->peer && atomic_load(&broker->peer->revoked) : broker->call_bound) || broker->unsafe ||
+        (unavailable ? !stdio_unavailable_joined(broker) : broker->response_refused)) return stdio_throw(broker, true);
     return undefined(env);
 }
 static napi_value stdio_fence_close(napi_env env, napi_callback_info info) {
-    struct stdio_proof *proof = stdio_fence_receiver(env, info); if (!proof) return NULL;
+    struct stdio_proof *proof = stdio_fence_receiver(env, info, NULL); if (!proof) return NULL;
     if (!proof->fence_active) return undefined(env);
     struct broker *broker = proof->owner;
     if (!broker->fence_locked || pthread_mutex_unlock(&broker->release_mutex)) { broker->unsafe = true; return stdio_throw(broker, true); }
     proof->fence_active = false; broker->fence_locked = false; return undefined(env);
 }
-static napi_value stdio_acquire_fence(napi_env env, napi_callback_info info) {
+static napi_value stdio_acquire_fence_for(napi_env env, napi_callback_info info, bool unavailable) {
     size_t argc = 2; napi_value args[2]; struct broker *broker = stdio_receiver(env, info, &argc, args);
     if (!broker) return NULL;
     if (argc != 1 || broker->admin || !broker->retained || !broker->close_finished || !broker->retired ||
-        broker->unsafe || broker->response_refused || broker->fence_locked || !stdio_binding_matches(broker, args[0], !broker->recovery, false) ||
+        broker->unsafe || broker->fence_locked || (unavailable ? !stdio_unavailable_joined(broker) : broker->response_refused) ||
+        !stdio_binding_matches(broker, args[0], !broker->recovery, false) ||
         (broker->recovery && (!broker->peer || !atomic_load(&broker->peer->revoked))) ||
         pthread_mutex_lock(&broker->release_mutex)) return stdio_throw(broker, true);
     napi_value value; struct stdio_proof *proof = NULL;
     const napi_property_descriptor methods[] = {{"assertHeld", NULL, stdio_fence_assert, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, stdio_fence_close, NULL, NULL, NULL, napi_default, NULL}};
-    if (napi_create_object(env, &value) != napi_ok || !stdio_wrap_proof(broker, value, NULL, broker->recovery ? &STDIO_RECOVERY_FENCE_TAG : &STDIO_FENCE_TAG) ||
+    const napi_type_tag *tag = unavailable ? &STDIO_RECOVERY_UNAVAILABLE_FENCE_TAG : broker->recovery ? &STDIO_RECOVERY_FENCE_TAG : &STDIO_FENCE_TAG;
+    if (napi_create_object(env, &value) != napi_ok || !stdio_wrap_proof(broker, value, NULL, tag) ||
         napi_unwrap(env, value, (void **)&proof) != napi_ok || !proof || napi_define_properties(env, value, 2, methods) != napi_ok) {
         pthread_mutex_unlock(&broker->release_mutex); return stdio_throw(broker, true);
     }
     proof->fence_active = true; broker->fence_locked = true; napi_object_freeze(env, value); return value;
 }
+static napi_value stdio_acquire_fence(napi_env e, napi_callback_info i) { return stdio_acquire_fence_for(e, i, false); }
+static napi_value stdio_acquire_unavailable_fence(napi_env e, napi_callback_info i) { return stdio_acquire_fence_for(e, i, true); }
 static void stdio_abandon_preparation(struct broker *broker) {
     broker->closing = broker->retired = broker->close_finished = broker->timer_closed = true;
     if (broker->recipe.fd >= 0) { int fd = broker->recipe.fd; broker->recipe.fd = -1; if (close(fd)) atomic_store(&retirement_failed, true); }
@@ -1081,8 +1210,14 @@ static napi_value stdio_prepare(napi_env env, napi_callback_info info, unsigned 
         napi_define_properties(env, owner, sizeof(methods) / sizeof(methods[0]), methods) == napi_ok &&
         napi_define_properties(env, recipe, 1, &copy) == napi_ok;
     if (valid && !admin) {
-        const napi_property_descriptor probe_fence = {"acquireProbeFence", NULL, stdio_acquire_fence, NULL, NULL, NULL, napi_default, NULL};
-        valid = recovery ? napi_define_properties(env, owner, 1, &probe_fence) == napi_ok :
+        const napi_property_descriptor probe_methods[] = {
+            {"acquireProbeFence", NULL, stdio_acquire_fence, NULL, NULL, NULL, napi_default, NULL},
+            {"readUnavailableJoined", NULL, stdio_read_unavailable_join, NULL, NULL, NULL, napi_default, NULL},
+            {"assertUnavailableJoined", NULL, stdio_assert_unavailable_join, NULL, NULL, NULL, napi_default, NULL},
+            {"acquireUnavailableProbeFence", NULL, stdio_acquire_unavailable_fence, NULL, NULL, NULL, napi_default, NULL},
+            {"releaseUnavailableDomain", NULL, stdio_release_unavailable_domain, NULL, NULL, NULL, napi_default, NULL}
+        };
+        valid = recovery ? napi_define_properties(env, owner, sizeof(probe_methods) / sizeof(probe_methods[0]), probe_methods) == napi_ok :
             napi_define_properties(env, owner, sizeof(run_methods) / sizeof(run_methods[0]), run_methods) == napi_ok;
         set_string(env, owner, "releaseFenceTokenDigest", broker->token_digest);
     }
@@ -1361,6 +1496,53 @@ static napi_value run_mcp_stdio_recovery_data_fixture(napi_env env, napi_callbac
     RECOVERY_DATA_ASSERT(cliq_mcp_stdio_packet_closed(&packet));
     packet.stdio_purpose = 4;
     RECOVERY_DATA_ASSERT(!cliq_mcp_stdio_packet_closed(&packet));
+    packet.stdio_purpose = CLIQ_MCP_STDIO_RECOVERY;
+    memcpy(packet.stdio_server_digest, birth.identity.adapterExecutableDigest, 65);
+    memset(packet.stdio_init_digest, 'b', 64);
+    RECOVERY_DATA_ASSERT(cliq_mcp_stdio_recovery_program_matches(&packet, &birth.identity));
+    memcpy(packet.stdio_init_digest, birth.identity.adapterExecutableDigest, 65);
+    RECOVERY_DATA_ASSERT(!cliq_mcp_stdio_recovery_program_matches(&packet, &birth.identity));
+    memset(packet.stdio_server_digest, 'b', 64);
+    RECOVERY_DATA_ASSERT(!cliq_mcp_stdio_recovery_program_matches(&packet, &birth.identity));
+    // Complete bounded payload refusal permits only checked discard/drain.
+    // These inert bytes never provide a peer, token, socket or physical join.
+    unsigned char output[128] = {0}, errors[128] = {0}, empty[128] = {0};
+    const unsigned char malformed[] = "{\"id\":3,\"result\":{\"sentinel\":\"untrusted\"\n";
+    struct broker refused = {0};
+    atomic_init(&refused.error, NULL);
+    refused.recovery = true; refused.recipe.header = header;
+    refused.recipe.header.maximum_output_bytes = sizeof(output);
+    refused.phase = 3; refused.stage_released = true;
+    refused.output[0] = output; refused.output[1] = errors;
+    RECOVERY_DATA_ASSERT(stdio_receive_packet(&refused, CLIQ_MCP_STDIO_STDOUT, malformed, sizeof(malformed) - 1) &&
+        refused.response_refused && refused.payload_refused && !refused.protocol_complete && !refused.retired && refused.ack_stream == 1);
+    stdio_discard_refused_output(&refused);
+    RECOVERY_DATA_ASSERT(refused.refused_output_discarded && refused.closing && !memcmp(output, empty, sizeof(output)) &&
+        refused.output_size[0] == sizeof(malformed) - 1 && refused.ack_stream == 1);
+    refused.ack_stream = 0;
+    RECOVERY_DATA_ASSERT(stdio_receive_packet(&refused, CLIQ_MCP_STDIO_STDERR, malformed, sizeof(malformed) - 1) &&
+        refused.ack_stream == 2 && !memcmp(errors, empty, sizeof(errors)) && refused.output_size[1] == sizeof(malformed) - 1);
+    refused.ack_stream = 0;
+    RECOVERY_DATA_ASSERT(!stdio_receive_packet(&refused, CLIQ_MCP_STDIO_STDOUT, output, sizeof(output)) &&
+        refused.output_size[0] == sizeof(malformed) - 1);
+    RECOVERY_DATA_ASSERT(!stdio_receive_packet(&refused, CLIQ_MCP_STDIO_OUTPUT_EOF, output, 3) && !stdio_unavailable_joined(&refused));
+    struct broker ordinary = {0};
+    atomic_init(&ordinary.error, NULL); ordinary.recipe.header = header;
+    RECOVERY_DATA_ASSERT(!stdio_decode(&ordinary, malformed, sizeof(malformed) - 2, sizeof(malformed) - 1) &&
+        ordinary.response_refused && !ordinary.payload_refused);
+    struct broker oversized = {0};
+    atomic_init(&oversized.error, NULL); oversized.recovery = true; oversized.recipe.header = header;
+    oversized.recipe.header.maximum_response_bytes = 4;
+    RECOVERY_DATA_ASSERT(!stdio_decode(&oversized, malformed, sizeof(malformed) - 2, sizeof(malformed) - 1) &&
+        oversized.response_refused && !oversized.payload_refused);
+    struct broker tail = {0};
+    unsigned char secret[] = "fixture-inert-tail-key";
+    atomic_init(&tail.error, NULL);
+    tail.recovery = true; tail.output[0] = output; tail.output[1] = errors;
+    tail.platform.secret = secret; tail.platform.secret_size = sizeof(secret) - 1;
+    memcpy(errors, secret, sizeof(secret) - 1); tail.output_size[1] = sizeof(secret) - 1;
+    RECOVERY_DATA_ASSERT(stdio_screen_recovery_drain(&tail) && tail.raw_screened && tail.raw_refused &&
+        tail.payload_refused && !memcmp(errors, empty, sizeof(errors)) && !stdio_unavailable_joined(&tail));
     free(recipe);
 #undef RECOVERY_DATA_ASSERT
     napi_value value; napi_create_object(env, &value); set_number(env, value, "checks", checks);

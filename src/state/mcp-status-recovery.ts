@@ -54,6 +54,10 @@ export function prepareMcpStatusSuccessorRecovery(input: Readonly<{ driver: Sqli
     const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format), metadata: PublishedArtifact[] = [inspectorArtifact];
     const lifecycle = decodeMcpStdioRecoveryLifecycleData(actual.lifecycleSnapshot), plan = original.plan;
     if (plan.backend.kind !== 'linux' || lifecycle.binding.kind !== 'recovery') fail('MCP status successor changed its original Linux readonly purpose');
+    const unavailable = lifecycle.joined.responseRefused;
+    if (unavailable && (lifecycle.progressKind !== 9 || !lifecycle.joined.execReleased || !lifecycle.joined.deathJoined ||
+        !lifecycle.joined.ownerDrained || !lifecycle.joined.outputCustodyRetired || !lifecycle.containment))
+      fail('MCP successor cannot audit a refused response without its original complete disposed-output progress');
     const observedAt = new Date(cleanup.observedAtMs).toISOString(), common = { schemaVersion: 1 as const,
       planRef: original.preparation.plannedContainmentRef, sandboxLaunchSpecRef: original.preparation.sandboxLaunchSpecRef,
       sandboxLaunchSpecDigest: original.preparation.sandboxLaunchSpecDigest, owner: plan.owner, launchNonceDigest: plan.launchNonceDigest,
@@ -89,7 +93,8 @@ export function prepareMcpStatusSuccessorRecovery(input: Readonly<{ driver: Sqli
     metadata.push(raw, projection, cleanupRaw, cleanupProjection, evidenceArtifact);
     const core = { schemaVersion: 1 as const, format: 'cliq-mcp-stdio-recovery-retirement-v1' as const, binding: original.binding,
       ...(containmentRef ? { processContainmentRef: containmentRef } : {}), retirementEvidenceRef: evidenceArtifact.ref, observedAt,
-      nativeClosure: { kind: 'linux_successor_cleanup' as const, lifecycleRawRef: raw.ref, lifecycleProjectionRef: projection.ref,
+      nativeClosure: { kind: unavailable ? 'linux_successor_response_unavailable_cleanup' : 'linux_successor_cleanup',
+        lifecycleRawRef: raw.ref, lifecycleProjectionRef: projection.ref,
         cleanupRawRef: cleanupRaw.ref, cleanupProjectionRef: cleanupProjection.ref },
       creatorProcessDomain: { authorityDomain: 'linux_installed_native_creator_process_v1' as const,
         processObservation: 'absent_or_start_token_mismatch' as const, creatorSupervisorInstanceId: original.original.owner.supervisorInstanceId,

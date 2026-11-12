@@ -28,9 +28,9 @@ import { readMcpInputAuthority } from './mcp-input-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { readChildAdmission, type ChildAdmissionData } from './child-admission.js';
 import { readRun } from './rows.js';
-import type { ArtifactCatalog } from './artifacts.js';
+import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { sampleCanonicalNow } from './canonical-time.js';
-import { validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
+import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity, type LocalInferenceAdmissionFrame } from './control-channel.js';
 import { decodeLocalPrincipalIdentity, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { decodeSandboxProfile } from './execution-closure.js';
@@ -57,6 +57,10 @@ import { captureInstalledSkills } from './skill-source.js';
 import { combineMcpToolManifest } from './mcp-registration.js';
 import { readMcpAdmissionSelections, readFrozenMcpSelections, mcpSelectionCredentialRefs,
   type InstalledMcpSelection } from './mcp-admission.js';
+import { publishInstalledLocalRunModel, readInstalledLocalRunModel } from './local-inference-run-authority.js';
+import { readInheritedLocalModelAdmissionAssembly } from './local-model-history.js';
+import { readInstalledLocalInferenceObservation, type InstalledLocalInferenceObservation, type InstalledLocalInferenceServices } from './local-inference-service.js';
+import type { LocalModelRegistrationV1 } from '../kernel/local-inference.js';
 
 type RetiredSource = Extract<SourceInspectionAttemptV1, { phase: 'retired' }>;
 type InstructionEntry = { canonicalRootRelativePath: string; directoryDepth: number;
@@ -79,7 +83,8 @@ type AdmissionBinding = { driver: SqliteDriver; owner: StateOwnerContext; select
   native: NativeStateOwner; workspace: Extract<WorkspaceIdentityV1, { kind: 'live' }>;
   repository?: RepositoryIdentity;
   input: AdmitRunInput; admittedAt: string; deadlineAt: string; signal?: AbortSignal; dependency?: InstalledDependencyAdmission;
-  mcp: readonly InstalledMcpSelection[] };
+  mcp: readonly InstalledMcpSelection[]; localObservation?: InstalledLocalInferenceObservation;
+  localFrame?: LocalInferenceAdmissionFrame; localMetadata?: readonly PublishedArtifact[] };
 const admissions = new WeakMap<AssembledInstalledRun, AdmissionBinding>();
 /** Fixed refusal projection, not authority or a caller-selectable error code. */
 export class InstalledRunAuthorityError extends KernelStorageError {
@@ -119,6 +124,14 @@ export function assertInstalledRunRecipe(request: NormalizedRunSubmitRequest,
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'installed model endpoint path is outside the native recipe');
     }
   }
+}
+
+export function assertInstalledLocalRunRecipe(request: NormalizedRunSubmitRequest): void {
+  if (request.model.provider !== 'ollama' || request.budgets.costMicros !== 0 ||
+      request.sandboxResources.maxProcesses < 8 || request.sandboxResources.maxSingleFileBytes > 268_435_456)
+    invalid('installed local Run selects an unsupported model, nonzero cost or execution resource');
+  assertInstalledDependencyRequest(request);
+  assertSupportedVerifierRequests(request.verifiers, request.policyMode);
 }
 
 function closeOwned(resources: readonly { close(): void }[], error?: unknown): void {
@@ -356,17 +369,32 @@ async function publishInstalledModelMaterial(input: {
   return { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: undefined };
 }
 
-async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal,
-  childOrigin?: ChildAdmissionData, driver?: SqliteDriver): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
-  signal?.throwIfAborted();
-  if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
-      assembly.provider.negotiation.streaming)
-    invalid('installed assembly selects an unsupported model recipe');
-  if (assembly.mcpServers.length && (!driver || childOrigin))
-    invalid('MCP material requires its original SQL registration provenance and implemented root-Run profile');
-  const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, assembly.provider.endpoint.endpointRegistrationRef));
-  const mcp = driver ? await readFrozenMcpSelections(driver, artifacts, endpoint.ownerPrincipalId,
-    assembly.mcpServers, installed.bundle, signal) : [];
+type InstalledProviderMaterial = Pick<RunAssemblyValidationMaterial, 'capabilityEvidence' | 'localProvenance' | 'priceTable' |
+  'verifyLocalZeroCostAuthority' | 'resolveVerifiedCapabilityClaims' | 'resolvePriceTableAuthority' | 'verifyProviderAdapter' | 'verifyProviderEndpoint'> & {
+  principalId: string;
+};
+
+async function readInstalledProviderMaterial(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1,
+  driver?: SqliteDriver): Promise<InstalledProviderMaterial> {
+  const selectedEndpoint = assembly.provider.endpoint;
+  if (selectedEndpoint.kind === 'local_zero_cost') {
+    if (!driver) invalid('installed local model requires its original SQL launch and StateOwner history');
+    const local = await readInstalledLocalRunModel(artifacts, installed, driver, assembly);
+    return {
+      principalId: local.registration.ownerPrincipalId,
+      capabilityEvidence: { ref: assembly.provider.negotiation.capabilityEvidenceRef, value: local.capability },
+      localProvenance: local.provenance, verifyLocalZeroCostAuthority: value => same(value, local.provenance.value),
+      resolveVerifiedCapabilityClaims: source => same(source, local.capability.source) ? local.registration.modelManifest.claims : null,
+      resolvePriceTableAuthority: () => null,
+      verifyProviderAdapter: candidate => same(candidate, { adapter: local.capability.adapter, runtimeBundleRef: installed.bundleDigest,
+        runtimeBundleManifestDigest: installed.bundle.manifestDigest }),
+      verifyProviderEndpoint: candidate => same(candidate, { provider: 'ollama', model: local.registration.model,
+        endpoint: selectedEndpoint, credentialGrantRefs: [], capabilitySource: local.capability.source }),
+    };
+  }
+  if (assembly.provider.name !== 'openai-compatible' || assembly.provider.negotiation.streaming)
+    invalid('installed assembly selects an unsupported remote model recipe');
+  const endpoint = decodeEndpointRegistration(await readCanonicalArtifact(artifacts, selectedEndpoint.endpointRegistrationRef));
   const trust = installed.bundle.entries.find(entry => entry.entryId === endpoint.tls.trustStoreEntryId);
   if (!trust || trust.role !== 'trust_store' || trust.executable || endpoint.tls.trustStoreRuntimeBundleRef !== installed.bundleDigest ||
       endpoint.tls.trustStoreRuntimeBundleManifestDigest !== installed.bundle.manifestDigest ||
@@ -391,6 +419,36 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     catalogEntryRef: catalogRef, priceTableRef: priceRef, objects }), catalog = model.catalog.value;
   if (catalog.adapter.adapterId !== 'openai-compatible-broker-v1' || catalog.adapter.version !== '1') mismatch('installed provider adapter recipe is unsupported');
   requireEqual(assembly.provider.adapter, catalog.adapter, 'installed provider adapter');
+  const credentialRefs = [...assembly.provider.credentialGrantRefs];
+  for (const ref of credentialRefs) {
+    const binding = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
+    if (binding.ownerPrincipalId !== endpoint.ownerPrincipalId || binding.purpose !== 'model_endpoint' ||
+        binding.endpointRegistrationRef !== selectedEndpoint.endpointRegistrationRef || binding.endpointIdentityDigest !== endpoint.endpointIdentityDigest ||
+        binding.tlsPolicyDigest !== endpoint.tlsPolicyDigest) mismatch('installed model credential closure is for another principal or endpoint');
+  }
+  return { principalId: endpoint.ownerPrincipalId,
+    capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
+    resolveVerifiedCapabilityClaims: source => source.kind === 'signed_catalog' && source.runtimeBundleRef === installed.bundleDigest &&
+      source.catalogEntryRef === model.catalog.ref && source.catalogEntryDigest === catalog.catalogEntryDigest ? catalog.claims : null,
+    priceTable: immutableSnapshot(model.priceTable), verifyLocalZeroCostAuthority: () => false,
+    resolvePriceTableAuthority: table => same(table, model.priceTable.value) ? model.priceTable.value.signatureRef : null,
+    verifyProviderAdapter: candidate => same(candidate, { adapter: catalog.adapter, runtimeBundleRef: installed.bundleDigest,
+      runtimeBundleManifestDigest: installed.bundle.manifestDigest }),
+    verifyProviderEndpoint: candidate => same(candidate, { provider: catalog.provider, model: catalog.model, endpoint: selectedEndpoint,
+      credentialGrantRefs: credentialRefs, capabilitySource: capability.source }) &&
+      selectedEndpoint.endpointIdentityDigest === endpoint.endpointIdentityDigest && selectedEndpoint.tlsPolicyDigest === endpoint.tlsPolicyDigest,
+  };
+}
+
+async function materialFor(installed: InstalledRuntimeBorrow, artifacts: ArtifactCatalog, assembly: RunAssemblyV1, signal?: AbortSignal,
+  childOrigin?: ChildAdmissionData, driver?: SqliteDriver): Promise<RunAssemblyValidationMaterial & { retainedToolchain?: RetainedVerifierToolchain }> {
+  signal?.throwIfAborted();
+  if (assembly.mcpServers.length && (!driver || childOrigin))
+    invalid('MCP material requires its original SQL registration provenance and implemented root-Run profile');
+  const inheritedLocal = childOrigin && assembly.provider.endpoint.kind === 'local_zero_cost'
+    ? await readInheritedLocalModelAdmissionAssembly(artifacts, assembly, childOrigin) : undefined;
+  const { principalId, ...provider } = await readInstalledProviderMaterial(installed, artifacts, inheritedLocal ?? assembly, driver);
+  const mcp = driver ? await readFrozenMcpSelections(driver, artifacts, principalId, assembly.mcpServers, installed.bundle, signal) : [];
   const tools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
   const toolEntry = installed.bundle.entries.find(entry => entry.digest === assembly.tools.manifestRef);
   if ((!childOrigin && !mcp.length && (!toolEntry || toolEntry.role !== 'schema' || toolEntry.executable || toolEntry.byteCount !== canonicalJsonBytes(tools).length)) ||
@@ -426,15 +484,8 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === assembly.provider.name && prompt.model === assembly.provider.model);
   if (!system || !compaction || system.ref !== assembly.instructions.systemPromptRef || system.value.textDigest !== assembly.instructions.systemPromptDigest ||
       compaction.material.ref !== assembly.context.compactionPromptEnvelopeRef) mismatch('installed assembly substitutes signed prompt identity');
-  const credentialRefs = [...assembly.provider.credentialGrantRefs];
-  for (const ref of credentialRefs) {
-    const binding = decodeEndpointCredentialGrantBinding(await readCanonicalArtifact(artifacts, ref));
-    if (binding.ownerPrincipalId !== endpoint.ownerPrincipalId || binding.purpose !== 'model_endpoint' ||
-        binding.endpointRegistrationRef !== assembly.provider.endpoint.endpointRegistrationRef || binding.endpointIdentityDigest !== endpoint.endpointIdentityDigest ||
-        binding.tlsPolicyDigest !== endpoint.tlsPolicyDigest) mismatch('installed model credential closure is for another principal or endpoint');
-  }
   const { instructions, skills, retainedToolchain } = await readInstalledRunDataClosures(artifacts, assembly,
-    endpoint.ownerPrincipalId, installed, signal);
+    principalId, installed, signal);
   const references = [
     { kind: 'runtime_bundle', ref: installed.bundleDigest, digest: installed.bundle.manifestDigest },
     { kind: 'tool_contract_manifest', ref: assembly.tools.manifestRef, digest: tools.manifestDigest },
@@ -454,7 +505,7 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
   if (childOrigin) {
     requireEqual(assembly, await readCanonicalArtifact(artifacts, childOrigin.spec.assemblyRef), 'child exact admitted assembly');
     const rootAssembly = childOrigin.rootOrigin.spec.assemblyRef;
-    const original = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, rootAssembly));
+    const original = inheritedLocal ?? decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, rootAssembly));
     const originalTools = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, original.tools.manifestRef);
     requireEqual(originalTools, expected.manifest, 'child original signed compiled tool manifest');
     for (const entry of tools.entries) {
@@ -466,21 +517,9 @@ async function materialFor(installed: InstalledRuntimeBorrow, artifacts: Artifac
     'complete installed builtin and authenticated MCP tool manifest');
   if (script) for await (const _chunk of artifacts.readChunks(script.digest, script.byteCount)) signal?.throwIfAborted();
   signal?.throwIfAborted();
-  return Object.freeze({ capabilityEvidence: immutableSnapshot({ ref: assembly.provider.negotiation.capabilityEvidenceRef, value: capability }),
-    ...(retainedToolchain ? { retainedToolchain } : {}),
-    resolveVerifiedCapabilityClaims: source => source.kind === 'signed_catalog' && source.runtimeBundleRef === installed.bundleDigest &&
-      source.catalogEntryRef === model.catalog.ref && source.catalogEntryDigest === catalog.catalogEntryDigest ? catalog.claims : null,
-    priceTable: immutableSnapshot(model.priceTable), verifyLocalZeroCostAuthority: () => false,
-    resolvePriceTableAuthority: table => same(table, model.priceTable.value) ? model.priceTable.value.signatureRef : null,
-    compactionEnvelope: compaction.material,
+  return Object.freeze({ ...provider, ...(retainedToolchain ? { retainedToolchain } : {}), compactionEnvelope: compaction.material,
     resolveVerifiedTools: reference => same(reference, assembly.tools) ? verifiedTools : null,
     additionalCredentialGrantRefs: mcpSelectionCredentialRefs(mcp), verifyReference: reference => references.some(expected => same(expected, reference)),
-    verifyProviderAdapter: candidate => same(candidate, { adapter: catalog.adapter, runtimeBundleRef: installed.bundleDigest,
-      runtimeBundleManifestDigest: installed.bundle.manifestDigest }),
-    verifyProviderEndpoint: candidate => same(candidate, { provider: catalog.provider, model: catalog.model, endpoint: assembly.provider.endpoint,
-      credentialGrantRefs: credentialRefs, capabilitySource: capability.source }) &&
-      assembly.provider.endpoint.kind === 'registered' && assembly.provider.endpoint.endpointIdentityDigest === endpoint.endpointIdentityDigest &&
-      assembly.provider.endpoint.tlsPolicyDigest === endpoint.tlsPolicyDigest,
   } satisfies RunAssemblyValidationMaterial);
 }
 
@@ -514,19 +553,26 @@ function reportInstalledRunAssemblyPhase(observer: ((phase: InstalledRunAssembly
   try { observer?.(phase); } catch { /* Diagnosis cannot decide or replace the original operation. */ }
 }
 
+type LocalModelPreparation = Readonly<{ registration: LocalModelRegistrationV1; services: InstalledLocalInferenceServices;
+  frame: LocalInferenceAdmissionFrame }>;
 export async function assembleInstalledRun(input: {
   selected: HeldInstalledRuntime; driver: SqliteDriver; owner: StateOwnerContext; artifacts: ArtifactCatalog;
   identity: AuthenticatedControlIdentity; request: NormalizedRunSubmitRequest; originalRequest: object; source: RetiredSource;
-  endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[]; controlledHome: string;
-}, signal?: AbortSignal, onAssemblyPhase?: (phase: InstalledRunAssemblyPhase) => void): Promise<AssembledInstalledRun> {
-  const { selected, driver, owner, artifacts, controlledHome } = input;
+  controlledHome: string;
+} & ({ endpoint: EndpointRegistrationV1; credentialBindings: readonly EndpointCredentialGrantBinding[]; localModel?: never } |
+  { localModel: LocalModelPreparation; endpoint?: never; credentialBindings?: never }),
+  signal?: AbortSignal, onAssemblyPhase?: (phase: InstalledRunAssemblyPhase) => void): Promise<AssembledInstalledRun> {
+  const { selected, driver, owner, artifacts, controlledHome, localModel } = input;
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const currentOriginal = normalizeRunSubmitRequest(input.originalRequest);
-  const { identity, request, source, endpoint, credentialBindings } = immutableSnapshot({ identity: input.identity,
-    request: input.request, source: input.source, endpoint: decodeEndpointRegistration(input.endpoint),
-    credentialBindings: input.credentialBindings.map(decodeEndpointCredentialGrantBinding) });
+  const { identity, request, source } = immutableSnapshot({ identity: input.identity, request: input.request, source: input.source });
+  const endpoint = input.endpoint && decodeEndpointRegistration(input.endpoint);
+  const credentialBindings = immutableSnapshot((input.credentialBindings ?? []).map(decodeEndpointCredentialGrantBinding));
   if (!same(currentOriginal.request, request)) mismatch('installed producer did not receive the exact normalized current public frame');
-  assertInstalledRunRecipe(request, endpoint);
+  if (localModel) {
+    assertInstalledLocalRunRecipe(request);
+    assertCurrentControlFrame(owner, input.identity, localModel.frame);
+  } else assertInstalledRunRecipe(request, endpoint);
   if (request.verifiers.length) {
     // Native loading uses the installed queue itself; never invoke it from a
     // held-runtime borrow that would wait behind its own queued operation.
@@ -534,9 +580,8 @@ export async function assembleInstalledRun(input: {
     const native = await loadInstalledWorkerNative(selected, signal);
     if (native.verifierInterfaceVersion !== 1) throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
   }
-  const remote = request.model;
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_source');
-  const control = await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
+  const control = await validateControlChannelClosure(reads, owner, identity, localModel?.frame); assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
   const session = readSession(driver, request.sessionId), workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(reads, session.workspaceIdentityRef));
   if (readSessionPrincipalId(driver, session.id) !== identity.principalId || session.contextRevision !== request.expectedContextRevision ||
       workspace.kind !== 'live' || workspace.ownerPrincipalId !== identity.principalId || workspace.canonicalRootPath !== request.workspacePath)
@@ -598,6 +643,7 @@ export async function assembleInstalledRun(input: {
     }
     assertWorkspaceSourceTrust(trust, request.workspacePath);
   } catch (error) { failure = error; throw error; } finally { closeOwned(resources, failure); }
+  const localObservation = localModel && await localModel.services.observeRegistration(localModel.registration);
   const admittedAt = sampleCanonicalNow(), deadlineAt = addCanonicalDuration(admittedAt, request.budgets.wallTimeMs);
   // This factory may borrow the original installed native modules and
   // credential scope; never call it from the held-runtime queue below.
@@ -608,30 +654,48 @@ export async function assembleInstalledRun(input: {
     request.registeredMcpServerIds, captureRuntime.bundle, signal);
   reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_material');
   return withHeldInstalledRuntime(selected, async installed => {
-    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
-    const model = selectedModel(installed, remote.provider, remote.model, endpoint), catalog = model.catalog.value;
-    if (catalog.claims.streaming) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
-    if (endpoint.ownerPrincipalId !== identity.principalId || endpoint.endpointRegistrationId !== remote.endpoint.endpointRegistrationId ||
-        !endpoint.purposes.includes('model_endpoint') || endpoint.createdAt > admittedAt ||
-        endpoint.tls.trustStoreRuntimeBundleRef !== installed.bundleDigest || endpoint.tls.trustStoreRuntimeBundleManifestDigest !== installed.bundle.manifestDigest)
-      mismatch('installed endpoint is not the exact principal-bound model TLS authority');
-    if (catalog.validFrom > admittedAt || catalog.validThrough < deadlineAt) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
-    if (model.priceTable.value.validFrom > admittedAt || model.priceTable.value.validThrough < deadlineAt)
-      throw new InstalledRunAuthorityError('MODEL_COST_UNKNOWN');
-    if (!credentialBindings.length || credentialBindings.length !== remote.modelCredentialGrantIds.length ||
-        new Set(credentialBindings.map(binding => binding.credentialGrantId)).size !== credentialBindings.length)
-      mismatch('installed credential ids and frozen model bindings differ');
-    // Capability construction is inert. Complete materialFor reads and all
-    // original runtime/channel/owner checks still follow durable publication.
-    const capability: ModelCapabilityEvidenceV1 = { schemaVersion: 1, format: 'cliq-model-capability-evidence-v1',
-      provider: catalog.provider, model: catalog.model, endpointIdentityDigest: catalog.endpointIdentityDigest, adapter: catalog.adapter,
-      source: { kind: 'signed_catalog', runtimeBundleRef: installed.bundleDigest, catalogEntryRef: model.catalog.ref, catalogEntryDigest: catalog.catalogEntryDigest },
-      ...catalog.claims, observedAt: admittedAt, validThrough: catalog.validThrough, evidenceDigest: '' };
-    capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
-    const { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: publishedSandboxRef } = await publishInstalledModelMaterial({
-      artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability,
-      sandboxResources: request.sandboxResources, signal
-    });
+    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity, localModel?.frame); assertActiveStateOwner(driver, owner);
+    const model = await (async () => {
+      if (localObservation) {
+        const local = await publishInstalledLocalRunModel(artifacts, installed, driver, owner, localObservation,
+          identity.principalId, request.model.model, admittedAt, deadlineAt);
+        return { ...local, publishedSandboxRef: undefined,
+          localMetadata: [...localObservation.boundary.metadata, local.capabilityArtifact, local.provenanceArtifact] };
+      }
+      const remote = request.model;
+      if (!endpoint || remote.provider !== 'openai-compatible') mismatch('installed remote model request lost its exact endpoint');
+      const model = selectedModel(installed, remote.provider, remote.model, endpoint), catalog = model.catalog.value;
+      if (catalog.claims.streaming) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
+      if (endpoint.ownerPrincipalId !== identity.principalId || endpoint.endpointRegistrationId !== remote.endpoint.endpointRegistrationId ||
+          !endpoint.purposes.includes('model_endpoint') || endpoint.createdAt > admittedAt ||
+          endpoint.tls.trustStoreRuntimeBundleRef !== installed.bundleDigest || endpoint.tls.trustStoreRuntimeBundleManifestDigest !== installed.bundle.manifestDigest)
+        mismatch('installed endpoint is not the exact principal-bound model TLS authority');
+      if (catalog.validFrom > admittedAt || catalog.validThrough < deadlineAt) throw new InstalledRunAuthorityError('MODEL_CAPABILITY_UNKNOWN');
+      if (model.priceTable.value.validFrom > admittedAt || model.priceTable.value.validThrough < deadlineAt)
+        throw new InstalledRunAuthorityError('MODEL_COST_UNKNOWN');
+      if (!credentialBindings.length || credentialBindings.length !== remote.modelCredentialGrantIds.length ||
+          new Set(credentialBindings.map(binding => binding.credentialGrantId)).size !== credentialBindings.length)
+        mismatch('installed credential ids and frozen model bindings differ');
+      // Capability construction is inert. Complete materialFor reads and all
+      // original runtime/channel/owner checks still follow durable publication.
+      const capability: ModelCapabilityEvidenceV1 = { schemaVersion: 1, format: 'cliq-model-capability-evidence-v1',
+        provider: catalog.provider, model: catalog.model, endpointIdentityDigest: catalog.endpointIdentityDigest, adapter: catalog.adapter,
+        source: { kind: 'signed_catalog', runtimeBundleRef: installed.bundleDigest, catalogEntryRef: model.catalog.ref, catalogEntryDigest: catalog.catalogEntryDigest },
+        ...catalog.claims, observedAt: admittedAt, validThrough: catalog.validThrough, evidenceDigest: '' };
+      capability.evidenceDigest = digestOmitting(capability, 'evidenceDigest');
+      const { endpointArtifact, credentialGrantRefs, capabilityArtifact, sandboxProfileRef: publishedSandboxRef } = await publishInstalledModelMaterial({
+        artifacts, endpoint, credentialBindings, remote, identity, admittedAt, deadlineAt, capability,
+        sandboxResources: request.sandboxResources, signal
+      });
+      return { capability, capabilityArtifact, publishedSandboxRef, claims: catalog.claims, localMetadata: undefined,
+        provider: { name: catalog.provider, model: catalog.model,
+          endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
+            endpointIdentityDigest: endpoint.endpointIdentityDigest, tlsPolicyDigest: endpoint.tlsPolicyDigest }, credentialGrantRefs,
+          adapter: catalog.adapter, pricing: { kind: 'trusted_price_table', priceTableRef: model.priceTable.ref, priceTableDigest: model.priceTable.value.tableDigest,
+            calculationAlgorithm: 'cliq-price-ceil-v1', maxRunCostMicros: request.budgets.costMicros, validThrough: model.priceTable.value.validThrough,
+            provenanceRef: model.priceTable.value.signatureRef } } satisfies Omit<RunAssemblyV1['provider'], 'negotiation'> };
+    })();
+    const { provider, capability, capabilityArtifact, publishedSandboxRef, claims } = model;
     const toolCandidates = installed.bundle.entries.filter(entry => entry.role === 'schema' && !entry.executable).map(entry => {
       const bytes = installed.objects.get(entry.digest); return bytes && JSON.parse(bytes.toString('utf8')) as { format?: string };
     }).filter((value): value is ToolContractManifestV1 => value?.format === 'cliq-tool-contracts-v1');
@@ -641,12 +705,12 @@ export async function assembleInstalledRun(input: {
     const toolRef = canonicalSha256(tools);
     if (mcp.length && (await artifacts.publishCanonical(tools, tools.format)).ref !== toolRef)
       mismatch('derived MCP tool manifest differs from its complete authenticated inputs');
-    const allCredentialGrantRefs = [...new Set([...credentialGrantRefs, ...mcpSelectionCredentialRefs(mcp)])].sort();
-    const system = installed.structured.systemPrompts.find(prompt => prompt.provider === catalog.provider && prompt.model === catalog.model);
-    const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === catalog.provider && prompt.model === catalog.model);
+    const allCredentialGrantRefs = [...new Set([...provider.credentialGrantRefs, ...mcpSelectionCredentialRefs(mcp)])].sort();
+    const system = installed.structured.systemPrompts.find(prompt => prompt.provider === provider.name && prompt.model === provider.model);
+    const compaction = installed.structured.compactionPrompts.find(prompt => prompt.provider === provider.name && prompt.model === provider.model);
     const worker = installed.bundle.entries.find(entry => entry.entryId === LINUX_WORKER_RECIPE.workerId);
     if (!system || !compaction || !worker || worker.role !== 'worker' || !worker.executable) mismatch('installed Run lacks its exact signed prompt or worker recipe');
-    const c = catalog.claims.contextLimitTokens, o = Math.min(catalog.claims.maxOutputTokens, Math.floor(c / 4));
+    const c = claims.contextLimitTokens, o = Math.min(claims.maxOutputTokens, Math.floor(c / 4));
     const verifierToolchain = selectVerifierReleaseReference(driver, installed.bundle,
       identity.principalId, request.verifiers, request.policyMode, signal);
     // Script execution always pins the same signed guest discovery root, even
@@ -662,15 +726,9 @@ export async function assembleInstalledRun(input: {
       mismatch('installed dependency and tools/verifiers select different signed guests');
     const selectedGuest = ordinaryGuest ?? dependencyData?.guestToolchain;
     const h = c - o, s = Math.min(8192, Math.floor(c / 8)), k = compactionEnvelopeEstimate(compaction.material);
-    const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { name: catalog.provider, model: catalog.model,
-      endpoint: { kind: 'registered', registrationKind: endpoint.registrationKind, endpointRegistrationRef: endpointArtifact.ref,
-        endpointIdentityDigest: endpoint.endpointIdentityDigest, tlsPolicyDigest: endpoint.tlsPolicyDigest }, credentialGrantRefs,
-      adapter: catalog.adapter, negotiation: { mode: capability.nativeToolCalling ? 'native-tools' : 'text-only',
-        capabilityEvidenceRef: capabilityArtifact.ref, capabilityDigest: capability.evidenceDigest, ...catalog.claims,
-        exposedToolNames: capability.nativeToolCalling ? tools.entries.map(entry => entry.name) : [] },
-      pricing: { kind: 'trusted_price_table', priceTableRef: model.priceTable.ref, priceTableDigest: model.priceTable.value.tableDigest,
-        calculationAlgorithm: 'cliq-price-ceil-v1', maxRunCostMicros: request.budgets.costMicros, validThrough: model.priceTable.value.validThrough,
-        provenanceRef: model.priceTable.value.signatureRef } }, mcpServers: mcp.map(selected => ({ registrationId: selected.registry.registrationId,
+    const assembly: RunAssemblyV1 = { schemaVersion: 1, format: 'cliq-run-assembly-v1', provider: { ...provider,
+      negotiation: { mode: capability.nativeToolCalling ? 'native-tools' : 'text-only', capabilityEvidenceRef: capabilityArtifact.ref,
+        capabilityDigest: capability.evidenceDigest, ...claims, exposedToolNames: capability.nativeToolCalling ? tools.entries.map(entry => entry.name) : [] } }, mcpServers: mcp.map(selected => ({ registrationId: selected.registry.registrationId,
           registryRevisionRef: selected.ref, registryRevision: selected.registry.registryRevision, manifestDigest: selected.registry.manifestDigest })),
       tools: { manifestRef: toolRef, manifestDigest: tools.manifestDigest },
       instructions: { systemPromptRef: system.ref, systemPromptDigest: system.value.textDigest, workspaceInstructionsRef: instructions.ref,
@@ -720,12 +778,13 @@ export async function assembleInstalledRun(input: {
     const policyRef = (await artifacts.publishCanonical(policy, policy.format)).ref;
     const verifierSpecRef = verifier.specRef;
     reportInstalledRunAssemblyPhase(onAssemblyPhase, 'submit_assembly_final_check');
-    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity); assertActiveStateOwner(driver, owner);
+    await installed.revalidate(signal); await validateControlChannelClosure(reads, owner, identity, localModel?.frame); assertActiveStateOwner(driver, owner);
     const result: AssembledInstalledRun = Object.freeze({ assemblyRef, assembly: immutableSnapshot(assembly), policyRef, sandboxProfileRef, verifierSpecRef,
       credentialGrantRefs: Object.freeze(allCredentialGrantRefs), sourceProjectionRef: sourceManifest.sourceProjectionRef,
       frozenIgnoreRulesRef: sourceManifest.frozenIgnoreRulesRef, baseWorkspaceManifestRef: capturedSourceRef, material, admittedAt, deadlineAt,
       ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}) });
     admissions.set(result, { driver, owner, selected, identity, normalized: currentOriginal, source, native: held, workspace, repository, signal, dependency, mcp,
+      ...(localModel && localObservation ? { localFrame: localModel.frame, localObservation, localMetadata: model.localMetadata } : {}),
       input: immutableSnapshot({ ...identity, requestId: request.requestId, admissionKey: request.admissionKey, sessionId: request.sessionId,
         expectedContextRevision: request.expectedContextRevision, workspacePath: request.workspacePath, objective: request.objective,
         assemblyRef, policyRef, sandboxProfileRef, verifierSpecRef, ...(dependencyData ? { dependencyPolicyRef: dependencyData.policyRef } : {}),
@@ -771,6 +830,10 @@ export function readInstalledRunAdmission(prepared: AssembledInstalledRun, drive
   // responses never consult this transient preparation token on replay.
   binding.signal?.throwIfAborted();
   assertActiveStateOwner(connection, owner);
+  if (binding.localObservation && binding.localFrame) {
+    assertCurrentControlFrame(owner, identity, binding.localFrame);
+    binding.localObservation.assertCurrent(connection);
+  }
   for (const selected of binding.mcp) selected.assertUnchanged(connection);
   const key = { principalId: identity.principalId, admissionKey: binding.normalized.request.admissionKey,
     admissionIntentDigest: runSubmitIntentDigest(identity.principalId, binding.normalized.request) };
@@ -780,6 +843,15 @@ export function readInstalledRunAdmission(prepared: AssembledInstalledRun, drive
     mismatch('installed admission Session cut changed');
   return immutableSnapshot({ input: binding.input, normalized: binding.normalized, source: binding.source,
     admittedAt: binding.admittedAt, deadlineAt: binding.deadlineAt });
+}
+
+export function readInstalledRunLocalModel(prepared: AssembledInstalledRun, driver: SqliteDriver,
+  owner: StateOwnerContext, identity: AuthenticatedControlIdentity): Readonly<{
+    frame: LocalInferenceAdmissionFrame; metadata: readonly PublishedArtifact[] }> | undefined {
+  readInstalledRunAdmission(prepared, driver, owner, identity);
+  const binding = admissions.get(prepared);
+  if (!binding?.localObservation || !binding.localFrame || !binding.localMetadata) return undefined;
+  return { frame: binding.localFrame, metadata: binding.localMetadata };
 }
 
 /** Admission friend using the already-held installed native implementation.

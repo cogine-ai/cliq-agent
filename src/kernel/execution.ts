@@ -177,7 +177,7 @@ export type SandboxExecutableIdentityV1 =
       runtimeBundleRef: ArtifactRef
       runtimeBundleManifestDigest: string
       executableId: string
-      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'local_inference' | 'platform_helper'
+      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'mcp_recovery_adapter' | 'local_inference' | 'platform_helper'
       executionPath: string
       executableDigest: string
     }
@@ -434,6 +434,7 @@ export type SandboxLaunchSpecV1 =
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
       purpose: 'mcp_recovery'
+      executable: Extract<SandboxExecutableIdentityV1, { kind: 'runtime_bundle' }> & { role: 'mcp_recovery_adapter' }
       processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
       requestRef: ArtifactRef
       requestDigest: string

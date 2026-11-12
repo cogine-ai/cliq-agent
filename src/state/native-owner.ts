@@ -1,4 +1,7 @@
 import type { NativeLocalModelStore } from './local-model-store-native.js';
+import type { NativeLocalInferenceInput } from './local-inference-native.js';
+import { decodeLocalInferenceNativeInput, decodeLocalInferenceNativeInputData,
+  splitLocalInferenceNativeInput } from '../kernel/local-inference-native-input.js';
 import { constants, type BigIntStats } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
@@ -22,7 +25,14 @@ import { encodeCurrentMigrationExpectedEntry } from '../kernel/current-migration
 import { encodeCurrentArchiveManifestSelection, encodeCurrentArchivePayload, encodeCurrentArchiveCasEntry,
   type CurrentArchiveManifestSelection } from '../kernel/current-kernel-archive-data.js';
 import { CompleteKernelArchiveManifestStream } from './kernel-archive-manifest-stream.js';
-import type { CompleteKernelArchiveHeader } from './kernel-archive-manifest.js';
+import { kernelArchiveSidecarBytes, type CompleteKernelArchiveHeader } from './kernel-archive-manifest.js';
+import { decodeKernelArchiveModelStore, encodeCurrentKernelArchiveModelStore, type KernelArchiveModelStore } from '../kernel/kernel-archive-model-store.js';
+import { decodeKernelArchiveRuntimeWitnesses, encodeCurrentRuntimeWitnessArchive, encodeRuntimeWitnessArchiveEntry,
+  type KernelArchiveRuntimeWitnesses } from '../kernel/kernel-archive-runtime-witness.js';
+import { installedRuntimeWitnessEntries, withInstalledRuntimeWitnessAnchor, type InstalledRuntimeWitnessCut } from './runtime-witness-archive-cut.js';
+import { decodeKernelRollbackRestoringControl, encodePreparedRollbackMarkerIdentities, type KernelRollbackRestoringControlV1 } from '../kernel/kernel-rollback-records.js';
+import { decodeKernelRollbackArchiveReadyControl, encodeRollbackArchiveReadyAuthIdentity,
+  type KernelRollbackArchiveReadyControlV1 } from '../kernel/kernel-rollback-handoff.js';
 import { decodeKernelArchiveCasIdentity, decodeKernelArchiveCasEntry, decodeKernelArchiveDirectoryIdentity,
   KERNEL_ARCHIVE_MAX_MANIFEST_BYTES, KERNEL_ARCHIVE_MAX_BYTES,
   type KernelArchiveCasIdentity, type KernelArchiveCasEntry } from '../kernel/kernel-archive-namespace.js';
@@ -1103,6 +1113,8 @@ type NativeLock = Omit<HeldStateOwnerLock, 'quarantineGeneration' | 'createGener
   openSourceInspectionStaging(stagingId: string, deviceId: string, fileId: string): NativeSourceInspectionStaging;
   createWorkerReservation(reservationId: string): NativeWorkerReservation;
   openWorkerReservation(reservationId: string, deviceId: string, fileId: string, ownerUid: number): NativeWorkerReservation;
+  createLocalInferenceInput?(config: Buffer, origin: Buffer): NativeLocalInferenceInput;
+  openRetainedLocalInferenceInput?(config: Buffer, origin: Buffer): NativeLocalInferenceInput;
   createAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
   openRetainedAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
   openAbsentAdminMcpInput(input: AdminMcpInputBinding): NativeAdminMcpInput;
@@ -1187,6 +1199,73 @@ export type HeldPublicationOperation = Readonly<{
   finishCleanup(): void; finishArenaRetirement(): void; assertArenaRetired(): void; close(): void;
 }>;
 const publicationLocks = new WeakMap<HeldStateOwnerLock, NativeLock>();
+export type HeldLocalInferenceInput = Readonly<{ assertHeld(): void; sourceBytes(): Buffer; close(): void }>;
+const localInferenceInputs = new WeakMap<HeldLocalInferenceInput, {
+  lock: HeldStateOwnerLock; native: NativeLocalInferenceInput; retained: boolean; processId: number;
+}>();
+
+function holdLocalInferenceInput(lock: HeldStateOwnerLock, config: Buffer, origin: Buffer, retained: boolean): HeldLocalInferenceInput {
+  assertStateOwnerLock(lock); lock.assertHeld();
+  const original = publicationLocks.get(lock);
+  const open = retained ? original?.openRetainedLocalInferenceInput : original?.createLocalInferenceInput;
+  if (!original || typeof open !== 'function')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original local inference source owner is unavailable');
+  const configBytes = Buffer.from(config), originBytes = Buffer.from(origin);
+  decodeLocalInferenceNativeInputData(configBytes);
+  let native: NativeLocalInferenceInput;
+  try { native = open.call(original, configBytes, originBytes); }
+  catch (error) { return workerReservationError(error); }
+  let source: Buffer;
+  try {
+    native.assertHeld();
+    source = Buffer.concat([configBytes, native.originBytes()]);
+    const decoded = decodeLocalInferenceNativeInput(source), root = stateRootIdentityForLock(lock);
+    if (decoded.origin.stateRoot.deviceId !== root.deviceId || decoded.origin.stateRoot.fileId !== root.directoryFileId ||
+        decoded.origin.stateRoot.uid !== root.ownerUid || (retained && !splitLocalInferenceNativeInput(source).origin.equals(originBytes)))
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'native local inference source belongs to another original StateRoot or witness');
+  } catch (error) {
+    try { native.close(); }
+    catch (failure) { throw new ResourceRetirementError('local inference source validation did not retire', new AggregateError([error, failure])); }
+    throw error;
+  }
+  let closed = false;
+  const holder: HeldLocalInferenceInput = Object.freeze({
+    assertHeld() {
+      if (this !== holder || closed) throw new TypeError('invalid or retired local inference source');
+      lock.assertHeld(); native.assertHeld();
+    },
+    sourceBytes() { holder.assertHeld(); return Buffer.from(source); },
+    close() {
+      if (this !== holder) throw new TypeError('invalid local inference source receiver');
+      if (closed) return;
+      try { native.close(); }
+      catch (error) { throw new ResourceRetirementError('original local inference source did not retire', error); }
+      closed = true; localInferenceInputs.delete(holder);
+    },
+  });
+  localInferenceInputs.set(holder, { lock, native, retained, processId: process.pid });
+  return holder;
+}
+
+export function createHeldLocalInferenceInput(lock: HeldStateOwnerLock, config: Buffer, origin: Buffer): HeldLocalInferenceInput {
+  return holdLocalInferenceInput(lock, config, origin, false);
+}
+
+export function openRetainedHeldLocalInferenceInput(lock: HeldStateOwnerLock, source: Buffer): HeldLocalInferenceInput {
+  decodeLocalInferenceNativeInput(source);
+  const { config, origin } = splitLocalInferenceNativeInput(source);
+  return holdLocalInferenceInput(lock, config, origin, true);
+}
+
+/** Private same-owner friend. The native controller independently rejects
+ * copied objects, a retained cleanup source and wrong installed layouts. */
+export function borrowHeldLocalInferenceInput(lock: HeldStateOwnerLock, source: HeldLocalInferenceInput,
+  retained: boolean): NativeLocalInferenceInput {
+  const held = localInferenceInputs.get(source);
+  if (!held || held.lock !== lock || held.retained !== retained || held.processId !== process.pid)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local inference input differs from its original physical owner and purpose');
+  source.assertHeld(); return held.native;
+}
 type NativePublicationOperation = HeldPublicationOperation & { readRetirementDiagnostic(): unknown };
 type PublicationArenaPhysicalRetirement = Readonly<{ arenaId: string; arenaIdentity: DescriptorIdentity & { mode: 448 };
   parentIdentity: DescriptorIdentity & { mode: 448 }; retirementObservation: PublicationArenaRetirementObservation }>;
@@ -1488,7 +1567,12 @@ type NativeCredentialScope = Readonly<{ generation: string; assertHeld(): void; 
   observeProducerLifetime(pid: number, ownerUid: number, processStartToken: string): 'present' | 'dead' }>;
 type NativeKernelGlobalGate = Readonly<{ assertHeld(): void; close(): void }>;
 type NativeMigrationCredentialGate = Readonly<{ assertHeld(): void; close(): void }>;
-type NativeMigrationFilesystem = Readonly<{ assertHeld(): void; close(): void; createCandidate(): void;
+type NativeLegacyProcessCut = Readonly<{
+  beginLegacyProcessCut(): unknown; stepLegacyProcessCut(): unknown; settleLegacyProcessPackage(digest: string, unrelated: boolean): unknown;
+  cancelLegacyProcessCut(): unknown;
+}>;
+type NativeMigrationFilesystem = NativeLegacyProcessCut & Readonly<{ assertHeld(): void; close(): void; createCandidate(): void;
+  checkBeforeLegacyProcessControl(): boolean;
   prepareLegacyLocksNext(): boolean; assertLegacyLocks(): void; releaseLegacyLocks(): Promise<void>;
   observeRoots(): Readonly<{ legacyRoot: HeldMigrationDirectoryObservation; backupRoot: HeldMigrationDirectoryObservation }>;
   publishInitialSpine(preparationRef: string, controlBytes: Buffer, previousLegacyMarkerBytes?: Buffer): void;
@@ -1504,14 +1588,28 @@ type NativeMigrationFilesystem = Readonly<{ assertHeld(): void; close(): void; c
   beginContextProjection(): void;
   nextContextSource(): HeldMigrationSourceFile | null;
   readContextSourceChunk(): Buffer | null; closeContextSource(): void }>;
-type RawCurrentMigrationInspector = Readonly<{ assertHeld(): void; close(): void;
+type RawCurrentMigrationInspector = NativeLegacyProcessCut & Readonly<{ assertHeld(): void; close(): void;
   prepareLegacyLocksNext(): boolean; assertLegacyLocks(): void; releaseLegacyLocks(): Promise<void>;
   beginExpectedEntry(packet: Buffer): void; verifyExpectedEntryNext(): boolean; finishExpectedEntries(): void;
   beginWholeTreeVerification(): void; verifyWholeTreesNext(): boolean; inspectRetainedLegacy(): unknown;
   selectOriginalKernelArchive(packet: Buffer): void; verifyArchiveManifestNext(): boolean; readArchiveManifestChunk(): Buffer | null;
+  selectArchiveModelStore(packet: Buffer): void; verifyArchiveModelStoreNext(): boolean; finishArchiveModelInspection(): void;
+  selectArchiveRuntimeWitnesses(packet: Buffer): void; verifyArchiveRuntimeWitnessesNext(): boolean;
+  beginRetiredRuntimeWitnessObservation(fd: number, origin: Buffer, kind: 1 | 2): void;
+  observeRetiredRuntimeWitnessNext(): boolean; retiredRuntimeWitnessObservation(): unknown;
   selectArchivePayload(packet: Buffer): void; verifyArchiveImageNext(): boolean; beginArchiveEntryPass(): void;
   beginArchiveCasEntry(packet: Buffer): void; verifyArchiveCasEntryNext(): boolean;
   verifyArchiveNamespaceNext(): boolean; inspectVerifiedArchive(): unknown }>;
+type RawCurrentRollbackPublisher = Readonly<{
+  publishDraining(bytes: Buffer): void;
+  observeAuthPreimage(): unknown;
+  publishArchiveReady(bytes: Buffer, authIdentity: Buffer): void;
+  restoreAbsentAuth(archiveReadySha256: string): unknown;
+  stageLegacyAuthority(bytes: Buffer): unknown;
+  publishRestoring(bytes: Buffer): void;
+  publishPreparedAuthority(): void;
+  close(): void;
+}>;
 export type PreparedImportImageObservation = Readonly<{
   file: Readonly<{ deviceId: string; fileId: string; ownerUid: number }>; sha256: string; byteCount: number; mode: number;
   stateRoot: DescriptorIdentity; migrationDirectory: DescriptorIdentity; collectionDirectory: DescriptorIdentity;
@@ -1544,12 +1642,16 @@ type NativeBinding = { acquireLock(stateRoot: string, createLayout: boolean): Na
   bindMigrationCredentialGate?(owner: NativeLock, exclusive: NativeKernelGlobalGate): NativeMigrationCredentialGate;
   acquireMigrationFilesystem?(bound: NativeMigrationCredentialGate, migrationId: string, legacyRoot: string): NativeMigrationFilesystem;
   openCurrentMigrationInspector?(bound: NativeMigrationCredentialGate, migrationId: string, archiveId: string,
-    legacyRoot: string, roots: readonly bigint[], control: Buffer, authority: Buffer, rendezvous: Buffer, authMarker: Buffer): RawCurrentMigrationInspector;
+    legacyRoot: string, roots: readonly bigint[], control: Buffer, authority: Buffer, rendezvous: Buffer, authMarker: Buffer,
+    modelScope?: NativeLocalModelStore | null, preparedMarker?: Buffer, markerIdentities?: Buffer): RawCurrentMigrationInspector;
+  createCurrentRollbackPublisher?(inspector: RawCurrentMigrationInspector): RawCurrentRollbackPublisher;
   openPreparedImportCandidate?(scope: NativeMigrationFilesystem): NativePreparedImportCandidate;
-  createKernelArchive?(bound: NativeMigrationCredentialGate, migrationId: string, archiveId: string, controlBytes: Buffer): RawKernelArchive;
+  createKernelArchive?(bound: NativeMigrationCredentialGate, migrationId: string, archiveId: string, controlBytes: Buffer,
+    modelScope?: NativeLocalModelStore | RawCurrentMigrationInspector | null): RawKernelArchive;
   deriveLocalModelStoreGate?(original: NativeMigrationCredentialGate): NativeLocalModelExclusiveGate;
   acquireLocalModelStore?(rootFd: number, stateRoot: string, root: readonly bigint[],
     exclusive?: NativeLocalModelExclusiveGate): NativeLocalModelStore | null;
+  inspectExistingLocalModelStore?(rootFd: number, stateRoot: string, root: readonly bigint[]): NativeLocalModelStore | null;
   acquireCredentialScope?(rootFd: number, stateRoot: string, root: readonly bigint[],
     migration?: NativeMigrationCredentialGate): NativeCredentialScope;
   connectInstalledControl?(rootFd: number, stateRoot: string, root: readonly bigint[],
@@ -1568,7 +1670,8 @@ const nativeBindings = new WeakMap<NativeStateOwner, NativeBinding>();
 export type KernelArchiveBirthObservation = Readonly<{
   stateRoot: DescriptorIdentity; migrationDirectory: DescriptorIdentity; archiveCollection: DescriptorIdentity;
   archiveDirectory: DescriptorIdentity; controlFile: DescriptorIdentity; file: DescriptorIdentity;
-  migrationId: string; archiveId: string; controlContentDigest: string; localModelStore: 'absent'; mode: number; linkCount: number;
+  migrationId: string; archiveId: string; controlContentDigest: string; localInferenceRuntime: 'absent' | 'present';
+  localModelStore: 'absent' | 'present'; mode: number; linkCount: number;
 }>;
 export type KernelArchiveImageObservation = KernelArchiveBirthObservation & Readonly<{ sha256: string; byteCount: number }>;
 export type KernelArchiveBackupJoin = Readonly<{ outcome: 'commit_phase_two_observed' | 'cancelled' | 'failed' | 'not_selected' | 'no_commit_phase_two';
@@ -1576,6 +1679,14 @@ export type KernelArchiveBackupJoin = Readonly<{ outcome: 'commit_phase_two_obse
 type RawKernelArchive = Readonly<{ assertHeld(): void; describeBirth(): KernelArchiveBirthObservation;
   beginBackup(): string; requestCancel(): void; joinBackup(): KernelArchiveBackupJoin; sealNext(): boolean;
   identity(): KernelArchiveImageObservation; beginRead(): string; endRead(): void;
+  beginModelCapture(): void; captureModelNext(): boolean; modelCaptureIdentity(): KernelArchiveModelStore | Readonly<{ kind: 'absent' }>;
+  beginModelVerification(): void; verifyModelNext(): boolean;
+  beginRuntimeWitnessCapture(count: number): void;
+  beginRetiredRuntimeWitnessObservation(fd: number, origin: Buffer, kind: 1 | 2): void;
+  observeRetiredRuntimeWitnessNext(): boolean; retiredRuntimeWitnessObservation(): unknown;
+  beginRuntimeWitnessEntry(packet: Buffer): void; captureRuntimeWitnessEntryNext(): boolean;
+  beginRuntimeWitnessSeal(): void; verifyRuntimeWitnessPackNext(): boolean; runtimeWitnessCaptureIdentity(): unknown;
+  beginRuntimeWitnessRecheck(): void;
   beginCasCapture(): void; captureCasNext(): boolean; casCaptureIdentity(): KernelArchiveCasIdentity;
   readCasCaptureEntries(start: number): readonly KernelArchiveCasEntry[];
   beginManifest(bytes: Buffer): void; sealManifestNext(): boolean;
@@ -1586,14 +1697,18 @@ const kernelArchives = new WeakMap<HeldKernelArchive, Readonly<{ native: NativeS
   gate: HeldMigrationCredentialGate; image: FileHandle; control: KernelRollbackDrainingControlV1; birth: KernelArchiveBirthObservation }>>();
 const unretiredKernelArchives = new Set<HeldKernelArchive>();
 const kernelArchiveCaptureReads = new WeakMap<HeldKernelArchive, { complete: boolean }>();
-function archiveObservation(value: unknown, control: KernelRollbackDrainingControlV1, sealed: boolean): KernelArchiveBirthObservation | KernelArchiveImageObservation {
+const kernelArchiveModelCaptures = new WeakMap<HeldKernelArchive, KernelArchiveModelStore | Readonly<{ kind: 'absent' }>>();
+function archiveObservation(value: unknown, control: KernelRollbackDrainingControlV1, sealed: boolean,
+  modelPresence: 'absent' | 'present' = 'absent'): KernelArchiveBirthObservation | KernelArchiveImageObservation {
   assertControlWireJson(value);
   const data = controlWireRecord(value, ['stateRoot', 'migrationDirectory', 'archiveCollection', 'archiveDirectory', 'controlFile', 'file',
-    'migrationId', 'archiveId', 'controlContentDigest', 'localModelStore', 'mode', 'linkCount', ...(sealed ? ['sha256', 'byteCount'] : [])]);
+    'migrationId', 'archiveId', 'controlContentDigest', 'localInferenceRuntime', 'localModelStore', 'mode', 'linkCount', ...(sealed ? ['sha256', 'byteCount'] : [])]);
   for (const key of ['stateRoot', 'migrationDirectory', 'archiveCollection', 'archiveDirectory', 'controlFile', 'file'])
     migrationObservedRootIdentity(data[key]);
   if (data.migrationId !== control.migrationId || data.archiveId !== control.archiveId ||
-      data.controlContentDigest !== canonicalSha256(control) || data.localModelStore !== 'absent' || data.mode !== (sealed ? 0o400 : 0o600) || data.linkCount !== 1)
+      data.controlContentDigest !== canonicalSha256(control) ||
+      (data.localInferenceRuntime !== 'absent' && data.localInferenceRuntime !== 'present') ||
+      data.localModelStore !== modelPresence || data.mode !== (sealed ? 0o400 : 0o600) || data.linkCount !== 1)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'original archive observation differs from its draining intent');
   if (sealed) { controlWireRef(data.sha256); controlWireInteger(data.byteCount, 1, 53_687_091_200); }
   return immutableSnapshot(data) as KernelArchiveBirthObservation | KernelArchiveImageObservation;
@@ -1601,7 +1716,8 @@ function archiveObservation(value: unknown, control: KernelRollbackDrainingContr
 /** Called only by the fixed installed producer while its original selected
  * image/EX/Owner are held. It cannot adopt an archive or accept a destination. */
 export async function createHeldKernelArchive(native: NativeStateOwner, gate: HeldMigrationCredentialGate,
-  image: FileHandle, value: KernelRollbackDrainingControlV1): Promise<HeldKernelArchive> {
+  image: FileHandle, value: KernelRollbackDrainingControlV1,
+  modelScope: NativeLocalModelStore | HeldCurrentMigrationInspector | null = null): Promise<HeldKernelArchive> {
   const binding = nativeBindings.get(native), original = migrationCredentialGates.get(gate);
   if (!binding || typeof binding.createKernelArchive !== 'function' || !original || original.native !== native ||
       process.platform !== 'linux' || process.versions.node !== '24.21.0')
@@ -1612,7 +1728,13 @@ export async function createHeldKernelArchive(native: NativeStateOwner, gate: He
     throw new TypeError('archive draining intent belongs to another actual original root');
   gate.assertHeld(); original.owner.assertHeld(); await assertHeldCredentialNativeImage(native, image); gate.assertHeld();
   let actual: RawKernelArchive;
-  try { actual = binding.createKernelArchive(original.original, control.migrationId, control.archiveId, canonicalJsonBytes(control)); }
+  const loan = modelScope === null ? undefined : currentMigrationInspectors.get(modelScope as HeldCurrentMigrationInspector);
+  if (loan && (loan.native !== native || loan.gate !== gate || loan.owner !== original.owner))
+    throw new TypeError('archive model visitor loan requires its exact original current inspector');
+  // Raw model source is validated only by its genuine separate native tag and
+  // exact original binding. A structural assertHeld callback is never invoked.
+  try { actual = binding.createKernelArchive(original.original, control.migrationId, control.archiveId, canonicalJsonBytes(control),
+    loan?.raw ?? modelScope as NativeLocalModelStore | null); }
   catch (error) { return kernelGlobalFailure(error); }
   const held: HeldKernelArchive = Object.freeze({
     assertHeld(...args: unknown[]) {
@@ -1626,7 +1748,8 @@ export async function createHeldKernelArchive(native: NativeStateOwner, gate: He
     }
   });
   try {
-    const birth = archiveObservation(actual.describeBirth(), control, false) as KernelArchiveBirthObservation;
+    const modelPresent = loan ? loan.modelPresent : modelScope !== null;
+    const birth = archiveObservation(actual.describeBirth(), control, false, modelPresent ? 'present' : 'absent') as KernelArchiveBirthObservation;
     if (canonicalSha256(birth.stateRoot) !== canonicalSha256({ deviceId: root.deviceId, fileId: root.directoryFileId, ownerUid: root.ownerUid }))
       throw new TypeError('archive birth belongs to another actual original root');
     kernelArchives.set(held, { native, original: actual, gate, image, control, birth }); return held;
@@ -1667,7 +1790,7 @@ export function assertHeldMigrationGateOwner(native: NativeStateOwner, gate: Hel
 }
 
 export function describeHeldKernelArchiveBirth(scope: HeldKernelArchive): KernelArchiveBirthObservation {
-  const held = heldKernelArchive(scope); const actual = archiveObservation(held.original.describeBirth(), held.control, false);
+  const held = heldKernelArchive(scope); const actual = archiveObservation(held.original.describeBirth(), held.control, false, held.birth.localModelStore);
   if (canonicalSha256(actual) !== canonicalSha256(held.birth)) throw new KernelStorageError('RECOVERY_REQUIRED', 'archive original birth changed');
   return held.birth;
 }
@@ -1717,7 +1840,7 @@ export async function sealHeldKernelArchive(scope: HeldKernelArchive, signal?: A
   const held = heldKernelArchive(scope);
   for (;;) { signal?.throwIfAborted(); scope.assertHeld();
     if (held.original.sealNext()) break; await setImmediate(); }
-  const value = archiveObservation(held.original.identity(), held.control, true) as KernelArchiveImageObservation;
+  const value = archiveObservation(held.original.identity(), held.control, true, held.birth.localModelStore) as KernelArchiveImageObservation;
   for (const field of ['stateRoot', 'migrationDirectory', 'archiveCollection', 'archiveDirectory', 'controlFile', 'file'] as const)
     if (canonicalSha256(value[field]) !== canonicalSha256(held.birth[field]))
       throw new KernelStorageError('RECOVERY_REQUIRED', 'sealed archive changed its original birth identity');
@@ -1810,6 +1933,96 @@ export async function sealHeldKernelArchiveManifest(scope: HeldKernelArchive, by
       file.deviceId !== held.birth.archiveDirectory.deviceId)
     throw new KernelStorageError('RECOVERY_REQUIRED', 'archive manifest differs from its actual complete original bytes');
   scope.assertHeld(); return Object.freeze({ file, sha256: digest, byteCount });
+}
+
+/** Revocation is allowed after a data refusal. It names only this genuine
+ * original scope; no data assertion, close, join or snapshot success is implied. */
+export function revokeHeldKernelArchive(scope: HeldKernelArchive): void {
+  const held = kernelArchives.get(scope);
+  if (!held) throw new TypeError('archive revocation requires its genuine original native producer');
+  try { held.original.requestCancel(); } catch (error) { return kernelGlobalFailure(error); }
+}
+async function verifyArchiveModelScope(scope: HeldKernelArchive, signal?: AbortSignal): Promise<void> {
+  const held = heldKernelArchive(scope);
+  held.original.beginModelVerification();
+  for (;;) {
+    signal?.throwIfAborted(); scope.assertHeld(); const complete = held.original.verifyModelNext();
+    if (typeof complete !== 'boolean') throw new TypeError('model archive returned a non-closed verification result');
+    if (complete) { scope.assertHeld(); return; } await setImmediate();
+  }
+}
+export async function captureHeldKernelArchiveModels(scope: HeldKernelArchive, signal?: AbortSignal):
+  Promise<KernelArchiveModelStore | Readonly<{ kind: 'absent' }>> {
+  const held = heldKernelArchive(scope);
+  if (kernelArchiveModelCaptures.has(scope) || typeof held.original.beginModelCapture !== 'function' ||
+      typeof held.original.captureModelNext !== 'function' || typeof held.original.modelCaptureIdentity !== 'function' ||
+      typeof held.original.beginModelVerification !== 'function' || typeof held.original.verifyModelNext !== 'function')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original archive lacks its complete private model-store source lifecycle');
+  signal?.throwIfAborted(); held.original.beginModelCapture();
+  for (;;) {
+    signal?.throwIfAborted(); scope.assertHeld(); const complete = held.original.captureModelNext();
+    if (typeof complete !== 'boolean') throw new TypeError('model archive returned a non-closed capture result');
+    if (complete) break; await setImmediate();
+  }
+  const raw = held.original.modelCaptureIdentity();
+  const present = held.birth.localModelStore === 'present';
+  let identity: KernelArchiveModelStore | Readonly<{ kind: 'absent' }>;
+  if (present) {
+    const captured = decodeKernelArchiveModelStore(raw);
+    if (captured.sourceDirectory.ownerUid !== held.birth.stateRoot.ownerUid ||
+        captured.sourceDirectory.deviceId !== held.birth.stateRoot.deviceId ||
+        captured.archiveDirectory.deviceId !== held.birth.archiveDirectory.deviceId)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'original model store belongs to another Root or archive filesystem');
+    identity = captured;
+  } else {
+    const absent = controlWireRecord(raw, ['kind']); if (absent.kind !== 'absent')
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'original model-store absence changed during archive capture');
+    identity = Object.freeze({ kind: 'absent' });
+  }
+  await verifyArchiveModelScope(scope, signal);
+  kernelArchiveModelCaptures.set(scope, identity); return identity;
+}
+/** Re-observes the same original fully captured source/target after CAS/root
+ * seal. It never resets a failed action, Owner, clock, nonce, budget or deadline. */
+export async function verifyHeldKernelArchiveModels(scope: HeldKernelArchive, signal?: AbortSignal): Promise<void> {
+  if (!kernelArchiveModelCaptures.has(scope)) throw new TypeError('current model validation requires the original complete capture');
+  await verifyArchiveModelScope(scope, signal);
+}
+/** The same producer copies only the actual fully retired original witness
+ * namespace. Each typed launch is reobserved through the genuine Anchor. */
+export async function captureHeldKernelArchiveRuntimeWitnesses(scope: HeldKernelArchive, cut: InstalledRuntimeWitnessCut | undefined,
+  signal?: AbortSignal): Promise<KernelArchiveRuntimeWitnesses | Readonly<{ kind: 'absent' }>> {
+  const held = heldKernelArchive(scope), raw = held.original;
+  const entries = cut ? installedRuntimeWitnessEntries(cut) : undefined;
+  if (held.birth.localInferenceRuntime === 'absent') {
+    if (cut?.count) throw new KernelStorageError('RECOVERY_REQUIRED', 'retained local launch is missing its original runtime witness namespace');
+    const absent = controlWireRecord(raw.runtimeWitnessCaptureIdentity(), ['kind']);
+    if (absent.kind !== 'absent') throw new KernelStorageError('RECOVERY_REQUIRED', 'runtime witness absence changed during archive capture');
+    return Object.freeze({ kind: 'absent' });
+  }
+  if (!cut || !entries) throw new KernelStorageError('RECOVERY_REQUIRED', 'runtime witness archive requires the original installed EX launch cut');
+  raw.beginRuntimeWitnessCapture(cut.count);
+  for await (const entry of entries) {
+    signal?.throwIfAborted(); scope.assertHeld();
+    withInstalledRuntimeWitnessAnchor(cut, fd => raw.beginRetiredRuntimeWitnessObservation(fd, entry.origin, entry.kind));
+    await currentInspectionSteps(scope, () => raw.observeRetiredRuntimeWitnessNext(), signal);
+    const observation = entry.verifyObservation(raw.retiredRuntimeWitnessObservation());
+    raw.beginRuntimeWitnessEntry(encodeRuntimeWitnessArchiveEntry(observation));
+    await currentInspectionSteps(scope, () => raw.captureRuntimeWitnessEntryNext(), signal);
+  }
+  signal?.throwIfAborted(); raw.beginRuntimeWitnessSeal();
+  await currentInspectionSteps(scope, () => raw.verifyRuntimeWitnessPackNext(), signal);
+  const identity = decodeKernelArchiveRuntimeWitnesses(raw.runtimeWitnessCaptureIdentity());
+  if (identity.entryCount !== cut.count || identity.sourceDirectory.ownerUid !== held.birth.stateRoot.ownerUid ||
+      identity.sourceDirectory.deviceId !== held.birth.stateRoot.deviceId)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'complete runtime witness pack differs from its exact original Root and cut');
+  return identity;
+}
+export async function recheckHeldKernelArchiveRuntimeWitnesses(scope: HeldKernelArchive, signal?: AbortSignal): Promise<void> {
+  const held = heldKernelArchive(scope);
+  if (held.birth.localInferenceRuntime === 'absent') return;
+  signal?.throwIfAborted(); held.original.beginRuntimeWitnessRecheck();
+  await currentInspectionSteps(scope, () => held.original.verifyRuntimeWitnessPackNext(), signal);
 }
 
 /** Account-wide cooperation fence only. It grants no credential, StateOwner,
@@ -2048,7 +2261,7 @@ export function acquireHeldMigrationFilesystem(native: NativeStateOwner, bound: 
 const migrationLegacyRetirements = new WeakMap<HeldMigrationFilesystem, Promise<void>>();
 export type HeldCurrentMigrationInspector = Readonly<{ assertHeld(): void; close(): void }>;
 const currentMigrationInspectors = new WeakMap<HeldCurrentMigrationInspector, Readonly<{
-  native: NativeStateOwner; gate: HeldMigrationCredentialGate; owner: HeldStateOwnerLock; raw: RawCurrentMigrationInspector;
+  native: NativeStateOwner; gate: HeldMigrationCredentialGate; owner: HeldStateOwnerLock; raw: RawCurrentMigrationInspector; modelPresent: boolean;
 }>>();
 const unretiredCurrentMigrationInspectors = new Set<HeldCurrentMigrationInspector>();
 const currentMigrationRetirements = new WeakMap<HeldCurrentMigrationInspector, Promise<void>>();
@@ -2058,7 +2271,9 @@ const currentMigrationRetirements = new WeakMap<HeldCurrentMigrationInspector, P
 export function openHeldCurrentMigrationInspector(native: NativeStateOwner, gate: HeldMigrationCredentialGate,
   owner: HeldStateOwnerLock, input: Readonly<{ migrationId: string; archiveId: string; legacyRoot: HeldMigrationDirectoryObservation;
     backupRoot: HeldMigrationDirectoryObservation; entryCount: number; controlBytes: Buffer; authorityBytes: Buffer;
-    rendezvousBytes: Buffer; authMarkerBytes: Buffer }>): HeldCurrentMigrationInspector {
+    rendezvousBytes: Buffer; authMarkerBytes: Buffer }>, modelScope: NativeLocalModelStore | null = null,
+  recovery?: Readonly<{ control: KernelRollbackRestoringControlV1; marker: MigrationAuthorityMarker; requireUnpublishedLegacy?: true }> |
+    Readonly<{ archiveReady: KernelRollbackArchiveReadyControlV1 }>): HeldCurrentMigrationInspector {
   assertHeldMigrationGateOwner(native, gate, owner);
   const binding = nativeBindings.get(native), actual = migrationCredentialGates.get(gate)!, root = stateRootIdentityForLock(owner);
   if (!binding?.openCurrentMigrationInspector) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'selected native image lacks its fixed current migration inspector');
@@ -2072,11 +2287,30 @@ export function openHeldCurrentMigrationInspector(native: NativeStateOwner, gate
     if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > 1_048_576) throw new TypeError('current inspector requires complete bounded fixed documents');
     return Buffer.from(bytes);
   });
+  let recoveryDocuments: [] | [Buffer] | [Buffer, Buffer] = [];
+  if (recovery && 'archiveReady' in recovery) {
+    const control = decodeKernelRollbackArchiveReadyControl(recovery.archiveReady);
+    if (control.migrationId !== input.migrationId || control.archiveId !== input.archiveId ||
+        control.originalAuthMarkerFile.deviceId !== legacy.deviceId || control.originalAuthMarkerFile.ownerUid !== legacy.ownerUid ||
+        !documents[0]!.equals(canonicalJsonBytes(control)) ||
+        createHash('sha256').update(documents[3]!).digest('hex') !== control.originalMigratedAuthMarkerRef)
+      throw new TypeError('rollback archive-ready successor requires its exact original auth marker intent');
+    recoveryDocuments = [encodeRollbackArchiveReadyAuthIdentity(control)];
+  } else if (recovery) {
+    const control = decodeKernelRollbackRestoringControl(recovery.control), marker = decodeMigrationAuthorityMarker(recovery.marker);
+    if (control.migrationId !== input.migrationId || control.archiveId !== input.archiveId ||
+        control.preparedRootAuthorityFile.ownerUid !== root.ownerUid || control.preparedRootAuthorityFile.deviceId !== root.deviceId ||
+        control.preparedLegacyAuthorityFile.ownerUid !== legacy.ownerUid || control.preparedLegacyAuthorityFile.deviceId !== legacy.deviceId ||
+        !documents[0]!.equals(canonicalJsonBytes(control)) || marker.authority !== 'legacy' || marker.migrationId !== control.migrationId ||
+        canonicalSha256(marker) !== control.preparedLegacyAuthorityMarkerRef || marker.markerDigest !== control.preparedLegacyAuthorityMarkerDigest)
+      throw new TypeError('current rollback successor requires the exact original prepared marker identities and control');
+    recoveryDocuments = [canonicalJsonBytes(marker), encodePreparedRollbackMarkerIdentities(control, recovery.requireUnpublishedLegacy)];
+  }
   let raw: RawCurrentMigrationInspector;
   try { raw = binding.openCurrentMigrationInspector(actual.original, input.migrationId, input.archiveId, legacy.canonicalAbsolutePath,
     [BigInt(legacy.deviceId), BigInt(legacy.directoryFileId), BigInt(legacy.mode), BigInt(backup.deviceId),
       BigInt(backup.directoryFileId), BigInt(backup.mode), BigInt(root.ownerUid), BigInt(input.entryCount)],
-    documents[0]!, documents[1]!, documents[2]!, documents[3]!); }
+    documents[0]!, documents[1]!, documents[2]!, documents[3]!, modelScope, ...recoveryDocuments); }
   catch (error) { return kernelGlobalFailure(error); }
   const held: HeldCurrentMigrationInspector = Object.freeze({
     assertHeld(...args: unknown[]) {
@@ -2089,14 +2323,113 @@ export function openHeldCurrentMigrationInspector(native: NativeStateOwner, gate
       catch (error) { unretiredCurrentMigrationInspectors.add(held); throw new ResourceRetirementError('current inspector original resources did not actually close', error); }
     }
   });
-  currentMigrationInspectors.set(held, { native, gate, owner, raw }); return held;
+  currentMigrationInspectors.set(held, { native, gate, owner, raw, modelPresent: modelScope !== null }); return held;
 }
 function currentMigrationInspector(scope: HeldCurrentMigrationInspector): RawCurrentMigrationInspector {
   const held = currentMigrationInspectors.get(scope);
   if (!held) throw new TypeError('current observation requires its genuine native inspector');
   assertHeldMigrationGateOwner(held.native, held.gate, held.owner); return held.raw;
 }
-async function currentInspectionSteps(scope: HeldCurrentMigrationInspector, step: () => boolean, signal?: AbortSignal): Promise<void> {
+type LegacyProcessCutResult = Readonly<{ kind: 'complete'; digest: string }> |
+  Readonly<{ kind: 'legacy_process_or_descriptor_open' | 'unavailable' }>;
+const unavailableProcessCut = Object.freeze({ kind: 'unavailable' as const });
+const legacyProcessOpen = Object.freeze({ kind: 'legacy_process_or_descriptor_open' as const });
+function checkLegacyProcessPackage(value: unknown): Readonly<{ result: 'unrelated' | 'legacy' | 'unavailable'; digest: string }> {
+  const data = controlWireRecord(value, ['kind', 'bytes', 'rootManaged', 'entrypoint', 'packageSha256', 'entrySha256']);
+  const bytes = data.bytes;
+  if (!Buffer.isBuffer(bytes) || bytes.byteLength === 0 || bytes.byteLength > 131072) throw new TypeError('invalid original package observation');
+  try {
+    const digest = controlWireRef(data.packageSha256);
+    controlWireRef(data.entrySha256);
+    const entry = controlWireText(data.entrypoint, 4096);
+    if (createHash('sha256').update(bytes).digest('hex') !== digest || path.posix.isAbsolute(entry) ||
+        path.posix.normalize(entry) !== entry || entry.split('/').includes('..') || entry.includes('\\'))
+      throw new TypeError('package bytes or original entry do not match');
+    const unavailable = { result: 'unavailable' as const, digest };
+    let decoded: unknown;
+    try {
+      decoded = parseJsonStrict(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+      assertControlWireJson(decoded);
+    } catch { return unavailable; }
+    if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) return unavailable;
+    const { name, version, bin } = decoded as Record<string, unknown>;
+    if (typeof name !== 'string' || !/^(?:@[a-z0-9_.-]+\/)?[a-z0-9_.-]+$/u.test(name) ||
+        typeof version !== 'string' || version.length > 128 ||
+        !/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?$/u.test(version))
+      return unavailable;
+    const entries = typeof bin === 'string' ? [bin] : bin && typeof bin === 'object' && !Array.isArray(bin) ? Object.values(bin) : [];
+    if (!entries.some(candidate => typeof candidate === 'string' && (candidate === entry || candidate === './' + entry)))
+      return unavailable;
+    if (name === 'cliq' || name === '@cogineai/cliq') return { result: 'legacy', digest };
+    // npm/npx may have resolved another package from arguments or cache. An
+    // unrelated package name alone cannot resolve that launcher chain.
+    if (data.rootManaged !== true || name === 'npm' || name === 'npx') return unavailable;
+    return { result: 'unrelated', digest };
+  } finally { bytes.fill(0); }
+}
+
+/** Genuine migration EX and exact held legacy roots are selected by the
+ * original holders. The private native cursor retains only its own process
+ * read resources and joins before any complete/refused result escapes. */
+export async function inspectHeldLegacyProcessCut(scope: HeldMigrationFilesystem | HeldCurrentMigrationInspector,
+  signal?: AbortSignal): Promise<LegacyProcessCutResult> {
+  const raw: NativeLegacyProcessCut = migrationFilesystems.get(scope as HeldMigrationFilesystem)?.original ??
+    currentMigrationInspector(scope as HeldCurrentMigrationInspector);
+  if (typeof raw.beginLegacyProcessCut !== 'function' || typeof raw.stepLegacyProcessCut !== 'function' ||
+      typeof raw.settleLegacyProcessPackage !== 'function' || typeof raw.cancelLegacyProcessCut !== 'function')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'installed migration requires its fixed native process inspection');
+  signal?.throwIfAborted(); scope.assertHeld();
+  const start = controlWireRecord(raw.beginLegacyProcessCut(), ['kind']);
+  if (start.kind === 'unavailable') return unavailableProcessCut;
+  if (start.kind !== 'started') throw new TypeError('invalid native Legacy process inspection entry');
+  let held = true, failed = false, failure: unknown, result: LegacyProcessCutResult | undefined;
+  try {
+    for (;;) {
+      signal?.throwIfAborted(); scope.assertHeld();
+      const value = raw.stepLegacyProcessCut();
+      const kind = value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, 'kind')?.value : undefined;
+      if (kind === 'complete') {
+        held = false;
+        const data = controlWireRecord(value, ['kind', 'digest']);
+        result = Object.freeze({ kind, digest: controlWireRef(data.digest) }); break;
+      }
+      if (kind === 'unavailable' || kind === 'legacy_process_or_descriptor_open') {
+        held = false; controlWireRecord(value, ['kind']);
+        result = kind === 'unavailable' ? unavailableProcessCut : legacyProcessOpen; break;
+      }
+      if (kind === 'package') {
+        const observed = checkLegacyProcessPackage(value);
+        if (observed.result === 'legacy') {
+          result = legacyProcessOpen; break;
+        }
+        if (controlWireRecord(raw.settleLegacyProcessPackage(observed.digest, observed.result === 'unrelated'), ['kind']).kind !== 'progress')
+          throw new TypeError('invalid native package source acknowledgment');
+      } else if (controlWireRecord(value, ['kind']).kind !== 'progress') {
+        throw new TypeError('invalid native Legacy process inspection step');
+      }
+      await setImmediate();
+    }
+    signal?.throwIfAborted(); scope.assertHeld();
+  } catch (error) { failed = true; failure = error; }
+  if (held) {
+    try {
+      if (controlWireRecord(raw.cancelLegacyProcessCut(), ['kind']).kind !== 'retired')
+        throw new TypeError('invalid native Legacy process close receipt');
+    } catch (error) {
+      throw new ResourceRetirementError('original Legacy process inspection did not retire', failed ? new AggregateError([failure, error]) : error);
+    }
+  }
+  if (failed) throw failure;
+  if (!result) throw new TypeError('missing original Legacy process inspection outcome');
+  return result;
+}
+export function assertHeldEarlyMigrationProcessRefusal(scope: HeldMigrationFilesystem): void {
+  const raw = migrationFilesystems.get(scope)?.original;
+  if (!raw || typeof raw.checkBeforeLegacyProcessControl !== 'function' || raw.checkBeforeLegacyProcessControl() !== true)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'original migration control absence cannot be proven');
+  scope.assertHeld();
+}
+async function currentInspectionSteps(scope: Readonly<{ assertHeld(): void }>, step: () => boolean, signal?: AbortSignal): Promise<void> {
   for (;;) {
     signal?.throwIfAborted(); scope.assertHeld(); const complete = step();
     if (typeof complete !== 'boolean') throw new TypeError('current native observation returned a non-closed completion');
@@ -2113,7 +2446,12 @@ export async function verifyHeldCurrentMigrationLegacy(scope: HeldCurrentMigrati
     signal?.throwIfAborted(); scope.assertHeld(); raw.beginExpectedEntry(encodeCurrentMigrationExpectedEntry(entry));
     await currentInspectionSteps(scope, () => raw.verifyExpectedEntryNext(), signal);
   }
-  raw.finishExpectedEntries(); raw.beginWholeTreeVerification();
+  raw.finishExpectedEntries();
+  return recheckHeldCurrentMigrationLegacy(scope, signal);
+}
+export async function recheckHeldCurrentMigrationLegacy(scope: HeldCurrentMigrationInspector, signal?: AbortSignal):
+  ReturnType<typeof verifyHeldCurrentMigrationLegacy> {
+  const raw = currentMigrationInspector(scope); raw.beginWholeTreeVerification();
   await currentInspectionSteps(scope, () => raw.verifyWholeTreesNext(), signal);
   const data = controlWireRecord(raw.inspectRetainedLegacy(), ['kind', 'sourceAuth', 'legacyRoot', 'entryCount', 'byteCount', 'inspectionEpoch']);
   if (data.kind !== 'retained_original_objects_unchanged' || !['matched_original_marker', 'absent'].includes(data.sourceAuth as string) ||
@@ -2121,11 +2459,107 @@ export async function verifyHeldCurrentMigrationLegacy(scope: HeldCurrentMigrati
   migrationDirectoryObservation(data.legacyRoot); controlWireInteger(data.entryCount); controlWireInteger(data.byteCount, 0, KERNEL_ARCHIVE_MAX_BYTES);
   scope.assertHeld(); return immutableSnapshot(data) as Awaited<ReturnType<typeof verifyHeldCurrentMigrationLegacy>>;
 }
+export type HeldCurrentRollbackPublisher = Readonly<{ close(): void }>;
+const currentRollbackPublishers = new WeakMap<HeldCurrentRollbackPublisher, Readonly<{
+  inspector: HeldCurrentMigrationInspector; raw: RawCurrentRollbackPublisher;
+}>>();
+const unretiredRollbackPublishers = new Set<HeldCurrentRollbackPublisher>();
+function rollbackPublisher(publisher: HeldCurrentRollbackPublisher) {
+  const held = currentRollbackPublishers.get(publisher);
+  if (!held) throw new TypeError('rollback requires its genuine current publisher');
+  held.inspector.assertHeld();
+  return held;
+}
+export function holdCurrentRollbackPublisher(inspector: HeldCurrentMigrationInspector): HeldCurrentRollbackPublisher {
+  const original = currentMigrationInspectors.get(inspector);
+  if (!original) throw new TypeError('rollback publisher requires its genuine current inspector');
+  inspector.assertHeld();
+  const binding = nativeBindings.get(original.native);
+  if (typeof binding?.createCurrentRollbackPublisher !== 'function')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'selected native image lacks its fixed rollback publisher');
+  let raw: RawCurrentRollbackPublisher;
+  try { raw = binding.createCurrentRollbackPublisher(original.raw); }
+  catch (error) { return kernelGlobalFailure(error); }
+  let retired = false;
+  const held: HeldCurrentRollbackPublisher = Object.freeze({
+    close(...args: unknown[]) {
+      if (this !== held || args.length) throw new TypeError('rollback publisher requires its genuine close receiver');
+      if (retired) return;
+      try { raw.close(); retired = true; currentRollbackPublishers.delete(held); unretiredRollbackPublishers.delete(held); }
+      catch (error) {
+        unretiredRollbackPublishers.add(held);
+        throw new ResourceRetirementError('original rollback publisher did not retire', error);
+      }
+    }
+  });
+  currentRollbackPublishers.set(held, { inspector, raw }); return held;
+}
+export function publishHeldRollbackDraining(publisher: HeldCurrentRollbackPublisher, control: KernelRollbackDrainingControlV1): void {
+  const held = rollbackPublisher(publisher);
+  try { held.raw.publishDraining(canonicalJsonBytes(decodeKernelRollbackDrainingControl(control))); }
+  catch (error) { return kernelGlobalFailure(error); }
+}
+export function observeHeldRollbackAuthPreimage(publisher: HeldCurrentRollbackPublisher, markerRef: string): DescriptorIdentity {
+  const held = rollbackPublisher(publisher);
+  let observed: unknown;
+  try { observed = held.raw.observeAuthPreimage(); } catch (error) { return kernelGlobalFailure(error); }
+  const data = controlWireRecord(observed, ['file', 'sha256']);
+  if (data.sha256 !== controlWireRef(markerRef))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'original rollback auth preimage changed after archive verification');
+  return migrationObservedRootIdentity(data.file);
+}
+export function publishHeldRollbackArchiveReady(publisher: HeldCurrentRollbackPublisher, value: KernelRollbackArchiveReadyControlV1): void {
+  const held = rollbackPublisher(publisher), control = decodeKernelRollbackArchiveReadyControl(value);
+  try { held.raw.publishArchiveReady(canonicalJsonBytes(control), encodeRollbackArchiveReadyAuthIdentity(control)); }
+  catch (error) { return kernelGlobalFailure(error); }
+}
+export function restoreHeldRollbackAuthAbsence(publisher: HeldCurrentRollbackPublisher, value: KernelRollbackArchiveReadyControlV1):
+  Readonly<{ kind: 'exact_marker_removed_and_directory_synced' | 'original_intent_current_absence_and_directory_synced';
+    previousMarkerFile: DescriptorIdentity }> {
+  const held = rollbackPublisher(publisher), ready = decodeKernelRollbackArchiveReadyControl(value);
+  const { originalAuthMarkerFile } = ready;
+  let observed: unknown;
+  try { observed = held.raw.restoreAbsentAuth(canonicalSha256(ready)); } catch (error) { return kernelGlobalFailure(error); }
+  const kind = observed && typeof observed === 'object' ? Object.getOwnPropertyDescriptor(observed, 'kind')?.value : undefined;
+  if (kind === 'original_intent_current_absence_and_directory_synced') {
+    controlWireRecord(observed, ['kind']);
+    return Object.freeze({ kind, previousMarkerFile: originalAuthMarkerFile });
+  }
+  const data = controlWireRecord(observed, ['kind', 'previousMarkerFile']);
+  if (kind !== 'exact_marker_removed_and_directory_synced' ||
+      canonicalSha256(migrationObservedRootIdentity(data.previousMarkerFile)) !== canonicalSha256(originalAuthMarkerFile))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'original restored auth absence lacks its exact physical result');
+  return Object.freeze({ kind, previousMarkerFile: originalAuthMarkerFile });
+}
+export function stageHeldRollbackAuthority(publisher: HeldCurrentRollbackPublisher, value: MigrationAuthorityMarker):
+  Readonly<{ rootFile: DescriptorIdentity; legacyFile: DescriptorIdentity;
+    originalRootFile: DescriptorIdentity; originalLegacyFile: DescriptorIdentity }> {
+  const held = rollbackPublisher(publisher), marker = decodeMigrationAuthorityMarker(value);
+  if (marker.authority !== 'legacy') throw new TypeError('rollback can only stage its exact Legacy authority branch');
+  let observed: unknown;
+  try { observed = held.raw.stageLegacyAuthority(canonicalJsonBytes(marker)); } catch (error) { return kernelGlobalFailure(error); }
+  const data = controlWireRecord(observed, ['rootFile', 'legacyFile', 'originalRootFile', 'originalLegacyFile', 'contentDigest']);
+  if (data.contentDigest !== canonicalSha256(marker))
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'original staged authority bytes differ from their exact marker');
+  return Object.freeze({ rootFile: migrationObservedRootIdentity(data.rootFile), legacyFile: migrationObservedRootIdentity(data.legacyFile),
+    originalRootFile: migrationObservedRootIdentity(data.originalRootFile), originalLegacyFile: migrationObservedRootIdentity(data.originalLegacyFile) });
+}
+export function publishHeldRollbackRestoring(publisher: HeldCurrentRollbackPublisher, control: KernelRollbackRestoringControlV1): void {
+  const held = rollbackPublisher(publisher);
+  try { held.raw.publishRestoring(canonicalJsonBytes(decodeKernelRollbackRestoringControl(control))); }
+  catch (error) { return kernelGlobalFailure(error); }
+}
+/** The only caller is the private Store coordinator after its original final
+ * SQL receipt and actual database close are independently verified. */
+export function publishHeldPreparedRollbackAuthority(publisher: HeldCurrentRollbackPublisher): void {
+  const held = rollbackPublisher(publisher);
+  try { held.raw.publishPreparedAuthority(); } catch (error) { return kernelGlobalFailure(error); }
+}
 /** Header first, then independently rehashed entry stream. No entry vector or
  * caller-selected file path survives; null means that exact reader reached EOF,
  * rehashed, fsynced and really closed before either strict decoder is finished. */
 export async function verifyHeldCurrentKernelArchive(scope: HeldCurrentMigrationInspector, selection: CurrentArchiveManifestSelection,
-  expectedControl: KernelRollbackDrainingControlV1, signal?: AbortSignal): Promise<Readonly<{
+  expectedControl: KernelRollbackDrainingControlV1, signal?: AbortSignal, witnessCut?: InstalledRuntimeWitnessCut): Promise<Readonly<{
     header: CompleteKernelArchiveHeader; observation: Readonly<{ kind: 'current_checked_original_archive'; entryCount: number;
       totalBytes: number; manifestSha256: string; archiveDirectory: DescriptorIdentity; manifestFile: DescriptorIdentity;
       databaseFile: DescriptorIdentity; casDirectory: DescriptorIdentity }> }>> {
@@ -2139,6 +2573,17 @@ export async function verifyHeldCurrentKernelArchive(scope: HeldCurrentMigration
   if (canonicalSha256(header.control) !== canonicalSha256(control) ||
       canonicalSha256(header.archiveDirectory) !== canonicalSha256(selection.archiveDirectory))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'archive header belongs to another original draining intent or birth');
+  const models = header.localModelStore;
+  if (models.kind === 'captured') raw.selectArchiveModelStore(encodeCurrentKernelArchiveModelStore(models));
+  const runtime = header.localInferenceRuntime;
+  const runtimeEntries = witnessCut ? installedRuntimeWitnessEntries(witnessCut) : undefined;
+  if (runtime.kind === 'captured') {
+    if (!witnessCut || !runtimeEntries || witnessCut.count !== runtime.entryCount)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'current runtime witness archive lacks its exact original launch cut');
+    raw.selectArchiveRuntimeWitnesses(encodeCurrentRuntimeWitnessArchive(runtime));
+  } else if (witnessCut?.count) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'current retained local launch lacks its original archived runtime witness');
+  }
   raw.selectArchivePayload(encodeCurrentArchivePayload(header));
   await currentInspectionSteps(scope, () => raw.verifyArchiveImageNext(), signal); raw.beginArchiveEntryPass();
   const entryReader = new CompleteKernelArchiveManifestStream({ byteCount: selection.manifest.byteCount, sha256: selection.manifest.sha256 });
@@ -2152,11 +2597,25 @@ export async function verifyHeldCurrentKernelArchive(scope: HeldCurrentMigration
   }
   if (canonicalSha256(entryReader.finish()) !== canonicalSha256(header))
     throw new KernelStorageError('RECOVERY_REQUIRED', 'archive header changed during its original entry pass');
+  if (runtime.kind === 'captured') {
+    await currentInspectionSteps(scope, () => raw.verifyArchiveRuntimeWitnessesNext(), signal);
+    for await (const entry of runtimeEntries!) {
+      signal?.throwIfAborted(); scope.assertHeld();
+      withInstalledRuntimeWitnessAnchor(witnessCut!, fd => raw.beginRetiredRuntimeWitnessObservation(fd, entry.origin, entry.kind));
+      await currentInspectionSteps(scope, () => raw.observeRetiredRuntimeWitnessNext(), signal);
+      entry.verifyObservation(raw.retiredRuntimeWitnessObservation());
+    }
+  }
   await currentInspectionSteps(scope, () => raw.verifyArchiveNamespaceNext(), signal);
+  if (models.kind === 'captured') {
+    await currentInspectionSteps(scope, () => raw.verifyArchiveModelStoreNext(), signal);
+    signal?.throwIfAborted(); raw.finishArchiveModelInspection();
+  }
   const data = controlWireRecord(raw.inspectVerifiedArchive(), ['kind', 'entryCount', 'totalBytes', 'manifestSha256',
     'archiveDirectory', 'manifestFile', 'databaseFile', 'casDirectory']);
   if (data.kind !== 'current_checked_original_archive' || data.entryCount !== header.cas.entryCount ||
-      data.totalBytes !== header.cas.combinedPayloadBytes + selection.manifest.byteCount || data.manifestSha256 !== selection.manifest.sha256 ||
+      data.totalBytes !== header.cas.combinedPayloadBytes + selection.manifest.byteCount + kernelArchiveSidecarBytes(header) ||
+      data.manifestSha256 !== selection.manifest.sha256 ||
       canonicalSha256(data.archiveDirectory) !== canonicalSha256(header.archiveDirectory) ||
       canonicalSha256(data.manifestFile) !== canonicalSha256(selection.manifest.file) ||
       canonicalSha256(data.databaseFile) !== canonicalSha256(header.database.file) ||
@@ -2953,6 +3412,14 @@ export function withHeldLocalModelStoreScope<T>(native: NativeStateOwner, input:
     return operation(scope);
   });
 }
+/** Existing namespace only. Actual no-follow ENOENT returns null after its
+ * original global SH/root descriptions join; a partial layout is refused,
+ * never repaired or initialized by an ordinary list/retirement operation. */
+export function withHeldExistingLocalModelStoreScope<T>(native: NativeStateOwner, input: Readonly<{
+  image: FileHandle; root: FileHandle; rootIdentity: BigIntStats; stateRoot: string;
+}>, operation: (scope: NativeLocalModelStore | null) => Promise<T>): Promise<T> {
+  return withHeldModelStoreScope(native, { ...input, existingOnly: true }, operation);
+}
 /** Existing-source archive borrow only. A genuine original migration binding
  * proves the same Root/Owner/global EX; native derives a separate model tag.
  * Absence is actual no-follow ENOENT. No SH, second pager or source mutation
@@ -2966,10 +3433,13 @@ export function withHeldMigrationLocalModelStoreScope<T>(native: NativeStateOwne
 async function withHeldModelStoreScope<T>(native: NativeStateOwner, input: Readonly<{
   image: FileHandle; root: FileHandle; rootIdentity: BigIntStats; stateRoot: string;
   migrationGate?: HeldMigrationCredentialGate;
+  existingOnly?: true;
 }>, operation: (scope: NativeLocalModelStore | null) => Promise<T>): Promise<T> {
   const binding = nativeBindings.get(native);
   if (!binding || typeof binding.acquireLocalModelStore !== 'function' || typeof binding.deriveLocalModelStoreGate !== 'function')
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'selected helper lacks the fixed original model-store owner');
+  if (input.existingOnly && input.migrationGate !== undefined)
+    throw new TypeError('ordinary existing-model purpose cannot borrow migration authority');
   if (process.versions.node !== '24.21.0')
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'model store requires the fixed installed Node 24.21.0 backend');
   // This compares the original signed loaded image only; it neither opens nor
@@ -2995,8 +3465,12 @@ async function withHeldModelStoreScope<T>(native: NativeStateOwner, input: Reado
     }
     const root = input.rootIdentity;
     const tuple = [root.dev, root.ino, root.uid, root.gid, root.mode];
-    scope = exclusive ? binding.acquireLocalModelStore(input.root.fd, input.stateRoot, tuple, exclusive) :
-      binding.acquireLocalModelStore(input.root.fd, input.stateRoot, tuple);
+    if (exclusive) scope = binding.acquireLocalModelStore(input.root.fd, input.stateRoot, tuple, exclusive);
+    else if (input.existingOnly) {
+      const inspect = binding.inspectExistingLocalModelStore;
+      if (typeof inspect !== 'function') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'existing model-store reads require their fixed original native purpose');
+      scope = inspect(input.root.fd, input.stateRoot, tuple);
+    } else scope = binding.acquireLocalModelStore(input.root.fd, input.stateRoot, tuple);
     if (scope) {
       scope.assertHeld();
       const bootstrap = new DatabaseSync(':memory:', { allowExtension: true });

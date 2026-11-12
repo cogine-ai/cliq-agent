@@ -205,17 +205,19 @@ async function within<T>(pending: Promise<T>, milliseconds: number): Promise<T> 
 }
 
 /** One real child lifetime; the caller supplies only its trusted disposable
- * fixture composition. The production caller fixes the original 60s budget.
+ * fixture composition and a fixed fixture budget.
  * No observation can extend it, make a timeout successful or authorize work. */
 export async function runOwnedEnrollDiagnostic(input: Readonly<{
   command: { executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv };
   input: Buffer; uid: number; bootstrapImage: string; installedImage: string; originalDeadlineMs: number;
   scanner: CredentialSecretScanner; diagnostic: InstalledEnrollDiagnostic; observeOwner?: () => EnrollOwnerStage;
+  fixtureScope?: 'delayed_delivery';
 }>) {
   assert.equal(process.platform, 'linux');
   assert(Number.isSafeInteger(input.uid) && input.uid >= 0);
   assert(input.input.length > 0 && input.input.length <= 65536);
-  assert(Number.isSafeInteger(input.originalDeadlineMs) && input.originalDeadlineMs > 0 && input.originalDeadlineMs <= 60000);
+  const ceiling = input.fixtureScope === 'delayed_delivery' ? 180_000 : 60_000;
+  assert(Number.isSafeInteger(input.originalDeadlineMs) && input.originalDeadlineMs > 0 && input.originalDeadlineMs <= ceiling);
   const started = performance.now(), by = started + input.originalDeadlineMs, diagnostic = input.diagnostic;
   Object.assign(diagnostic, { diagnosticOnly: true, originalDeadlineMs: input.originalDeadlineMs, elapsedMs: 0, outcome: 'observation_failed',
     launcherObserved: false, authObserved: false, launcherJoined: false, authJoined: false, processAndPipesJoined: false,

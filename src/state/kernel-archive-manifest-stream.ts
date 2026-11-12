@@ -8,9 +8,9 @@ import { parseJsonStrict } from '../kernel/json.js';
 import { assertControlWireJson, controlWireInteger, controlWireRecord, controlWireRef } from '../kernel/control-wire-data.js';
 import { decodeKernelArchiveCasEntry, decodeKernelArchiveCasIdentity, KERNEL_ARCHIVE_MAX_BYTES, KERNEL_ARCHIVE_MAX_MANIFEST_BYTES,
   type KernelArchiveCasEntry, type KernelArchiveCasIdentity } from '../kernel/kernel-archive-namespace.js';
-import { decodeCompleteKernelArchiveHeader, type CompleteKernelArchiveHeader } from './kernel-archive-manifest.js';
+import { decodeCompleteKernelArchiveHeader, kernelArchiveSidecarBytes, type CompleteKernelArchiveHeader } from './kernel-archive-manifest.js';
 
-const FIELDS = ['archiveDirectory', 'cas', 'control', 'database', 'entries', 'excludedTail', 'format', 'localModelStore',
+const FIELDS = ['archiveDirectory', 'cas', 'control', 'database', 'entries', 'excludedTail', 'format', 'localInferenceRuntime', 'localModelStore',
   'manifestDigest', 'schemaVersion', 'snapshotBoundary'] as const;
 function invalid(): never { throw new TypeError('archive manifest is not its complete fixed canonical byte stream'); }
 /** One bounded source chunk and at most one small canonical fragment survive
@@ -61,7 +61,7 @@ export class CompleteKernelArchiveManifestStream {
       if (this.manifestHash.digest('hex') !== header.manifestDigest || this.count !== header.cas.entryCount ||
           this.totalBytes !== header.cas.totalBytes || this.entriesHash.digest('hex') !== header.cas.entriesDigest ||
           header.cas.combinedPayloadBytes !== header.database.byteCount + this.totalBytes ||
-          header.cas.combinedPayloadBytes > KERNEL_ARCHIVE_MAX_BYTES - this.observedBytes) return invalid();
+          header.cas.combinedPayloadBytes > KERNEL_ARCHIVE_MAX_BYTES - this.observedBytes - kernelArchiveSidecarBytes(header)) return invalid();
       return header;
     } catch { this.failed = true; return invalid(); }
   }

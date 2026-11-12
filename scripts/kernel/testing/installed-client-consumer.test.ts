@@ -361,6 +361,35 @@ test('the original ready deadline retains the last scanned split progress marker
   assert.equal(closed, 2); assert.equal(joined, false);
 });
 
+test('only the named cold schema3 fixtures can use the 90-second greeting deadline', async t => {
+  const originalTimer = globalThis.setTimeout;
+  t.mock.method(globalThis, 'setTimeout', (callback: () => void, milliseconds: number) =>
+    originalTimer(callback, milliseconds > 85_000 ? 10 : milliseconds));
+  const options = { executable: process.execPath,
+    args: ['--input-type=module', '-e', 'for await (const _ of process.stdin) {}'],
+    cwd: process.cwd(), env: process.env, headlessSchemaVersion: 3 as const,
+    openScan: () => ({ scan() {}, close() {} }), onJoined() { assert.fail(); } };
+  for (const coldHello of ['migration', 'local_inference'] as const) {
+    await assert.rejects(openInstalledClientConsumer({ ...options, coldHello }), error => {
+      assert(error instanceof InstalledClientConsumerDeadlineError);
+      assert.equal(error.diagnostic.stage, 'ready'); assert.equal(error.diagnostic.originalDeadlineMs, 90_000);
+      assert.equal(error.diagnostic.frames, 0); return true;
+    });
+  }
+  for (const invalid of [
+    { timeout: 5001 },
+    { coldHello: 'unknown' },
+    { coldHello: 'migration', headlessSchemaVersion: undefined },
+    { coldHello: 'migration', headlessTransport: 'rpc' },
+    { coldHello: 'migration', timeout: 5000 },
+    { coldHello: 'local_inference', initialRequest: { protocolVersion: 1, method: 'run.get', runId: 'run' } },
+  ]) {
+    await assert.rejects(openInstalledClientConsumer({ ...options, ...invalid,
+      openScan() { throw new Error('invalid readiness options reached the child startup'); } } as Parameters<typeof openInstalledClientConsumer>[0]),
+    { code: 'ERR_ASSERTION' });
+  }
+});
+
 test('the ready deadline retains scanned split authentication boundaries and actual work counters only as diagnostics', async () => {
   const marker = 'CLIQ_INSTALLED_CLIENT_AUTH_V1:hello_exchange_started:12:1:1:10:3:2:2:20:4:0:0:0:0\n';
   const scanned: Buffer[] = []; let closed = 0;

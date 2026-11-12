@@ -58,13 +58,17 @@ static bool verifier_drop_capabilities(void) {
  * every writable/source view is noexec, and all executable mounts are the
  * selected same-image closure. No new namespace, network, ptrace or host-FD
  * acquisition path can undo those facts. */
-static bool verifier_filter(void) {
+static bool verifier_filter_network(bool private_loopback) {
 #if !defined(__x86_64__) || defined(__ILP32__)
+    (void)private_loopback;
     return false;
 #else
 #define CLIQ_DENY_SYSCALL(number) \
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
+#define CLIQ_NETWORK_SYSCALL(number) \
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
+    BPF_STMT(BPF_RET | BPF_K, private_loopback ? SECCOMP_RET_ALLOW : SECCOMP_RET_ERRNO | EPERM)
     struct sock_filter instructions[] = {
         BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
         BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
@@ -75,9 +79,9 @@ static bool verifier_filter(void) {
         CLIQ_DENY_SYSCALL(__NR_mount), CLIQ_DENY_SYSCALL(__NR_umount2),
         CLIQ_DENY_SYSCALL(__NR_pivot_root), CLIQ_DENY_SYSCALL(__NR_chroot),
         CLIQ_DENY_SYSCALL(__NR_unshare), CLIQ_DENY_SYSCALL(__NR_setns),
-        CLIQ_DENY_SYSCALL(__NR_socket), CLIQ_DENY_SYSCALL(__NR_connect),
-        CLIQ_DENY_SYSCALL(__NR_bind), CLIQ_DENY_SYSCALL(__NR_listen),
-        CLIQ_DENY_SYSCALL(__NR_accept), CLIQ_DENY_SYSCALL(__NR_accept4),
+        CLIQ_NETWORK_SYSCALL(__NR_socket), CLIQ_NETWORK_SYSCALL(__NR_connect),
+        CLIQ_NETWORK_SYSCALL(__NR_bind), CLIQ_NETWORK_SYSCALL(__NR_listen),
+        CLIQ_NETWORK_SYSCALL(__NR_accept), CLIQ_NETWORK_SYSCALL(__NR_accept4),
         CLIQ_DENY_SYSCALL(__NR_ptrace), CLIQ_DENY_SYSCALL(__NR_process_vm_readv),
         CLIQ_DENY_SYSCALL(__NR_process_vm_writev), CLIQ_DENY_SYSCALL(__NR_open_by_handle_at),
         CLIQ_DENY_SYSCALL(__NR_bpf), CLIQ_DENY_SYSCALL(__NR_perf_event_open),
@@ -107,10 +111,12 @@ static bool verifier_filter(void) {
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
 #undef CLIQ_DENY_SYSCALL
+#undef CLIQ_NETWORK_SYSCALL
     struct sock_fprog program = { .len = (unsigned short)(sizeof(instructions) / sizeof(instructions[0])), .filter = instructions };
     return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0;
 #endif
 }
+static bool verifier_filter(void) { return verifier_filter_network(false); }
 
 static bool verifier_read_config(int fd, struct cliq_verifier_config *config) {
     struct stat metadata;

@@ -37,10 +37,22 @@ function isInstalledBroker(assembly: RunAssemblyV1): boolean { return assembly.p
 /** Reproduce the original admission's immutable model catalog/Bundle links.
  * Publisher authentication remains the installed admission/release gate; this
  * reader has no trust roots and never treats a catalog's own key as authority. */
-async function retainedRecipe(artifacts: ArtifactCatalog, run: Run, spec: RunSpec, assembly: RunAssemblyV1) {
+async function retainedRecipe(driver: SqliteDriver, artifacts: ArtifactCatalog, run: Run, spec: RunSpec, assembly: RunAssemblyV1) {
   if (spec.operation !== 'agent' || canonicalSha256(spec) !== run.specRef || canonicalSha256(assembly) !== spec.assemblyRef ||
-      assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
       assembly.provider.adapter.version !== '1' || assembly.provider.negotiation.streaming) invalid();
+  if (assembly.provider.name === 'ollama' && assembly.provider.endpoint.kind === 'local_zero_cost') {
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
+    if (bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest) invalid();
+    const { readInstalledLocalRunModel } = await import('./local-inference-run-authority.js');
+    const child = run.parentRunId ? await (await import('./child-admission.js')).readChildAdmission(driver, artifacts, run.id) : undefined;
+    const original = child ? await (await import('./local-model-history.js')).readInheritedLocalModelAdmissionAssembly(artifacts, assembly, child) : assembly;
+    const local = await readInstalledLocalRunModel(artifacts, { bundle, bundleDigest: assembly.runtime.runtimeBundleRef }, driver, original);
+    if (local.provenance.value.createdAt !== (child?.rootOrigin.run.createdAt ?? run.createdAt) || local.provenance.value.validThrough < run.deadlineAt ||
+        local.registration.ownerPrincipalId !== readSessionPrincipalId(driver, run.sessionId)) invalid();
+    child?.rootOrigin.assertUnchanged(driver);
+    return;
+  }
+  if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered') invalid();
   const capability = await readCanonicalArtifact<ModelCapabilityEvidenceV1>(artifacts, assembly.provider.negotiation.capabilityEvidenceRef);
   if (!exactKeys(capability, ['schemaVersion', 'format', 'provider', 'model', 'endpointIdentityDigest', 'adapter', 'source',
     'nativeToolCalling', 'streaming', 'trustedUsageEvidence', 'contextLimitTokens', 'maxOutputTokens', 'observedAt', 'validThrough', 'evidenceDigest']) ||
@@ -130,7 +142,7 @@ export async function prepareInstalledBrokerAmbiguity(driver: SqliteDriver, arti
   const assembly = decodeRetainedRunAssembly(raw);
   if (!isInstalledBroker(assembly)) return undefined;
   if (!input.claim) invalid();
-  await retainedRecipe(artifacts, input.run, spec, assembly);
+  await retainedRecipe(driver, artifacts, input.run, spec, assembly);
   const prototype = decodeBrokerInvocationAmbiguity(await readCanonicalArtifact(artifacts, input.evidenceRef));
   if (prototype.evidenceDigest !== input.evidenceDigest || prototype.observedAt > input.settledAt) invalid();
   const principalId = readSessionPrincipalId(driver, input.run.sessionId);
@@ -169,7 +181,7 @@ export async function validateInstalledBrokerAmbiguityHistory(input: { driver: S
     return;
   }
   if (!isInstalledBroker(input.assembly)) return;
-  await retainedRecipe(input.artifacts, input.run, input.spec, input.assembly);
+  await retainedRecipe(input.driver, input.artifacts, input.run, input.spec, input.assembly);
   for (const unknown of input.journal.filter(entry => entry.opKind === 'model' && entry.phase === 'unknown')) {
     if (!unknown.evidenceRef || !unknown.evidenceDigest) invalid();
     const before = input.journal.filter(entry => entry.opId === unknown.opId && entry.attempt === unknown.attempt && entry.seq < unknown.seq);
@@ -205,7 +217,7 @@ async function terminalFrames(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   const { run, runSpec: spec } = cut;
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   if (!isInstalledBroker(assembly) || assembly.runtime.sandboxBackend !== 'linux_namespace') terminalFailure();
-  await retainedRecipe(artifacts, run, spec, assembly);
+  await retainedRecipe(driver, artifacts, run, spec, assembly);
   const principalId = readSessionPrincipalId(driver, run.sessionId);
   const frames: TerminalFrame[] = [];
   for (const unknown of unknowns) {

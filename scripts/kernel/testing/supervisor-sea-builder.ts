@@ -65,7 +65,7 @@ export const SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER = `;(() => { try {
 // delegated to diagnostics_channel's publish() exception behavior.
 export const INSTALLED_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
   const role = process.argv[2] === '--bootstrap-credential' ? 'bootstrap'
-    : process.argv[2] === '--installed-credential' ? 'credential' : undefined;
+    : process.argv[2] === '--installed-credential' || process.argv[2] === 'models' && process.argv[3] === 'add' ? 'credential' : undefined;
   if (!role) return;
   const diagnostic = require('node:diagnostics_channel').channel(${JSON.stringify(INSTALLED_WORK_CHANNEL)});
   const write = require('node:fs').writeSync;

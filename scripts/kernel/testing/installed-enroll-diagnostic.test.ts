@@ -112,11 +112,17 @@ test('enroll diagnostics retain only exact numeric process counters, including v
   assert.throws(() => decodeEnrollProcessCounters(43, stat, ''), { message: 'enroll process counters are invalid' });
 });
 
-test('the verifier enroll alone uses the owned asynchronous command without changing the original deadline or raw-state policy', async () => {
+test('the verifier enroll keeps its dedicated owned diagnostic and original deadline and raw-state policy', async () => {
   const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   assert.equal((source.match(/await runOwnedEnrollDiagnostic\(/gu) ?? []).length, 1);
-  assert(source.includes("const setup = credential({ schemaVersion: 1, kind: 'install_services' })"));
-  assert(source.includes('originalDeadlineMs: 60000'));
+  assert(source.includes('const delayedBootstrap = options.publicationRetirementDiagnostics === true;'));
+  assert(source.includes("const setup = await joinedFixtureCommand([path.join(recipe.stateRoot, 'runtime/bootstrap'), '--bootstrap-credential',"));
+  assert(source.includes("canonicalJsonBytes({ schemaVersion: 1, kind: 'install_services' }).toString('base64url')], delayedBootstrap ? 180_000 : 60_000);"));
+  assert(source.includes('delayedBootstrap ? 180_000 : 90_000, { input });'));
+  assert(source.includes('const installation = await joinedFixtureCommand([process.execPath, ...installerArgs], 90_000, {'));
+  assert(source.includes('const enrollmentDeadline = delayedBootstrap ? 180_000 : 60_000;'));
+  assert(source.includes('originalDeadlineMs: enrollmentDeadline,'));
+  assert(source.includes("delayedBootstrap ? { fixtureScope: 'delayed_delivery' as const }"));
   assert(source.includes("assert.equal(enrollmentResult.error, undefined, 'actual fixture command must join')"));
   assert(source.includes("assert.equal(enrollmentResult.signal, null)"));
   assert(source.includes("{ kind: 'unavailable', reason: 'no_safe_readonly_wal_reader' }"));

@@ -13,7 +13,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { KernelStorageError } from './errors.js';
 import { decodeMcpStdioRecoveryLifecycleData, decodeMcpStdioRecoveryCleanupData } from './native-owner.js';
 import { readMcpStdioCapture } from './mcp-stdio-history.js';
-import { decodeMcpStatusRetirement } from './mcp-status-proof.js';
+import { decodeMcpStatusRetirement, isMcpStatusUnavailableRetirement } from './mcp-status-proof.js';
 import { projectMcpStatusResponse } from './mcp-status-protocol.js';
 import type { readMcpStatusProbePreparation } from './mcp-status-preparation.js';
 import { readSupervisorInspector } from './supervisor-inspector.js';
@@ -33,8 +33,10 @@ export async function readMcpStatusRetirementHistory(driver: SqliteDriver, artif
   requireEqual(lifecycle.controller, prepared.preparation.controller, 'MCP recovery original actual native controller');
   requireEqual(lifecycle.originalSupervisor, prepared.preparation.originalSupervisor, 'MCP recovery original actual Supervisor process');
   const root = prepared.history.rootIdentity, native = lifecycle.joined;
+  const unavailable = isMcpStatusUnavailableRetirement(value);
+  const originalJoin = !('cleanupRawRef' in value.nativeClosure);
   let physical = lifecycle.retirement, inspector = prepared.original, history = prepared.history;
-  if (value.nativeClosure.kind === 'linux_original_join') {
+  if (!('cleanupRawRef' in value.nativeClosure)) {
     if (!value.joined || !native.deathJoined || !native.ownerDrained || !native.outputCustodyRetired ||
         native.execReleased !== value.joined.execReleased || native.statusReleased !== value.joined.statusReleased ||
         native.protocolCompleted !== (value.joined.completedStages.length === 4))
@@ -59,7 +61,9 @@ export async function readMcpStatusRetirementHistory(driver: SqliteDriver, artif
       fail('MCP status successor cleanup lacks its exact strictly newer checker, old birth and real creator/controller deaths');
     inspector = current; physical = cleanup.retirement;
   }
-  if (canonicalSha256(lifecycle) !== value.nativeClosure.lifecycleProjectionRef || native.responseRefused || !physical ||
+  if (canonicalSha256(lifecycle) !== value.nativeClosure.lifecycleProjectionRef || native.responseRefused !== unavailable || !physical ||
+      unavailable && (lifecycle.progressKind !== 9 || !native.execReleased || !native.deathJoined || !native.ownerDrained ||
+        !native.outputCustodyRetired || !lifecycle.containment || !value.processContainmentRef) ||
       physical.cgroupPopulated !== 0 || physical.remainingTrackedDescendants !== 0 ||
       physical.cgroupId !== lifecycle.reservation.cgroupInode || physical.observedAtMs !== parseCanonicalTime(value.observedAt) ||
       lifecycle.reservation.cgroupName !== `cliq-mcp-stdio-recovery-${prepared.preparation.nonce}` ||
@@ -98,7 +102,7 @@ export async function readMcpStatusRetirementHistory(driver: SqliteDriver, artif
       'MCP recovery exact original all-descendant death');
   } else if (!value.processContainmentRef && evidence.kind === 'containment_plan_quiescent') {
     if (lifecycle.containment || native.spawnAttempted || native.execReleased || native.statusReleased || physical.namespaceInitPid !== 0 ||
-        physical.namespaceInitDeadAndReaped !== 0 || value.nativeClosure.kind === 'linux_original_join' && lifecycle.progressKind !== 9 || evidence.backend.kind !== 'linux')
+        physical.namespaceInitDeadAndReaped !== 0 || originalJoin && lifecycle.progressKind !== 9 || evidence.backend.kind !== 'linux')
       fail('MCP status missing original READY cannot impersonate a positive no-spawn result');
     requireEqual(evidence.backend, { kind: 'linux', cgroupPath: plan.backend.cgroupPath,
       cgroupObservation: { kind: 'empty', cgroupId: physical.cgroupId, populated: 0 },
@@ -144,7 +148,8 @@ export async function readMcpStatusCaptureHistory(driver: SqliteDriver, artifact
   requireEqual(value.binding, prepared.binding, 'MCP status complete original response native binding');
   const retirement = await readMcpStatusRetirementHistory(driver, artifacts, prepared, value.retirementRef as string, value.retirementDigest as string);
   const joined = retirement.value.joined;
-  if (!joined || retirement.value.nativeClosure.kind !== 'linux_original_join' || !joined.execReleased || !joined.setupReleased || !joined.statusReleased || joined.completedStages.join(',') !== 'initialize,initialized,tools_list,tools_call' ||
+  if (!joined || joined.kind !== 'mcp_stdio_recovery_owner_joined' || retirement.value.nativeClosure.kind !== 'linux_original_join' ||
+      !joined.execReleased || !joined.setupReleased || !joined.statusReleased || joined.completedStages.join(',') !== 'initialize,initialized,tools_list,tools_call' ||
       retirement.evidence.kind !== 'containment_all_descendants_dead' || value.observedAt !== retirement.value.observedAt ||
       (value.statusReceivedAt as string) < prepared.preparation.createdAt || (value.statusReceivedAt as string) > (value.observedAt as string))
     fail('MCP status result lacks its complete original protocol followed by actual process/pipe/output join');

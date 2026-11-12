@@ -98,6 +98,8 @@ export async function publishMcpStatusCapture(driver: SqliteDriver, artifacts: A
   requireEqual(state.binding, binding, 'MCP exact original read-only status binding');
   const retired = retained ?? await publishMcpStatusRetirement(driver, artifacts, owner, native, binding, scope, input);
   const retirement = retired.physical, joined = retirement.joined.ownerJoined;
+  if (joined.kind !== 'mcp_stdio_recovery_owner_joined')
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP unavailable status response cannot supply a capture');
   assertInstalledMcpStdioRecoveryJoined(native, joined, binding);
   if (!joined.execReleased || !joined.setupReleased || !joined.statusReleased || joined.completedStages.join(',') !== 'initialize,initialized,tools_list,tools_call' ||
       retirement.evidence.kind !== 'containment_all_descendants_dead' || retirement.observedAt < state.statusReceivedAt)

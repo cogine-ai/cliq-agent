@@ -11,6 +11,8 @@ import type { KernelArchiveProjection } from './kernel-archive.js';
 import { assertHeldKernelArchive, type HeldKernelArchive } from './native-owner.js';
 import { assertOriginalKernelArchiveSource, type SqliteDriver, type SqliteRow } from './sqlite-driver.js';
 import type { PreparedImportRow, PreparedImportTable } from './prepared-import-candidate.js';
+import { assertInstalledExclusiveReadSource, type InstalledExclusiveReadSource } from './store.js';
+import type { StateOwnerContext } from './state-owner.js';
 
 export const KERNEL_ARCHIVE_SQL_ORDER: Readonly<Record<PreparedImportTable, string>> = Object.freeze({
   canonical_time_fence: 'id', state_owners: 'owner_epoch', artifacts: 'ref COLLATE BINARY', sessions: 'id COLLATE BINARY',
@@ -56,18 +58,19 @@ function encodeRow(row: PreparedImportRow): Buffer {
 }
 async function cut(rows: (table: PreparedImportTable) => AsyncIterable<PreparedImportRow>, signal?: AbortSignal): Promise<KernelArchiveSqlCut> {
   const tables: { table: PreparedImportTable; rowCount: number; rowsDigest: string }[] = [];
-  for (const table of PRODUCTIVE) {
-    signal?.throwIfAborted(); let rowCount = 0;
-    const hash = createHash('sha256').update('cliq-kernel-archive-table-v1\n').update(table).update('\n');
-    for await (const row of rows(table)) {
-      signal?.throwIfAborted(); if (!Number.isSafeInteger(++rowCount)) invalid();
-      hash.update(encodeRow(row)).update('\n');
-    }
-    tables.push({ table, rowCount, rowsDigest: hash.digest('hex') });
-  }
+  for (const table of PRODUCTIVE) tables.push(await digestTable(table, rows(table), signal));
   const core = { schemaVersion: 1 as const, format: 'cliq-kernel-archive-productive-cut-v1' as const,
     stateSchemaVersion: 8 as const, excludedTable: 'canonical_time_fence' as const, tables };
   return decodeKernelArchiveSqlCut({ ...core, cutDigest: canonicalSha256(core) });
+}
+async function digestTable(table: PreparedImportTable, rows: AsyncIterable<PreparedImportRow>, signal?: AbortSignal) {
+  signal?.throwIfAborted(); let rowCount = 0;
+  const hash = createHash('sha256').update('cliq-kernel-archive-table-v1\n').update(table).update('\n');
+  for await (const row of rows) {
+    signal?.throwIfAborted(); if (!Number.isSafeInteger(++rowCount)) invalid();
+    hash.update(encodeRow(row)).update('\n');
+  }
+  return { table, rowCount, rowsDigest: hash.digest('hex') };
 }
 export function readArchivedKernelProductiveCut(projection: KernelArchiveProjection, signal?: AbortSignal): Promise<KernelArchiveSqlCut> {
   projection.assertHeld(); return cut(table => projection.rows(table), signal);
@@ -79,7 +82,24 @@ export function readOriginalKernelProductiveCut(driver: SqliteDriver, scope: Hel
   signal?: AbortSignal): Promise<KernelArchiveSqlCut> {
   const current = () => { signal?.throwIfAborted(); assertOriginalKernelArchiveSource(driver, scope); assertHeldKernelArchive(scope); };
   current();
-  const rows = async function* (table: PreparedImportTable): AsyncIterableIterator<PreparedImportRow> {
+  return cut(table => readLiveRows(driver, table, current), signal);
+}
+/** The eighteen unchanged business families must still match the original
+ * drained archive. Owner and artifact tail rows receive their separate
+ * complete retained-history checks. The current issuer is genuine EX. */
+export async function assertInstalledRollbackProductiveCut(driver: SqliteDriver, source: InstalledExclusiveReadSource,
+  owner: StateOwnerContext, value: KernelArchiveSqlCut, signal?: AbortSignal): Promise<void> {
+  const expected = decodeKernelArchiveSqlCut(value);
+  const current = () => { signal?.throwIfAborted(); assertInstalledExclusiveReadSource(source, driver, owner); };
+  current();
+  for (const table of expected.tables) {
+    if (table.table === 'state_owners' || table.table === 'artifacts') continue;
+    const actual = await digestTable(table.table, readLiveRows(driver, table.table, current), signal);
+    if (table.rowsDigest !== actual.rowsDigest || table.rowCount !== actual.rowCount) invalid();
+  }
+  current();
+}
+async function* readLiveRows(driver: SqliteDriver, table: PreparedImportTable, current: () => void): AsyncIterableIterator<PreparedImportRow> {
     current();
     const columns = driver.prepare(`PRAGMA table_info(${table})`).all<{ name: string }>().map(row => row.name);
     if (!columns.length) invalid();
@@ -105,6 +125,4 @@ export function readOriginalKernelProductiveCut(driver: SqliteDriver, scope: Hel
       }
       current();
     } finally { iterator.return?.(); }
-  };
-  return cut(rows, signal);
 }

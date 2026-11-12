@@ -12,7 +12,7 @@ export type VerifierStopIntent = Extract<StopIntent, { origin: 'verification' } 
 export type DeliveryMergeStopIntent = Extract<StopIntent, { runtimeSubtype: 'delivery_merge_conflict' }>;
 export type DeliveryPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'delivery'; reason: 'runtime_failed' };
 export type DependencyPolicyStopIntent = Extract<StopIntent, { origin: 'policy_deny' }> & { subjectKind: 'dependency_install_scripts'; reason: 'runtime_failed' };
-export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' | 'manual_abandon' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent | DependencyPolicyStopIntent | Extract<StopIntent, { origin: 'kernel_integrity'; source: 'dependency_acquisition' }>;
+export type AgentStopIntent = Extract<StopIntent, { origin: 'user_cancel' | 'parent_cancel' | 'deadline' | 'manual_abandon' }> | ResourceStopIntent | ModelFailureStopIntent | VerifierStopIntent | DeliveryMergeStopIntent | DeliveryPolicyStopIntent | DependencyPolicyStopIntent | Extract<StopIntent, { origin: 'kernel_integrity'; source: 'dependency_acquisition' } | { runtimeSubtype: 'local_inference_unavailable' }>;
 export const stopCheckpointId = (runId: string, stopIntentRef: string) => identityHash('cliq-stop-checkpoint-v1', runId, stopIntentRef);
 
 export function cancelRequestDigest(runId: string, input: RunCancel): string {
@@ -114,6 +114,10 @@ export function decodeAgentStop(value: unknown, run: Run): AgentStopIntent {
     } else if (intent.runtimeSubtype === 'delivery_merge_conflict') {
       fields.push('deliveryMergeConflictItemRef', 'conflictRef');
       assertArtifactRef(intent.deliveryMergeConflictItemRef); assertArtifactRef(intent.conflictRef);
+    } else if (intent.runtimeSubtype === 'local_inference_unavailable') {
+      fields.push('activationCycleId', 'serviceId', 'frontierRef', 'failureDetailRef');
+      if (!identifier(intent.activationCycleId) || !identifier(intent.serviceId)) throw new TypeError('invalid local inference failure identity');
+      assertArtifactRef(intent.frontierRef); assertArtifactRef(intent.failureDetailRef);
     } else if (intent.runtimeSubtype === 'runtime') {
       fields.push('failingOpId', 'runtimeFailureRef', 'runtimeFailureDigest');
       assertArtifactRef(intent.runtimeFailureRef);
@@ -150,6 +154,9 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
       ? { kind: 'runtime', failingOpId: intent.failingOpId, runtimeFailureRef: intent.runtimeFailureRef, runtimeFailureDigest: intent.runtimeFailureDigest }
     : intent.runtimeSubtype === 'delivery_merge_conflict'
       ? { kind: 'delivery_merge_conflict', deliveryMergeConflictItemRef: intent.deliveryMergeConflictItemRef, conflictRef: intent.conflictRef }
+    : intent.runtimeSubtype === 'local_inference_unavailable'
+      ? { kind: intent.runtimeSubtype, activationCycleId: intent.activationCycleId, serviceId: intent.serviceId,
+          frontierRef: intent.frontierRef, failureDetailRef: intent.failureDetailRef, evidenceRef: intent.failureDetailRef }
     : intent.runtimeSubtype === 'context_compaction_failed'
       ? { kind: intent.runtimeSubtype, compactionPlanRef: intent.compactionPlanRef, modelOpId: intent.modelOpId, attempt: intent.attempt, evidenceRef: stopIntentRef }
     : intent.runtimeSubtype === 'result_source_limit_exceeded'
@@ -167,6 +174,7 @@ export function agentStopDetail(intent: AgentStopIntent, stopIntentRef: string, 
     reasonDetail,
     primaryEvidenceRef: intent.origin === 'parent_cancel' ? intent.sourceStopIntentRef : intent.origin === 'kernel_integrity' ? intent.integrityEvidenceRef : intent.origin === 'policy_deny'
       ? intent.policyChannelEvidenceRef : intent.origin === 'runtime' && intent.runtimeSubtype === 'runtime' ? intent.runtimeFailureRef
+      : intent.origin === 'runtime' && intent.runtimeSubtype === 'local_inference_unavailable' ? intent.failureDetailRef
       : stopIntentRef,
     publicationResultItemRefs: [], abandonedRetryInvocations: [], createdAt };
 }

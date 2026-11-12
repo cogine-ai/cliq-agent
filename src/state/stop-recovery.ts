@@ -160,6 +160,9 @@ async function readStopReference(driver: SqliteDriver, artifacts: ArtifactCatalo
     await validateModelFailureStop(driver, artifacts, closure, intent);
   } else if (intent.origin === 'runtime' && intent.runtimeSubtype === 'delivery_merge_conflict') {
     requireEqual(agentStopCause(intent), await readDeliveryMergeConflictCause(driver, artifacts, closure), 'delivery merge conflict cause');
+  } else if (intent.origin === 'runtime' && intent.runtimeSubtype === 'local_inference_unavailable') {
+    requireOriginalStopSource(intent);
+    await (await import('./local-inference-frontier.js')).validateLocalInferenceFrontierStop(driver, artifacts, closure, intent);
   } else if (intent.origin === 'budget' || intent.origin === 'runtime') {
     requireOriginalStopSource(intent);
     const cause = await readResourceStopCause(driver, artifacts, closure, intent.createdAt, intent.registeredCheckpointId, intent.registeredRunRevision, intent.registeredJournalSeq);

@@ -1248,7 +1248,10 @@ static int controller(void) {
     return 0;
 }
 
+#include "local-inference-controller.h"
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--local-inference-controller") == 0) return local_service_controller();
+    if (argc == 2 && strcmp(argv[1], "--local-inference-namespace") == 0) return local_namespace();
     if (argc == 2 && strcmp(argv[1], "--source-producer") == 0) return source_producer();
     if (argc == 2 && strcmp(argv[1], "--preparation-producer") == 0) return preparation_producer();
     if (argc != 1) return 64;

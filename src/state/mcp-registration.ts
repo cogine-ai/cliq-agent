@@ -81,8 +81,13 @@ import type { McpStdioNativeCleanup } from './mcp-stdio-lifecycle.js';
 
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
 type RegistrySource = Readonly<{ registry: McpRegistryRevisionV1; assertUnchanged(connection: SqliteConnection): void }>;
-type RegistryReadContext = { sources: Map<string, Promise<RegistrySource>>; assertions: Map<string, (connection: SqliteConnection) => void> };
-function registryReadContext(): RegistryReadContext { return { sources: new Map(), assertions: new Map() }; }
+export type McpRegistryRetainedParent = Readonly<{ ref: string; registry: McpRegistryRevisionV1;
+  receipt: ReturnType<typeof decodeMcpRegistrationReceipt>; target: McpAdminProbeTargetV1;
+  operation: Extract<AdminOperationV1, { phase: 'completed' }>; result: ReturnType<typeof decodeMcpAdminProbeResult>;
+  closure: ReturnType<typeof decodeAdminProbeClosureEvidence>; tools: ReturnType<typeof decodeMcpToolsListResult> }>;
+type RegistryReadContext = { sources: Map<string, Promise<RegistrySource>>; assertions: Map<string, (connection: SqliteConnection) => void>;
+  parents: Map<string, McpRegistryRetainedParent> };
+function registryReadContext(): RegistryReadContext { return { sources: new Map(), assertions: new Map(), parents: new Map() }; }
 const MCP_ADMIN_RESOURCES = Object.freeze({ maxProcesses: 16, memoryBytes: 256 * 1024 ** 2, cpuQuotaMicrosPerSecond: 100_000,
   maxOpenFiles: 128, maxSingleFileBytes: 256 * 1024 ** 2, maxGenerationBytes: 512 * 1024 ** 2,
   maxInvocationOutputBytes: 65_536, maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2 });
@@ -1104,9 +1109,18 @@ async function readMcpRegistryClosureInContext(driver: SqliteDriver, artifacts: 
       if (!retained || !indexed || canonicalSha256(retained) !== operationSnapshot || canonicalSha256(indexed) !== controlSnapshot)
         throw new KernelStorageError('REVISION_CONFLICT', 'original completed MCP registry provenance changed');
   });
-  return { ...immutableSnapshot({ ref: reference, registry, receipt, target, operation, result, closure, tools }),
+  const parent = immutableSnapshot({ ref: reference, registry, receipt, target, operation, result, closure, tools });
+  context.parents.set(reference, parent);
+  return { ...parent,
     assertUnchanged(connection: SqliteConnection) {
       for (const assertion of context.assertions.values()) assertion(connection);
+    },
+    /** Only parents already checked by this complete original walk. Refresh
+     * cannot substitute its channel/request for the original register consent.
+     * This data view grants no registration, claim, native or delete authority. */
+    readOriginalParents(): readonly McpRegistryRetainedParent[] {
+      for (const assertion of context.assertions.values()) assertion(driver);
+      return Object.freeze([...context.parents.values()]);
     } };
 }
 
@@ -1452,9 +1466,10 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
       targetArtifact, core, coreArtifact, runtime, createdAt, deadlineAt, attempt, adminOperationId, nonce,
       ...(original ? { original } : {}), ...(priorClosure ? { priorClosure } : {}), ...(stdioAuthorization ? { authorization: stdioAuthorization } : {}), producer, key, signal });
     signal.throwIfAborted();
-    const launcher = await openInstalledLinuxWorkerLauncher(selected, anchor, { signal });
+    const launcher = await observeMcpAdminWork('http', 'launcher_open', () => openInstalledLinuxWorkerLauncher(selected, anchor, { signal }));
     let controller: LinuxWorkerController;
-    try { controller = await launcher.startController({ signal }); } catch (error) { await launcher.close(); throw error; }
+    try { controller = await observeMcpAdminWork('http', 'controller_start', () => launcher.startController({ signal })); }
+    catch (error) { await observeMcpAdminWork('http', 'launcher_close', () => launcher.close()); throw error; }
     let cgroupParent = ''; withInstalledWorkerRoot(selected, anchor, (_fd, value) => { cgroupParent = value; });
     let native: NativeMcpAdminHttpOwner | undefined, scope: Awaited<ReturnType<typeof openInstalledMcpHttpAdminScope>> | undefined;
     let physicalInput: ReturnType<typeof openAdminMcpInput> | undefined, closed: Promise<void> | undefined, stopping = false, domainRetained = false;
@@ -1466,28 +1481,28 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
         // interrupted now, rather than after the scope's Stop2 join expires.
         const failures: unknown[] = [];
         const joins: Promise<unknown>[] = [];
-        try { if (native) joins.push(native.close()); } catch (error) { failures.push(error); }
-        try { joins.push(controller.close()); } catch (error) { failures.push(error); }
+        try { if (native) joins.push(observeMcpAdminWork('http', 'native_close', () => native!.close())); } catch (error) { failures.push(error); }
+        try { joins.push(observeMcpAdminWork('http', 'controller_close', () => controller.close())); } catch (error) { failures.push(error); }
         for (const result of await Promise.allSettled(joins)) if (result.status === 'rejected') failures.push(result.reason);
         // The original scope's JS receivers remain fenced while controller
         // cleanup is pending. Observe/assert it only after the actual join;
         // native completion must retain its original birth/ACK/input custody.
-        try { await scope?.close(); } catch (error) { failures.push(error); }
-        try { await launcher.close(); } catch (error) { failures.push(error); }
+        try { if (scope) await observeMcpAdminWork('http', 'scope_close', () => scope!.close()); } catch (error) { failures.push(error); }
+        try { await observeMcpAdminWork('http', 'launcher_close', () => launcher.close()); } catch (error) { failures.push(error); }
         if (failures.length) throw failures.find(error => error instanceof ResourceRetirementError) ??
           new ResourceRetirementError('MCP original Admin owner did not completely join', new AggregateError(failures));
       })();
     } };
     let owners = adminResources.get(driver); if (!owners) adminResources.set(driver, owners = new Set()); owners.add(resource);
     try {
-      const launch = await publishMcpAdminLaunch(artifacts, owner, controller, cgroupParent, runtime, target, targetArtifact.ref, core, coreArtifact.ref,
-        adminOperationId, request.requestDigest, attempt, nonce, createdAt);
+      const launch = await observeMcpAdminWork('http', 'plan_publish', () => publishMcpAdminLaunch(artifacts, owner, controller, cgroupParent,
+        runtime, target, targetArtifact.ref, core, coreArtifact.ref, adminOperationId, request.requestDigest, attempt, nonce, createdAt));
       const prepared: AdminOperationV1 = { schemaVersion: 1, adminOperationId, principalId: identity.principalId, method: request.method,
         requestId: request.requestId, requestDigest: request.requestDigest, attempt, maxAttempts: 3, deadlineAt, targetRef: targetArtifact.ref,
         targetDigest: target.targetDigest, probePayloadCoreRef: coreArtifact.ref, probePayloadCoreDigest: core.payloadCoreDigest,
         supervisorInstanceId: owner.supervisorInstanceId, plannedContainmentRef: launch.planArtifact.ref, plannedContainmentDigest: launch.plan.planDigest,
         sandboxLaunchSpecRef: launch.specArtifact.ref, sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, rowVersion: 1, createdAt, phase: 'prepared' };
-      await persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared);
+      await observeMcpAdminWork('http', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared));
       priorClosure?.assertUnchanged(driver);
       const inputBinding: AdminMcpInputBinding = { adminOperationId, attempt, principalId: identity.principalId, nonce,
         targetRef: prepared.targetRef, targetDigest: prepared.targetDigest, probePayloadCoreRef: prepared.probePayloadCoreRef,
@@ -1498,8 +1513,11 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
       signal.throwIfAborted(); physicalInput = openAdminMcpInput(owner.filesystem, inputBinding);
       const frames = [mcpInitializeRequestData(1, '0.15.0'), mcpInitializedNotificationData(), mcpToolsListRequestData(2)];
       const config = canonicalJsonBytes({ nonce, recipe: frames.map(frame => ({ phase: frame.phase, bodyJson: frame.json })) });
-      scope = await openInstalledMcpHttpAdminScope(selected, anchor, controller, owner.filesystem, physicalInput, inputBinding, launch.toolchain, config, { signal });
-      await scope.reservation(); scope.createBlocked(); const ready = await scope.ready();
+      scope = await observeMcpAdminWork('http', 'native_prepare', () =>
+        openInstalledMcpHttpAdminScope(selected, anchor, controller, owner.filesystem, physicalInput!, inputBinding, launch.toolchain, config, { signal }));
+      await observeMcpAdminWork('http', 'scope_reserve', () => scope!.reservation());
+      scope.createBlocked();
+      const ready = await observeMcpAdminWork('http', 'scope_ready', () => scope!.ready());
       const containment: ProcessContainment = { schemaVersion: 1, planRef: launch.planArtifact.ref, sandboxLaunchSpecRef: launch.specArtifact.ref,
         sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, owner: launch.plan.owner, filesystemBinding: launch.plan.filesystemBinding,
         launchNonceDigest: launch.plan.launchNonceDigest, backend: { kind: 'linux', pidNamespaceReservationId: `cliq-mcp-admin-pidns:${nonce}`,
@@ -1555,7 +1573,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
         };
         const released: typeof active = { ...active, rowVersion: 4, probeDispatch: { state: 'released', probeRequestDigest, dispatchId, claimedAt, releasedAt: sampleCanonicalNow() } };
         authority.assertCurrent(); write(released, active); active = released; gate(); scope!.releaseRecipe(binding);
-        const received = await driveMcpAdminProtocol(native, binding, gate);
+        const received = await observeMcpAdminWork('http', 'protocol', () => driveMcpAdminProtocol(native!, binding, gate));
         await resource.close(); const joined = await scope!.close(), lifecycleBytes = scope!.lifecycleSnapshot();
         const lifecycle = decodeAdminMcpLifecycleData(lifecycleBytes); requireEqual(lifecycle.binding, inputBinding, 'MCP actual original native birth binding');
         if (!lifecycle.joined.deathJoined || !lifecycle.joined.outputCustodyRetired || !lifecycle.joined.protocolCompleted)
@@ -1568,7 +1586,8 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
             physical: { kind: 'http', native: native!, binding, scope: scope!, joined, ownerJoined: published.joined } });
           native!.releaseDomain(); owners!.delete(resource); producers!.delete(key); return response;
         };
-        producer.resume = finish; return finish();
+        producer.resume = () => observeMcpAdminWork('http', 'discovery_publish', finish);
+        return producer.resume() as Promise<InstalledControlResponseV1>;
       }, signal);
     } catch (failure) {
       // A received successful probe already owns its fixed persistence

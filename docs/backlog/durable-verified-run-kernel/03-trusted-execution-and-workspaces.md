@@ -194,7 +194,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
           runtimeBundleRef: ArtifactRef
           runtimeBundleManifestDigest: string
           executableId: string
-          role: 'worker' | 'tool_adapter' | 'mcp_server' | 'local_inference' | 'platform_helper'
+          role: 'worker' | 'tool_adapter' | 'mcp_server' | 'mcp_recovery_adapter' | 'local_inference' | 'platform_helper'
           executionPath: string
           executableDigest: string
         }
@@ -460,6 +460,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
       purpose: 'mcp_recovery'
+      executable: Extract<SandboxExecutableIdentityV1, { kind: 'runtime_bundle' }> & { role: 'mcp_recovery_adapter' }
       processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
       requestRef: ArtifactRef
       requestDigest: string
@@ -1909,7 +1910,26 @@ Rollback (only for hard-to-reverse changes):
 
 The RFC `reconciliation_probe` containment owner uses the fixed Linux native purpose 3 and `cliq-mcp-readonly-status-v1` recipe. Its exact original signed server/profile/template, distinct status operation, stable logical key, original nonce/deadline and full source intent must be reproduced before every release. It has no Worker parent, Run/Admin effect grant, credential, network or persistent writable mount. Only initialize, initialized, complete tools/list and the distinct signed read-only status call are allowed; the original effect is never resent.
 
+The original `mcp_server` stays in the signed registration and profile.
+Purpose 3 launches the distinct signed `mcp_recovery_adapter` as the actual
+stdio executable. Its sealed image, executable mount, launch spec and native
+recipe agree on the original adapter bytes. The fixed worker init helper
+keeps its own executable and digest. A native reservation or history with
+interchanged adapter and helper or server identities is rejected.
+
 A closeable receiver is registered before the first await and owns every issued image/controller/native job. READY remains five seconds, stop remains two seconds and the probe's original deadline remains thirty seconds. Safe responses enter original custody before projection; all process/pipe/output/FD jobs join before release. A missing/partial/replaced original birth cannot be adopted by path, content or absence. Same-owner closure requires its original irreversible native fence plus zero matching releases and complete join. A strictly newer StateOwner may instead prove actual original PID/start domain death and perform the dedicated real retained-input cleanup; separate current-checker raw/projection records never mutate the old lifecycle or manufacture its mutex/join receipt. An old creator still alive leaves recovery waiting.
+
+The original purpose-3 broker may discard a complete bounded malformed or
+NoEcho-refused payload while continuing the authenticated ACK, EOF and client
+join sequence. The unavailable-response guard requires the original revoked
+token, zero active releases and complete physical, descriptor and output
+retirement within Stop2. The audit keeps the fixed refusal and exact lifecycle
+and retirement references. Its timeout or owning cancellation keeps the
+original effect unknown, full charge and probe schedule. A successor requires
+complete original kind-9 refused-output retirement, actual old PID/start
+death and its own real cleanup. A refused-response closure cannot carry a
+status capture or the refused bytes or digest. Native IPC, capacity,
+allocation and uncertain retirement failures leave recovery waiting.
 
 These rules apply only to the MCP status domain. The independent model UNKNOWN broker fence/death checks, original charges, HTTP three-dispatch ceiling, stdio two-launch ceiling and original native call deadline are unchanged. Static/native-data/compiler tests do not qualify installed probe creation, successor cleanup, cancellation or Stop2; missing real Linux campaign evidence remains explicit and keeps the feature gate closed.
 

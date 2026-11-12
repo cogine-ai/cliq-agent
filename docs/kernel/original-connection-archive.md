@@ -11,12 +11,43 @@ installation, account EX and exact durable `rollback_draining` intent. The
 complete producer drain remains independently mandatory. Zero Runs, a SQL
 count, a structural object or a successful online copy does not establish it.
 
-The fixed `local-models` store must have a real descriptor-relative no-follow
-`ENOENT` observation before any archive birth and throughout original custody.
-Present, inaccessible, symlinked or empty stores all refuse until the separately
-locked complete model-store capture is implemented. The manifest records the
-explicit `localModelStore={kind:'absent'}` branch; SQL and CAS alone are not a
-complete StateRoot archive when another authoritative store exists.
+The fixed `local-models` branch is either real descriptor-relative no-follow
+`ENOENT` or a complete capture under the separately held original model-store
+lock derived from the same Root, StateOwner and account EX. The existing-source
+holder opens the original registry, journal, lock and object directory without
+creating, repairing or reopening a source SQLite pager. Unknown, replaced,
+inaccessible, symlinked or multiply linked entries refuse the entire archive.
+Every actual immutable object and allowed temporary object is included.
+
+A captured model store occupies the original archive's fixed `local-models`
+directory. The complete sorted `inventory-v1.bin` has a 64-byte header and
+192-byte records. It retains every source and archive file identity, source
+mode, source change-time identity, exact byte length and full SHA-256. The
+closed JSON header binds the inventory's original file identity, length and
+complete digest, both directory pairs and the complete entry and data totals.
+The inventory is a private archive file. Its times describe file identity and
+confer no clock or authority. Original source and independent target bytes
+are fully checked before the index retires. Current verification reopens fixed
+readonly targets and repeats full hashes and final all-and-only censuses.
+The original CAS index is allocated only after the model capture index retires.
+The compact model verification index shares the existing native metadata budget.
+
+The fixed `runtime/local-inference` namespace is absent only after a real
+no-follow `ENOENT` and an empty retained launch cut. A present namespace is
+checked against every retained local-service launch and its original retirement
+under the continuous Store EX. Each launch must close its typed SQL and CAS
+sources, the full native witness chain, the original controller and tracked
+process identities, and the actual empty or absent cgroup bound to that birth.
+The genuine installed Anchor supplies the readonly cgroup observation.
+
+The fixed private `local-inference-witnesses.bin` pack holds a 64-byte header
+and one 224-byte record followed by complete original witness bytes for each
+launch, ordered by launch ID. Its root manifest binds exact source directory
+and pack identities, total data bytes and the complete pack hash. Capture and
+current inspection verify full source and target bytes and complete source
+membership with a fixed descriptor count. Unknown, partially written or
+unproven witnesses refuse the entire archive. A present empty namespace can
+be represented by its actual directory and a sealed empty pack.
 
 The source is the one private original `NodeSqliteDriver` connection to fixed
 `kernel.sqlite3`. Node 24.21.0's real backup uses only its fixed nondefault
@@ -65,7 +96,8 @@ rollback-control/receipt/Owner-terminal audit are separately retained facts,
 not invented rows in that image. A partial archive, familiar path, equal bytes
 or fresh successor scope cannot substitute for missing creator/progress data.
 
-The combined SQLite, every CAS name and final manifest must fit 50 GiB. The
+The combined SQLite, every CAS name, model data and inventory, local-service witness pack, and final
+manifest must fit 50 GiB. The
 native metadata and manifest ceilings remain 256 MiB, with at most 1,048,576
 leaves, fixed descriptor count and no raised resource limits. Capture retains
 the native index (at most 256 MiB); encoding borrows only its fixed pages and

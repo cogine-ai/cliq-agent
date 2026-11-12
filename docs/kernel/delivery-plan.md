@@ -2,10 +2,52 @@
 
 ## Goal and baseline
 
-Complete all six work packages and the I1–I4 integration/release gates behind
-the single Kernel Cut. The goal is usable, verifiable work, not a count of
-modules, tests, or merged PRs. The RFC remains authoritative; this plan changes
-ordering and records delivery scope, not safety, billing, or success semantics.
+Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:
+real model → private code modification → actual checks and bounded repair →
+result review → explicit application. Complete the relevant detach/reconnect,
+cancel and Supervisor restart behavior together. All six WPs contribute to this
+flow; their complete I1–I4/default-cutover qualification is a later release gate.
+
+### Active delivery scope (approved 2026-11-13)
+
+1. **Real execution:** reuse the current CLI and Run kernel; close the actual
+   installation/authentication blockers and complete an authorized DeepSeek
+   request through the installed broker, private tools and existing budget.
+2. **Task delivery:** connect required checks, bounded repair, complete diff and
+   receipts, explicit application, cancellation and reconnection. After restart,
+   retain the original task and result; incomplete recovery evidence stays waiting.
+3. **Installable preview:** one active task on supported Linux, clear commands,
+   errors and documentation; relevant regressions and one same-source real journey,
+   then the required local build/full tests and a reviewable PR. Opening the PR
+   does not itself publish a release or change the default CLI.
+
+Pause expansion of managed local inference, complete MCP coverage, macOS native
+execution, all client surfaces, automatic legacy migration/rollback/GC and scale
+qualification. Retain their existing source and evidence. Existing source in the
+2026-11-06 candidate is restored to the working branch before new work; restoring
+it is not new implementation or a new passing validation result.
+
+The active acceptance is the user task above, not an individual schema, test seam
+or campaign. Use cheap affected checks during development and reuse compatible
+same-source build artifacts. Preserve all security, billing, timing and recovery
+checks; no mock response, skipped check or evidence from another source qualifies
+the actual provider flow. No competitor benchmark is required before shipping
+this preview. The dated records below remain historical, source-bound evidence.
+
+Implementation update (2026-11-13): restored the retained candidate into the
+existing isolated Git worktree; updated the RFC, README and scheduling guidance.
+Installed settings now reject concurrency above one before persistence and on
+Supervisor startup, preserving old bytes for explicit user correction. The
+underlying capacity/recovery mechanisms remain intact. Build passes; six affected
+client tests and the daily-campaign wiring regression pass. The latter now checks
+the actual existing setup block and its fixed sixty-second fixture bound.
+The full local suite has not been rerun and no push/PR has been made.
+
+The existing x64 QEMU Linux VM remains reachable. No new model call or physical
+qualification ran in this update. Installation/authentication on the real-provider
+path remains the next blocker; the historical timing failures have not been
+cleared by source restoration or these component tests. Continue from this Git
+worktree, rather than creating another private source candidate.
 
 ### Current product and qualification status (2026-11-03)
 

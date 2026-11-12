@@ -2,9 +2,9 @@
 #define CLIQ_MCP_STDIO_NATIVE_H
 #include "mcp-stdio-owner-bridge.h"
 #include <sys/mman.h>
-static const napi_type_tag MCP_STDIO_ADMIN_CLEANUP_TAG = {UINT64_C(0xa733bff080f24077), UINT64_C(0x98e7385b9459a512)};
-static const napi_type_tag MCP_STDIO_RECOVERY_CLEANUP_TAG = {UINT64_C(0x387eba7d38104d03), UINT64_C(0x93414c46b14c136e)};
-static const napi_type_tag MCP_STDIO_RUN_CLEANUP_TAG = {UINT64_C(0x1af3de639bc14d1e), UINT64_C(0xbb51452026d459f7)};
+static const napi_type_tag MCP_STDIO_ADMIN_CLEANUP_TAG = {UINT64_C(0xb917fa69c342fb4a), UINT64_C(0x1507d59b73bad66a)};
+static const napi_type_tag MCP_STDIO_RECOVERY_CLEANUP_TAG = {UINT64_C(0xc468d2eaf4b37e2f), UINT64_C(0x1a4ded3a5ef1dedb)};
+static const napi_type_tag MCP_STDIO_RUN_CLEANUP_TAG = {UINT64_C(0xc95041c8807e010e), UINT64_C(0x060b32797fa73add)};
 struct mcp_stdio_native_scope {
     struct cliq_mcp_stdio_peer bridge;
     struct controller *controller;
@@ -535,7 +535,7 @@ static napi_value reserve_mcp_stdio(napi_env env, napi_callback_info info, unsig
     request->stdio_init_bytes = valid ? (uint64_t)helper_stat.st_size : 0; request->stdio_bwrap_bytes = valid ? (uint64_t)bwrap_stat.st_size : 0;
     valid = valid && mcp_admin_native_hash_fd(helper->fd, request->stdio_init_bytes, request->stdio_init_digest) &&
         mcp_admin_native_hash_fd(bwrap->fd, request->stdio_bwrap_bytes, request->stdio_bwrap_digest) &&
-        (!recovery || !strcmp(request->stdio_init_digest, recovery->binding.identity.adapterExecutableDigest));
+        (!recovery || cliq_mcp_stdio_recovery_program_matches(request, &recovery->binding.identity));
     request->max_processes = limits.max_processes; request->memory_bytes = limits.memory_bytes; request->cpu_quota = limits.cpu_quota;
     request->max_open_files = limits.max_open_files; request->max_file_bytes = limits.max_file_bytes;
     request->max_generation_bytes = limits.max_generation_bytes; request->max_output_bytes = limits.max_output_bytes;

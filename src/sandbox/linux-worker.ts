@@ -11,9 +11,11 @@ import { constants as osConstants } from 'node:os';
 import path from 'node:path';
 import { types as utilTypes } from 'node:util';
 import { setImmediate, setTimeout as delay } from 'node:timers/promises';
-import { assertArtifactRef, normalizeAbsolutePath } from '../kernel/identity.js';
+import { assertArtifactRef, normalizeAbsolutePath, sha256Bytes } from '../kernel/identity.js';
+import { decodeLocalInferenceNativeObservation, splitLocalInferenceNativeInput, type LocalInferenceNativeInputData,
+  type LocalInferenceNativeObservation } from '../kernel/local-inference-native-input.js';
 import type { ProcessContainment, SanitizedSandboxEnvironmentV1 } from '../kernel/execution.js';
-import type { WorkerIdentity, WorkerLaunch } from '../kernel/types.js';
+import type { PlatformProcessIdentityV1, WorkerIdentity, WorkerLaunch } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { BUILTIN_SCRIPT_RECIPE, BUILTIN_SCRIPT_ENVIRONMENTS, builtinToolInputBytes, isBuiltinScriptTool, type BuiltinScriptTool } from './builtin-tool-data.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
@@ -25,6 +27,8 @@ import { borrowWorkerReservationForExecution, borrowSourceGitInputForExecution, 
   borrowRegisteredAbsentSourceGitInputForCleanup,
   borrowPreparingGitInputForExecution,
   borrowRetainedPreparingGitInputForCleanup,
+  borrowHeldLocalInferenceInput, createHeldLocalInferenceInput, openRetainedHeldLocalInferenceInput,
+  stateRootIdentityForLock, type HeldLocalInferenceInput, type HeldStateOwnerLock,
   type BorrowedGenerationForExecution, type HeldWorkerReservation, type HeldSourceGitInput,
   type HeldRetainedSourceGitInput, type HeldRegisteredAbsentSourceGitInput, type HeldPreparingGitInput, type HeldRetainedPreparingGitInput } from '../state/native-owner.js';
 import { borrowRunWorkspaceForExecution, type RunWorkspaceGeneration } from '../workspace/run-workspace/generation.js';
@@ -40,6 +44,7 @@ import { dependencyNpmInput } from './dependency-npm-data.js';
 import { NPM_DEPENDENCY_RECIPE, NPM_DEPENDENCY_SANDBOX_ENVIRONMENT, npmDependencyMounts } from './dependency-recipe.js';
 import type { DependencyBrokerBinding, NativeDependencyTransport } from '../state/dependency-broker-native.js';
 import type { NativeDependencyClosed } from '../state/dependency-broker-native.js';
+import type { NativeLocalInferenceController, NativeLocalInferencePeer, NativeLocalInferenceWorkerBinding } from '../state/local-inference-native.js';
 
 export class LinuxExecutionIdentityError extends Error {
   readonly code = 'UNSUPPORTED_EXECUTION_IDENTITY' as const;
@@ -554,7 +559,7 @@ export type NativeWorkerBinding = { interfaceVersion: 3; readonly builtinToolInt
   sealDependencyNpmData?(fd: number): NativeDependencyNpmDataImage;
   sealSourceGitInspector(fd: number): NativeSourceGitInspectorImage;
   sealImage(fd: number): NativeImage; sealImageBuffer(input: Buffer): NativeImage;
-  openController(helper: NativeImage, cgroupRootFd: number): NativeController };
+  openController(helper: NativeImage, cgroupRootFd: number): NativeController } & Partial<NativeLocalInferenceWorkerBinding>;
 type NativeBinding = NativeWorkerBinding;
 type HeldGuestPreparation = Readonly<{ job: NativeGuestToolchain; close(): Promise<void> }>;
 type HeldBuiltinToolRuntime = Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; script: NativeBuiltinToolScriptImage; close(): Promise<void> }>;
@@ -1225,6 +1230,226 @@ function actualContainment(closure: WorkerLaunchClosure | BuiltinToolLaunchClosu
       cgroupPath: backend.cgroupPath, cgroupId: observed.cgroupId, namespaceInitStartToken: observed.namespaceInitStartToken,
       subreaperStartToken: backend.subreaperStartToken }, createdAt });
 }
+
+export type InstalledLocalInferenceController = Readonly<{
+  pid: number; processStartToken: string; cgroupParent: string;
+  captureInput(data: LocalInferenceNativeInputData): Buffer;
+  reserve(originalSourceRef: string): Promise<LocalInferenceNativeObservation>;
+  prepare(): Promise<LocalInferenceNativeObservation>;
+  createBlocked(): Promise<LocalInferenceNativeObservation>;
+  releaseEngine(): Promise<LocalInferenceNativeObservation>;
+  publishActive(): Promise<LocalInferenceNativeObservation>;
+  observeActive(): Promise<LocalInferenceNativeObservation>;
+  retainHealthPeer(): NativeLocalInferencePeer;
+  retainModelPeer(): NativeLocalInferencePeer;
+  retirement(): LocalInferenceNativeObservation | undefined;
+  close(): Promise<void>;
+}>;
+type LocalPeerPurpose = 'health' | 'model';
+export class InstalledLocalInferenceBusyError extends KernelStorageError {
+  constructor() { super('STATE_TRANSITION_INVALID', 'original local inference observation is busy'); }
+}
+const installedLocalInferenceControllers = new WeakSet<InstalledLocalInferenceController>();
+const installedLocalInferencePeers = new WeakMap<NativeLocalInferencePeer, {
+  selected: HeldInstalledRuntime; purpose: LocalPeerPurpose; assertHeld(): void;
+}>();
+
+export function assertInstalledLocalInferenceController(controller: InstalledLocalInferenceController): void {
+  if (!installedLocalInferenceControllers.has(controller)) mismatch('local inference requires its original installed physical controller');
+}
+
+export function assertInstalledLocalInferencePeer(selected: HeldInstalledRuntime, peer: NativeLocalInferencePeer, purpose: LocalPeerPurpose): void {
+  const original = installedLocalInferencePeers.get(peer);
+  if (!original || original.selected !== selected || original.purpose !== purpose)
+    mismatch('local inference transport requires its original same-selection purpose');
+  original.assertHeld(); peer.assertHeld();
+}
+
+/** One physical purpose of the installed Linux controller. Capture creates
+ * only the source witness. The owning transaction must persist the exact
+ * source ref before the caller enters reserve or any productive method. */
+export async function openInstalledLocalInferenceController(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  lock: HeldStateOwnerLock, signal?: AbortSignal): Promise<InstalledLocalInferenceController> {
+  let controller: NativeLocalInferenceController | undefined, source: HeldLocalInferenceInput | undefined;
+  let helper: NativeImage | undefined, bubblewrap: NativeImage | undefined, bootstrap: NativeImage | undefined;
+  let config: Buffer | undefined, sourceRef: string | undefined, data: LocalInferenceNativeInputData | undefined;
+  let reserved = false, closed = false, pending = false, retirement: LocalInferenceNativeObservation | undefined;
+  let closePromise: Promise<void> | undefined;
+  const assertHeld = () => {
+    if (closed) mismatch('installed local inference owner is closing');
+    lock.assertHeld();
+    withInstalledWorkerRoot(selected, anchor, () => {});
+  };
+  const close = (): Promise<void> => {
+    closed = true;
+    return closePromise ??= (async () => {
+      const failures: unknown[] = [];
+      if (controller) try {
+        await controller.close();
+        if (reserved && config) {
+          const proof = controller.retirementObservation();
+          if (proof) retirement = decodeLocalInferenceNativeObservation(config, proof, 2);
+        }
+      } catch (error) { failures.push(error); }
+      try { source?.close(); } catch (error) { failures.push(error); }
+      for (const image of [bootstrap, bubblewrap, helper]) if (image) try { retireImage(image); } catch (error) { failures.push(error); }
+      if (failures.length) {
+        retirement = undefined;
+        throw retirementError('original local inference controller, source and images did not retire', new AggregateError(failures));
+      }
+    })();
+  };
+  try {
+    let cgroupParent = '';
+    withInstalledWorkerRoot(selected, anchor, (_fd, root) => { cgroupParent = root; });
+    signal?.throwIfAborted(); assertHeld();
+    const native = await loadInstalledWorkerNative(selected, signal);
+    if (native.localInferenceInterfaceVersion !== 3 ||
+        typeof native.encodeLocalInferenceInput !== 'function' || typeof native.openLocalInferenceController !== 'function')
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed installed local inference controller is unavailable');
+    const encode = native.encodeLocalInferenceInput, open = native.openLocalInferenceController;
+    helper = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.launcherId); signal?.throwIfAborted();
+    bubblewrap = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.bubblewrapId); signal?.throwIfAborted();
+    bootstrap = await sealInstalledWorkerImage(selected, 'ollama_local_inference'); signal?.throwIfAborted();
+    const images = { helper, bubblewrap, bootstrap };
+    const opened: { owner?: NativeLocalInferenceController } = {};
+    withInstalledWorkerRoot(selected, anchor, fd => { controller = opened.owner = open(images.helper, fd); });
+    const original = opened.owner;
+    if (!original) mismatch('original local inference controller was not created');
+    await awaitNative(() => original.pollReady() ? true : undefined, close, signal, 5000);
+
+    const request = async (command: number, begin: () => void, maximumMs?: number): Promise<LocalInferenceNativeObservation> => {
+      assertHeld(); signal?.throwIfAborted();
+      if (pending && command === 15) throw new InstalledLocalInferenceBusyError();
+      if (!config || !data || pending) mismatch('original local inference request lacks idle native custody');
+      const fixed = config;
+      const remaining = data.binding.activationDeadlineAtMs - Date.now();
+      const timeout = command === 15 ? 5000 : Math.min(remaining, maximumMs ?? remaining);
+      pending = true;
+      try {
+        if (timeout <= 0) mismatch('local inference activation deadline elapsed');
+        begin();
+        return await awaitNative(() => {
+          const reply = original.pollReply();
+          return reply === null ? undefined : decodeLocalInferenceNativeObservation(fixed, reply, command);
+        }, close, signal, timeout);
+      } catch (error) {
+        if (command === 15 && (error as { code?: unknown } | null)?.code === 'ERR_CLIQ_LOCAL_SERVICE_BUSY')
+          throw new InstalledLocalInferenceBusyError();
+        try { await close(); }
+        catch (failure) { throw retirementError('local inference request did not join its original resources', new AggregateError([error, failure])); }
+        throw error;
+      } finally { pending = false; }
+    };
+
+    const peer = (purpose: LocalPeerPurpose) => {
+      assertHeld(); signal?.throwIfAborted();
+      const nativePeer = purpose === 'health' ? original.retainHealthPeer() : original.retainModelPeer();
+      installedLocalInferencePeers.set(nativePeer, { selected, purpose, assertHeld });
+      return nativePeer;
+    };
+
+    const owner: InstalledLocalInferenceController = Object.freeze({
+      pid: original.pid, processStartToken: original.processStartToken, cgroupParent,
+      captureInput(input: LocalInferenceNativeInputData) {
+        assertHeld(); signal?.throwIfAborted();
+        if (source || reserved) mismatch('original local inference input already exists');
+        data = immutableSnapshot(input); config = encode(data);
+        source = createHeldLocalInferenceInput(lock, config, original.captureOrigin(config));
+        const bytes = source.sourceBytes(); sourceRef = sha256Bytes(bytes); return bytes;
+      },
+      reserve(reference: string) {
+        if (!source || reserved || sourceRef !== reference) mismatch('original local inference reservation does not match its persisted source');
+        const nativeInput = borrowHeldLocalInferenceInput(lock, source, false);
+        return request(2, () => {
+          reserved = true;
+          original.reserveService(nativeInput, images.bootstrap, images.bubblewrap);
+        });
+      },
+      async prepare() {
+        let observed = await request(3, () => original.beginPreparation());
+        if (!data) return mismatch('original local inference input is missing');
+        while (observed.preparedCount !== data.files.length) {
+          await delay(1, undefined, { signal });
+          observed = await request(4, () => original.beginPreparedObservation());
+        }
+        return observed;
+      },
+      createBlocked: () => request(5, () => original.beginCreateBlocked(), 5000),
+      releaseEngine: () => request(6, () => original.beginReleaseEngine(), 5000),
+      publishActive: () => request(14, () => original.beginPublishActive(), 5000),
+      observeActive: () => request(15, () => original.beginActiveObservation(), 5000),
+      retainHealthPeer: () => peer('health'),
+      retainModelPeer: () => peer('model'),
+      retirement: () => retirement,
+      close,
+    });
+    installedLocalInferenceControllers.add(owner);
+    return owner;
+  } catch (error) {
+    try { await close(); }
+    catch (failure) { throw retirementError('local inference construction did not join its original resources', new AggregateError([error, failure])); }
+    throw error;
+  }
+}
+
+
+/** Cleanup-only original source. The native operation proves the old
+ * Supervisor/controller lifetimes absent and touches only the exact born
+ * containment under the current held anchor. It cannot release old service I/O. */
+export async function cleanupInstalledRetainedLocalInference(selected: HeldInstalledRuntime, anchor: HeldInstalledAnchor,
+  lock: HeldStateOwnerLock, sourceBytes: Buffer, originalSupervisor: PlatformProcessIdentityV1,
+  signal?: AbortSignal): Promise<LocalInferenceNativeObservation | undefined> {
+  const root = stateRootIdentityForLock(lock);
+  if (originalSupervisor.platform !== 'linux' || originalSupervisor.ownerUid !== root.ownerUid || originalSupervisor.pid === process.pid)
+    mismatch('retained local inference requires its original earlier Linux Supervisor identity');
+  let input: HeldLocalInferenceInput | undefined, controller: NativeLocalInferenceController | undefined, helper: NativeImage | undefined;
+  let closing: Promise<void> | undefined, cleanupRequested = false, proof: LocalInferenceNativeObservation | undefined;
+  const { config } = splitLocalInferenceNativeInput(sourceBytes);
+  const close = (): Promise<void> => closing ??= (async () => {
+    const failures: unknown[] = [];
+    if (controller) try {
+      await controller.close();
+      if (cleanupRequested) {
+        const observed = controller.retirementObservation();
+        if (observed) proof = decodeLocalInferenceNativeObservation(config, observed, 11);
+      }
+    } catch (error) { failures.push(error); }
+    try { input?.close(); } catch (error) { failures.push(error); }
+    try { if (helper) retireImage(helper); } catch (error) { failures.push(error); }
+    if (failures.length) throw retirementError('current local inference recovery resources did not join', new AggregateError(failures));
+  })();
+  try {
+    signal?.throwIfAborted();
+    input = openRetainedHeldLocalInferenceInput(lock, sourceBytes);
+    const native = await loadInstalledWorkerNative(selected, signal), open = native.openLocalInferenceController;
+    if (native.localInferenceInterfaceVersion !== 3 || typeof open !== 'function')
+      throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed installed local inference recovery observer is unavailable');
+    helper = await sealInstalledWorkerImage(selected, LINUX_WORKER_RECIPE.launcherId);
+    const image = helper;
+    const opened: { owner?: NativeLocalInferenceController } = {};
+    withInstalledWorkerRoot(selected, anchor, fd => { controller = opened.owner = open(image, fd); });
+    const original = opened.owner;
+    if (!original) mismatch('current local inference cleanup controller was not created');
+    await awaitNative(() => original.pollReady() ? true : undefined, close, signal, 5000);
+    signal?.throwIfAborted();
+    const retained = borrowHeldLocalInferenceInput(lock, input, true);
+    original.cleanupRetainedService(retained, originalSupervisor.pid, originalSupervisor.processStartToken);
+    cleanupRequested = true;
+    await awaitNative(() => {
+      const reply = original.pollReply();
+      if (reply === null) return undefined;
+      decodeLocalInferenceNativeObservation(config, reply, 11);
+      return true;
+    }, close, signal, 2000);
+    await close(); return proof;
+  } catch (error) {
+    try { await close(); }
+    catch (failure) { throw retirementError('local inference recovery operation did not join', new AggregateError([error, failure])); }
+    throw error;
+  }
+}
+
 
 async function awaitNative<T>(poll: () => T | undefined, close: () => Promise<void>, signal?: AbortSignal,
   observationTimeoutMs = 6000, pollIntervalMs = 1): Promise<T> {

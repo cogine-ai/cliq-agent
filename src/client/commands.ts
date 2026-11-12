@@ -109,8 +109,9 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
       const matches = defaults?.preferences.modelSelections.filter(selected => selected.alias === alias) ?? [];
       if (alias === undefined || matches.length !== 1) throw new TypeError('select a configured model alias or supply explicit provider options');
       const selected = matches[0]!; aliasSelected = true;
-      selectedModel = { provider: selected.provider, model: selected.model,
-        endpoint: { kind: 'registered', endpointRegistrationId: selected.endpointRegistrationId }, modelCredentialGrantIds: [selected.credentialGrantId] };
+      selectedModel = selected.provider === 'ollama' ? { provider: selected.provider, model: selected.model }
+        : { provider: selected.provider, model: selected.model,
+          endpoint: { kind: 'registered', endpointRegistrationId: selected.endpointRegistrationId }, modelCredentialGrantIds: [selected.credentialGrantId] };
     } else {
       if (model === undefined) throw new TypeError('--model is required with --provider');
       if (provider === 'ollama' ? endpoint !== undefined || credentials.length !== 0 : endpoint === undefined || !credentials.length)

@@ -50,6 +50,29 @@ test('a status-only join rejects effect/Admin aliases, live releases, missing cu
     { completedStages: ['initialize', 'tools_call'] }, { releaseFenceTokenDigest: ref('foreign') }])
     assert.throws(() => decodeMcpStatusRetirement(reseal({ ...original, joined: { ...original.joined, ...change } })));
 });
+test('a refused status response retains only its exact original join or successor cleanup', () => {
+  const original = retirement(), successor = retirement(true);
+  if (!('joined' in original) || !original.joined || !('creatorProcessDomain' in successor) || !successor.creatorProcessDomain)
+    assert.fail('the refusal fixtures need their two distinct native sources');
+  const containment = { processContainmentRef: ref('original spawned containment') };
+  const joined = { ...original.joined, kind: 'mcp_stdio_recovery_response_unavailable_joined', reason: 'native_response_refused' };
+  const refusedClosure = { ...original.nativeClosure, kind: 'linux_original_response_unavailable' };
+  const refused = reseal({ ...original, ...containment, joined, nativeClosure: refusedClosure });
+  const reobserved = reseal({ ...successor, ...containment,
+    nativeClosure: { ...successor.nativeClosure, kind: 'linux_successor_response_unavailable_cleanup' } });
+  assert.deepEqual(decodeMcpStatusRetirement(refused), refused);
+  assert.deepEqual(decodeMcpStatusRetirement(reobserved), reobserved);
+  const { processContainmentRef: _missing, ...noContainment } = { ...original, ...containment };
+  for (const invalid of [
+    { ...refused, joined: original.joined }, { ...refused, joined: { ...joined, reason: 'transport_close' } },
+    { ...refused, joined: { ...joined, execReleased: false } }, { ...refused, joined: { ...joined, matchingActiveReleaseCount: 1 } },
+    { ...refused, joined: { ...joined, rawFinitePrefixDigest: ref('forbidden raw') } },
+    { ...refused, statusResponseRef: ref('forbidden response') },
+    { ...refused, creatorProcessDomain: successor.creatorProcessDomain }, { ...reobserved, joined },
+    { ...refused, nativeClosure: original.nativeClosure }, { ...noContainment, joined, nativeClosure: refusedClosure },
+    { ...reobserved, creatorProcessDomain: { ...successor.creatorProcessDomain, inspectorStateOwnerEpoch: 1 } }
+  ]) assert.throws(() => decodeMcpStatusRetirement(reseal(invalid)));
+});
 test('timeout and owning cancellation require the exact retirement root and preserve the original deadline', () => {
   const core = { schemaVersion: 1, format: 'cliq-reconciliation-probe-timeout-closure-v1', runId: 'run', waitingSubjectRef: ref('wait'),
     probeKind: 'automatic', probeOrdinal: 1, probeNonceDigest: ref('nonce'), probeDispatchDigest: ref('dispatch'),

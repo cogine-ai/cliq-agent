@@ -3,7 +3,9 @@
 export { loadInstalledMcpStdioBroker, assertInstalledMcpStdioRunOwner, assertInstalledMcpStdioAdminOwner,
   assertInstalledMcpStdioCallOwner, assertInstalledMcpStdioRunJoined, assertInstalledMcpStdioAdminJoined,
   assertInstalledMcpStdioRawResponse, assertInstalledMcpStdioUnusableResponse, readInstalledMcpStdioRecipeData, assertInstalledMcpStdioEffectFence,
-  assertInstalledMcpStdioRecoveryOwner, assertInstalledMcpStdioRecoveryJoined, assertInstalledMcpStdioProbeFence } from './installed-runtime.js';
+  assertInstalledMcpStdioRecoveryOwner, assertInstalledMcpStdioRecoveryJoined, assertInstalledMcpStdioProbeFence,
+  assertInstalledMcpStdioUnavailableJoined, assertInstalledMcpStdioUnavailableProbeFence } from './installed-runtime.js';
 export type { NativeMcpStdioBrokerBinding, NativeMcpStdioRunOwner, NativeMcpStdioAdminOwner, FrozenMcpStdioInput,
   NativeMcpStdioRunJoined, NativeMcpStdioAdminJoined, RunMcpStdioLaunchBinding, RunMcpStdioCallBinding, AdminMcpStdioBinding,
-  NativeMcpStdioRecoveryOwner, NativeMcpStdioRecoveryJoined, McpStdioRecoveryBinding, NativeMcpStdioProbeFence } from './mcp-stdio-broker-native.js';
+  NativeMcpStdioRecoveryOwner, NativeMcpStdioRecoveryJoined, McpStdioRecoveryBinding, NativeMcpStdioProbeFence,
+  NativeMcpStdioRecoveryClosure, NativeMcpStdioRecoveryUnavailableJoined, NativeMcpStdioUnavailableProbeFence } from './mcp-stdio-broker-native.js';

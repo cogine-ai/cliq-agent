@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
 import { CONTROL_FRAME_BYTES as FRAME_BYTES, INSTALLED_CONTROL_FEATURES, decodeControlFrame, decodeInstalledControlRequest, decodeInstalledControlResponse,
-  controlWireText, type InstalledControlMethod, type InstalledControlRequestV1, type InstalledControlResponseFor,
+  controlWireText, decodeInstalledMigrationProgress, type InstalledControlMethod, type InstalledControlRequestV1, type InstalledControlResponseFor,
   type InstalledControlResultFor } from '../kernel/control-wire.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
@@ -167,7 +167,8 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
   const socketClosed = new Promise<void>(resolve => socket.once('close', () => resolve()));
   let failure: unknown; let stopped = false; let retiring: Promise<void> | undefined; let closing: Promise<void> | undefined;
   let running: Promise<unknown> | undefined;
-  let waiter: { resolve(value: unknown): void; reject(error: unknown): void } | undefined;
+  let waiter: { resolve(value: unknown): void; reject(error: unknown): void;
+    progress?: { accept(value: unknown): void; deadline(): number } } | undefined;
   // The first observed failing part of this original exchange only. These
   // fixed labels carry no exception text, resource proof or retry permission.
   let exchangeFailureBoundary: import('./installed-request-diagnostics.js').InstalledRequestFailure['boundary'] | undefined;
@@ -178,6 +179,7 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     else failure ??= error;
     stopped = true; waiter?.reject(failure); waiter = undefined; body = undefined; socket.destroy();
   };
+  const responseTimedOut = () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control response timed out'), 'exchange_timeout');
   socket.on('error', () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control socket failed'), 'exchange_socket_error'));
   socket.on('close', () => { if (!stopped) fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control peer closed'), 'exchange_peer_closed'); });
   socket.on('data', (chunk: Buffer) => {
@@ -196,11 +198,19 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
         const count = Math.min(body.length - bodyCount, chunk.length - offset); chunk.copy(body, bodyCount, offset, offset + count);
         offset += count; bodyCount += count;
         if (bodyCount === body.length) {
+          if (waiter.progress && performance.now() >= waiter.progress.deadline()) { responseTimedOut(); return; }
           boundary = 'exchange_native_response';
           native.assertHeld();
           boundary = 'exchange_frame';
           const value = decodeControlFrame(body);
-          const complete = waiter; waiter = undefined; body = undefined; complete.resolve(value);
+          const complete = waiter; body = undefined;
+          if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'progressSequence')) {
+            if (!complete.progress) throw new TypeError('unsolicited installed migration progress');
+            complete.progress.accept(value);
+          } else {
+            waiter = undefined;
+            complete.resolve(value);
+          }
         }
       }
     } catch (error) { fail(error instanceof ResourceRetirementError ? error : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response or native peer is invalid'), boundary); }
@@ -218,15 +228,24 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     try { native.close(); }
     catch (error) { retainedGuards.add(native); retirementFailure ??= error instanceof ResourceRetirementError ? error : new ResourceRetirementError('installed native control descriptors did not retire', error); throw retirementFailure; }
   })();
-  const exchange = async (request: object, diagnosis?: ReturnType<typeof beginInstalledRequestDiagnostic>): Promise<unknown> => {
+  const exchange = async (request: InstalledControlRequestV1, diagnosis?: ReturnType<typeof beginInstalledRequestDiagnostic>): Promise<unknown> => {
     if (stopped || waiter || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control connection is closed or busy');
     diagnosis?.at('exchange_native_before');
     native.assertHeld();
     const bytes = canonicalJsonBytes(request); if (!bytes.length || bytes.length > (purpose === 'credential' ? 65536 : FRAME_BYTES)) throw new TypeError('installed control request exceeds its bound');
     const frame = Buffer.alloc(4); frame.writeUInt32BE(bytes.length);
     exchangeFailureBoundary = undefined;
-    const response = new Promise<unknown>((resolve, reject) => { waiter = { resolve, reject }; });
-    const timer = setTimeout(() => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control response timed out'), 'exchange_timeout'), 30000);
+    let timer: ReturnType<typeof setTimeout> | undefined, nextProgress = 1, responseDeadline = 0;
+    const awaitFrame = () => {
+      clearTimeout(timer);
+      responseDeadline = performance.now() + 30_000;
+      timer = setTimeout(responseTimedOut, 30_000);
+    };
+    const progress = request.method === 'state.migrate' || request.method === 'state.rollback'
+      ? { accept(value: unknown) { decodeInstalledMigrationProgress(value, request, nextProgress++); awaitFrame(); },
+          deadline: () => responseDeadline } : undefined;
+    const response = new Promise<unknown>((resolve, reject) => { waiter = { resolve, reject, progress }; });
+    awaitFrame();
     try {
       diagnosis?.at('exchange_response');
       const writes = [frame, bytes].map(value => new Promise<void>((resolve, reject) => {

@@ -5,6 +5,30 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
+
+test('both installed service roles cancel startup before joining and closing its resources', async () => {
+  const source = await readFile(new URL('./installed-entry.ts', import.meta.url), 'utf8');
+  const start = source.indexOf("  process.once('SIGTERM', () => {");
+  const end = source.indexOf('\n  if (credentialRole)', start);
+  assert(start >= 0 && end > start);
+  const handler = source.slice(start, end);
+  for (const mode of ['--installed-keeper', '--installed-supervisor']) {
+    const process = new EventEmitter(), events: string[] = [], stop = new AbortController();
+    let finish!: () => void;
+    const starting = new Promise<void>(resolve => { finish = resolve; });
+    const closed = new Promise<void>(resolve => {
+      stop.signal.addEventListener('abort', () => events.push('cancel'));
+      runInNewContext(handler, { mode, process, starting, serviceStopRequested: false, serviceStartupStop: stop,
+        store: undefined, close() { events.push('close'); resolve(); }, report() { assert.fail('unexpected close failure'); } });
+    });
+    process.emit('SIGTERM');
+    assert(stop.signal.aborted); assert.deepEqual(events, ['cancel']);
+    events.push('producer-joined'); finish(); await closed;
+    assert.deepEqual(events, ['cancel', 'producer-joined', 'close']);
+  }
+});
 
 test('normal model setup retains real OS termination outside its separately owned prompt', async () => {
   // Execute the entry's actual signal-selection block in a plain child. No
@@ -14,13 +38,21 @@ test('normal model setup retains real OS termination outside its separately owne
   const end = source.indexOf('\n    try {', start);
   assert(start >= 0 && end > start);
   const setup = source.slice(start, end);
-  for (const mode of ['models', 'help', 'run']) for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  const cases = [
+    { args: ['models', 'add', 'remote', '--profile', 'example'], cancels: false },
+    { args: ['models', 'list'], cancels: true },
+    { args: ['models', 'add', 'local', '--manifest', '/test/model-manifest.json'], cancels: true },
+    { args: ['help'], cancels: false },
+    { args: ['run'], cancels: true }
+  ];
+  for (const { args, cancels } of cases) for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `
       const mode = process.argv[1];
+      process.argv.splice(1, 0, 'fixed-image');
       ${setup}
       stop.signal.addEventListener('abort', () => process.stdout.write('aborted\\n', () => process.exit(0)));
       process.stdout.write('ready\\n'); setInterval(() => {}, 1000);
-    `, mode], { stdio: ['ignore', 'pipe', 'pipe'] });
+    `, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '', error = '', sent = false;
     const timer = setTimeout(() => child.kill('SIGKILL'), 3000);
     try {
@@ -34,8 +66,8 @@ test('normal model setup retains real OS termination outside its separately owne
         child.once('close', (code, signal) => resolve({ code, signal }));
       });
       assert.equal(error, ''); assert.equal(sent, true);
-      assert.deepEqual(exit, mode === 'run' ? { code: 0, signal: null } : { code: null, signal });
-      assert.equal(output, mode === 'run' ? 'ready\naborted\n' : 'ready\n');
+      assert.deepEqual(exit, cancels ? { code: 0, signal: null } : { code: null, signal });
+      assert.equal(output, cancels ? 'ready\naborted\n' : 'ready\n');
     } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
   }
 });
@@ -49,6 +81,7 @@ test('the hidden installed entry refuses ordinary Node before reading roots or c
       path.join(fixture, 'state'), 'a'.repeat(64), `0:1:${process.geteuid!()}`]]);
     roles.push(['--installed-client', path.join(fixture, 'state'), 'supervisor', 'status', '--json']);
     roles.push(['--upgrade-source-control', path.join(fixture, 'state'), 'a'.repeat(64)]);
+    roles.push(['--installed-models', path.join(fixture, 'state'), 'a'.repeat(64), '0:1:0', 'e30']);
     roles.push([], ['--installed-invalid-role']);
     for (const args of roles) {
         const result = spawnSync(process.execPath, ['--import', loader, entry, ...args], {

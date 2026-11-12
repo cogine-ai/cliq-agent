@@ -138,6 +138,16 @@ static bool broker_pin(struct broker *broker) {
   return (valid && matched) || broker_fail(broker, "broker_tls_refused");
 }
 static bool broker_connect(struct broker *broker) {
+#if defined(CLIQ_MODEL_OWNER_LOCAL_SERVICE)
+  if (broker->managed_local) {
+    /* The original permanent claim/mutex preceded the private peer's actual
+     * fixed namespace CONNECT. This worker may only use that one already
+     * transferred connected socket; no DNS, host connect, proxy or TLS bypass
+     * for a registered remote endpoint is introduced. */
+    return (broker->socket && broker->connection && !broker->tls && !broker->tls_context && broker_live(broker)) ||
+      broker_fail(broker, "broker_transport_interrupted");
+  }
+#endif
 #if defined(CLIQ_MCP_HTTP_BROKER_MODULE)
   /* GSocketClient can walk multiple resolved addresses. This fixed MCP
    * profile authorizes one CONNECT attempt only; DNS returns candidates but
@@ -200,6 +210,18 @@ static bool broker_write(struct broker *broker, const unsigned char *bytes, size
   size_t offset = 0;
   while (offset < size) {
     if (!broker_live(broker)) return false;
+#if defined(CLIQ_MODEL_OWNER_LOCAL_SERVICE)
+    if (broker->managed_local) {
+      ssize_t written = send(g_socket_get_fd(broker->socket), bytes + offset, size - offset, MSG_NOSIGNAL | MSG_DONTWAIT);
+      if (written > 0) { offset += (size_t)written; continue; }
+      if (written < 0 && errno == EINTR) continue;
+      if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        if (!broker_tls_wait(broker, SSL_ERROR_WANT_WRITE)) return false;
+        continue;
+      }
+      return broker_fail(broker, "broker_transport_interrupted");
+    }
+#endif
     size_t written = 0; int result = SSL_write_ex(broker->tls, bytes + offset, size - offset, &written);
     if (result == 1) { if (!written) return broker_fail(broker, "broker_transport_interrupted"); offset += written; }
     else if (!broker_tls_wait(broker, SSL_get_error(broker->tls, result))) return false;
@@ -211,6 +233,18 @@ static bool broker_write(struct broker *broker, const unsigned char *bytes, size
 static ssize_t broker_read(struct broker *broker, unsigned char *bytes, size_t size) {
   for (;;) {
     if (!broker_live(broker)) return -1;
+#if defined(CLIQ_MODEL_OWNER_LOCAL_SERVICE)
+    if (broker->managed_local) {
+      ssize_t count = recv(g_socket_get_fd(broker->socket), bytes, size, MSG_DONTWAIT);
+      if (count >= 0) return count;
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (!broker_tls_wait(broker, SSL_ERROR_WANT_READ)) return -1;
+        continue;
+      }
+      broker_fail(broker, "broker_transport_interrupted"); return -1;
+    }
+#endif
     size_t received = 0; int result = SSL_read_ex(broker->tls, bytes, size, &received);
     if (result == 1) return received ? (ssize_t)received : -1;
     int error = SSL_get_error(broker->tls, result);

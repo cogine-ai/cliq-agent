@@ -112,13 +112,22 @@ test('Run and both Admin authority callers pass their retained task signal witho
 
 test('the original native credential scope cancels only preparation and fully validates after the owned callback', async () => {
   const parsed = await source('./installed-runtime.ts'), methods: ts.MethodDeclaration[] = [];
+  const scopes: ts.FunctionDeclaration[] = [];
   const visit = (node: ts.Node) => {
     if (ts.isMethodDeclaration(node) && node.body && node.name.getText(parsed) === 'credentialScope') methods.push(node);
+    if (ts.isFunctionDeclaration(node) && node.body && node.name?.text === 'performCredentialScope') scopes.push(node);
     ts.forEachChild(node, visit);
   };
   visit(parsed);
   assert.equal(methods.length, 1);
-  const body = methods[0]!.getText(parsed);
+  assert.equal(scopes.length, 1);
+  const forwarded = calls(methods[0]!, 'performCredentialScope');
+  assert.equal(forwarded.length, 1);
+  const parameters = methods[0]!.parameters.map(parameter => parameter.name.getText(parsed));
+  assert.deepEqual(parameters, ['operation', 'preparationSignal', 'migrationGate']);
+  assert.deepEqual(forwarded[0]!.arguments.map(argument => argument.getText(parsed)), parameters,
+    'the selected runtime must forward its original preparation signal to the credential scope');
+  const body = scopes[0]!.body!.getText(parsed);
   assert.match(body, /preparationSignal\?\.throwIfAborted\(\)/u);
   assert.match(body, /await loadSelectedNative\(preparationSignal\)/u);
   const before = body.indexOf('await checkedRevalidate(preparationSignal); credential.assertHeld();');

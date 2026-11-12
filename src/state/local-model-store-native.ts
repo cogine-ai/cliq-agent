@@ -9,10 +9,16 @@ export type NativeLocalModelPackage = Readonly<{
   finish(): void;
   close(): void;
 }>;
+export type NativeLocalModelObjectSource = Readonly<{
+  /** Null follows the native full-byte hash and final identity check. */
+  readChunk(): Buffer | null;
+  close(): void;
+}>;
 export type NativeLocalModelStore = Readonly<{
   assertHeld(): void;
   readSmallObject(reference: string): Buffer;
   publishSmallObject(reference: string, bytes: Buffer): void;
   openPackage(manifestPath: string): NativeLocalModelPackage;
+  openObjectSource?(reference: string, byteCount: number): NativeLocalModelObjectSource;
   close(): void;
 }>;

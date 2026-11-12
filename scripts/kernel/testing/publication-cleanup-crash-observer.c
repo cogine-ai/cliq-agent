@@ -130,13 +130,187 @@ static int retirement_stop(int *process, int64_t watch_started) {
     return n > 0 && n < (int)sizeof(output) && frame(output);
 }
 
+/* Only the real disposable NSS fixture may use the root-side migration
+ * observer. The actor is outside the same-user census. It opens no SQL,
+ * records no credential bytes, and never signals an unobserved phase. */
+static int rollback_probe_root(const char *location, uid_t uid, int *legacy, int *root) {
+    static const char prefix[] = "/var/tmp/cliq-systemd-probe.", suffix[] = "/home/.cliq/kernel-v1";
+    size_t length = strlen(location), head = sizeof(prefix) - 1, tail = sizeof(suffix) - 1;
+    if (length <= head + tail || length > head + 64 + tail || memcmp(location, prefix, head) ||
+        strcmp(location + length - tail, suffix)) return 0;
+    const size_t nonce = length - head - tail;
+    if (strspn(location + head, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != nonce) return 0;
+    char fixture_name[96];
+    const char *base = location + sizeof("/var/tmp/") - 1;
+    size_t name_length = length - tail - (size_t)(base - location);
+    if (name_length >= sizeof(fixture_name)) return 0;
+    memcpy(fixture_name, base, name_length); fixture_name[name_length] = 0;
+    int parent = open("/var/tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), fixture = -1, home = -1;
+    struct stat metadata, source, kernel;
+    int valid = parent >= 0 &&
+        (fixture = openat(parent, fixture_name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) >= 0 &&
+        !fstat(fixture, &metadata) && S_ISDIR(metadata.st_mode) && metadata.st_uid == 0 && metadata.st_gid == 0 &&
+        (metadata.st_mode & 07777) == 0755 &&
+        (home = openat(fixture, "home", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) >= 0 &&
+        !fstat(home, &metadata) && private_directory(&metadata, uid) &&
+        (*legacy = openat(home, ".cliq", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) >= 0 &&
+        !fstat(*legacy, &source) && private_directory(&source, uid) &&
+        (*root = openat(*legacy, "kernel-v1", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)) >= 0 &&
+        !fstat(*root, &kernel) && private_directory(&kernel, uid) && kernel.st_dev == source.st_dev;
+    int descriptors[] = {home, fixture, parent};
+    for (size_t index = 0; index < sizeof(descriptors) / sizeof(descriptors[0]); ++index)
+        if (descriptors[index] >= 0 && close(descriptors[index])) valid = 0;
+    return valid;
+}
+static int rollback_document(int parent, const char *leaf, uid_t uid, unsigned char *bytes, size_t capacity,
+                             const char *required_phase, struct stat *observed, char digest_text[65]) {
+    int fd = openat(parent, leaf, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return -1;
+    struct stat before, after, named;
+    int valid = !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == uid &&
+        before.st_nlink == 1 && (before.st_mode & 07777) == 0600 && before.st_size > 0 && (uint64_t)before.st_size < capacity;
+    size_t size = 0;
+    while (valid && size < (size_t)before.st_size) {
+        ssize_t received = read(fd, bytes + size, (size_t)before.st_size - size);
+        if (received < 0 && errno == EINTR) continue;
+        if (received <= 0) { valid = 0; break; }
+        size += (size_t)received;
+    }
+    if (valid) {
+        unsigned char extra; ssize_t end;
+        do { end = read(fd, &extra, 1); } while (end < 0 && errno == EINTR);
+        valid = end == 0 && !fstat(fd, &after) && same(&before, &after) &&
+            !fstatat(parent, leaf, &named, AT_SYMLINK_NOFOLLOW) && same(&before, &named);
+    }
+    if (close(fd) || !valid) return -1;
+    static const char format[] = "\"format\":\"cliq-kernel-rollback-control-v1\"";
+    if (required_phase && (!memmem(bytes, size, format, sizeof(format) - 1) ||
+        !memmem(bytes, size, required_phase, strlen(required_phase)))) return 0;
+    struct sha256_context hash; unsigned char value[32];
+    sha256_init(&hash); sha256_update(&hash, bytes, size); sha256_final(&hash, value);
+    for (size_t index = 0; index < sizeof(value); ++index) snprintf(digest_text + index * 2, 3, "%02x", value[index]);
+    *observed = before;
+    return 1;
+}
+static int rollback_displaced_name(const unsigned char *bytes, size_t size, const char *phase, const char *actual) {
+    static const char field[] = "{\"archiveId\":\"";
+    const size_t offset = sizeof(field) - 1;
+    if (size < offset + 45 || memcmp(bytes, field, offset) || bytes[offset + 43] != '"' || bytes[offset + 44] != ',') return 0;
+    char archive[44], expected[NAME_MAX + 1]; memcpy(archive, bytes + offset, 43); archive[43] = 0;
+    if (!arena_id(archive)) return 0;
+    const char *suffix = !strcmp(phase, "rollback_archive_ready") ? "archive-ready" : "restoring";
+    int length = snprintf(expected, sizeof(expected), ".cliq-%s-rollback-%s.tmp", archive, suffix);
+    return length > 0 && (size_t)length < sizeof(expected) && !strcmp(expected, actual);
+}
+static int rollback_cut(const char *location, pid_t pid, uint64_t ticks, uid_t uid,
+                        const char *image_digest, uint64_t image_dev, uint64_t image_ino, uint64_t image_size,
+                        const char *phase, const char *kernel_marker) {
+    if ((strcmp(phase, "rollback_archive_ready") && strcmp(phase, "rollback_restoring")) || !digest(kernel_marker)) return 98;
+    int legacy = -1, root = -1, migration = -1, notify = -1, process = -1, result = 98, armed = 0;
+    unsigned char *bytes = malloc(1048577); char output[256] = {0};
+    struct stat parent, marker_before, marker_after, control_before, control_after, legacy_marker, auth;
+    char marker_hash[65], before_hash[65], after_hash[65], legacy_hash[65], watched[64], required[80], executable[64];
+    int required_count = snprintf(required, sizeof(required), ",\"phase\":\"%s\",", phase);
+    int executable_count = snprintf(executable, sizeof(executable), "/proc/%d/exe", pid);
+    if (!bytes || required_count <= 0 || (size_t)required_count >= sizeof(required) ||
+        executable_count <= 0 || (size_t)executable_count >= sizeof(executable) ||
+        !start_token(pid, ticks, uid) || (process = (int)syscall(SYS_pidfd_open, pid, 0)) < 0 ||
+        !image(pid, uid, image_digest, image_dev, image_ino, image_size) || !start_token(pid, ticks, uid) ||
+        !rollback_probe_root(location, uid, &legacy, &root)) goto done;
+    migration = openat(root, "migration", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (migration < 0 || fstat(migration, &parent) || !private_directory(&parent, uid) ||
+        rollback_document(migration, "authority-v1.json", uid, bytes, 1048577, NULL, &marker_before, marker_hash) != 1 ||
+        strcmp(marker_hash, kernel_marker)) goto done;
+    notify = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+    if (notify < 0 || snprintf(watched, sizeof(watched), "/proc/self/fd/%d", migration) >= (int)sizeof(watched)) goto done;
+    int watch = inotify_add_watch(notify, watched, IN_DELETE | IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR);
+    int64_t started = milliseconds();
+    if (watch < 0 || started < 0 || !frame("migration_rollback_cut_ready\n")) goto done;
+    for (;;) {
+        int64_t now = milliseconds();
+        if (now < started || now - started >= 90000) goto done;
+        struct pollfd fds[] = {{notify, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}, {process, POLLIN, 0}};
+        int available = poll(fds, 3, (int)(90000 - (now - started)));
+        if (available < 0 && errno == EINTR) continue;
+        if (available <= 0 || fds[2].revents || (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) ||
+            (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL))) goto done;
+        if (fds[1].revents & POLLIN) {
+            char input[32]; ssize_t size = read(STDIN_FILENO, input, sizeof(input));
+            if (armed || size != 9 || memcmp(input, "rollback\n", 9)) goto done;
+            armed = 1;
+        }
+        if (!(fds[0].revents & POLLIN)) continue;
+        _Alignas(struct inotify_event) unsigned char events[4096]; ssize_t count = read(notify, events, sizeof(events));
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (count <= 0) goto done;
+        for (size_t offset = 0; offset < (size_t)count;) {
+            if ((size_t)count - offset < sizeof(struct inotify_event)) goto done;
+            const struct inotify_event *event = (const void *)(events + offset);
+            if (event->len > (size_t)count - offset - sizeof(*event) ||
+                (event->mask & (IN_Q_OVERFLOW | IN_MOVE_SELF | IN_DELETE_SELF | IN_IGNORED))) goto done;
+            offset += sizeof(*event) + event->len;
+            if (!armed || event->wd != watch || !(event->mask & IN_DELETE) ||
+                !event->len || !memchr(event->name, 0, event->len)) continue;
+            /* cr_replace_control unlinks the displaced old control only
+             * after the new control's exact exchange and directory fsync. */
+            if (rollback_document(migration, "control-v1.json", uid, bytes, 1048577, required, &control_before, before_hash) != 1 ||
+                !rollback_displaced_name(bytes, (size_t)control_before.st_size, phase, event->name)) continue;
+            struct stat original_image;
+            if (rollback_document(migration, "authority-v1.json", uid, bytes, 1048577, NULL, &marker_after, marker_hash) != 1 ||
+                !same(&marker_before, &marker_after) || strcmp(marker_hash, kernel_marker) || !start_token(pid, ticks, uid) ||
+                stat(executable, &original_image) || !S_ISREG(original_image.st_mode) || original_image.st_uid != uid ||
+                (uint64_t)original_image.st_dev != image_dev || (uint64_t)original_image.st_ino != image_ino ||
+                (uint64_t)original_image.st_size != image_size) goto done;
+            if (syscall(SYS_pidfd_send_signal, process, SIGKILL, NULL, 0)) goto done;
+            const int64_t death_start = milliseconds();
+            if (death_start < started || death_start - started >= 90000) goto done;
+            for (;;) {
+                int64_t sampled = milliseconds();
+                if (sampled < death_start || sampled - death_start >= 2000 || sampled - started >= 90000) goto done;
+                struct pollfd death = {process, POLLIN, 0};
+                int exited = poll(&death, 1, (int)(2000 - (sampled - death_start)));
+                if (exited < 0 && errno == EINTR) continue;
+                if (exited <= 0 || !(death.revents & POLLIN) || (death.revents & (POLLERR | POLLNVAL))) goto done;
+                break;
+            }
+            uint64_t death_monotonic, death_realtime;
+            if (!stamp(&death_monotonic, &death_realtime) || death_monotonic / UINT64_C(1000000) < (uint64_t)death_start ||
+                death_monotonic / UINT64_C(1000000) - (uint64_t)death_start > 2000) goto done;
+            struct stat named;
+            if (fstatat(root, "migration", &named, AT_SYMLINK_NOFOLLOW) || named.st_dev != parent.st_dev || named.st_ino != parent.st_ino ||
+                rollback_document(migration, "control-v1.json", uid, bytes, 1048577, required, &control_after, after_hash) != 1 ||
+                !same(&control_before, &control_after) || strcmp(before_hash, after_hash) ||
+                rollback_document(migration, "authority-v1.json", uid, bytes, 1048577, NULL, &marker_after, marker_hash) != 1 ||
+                !same(&marker_before, &marker_after) || strcmp(marker_hash, kernel_marker) ||
+                rollback_document(legacy, ".cliq-generation-v1.json", uid, bytes, 1048577, NULL, &legacy_marker, legacy_hash) != 1) goto done;
+            int auth_present = fstatat(legacy, "auth.json", &auth, AT_SYMLINK_NOFOLLOW) == 0;
+            if (auth_present ? !S_ISREG(auth.st_mode) || auth.st_uid != uid || auth.st_nlink != 1 ||
+                (auth.st_mode & 07777) != 0600 : errno != ENOENT) goto done;
+            int length = snprintf(output, sizeof(output), "migration_rollback_cut_v1 %s %s %d %" PRIu64 " %" PRIu64 " %d %" PRIu64 "\n",
+                phase, after_hash, auth_present, auth_present ? (uint64_t)auth.st_dev : 0,
+                auth_present ? (uint64_t)auth.st_ino : 0, !strcmp(legacy_hash, kernel_marker), death_realtime / UINT64_C(1000000));
+            if (length <= 0 || (size_t)length >= sizeof(output)) goto done;
+            result = 0; goto done;
+        }
+    }
+done:
+    free(bytes);
+    int descriptors[] = {process, notify, migration, root, legacy};
+    for (size_t index = 0; index < sizeof(descriptors) / sizeof(descriptors[0]); ++index)
+        if (descriptors[index] >= 0 && close(descriptors[index])) result = 98;
+    return result == 0 && frame(output) ? 0 : 98;
+}
+
 int main(int argc, char **argv) {
     uint64_t pid_value, ticks, uid_value, image_dev, image_ino, image_size;
     int stopping = argc == 10 && !strcmp(argv[9], "--retirement-stop");
-    if ((argc != 9 && !stopping) || argv[1][0] != '/' || !number(argv[2], &pid_value) || !pid_value || pid_value > INT_MAX ||
+    int rollback = argc == 12 && !strcmp(argv[9], "--rollback-cut");
+    if ((argc != 9 && !stopping && !rollback) || argv[1][0] != '/' || !number(argv[2], &pid_value) || !pid_value || pid_value > INT_MAX ||
         !number(argv[3], &ticks) || !number(argv[4], &uid_value) || !uid_value || uid_value > UINT32_MAX ||
-        getuid() != (uid_t)uid_value || geteuid() != (uid_t)uid_value || !digest(argv[5]) ||
+        getuid() != (rollback ? 0 : (uid_t)uid_value) || geteuid() != (rollback ? 0 : (uid_t)uid_value) || !digest(argv[5]) ||
         !number(argv[6], &image_dev) || !number(argv[7], &image_ino) || !number(argv[8], &image_size)) return 98;
+    if (rollback) return rollback_cut(argv[1], (pid_t)pid_value, ticks, (uid_t)uid_value,
+        argv[5], image_dev, image_ino, image_size, argv[10], argv[11]);
     int root = -1, runtime = -1, parent = -1, notify = -1, process = -1, arena = -1, result = 98;
     pid_t pid = (pid_t)pid_value; uid_t uid = (uid_t)uid_value; struct stat r, p, named, captured;
     if (!start_token(pid, ticks, uid)) goto done;

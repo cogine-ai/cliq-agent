@@ -1,8 +1,8 @@
 # MCP recovery inspection and signed profile identity
 
-This companion specifies the two accepted refinements needed to implement the
-RFC's closed MCP retry/reconcile profiles. It does not make an unimplemented
-profile available or qualify any platform.
+This companion specifies the accepted refinements to the RFC's closed MCP
+retry and reconciliation profiles. Release readiness requires installed
+qualification.
 
 Server launch and ordinary tool effect remain distinct actions. Each productive
 server launch is separately permitted and, once claimed, costs one tool call;
@@ -34,6 +34,13 @@ target, inherit M/credentials, renew the original effect deadline or borrow an
 old native instance. Native READY5/Stop2, complete process/pipe/task/FD joins,
 NoEcho and the original probe-start-plus-30-second deadline remain mandatory.
 
+The profile identifies the original registered `mcp_server` and its argv.
+The isolated status scope runs the independently signed
+`mcp_recovery_adapter` at the fixed stdio path with that same exact argv.
+Its native recipe, launch spec and executable mount bind the actual adapter
+digest. The worker init helper retains its own signed identity. The broker
+and retained native history reject substitution of these executable roles.
+
 Broker request and target use the previous pending/exhausted wait and stable
 subject/nonce, then the dispatch hashes those identities, then the in-flight
 wait hashes that dispatch. The native birth may bind the resulting current
@@ -46,6 +53,24 @@ lifecycle. A transport close is not timeout or business evidence. A timeout
 requires the exact original token irreversibly revoked and actual matching
 release count zero under the native fence, plus complete scope join. A missing
 source or unsafe event remains unresolved/recovery-required.
+
+The installed `--run-mcp-status-user-replay-journey` exercises the original
+eight automatic probes and at least 6,156 seconds of real backoff before
+asking for the first user probe. It checks the exact first response after
+reconnect and restart, refusal when the same request id changes, and an
+unchanged original effect Journal and charge. This case requires its own
+completed evidence; the short recovery campaign leaves it unqualified.
+
+A complete bounded status payload can fail its JSON, protocol or NoEcho
+checks after valid native IPC. The original purpose-3 broker can discard it
+while completing the authenticated ACK, EOF, client and process joins. The
+dedicated unavailable-response retirement carries the fixed refusal reason
+and real original lifecycle and retirement evidence. It contains neither
+the refused payload nor its digest. Its native guard remains held through the
+original timeout or owning shutdown transaction. A strict successor can
+audit it only from the original complete refused-output retirement and its
+own real cleanup and old creator death proof. The original effect remains
+unknown and fully charged. The same deadline, counted probes and backoff apply.
 
 ## Acyclic profile signing identity
 

@@ -1,16 +1,59 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decodeControlFrame, decodeInstalledControlRequest, decodeInstalledControlResponse,
-  CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, UnsupportedExecutionIdentityRequestError } from './control-wire.js';
+  CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, decodeInstalledMigrationProgress,
+  UnsupportedExecutionIdentityRequestError } from './control-wire.js';
 import { canonicalJsonBytes, canonicalSha256 } from './canonical.js';
 import { digestOmitting, identityHash } from './identity.js';
 
 // Pure wire conformance: no installed selection, peer, grant or execution proof.
 test('connected composition ceiling is immutable while the actual Supervisor selects enabled capabilities', () => {
   assert.deepEqual(INSTALLED_CONTROL_FEATURES, ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize',
-    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list']);
+    'session.create', 'session.list', 'session.fork', 'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.cancel', 'authorization.create', 'authorization.list', 'authorization.revoke', 'run.result', 'run.diff', 'artifact.get', 'run.apply', 'run.approve', 'run.input', 'run.reconcile', 'mcp.register', 'mcp.refresh', 'mcp.list', 'state.migrate', 'state.rollback']);
   assert.throws(() => Reflect.apply(Array.prototype.push, INSTALLED_CONTROL_FEATURES, ['unexpected.method']));
   assert.throws(() => Reflect.apply(Array.prototype.push, CONTROL_METHODS_V1, ['unexpected.method']));
+});
+
+test('migration progress belongs to one original request and cannot serve as its final result', () => {
+  const request = { protocolVersion: 1, method: 'state.migrate', requestId: '01900000-0000-7000-8000-000000000001',
+    migrationId: 'a'.repeat(43), legacyRootCanonicalAbsolutePath: '/home/cliq/.cliq' } as const;
+  const progress = { protocolVersion: 1, method: request.method, requestId: request.requestId, progressSequence: 1 };
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  assert.deepEqual(decodeInstalledMigrationProgress(decodeControlFrame(canonicalJsonBytes(progress)), request, 1), progress);
+  assert.deepEqual(decodeInstalledMigrationProgress({ ...progress, progressSequence: 2 }, request, 2), { ...progress, progressSequence: 2 });
+  assert.throws(() => decodeInstalledMigrationProgress(progress, request, 2));
+  assert.throws(() => decodeInstalledControlResponse(progress, request));
+  for (const change of [{ protocolVersion: 2 }, { progressSequence: 0 }, { progressSequence: 2 }, { method: 'state.rollback' },
+    { requestId: '01900000-0000-7000-8000-000000000002' }, { receiptRef: 'a'.repeat(64) }, { retryAfterMs: 1000 }])
+    assert.throws(() => decodeInstalledMigrationProgress({ ...progress, ...change }, request, 1));
+
+  const ref = 'a'.repeat(64);
+  const result = { protocolVersion: 1, method: request.method, status: 'completed', requestId: request.requestId, migrationId: request.migrationId,
+    preparationRef: ref, preparationDigest: ref, receiptRef: ref, receiptDigest: ref, completedAt: '2026-10-18T00:00:00.000Z' };
+  assert.deepEqual(decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result }, request), { protocolVersion: 1, ok: true, result });
+  assert.throws(() => decodeInstalledControlResponse({ protocolVersion: 1, ok: true, result: { ...result, migrationId: 'b'.repeat(43) } }, request));
+});
+
+test('rollback final response verifies the exact receipt and migration id', () => {
+  const request = { protocolVersion: 1, method: 'state.rollback', requestId: '01900000-0000-7000-8000-000000000001',
+    migrationId: 'a'.repeat(43), allowPlaintextLegacyCredentials: false } as const;
+  const ref = 'a'.repeat(64);
+  const core = { schemaVersion: 1, format: 'cliq-migration-receipt-v1', kind: 'legacy_rollback', migrationId: request.migrationId,
+    rollbackRequestRef: ref, rollbackRequestDigest: ref, backupRef: ref, backupDigest: ref, legacyGenerationRef: ref,
+    legacyGenerationDigest: ref, archivedKernelGenerationRef: ref, archivedKernelGenerationDigest: ref,
+    completedAt: '2026-10-18T00:00:00.000Z' };
+  const reply = (receiptCore: typeof core) => {
+    const receipt = { ...receiptCore, receiptDigest: canonicalSha256(receiptCore) };
+    return { protocolVersion: 1, ok: true, result: { method: request.method, requestId: request.requestId, receiptRef: canonicalSha256(receipt), receipt } };
+  };
+  const response = reply(core);
+  assert.deepEqual(decodeInstalledControlRequest(request), request);
+  assert.deepEqual(decodeInstalledControlResponse(response, request), response);
+  assert.throws(() => decodeInstalledControlResponse(reply({ ...core, migrationId: 'b'.repeat(43) }), request));
+  assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...response.result, receiptRef: ref } }, request));
+  assert.throws(() => decodeInstalledControlResponse({ ...response, result: { ...response.result,
+    receipt: { ...response.result.receipt, receiptDigest: ref } } }, request));
+  assert.throws(() => decodeInstalledControlRequest({ ...request, allowPlaintextLegacyCredentials: 'true' }));
 });
 
 test('run.input binds one exact bounded value and has no caller principal, executable or authority fields', () => {

@@ -11,7 +11,7 @@ import { readHistoricalControlChannel } from './control-channel.js';
 import { KernelStorageError } from './errors.js';
 import { readMcpStatusCaptureHistory, readMcpStatusRetirementHistory } from './mcp-status-native-history.js';
 import { readMcpStatusProbePreparation } from './mcp-status-preparation.js';
-import { decodeMcpStatusProbeWrapper, decodeMcpStatusProbeClosure } from './mcp-status-proof.js';
+import { decodeMcpStatusProbeWrapper, decodeMcpStatusProbeClosure, isMcpStatusUnavailableRetirement } from './mcp-status-proof.js';
 import { readMcpReconcileSource } from './mcp-status-source.js';
 import { readCheckpoint, readControlRequest, readSessionPrincipalId } from './rows.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -20,7 +20,7 @@ function fail(message: string): never { throw new KernelStorageError('RECOVERY_R
 type Source = Awaited<ReturnType<typeof readMcpReconcileSource>>;
 export type McpStatusHistoryCut = Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'journal'>;
 const base = ({ probeState: _state, ...value }: McpInvocationWaitV1) => value;
-async function userSource(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: McpStatusHistoryCut, wait: McpInvocationWaitV1) {
+export async function readMcpStatusUserSource(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: McpStatusHistoryCut, wait: McpInvocationWaitV1) {
   const state = wait.probeState;
   if (state.phase !== 'user_in_flight') fail('MCP user probe changed its exact user-requested phase');
   const dispatch = state.dispatch;
@@ -95,13 +95,14 @@ export async function readMcpStatusProbeEvidence(driver: SqliteDriver, artifacts
       (closure.format === 'cliq-reconciliation-probe-cancellation-closure-v1') !== cancellation)
     fail('MCP closure changed its original native status nonce or inspector');
   const retirement = await readMcpStatusRetirementHistory(driver, artifacts, prepared, closure.retirementRef, closure.retirementDigest);
-  if (cancellation && retirement.value.nativeClosure.kind !== 'linux_original_join')
+  if (cancellation && !retirement.value.joined)
     fail('MCP successor cleanup cannot impersonate the original owning shutdown cancellation');
   if (retirement.value.observedAt > closure.closedAt || retirement.evidence.inspectorIdentityRef !== closure.inspectorIdentityRef ||
       retirement.evidence.inspectorIdentityDigest !== closure.inspectorIdentityDigest)
     fail('MCP probe closed before its genuine original process/pipe/native retirement');
   let lateCapture: Awaited<ReturnType<typeof readMcpStatusCaptureHistory>> | undefined;
   if (closure.lateStatusCaptureRef) {
+    if (isMcpStatusUnavailableRetirement(retirement.value)) fail('MCP unavailable-response audit cannot retain an original or late payload');
     lateCapture = await readMcpStatusCaptureHistory(driver, artifacts, prepared, source, closure.lateStatusCaptureRef, closure.lateStatusCaptureDigest!);
     if (lateCapture.value.retirementRef !== closure.retirementRef || lateCapture.value.retirementDigest !== closure.retirementDigest ||
         (lateCapture.value.observedAt as string) > closure.closedAt)
@@ -134,7 +135,7 @@ export async function readMcpStatusWaitHistory(driver: SqliteDriver, artifacts: 
     if (state.phase === 'automatic_in_flight' || state.phase === 'user_in_flight') {
       const prepared = await readMcpStatusProbePreparation(driver, artifacts, cursor, source);
       requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(state.dispatch)), state.dispatch, 'MCP full original persisted dispatch');
-      if (state.phase === 'user_in_flight') await userSource(driver, artifacts, cut, cursor);
+      if (state.phase === 'user_in_flight') await readMcpStatusUserSource(driver, artifacts, cut, cursor);
       cursor = prepared.previous; continue;
     }
     const proof = await readMcpStatusProbeEvidence(driver, artifacts, source, state.lastProbeEvidenceRef, state.lastProbeEvidenceDigest);

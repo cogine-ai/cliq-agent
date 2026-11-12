@@ -19,6 +19,8 @@ export type HeldInstalledAccountParticipant = Readonly<{
   enterExclusive(owner: HeldStateOwnerLock): HeldMigrationCredentialGate;
   /** Every original child must have actually closed before this transition. */
   restoreShared(): void;
+  /** After the final marker, end the exact exclusion without reentering Kernel service. */
+  retireExclusive(expected: HeldMigrationCredentialGate): void;
   close(): void;
 }>;
 const beforeOwnerReaders = new WeakMap<HeldInstalledAccountParticipant,
@@ -51,12 +53,15 @@ export function holdInstalledAccountParticipant(native: NativeStateOwner): HeldI
     if (actual !== participant || count !== 0) throw new TypeError('account participant requires its original receiver');
     if (failure) throw failure;
   };
-  const restore = () => {
+  const retireGate = () => {
     // A successful close is consumed exactly once. An uncertain close retains
     // the original object instead of retrying a possibly reused FD number.
     if (binding) { try { binding.close(); } catch (error) { return poison('migration binding did not actually retire', error); } binding = undefined; }
     if (gate) { try { gate.close(); } catch (error) { return poison('exclusive account participant did not actually retire', error); } gate = undefined; }
     phase = 'fenced_without_gate';
+  };
+  const restore = () => {
+    retireGate();
     gate = acquireHeldKernelGlobalShared(native); gate.assertHeld(); phase = 'shared';
   };
   const participant: HeldInstalledAccountParticipant = Object.freeze({
@@ -115,6 +120,14 @@ export function holdInstalledAccountParticipant(native: NativeStateOwner): HeldI
       if (phase === 'shared') { gate!.assertHeld(); return; }
       if (phase === 'closed') throw new TypeError('closed account participant cannot reacquire a lock');
       restore();
+    },
+    retireExclusive(expected, ...args: unknown[]) {
+      receiver(this, args.length);
+      if (phase !== 'exclusive' || !binding || binding !== expected)
+        throw new TypeError('account retirement requires its exact original exclusive binding');
+      binding.assertHeld();
+      retireGate();
+      phase = 'closed';
     },
     close(...args: unknown[]) {
       receiver(this, args.length); if (phase === 'closed') return;

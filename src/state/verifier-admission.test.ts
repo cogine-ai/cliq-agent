@@ -198,7 +198,7 @@ test('installed assembly uses the shared full verifier resolution before publica
   const publication = installedSource.slice(start, end);
   const stages = ['await artifacts.publishCanonical(', 'installedSandboxProfile(request.sandboxResources)', 'await prepareInstalledVerifierAssembly(',
     'await artifacts.publishCanonical(policy, policy.format)', 'await installed.revalidate(signal)',
-    'await validateControlChannelClosure(reads, owner, identity)', 'assertActiveStateOwner(driver, owner)'];
+    'await validateControlChannelClosure(reads, owner, identity, localModel?.frame)', 'assertActiveStateOwner(driver, owner)'];
   let previous = -1;
   for (const stage of stages) { const next = publication.indexOf(stage); assert(next > previous, stage); previous = next; }
   assert(!publication.includes('publishCanonical(assembly,'), 'the same original assembly is not republished after its fixed group');

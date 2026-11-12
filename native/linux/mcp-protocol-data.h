@@ -20,7 +20,17 @@ struct mcp_json {
     size_t          size, at;
     struct mcp_json_node *nodes;
     unsigned        count, entries;
+    /* Copies used by semantic readers report allocation failure to the same
+     * original parse. A bounded malformed payload is not an allocation proof. */
+    bool            allocation_failed;
+    bool           *allocation_failure;
 };
+static void
+mcp_json_allocation_failed(const struct mcp_json *json)
+{
+    if (json->allocation_failure)
+        *json->allocation_failure = true;
+}
 struct mcp_frame {
     unsigned char  *body;
     size_t          size;
@@ -125,6 +135,10 @@ mcp_json_value(struct mcp_json *json, unsigned depth, unsigned *result)
         unsigned        last = 0;
         GHashTable     *keys = byte == '{' ? g_hash_table_new_full(g_bytes_hash, g_bytes_equal, (GDestroyNotify) g_bytes_unref, NULL) : NULL;
         bool            valid = true;
+        if (byte == '{' && !keys) {
+            mcp_json_allocation_failed(json);
+            return false;
+        }
         if (json->at < json->size && json->bytes[json->at] == (byte == '{' ? '}' : ']'))
             json->at++;
         else
@@ -143,10 +157,15 @@ mcp_json_value(struct mcp_json *json, unsigned depth, unsigned *result)
                     key_node->start = json->at;
                     key_node->type = '"';
                     GString        *decoded = g_string_new(NULL);
+                    if (!decoded)
+                        mcp_json_allocation_failed(json);
                     valid = decoded && mcp_json_string(json, decoded);
                     if (valid) {
                         GBytes         *name = g_bytes_new(decoded->str, decoded->len);
-                        if (g_hash_table_contains(keys, name)) {
+                        if (!name) {
+                            mcp_json_allocation_failed(json);
+                            valid = false;
+                        } else if (g_hash_table_contains(keys, name)) {
                             g_bytes_unref(name);
                             valid = false;
                         } else
@@ -234,6 +253,8 @@ mcp_json_value(struct mcp_json *json, unsigned depth, unsigned *result)
                 return false;
         }
         char           *number = g_strndup((const char *)json->bytes + node->start, json->at - node->start), *end = NULL;
+        if (!number)
+            mcp_json_allocation_failed(json);
         double          value = number ? g_ascii_strtod(number, &end) : INFINITY;
         bool            valid = number && end && !*end && isfinite(value);
         g_free(number);
@@ -247,11 +268,14 @@ static bool
 mcp_json_parse(const unsigned char *bytes, size_t size, struct mcp_json *json)
 {
     memset(json, 0, sizeof(*json));
+    json->allocation_failure = &json->allocation_failed;
     if (!size || size > MCP_PROTOCOL_BODY_CAP || !g_utf8_validate((const char *)bytes, (gssize) size, NULL))
         return false;
     json->bytes = bytes;
     json->size = size;
     json->nodes = calloc(MCP_MAX_NODES, sizeof(*json->nodes));
+    if (!json->nodes)
+        mcp_json_allocation_failed(json);
     unsigned        root;
     bool            valid = json->nodes && mcp_json_value(json, 0, &root);
     mcp_json_space(json);
@@ -270,6 +294,8 @@ mcp_json_text(const struct mcp_json *json, unsigned index, const char *expected)
     struct mcp_json copy = *json;
     copy.at = json->nodes[index].start;
     GString        *decoded = g_string_new(NULL);
+    if (!decoded)
+        mcp_json_allocation_failed(json);
     bool            valid = decoded && mcp_json_string(&copy, decoded) && decoded->len == strlen(expected) && !memcmp(decoded->str, expected, decoded->len);
     if (decoded)
         g_string_free(decoded, TRUE);
@@ -314,11 +340,15 @@ mcp_json_id(const struct mcp_json *json, unsigned index, unsigned char **output,
         struct mcp_json copy = *json;
         copy.at = node->start;
         GString        *decoded = g_string_new(NULL);
+        if (!decoded)
+            mcp_json_allocation_failed(json);
         bool            valid = decoded && mcp_json_string(&copy, decoded);
         if (valid) {
             *size = decoded->len + 1;
             *output = malloc(*size);
             valid = *output != NULL;
+            if (!valid)
+                mcp_json_allocation_failed(json);
             if (valid) {
                 (*output)[0] = 's';
                 memcpy(*output + 1, decoded->str, decoded->len);
@@ -331,6 +361,8 @@ mcp_json_id(const struct mcp_json *json, unsigned index, unsigned char **output,
     if (node->type != '#')
         return false;
     char           *number = g_strndup((const char *)json->bytes + node->start, node->end - node->start), *end = NULL;
+    if (!number)
+        mcp_json_allocation_failed(json);
     double          value = number ? g_ascii_strtod(number, &end) : INFINITY;
     bool            valid = number && end && !*end && isfinite(value) && fabs(value) <= 9007199254740991.0 && trunc(value) == value;
     if (valid) {
@@ -339,6 +371,8 @@ mcp_json_id(const struct mcp_json *json, unsigned index, unsigned char **output,
         *size = (size_t) count;
         *output = malloc(*size);
         valid = count > 0 && *output;
+        if (!*output)
+            mcp_json_allocation_failed(json);
         if (valid)
             memcpy(*output, encoded, *size);
     }

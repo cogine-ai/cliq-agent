@@ -114,13 +114,15 @@ export const beginMcpStatusProbe = stateOperation('RECOVERY_REQUIRED', async (dr
     previousWaitingSubjectRef: run.waitingOnRef!, probeKind, probeOrdinal: ordinal, probeNonceDigest, brokerDispatchId,
     supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch };
   const launch = await publishMcpStdioLaunch(reads, { purpose: { kind: 'recovery', owner: processOwner,
-    requestRef: request.requestArtifact.ref, requestDigest: request.request.requestDigest, targetRef: request.targetArtifact.ref, targetDigest: request.target.targetDigest },
+    requestRef: request.requestArtifact.ref, requestDigest: request.request.requestDigest, targetRef: request.targetArtifact.ref,
+    targetDigest: request.target.targetDigest, adapter: source.manifest },
     bundle: runtime, controller: input.controller, cgroupParent, lock: owner.filesystem, executable: source.executable, nonce, createdAt: at, resources });
   // This private friend rejects structural native objects before observing
   // their token and verifies the complete fixed purpose3 recipe itself.
   const recipeBytes = readInstalledMcpStdioRecipeData(input.native), recipe = decodeMcpStdioRecipeData(recipeBytes);
   assertMcpStdioRecipeData(recipe, { purpose: 'recovery', transport: source.transport, serverByteCount: launch.serverEntry.byteCount, resources,
-    effectServerToolName: source.original.execution.serverToolName, statusOperationName: source.template.statusOperationName, arguments: source.argumentsValue });
+    adapterExecutableDigest: source.manifest.executableDigest, effectServerToolName: source.original.execution.serverToolName,
+    statusOperationName: source.template.statusOperationName, arguments: source.argumentsValue });
   const recipeArtifact = await artifacts.publishBytes(recipeBytes, 'application/octet-stream', 'cliq-mcp-stdio-native-recipe-bytes-v1');
   const core = { schemaVersion: 1 as const, format: 'cliq-mcp-status-probe-preparation-v1' as const, runId: run.id, principalId: source.original.principalId,
     previousWaitingSubjectRef: run.waitingOnRef!, reconciliationSubjectDigest: canonicalSha256(source.subject), probeKind, probeOrdinal: ordinal,

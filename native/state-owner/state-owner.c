@@ -86,8 +86,10 @@ typedef struct {
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int process_observation_retirement_error;
     int publication_retirement_error;
-    /* A migration credential friend retains this exact original lock. The
-     * account EX gate alone never grants authority over an arbitrary root. */
+    /* Physical Owner borrower count, retaining its original field/layout.
+     * Migration friends separately prove their actual global EX gate; local
+     * input friends borrow only this Owner and gain no EX/credential rights.
+     * Neither this count nor the account gate alone selects another Root. */
     napi_env owner_env;
     pid_t owner_pid;
     uid_t owner_uid;
@@ -139,6 +141,8 @@ static napi_value create_run_mcp_stdio_input(napi_env env,napi_callback_info inf
 static napi_value open_retained_run_mcp_stdio_input(napi_env env,napi_callback_info info);
 static napi_value create_admin_mcp_stdio_input(napi_env env,napi_callback_info info);
 static napi_value open_retained_admin_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value create_local_inference_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_local_inference_input(napi_env env,napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
@@ -256,7 +260,7 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
     if (lock->migration_retirement_error) {
-        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "migration credential binding is uncertain; StateOwner remains held"); return NULL;
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "StateOwner resource binding is uncertain; StateOwner remains held"); return NULL;
     }
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     if (lock->generation_retirement_error) {
@@ -281,7 +285,7 @@ static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
     if (lock->migration_bindings || lock->migration_retirement_error) {
-        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "migration credential bindings remain; StateOwner stays held"); return NULL;
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "StateOwner resource bindings remain; StateOwner stays held"); return NULL;
     }
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     if (close_lock_run_mcp_stdio_inputs(lock)) { napi_throw_error(env,"ERR_CLIQ_RESOURCE_RETIREMENT","Run MCP stdio resources did not retire; StateOwner remains held"); return NULL; }
@@ -392,6 +396,8 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"createRunMcpStdioInput", NULL, create_run_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
         {"openRetainedRunMcpStdioInput", NULL, open_retained_run_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
         {"createRecoveryMcpStdioInput", NULL, create_recovery_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"createLocalInferenceInput", NULL, create_local_inference_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedLocalInferenceInput", NULL, open_retained_local_inference_input, NULL, NULL, NULL, napi_default, NULL},
         {"openRetainedRecoveryMcpStdioInput", NULL, open_retained_recovery_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
         {"createAdminMcpStdioInput", NULL, create_admin_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
         {"openRetainedAdminMcpStdioInput", NULL, open_retained_admin_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
@@ -648,12 +654,15 @@ static int observe_process(pid_t pid, char token[128]) {
 #include "admin-mcp-input.c"
 #include "run-mcp-stdio-input.c"
 #include "recovery-mcp-stdio-input.c"
+#include "local-inference-input.c"
 #include "mcp-stdio-lifecycle-data.c"
 #include "mcp-admin-original-retirement-data.c"
 #include "publication.c"
 #include "publication-git-index.c"
 #include "kernel-global-gate.c"
 #include "credential-authority.c"
+#include "model-archive-current-check.h"
+#include "kernel-archive-runtime-witness.h"
 #include "migration-candidate-borrow.h"
 #include "migration-fs.c"
 #include "migration-entry.c"
@@ -744,6 +753,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
         {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
         {"acquireLocalModelStore", NULL, acquire_local_model_store, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectExistingLocalModelStore", NULL, inspect_existing_local_model_store, NULL, NULL, NULL, napi_default, NULL},
         {"deriveLocalModelStoreGate", NULL, derive_local_model_store_gate, NULL, NULL, NULL, napi_default, NULL},
         {"inspectKernelGlobalGate", NULL, inspect_kernel_global_gate, NULL, NULL, NULL, napi_default, NULL},
         {"acquireKernelGlobalShared", NULL, acquire_kernel_global_shared, NULL, NULL, NULL, napi_default, NULL},
@@ -755,6 +765,7 @@ static napi_value initialize(napi_env env, napi_value exports) {
         {"bindMigrationCredentialGate", NULL, bind_migration_credential_gate, NULL, NULL, NULL, napi_default, NULL},
         {"acquireMigrationFilesystem", NULL, acquire_migration_filesystem, NULL, NULL, NULL, napi_default, NULL},
         {"openCurrentMigrationInspector", NULL, open_current_migration_inspector, NULL, NULL, NULL, napi_default, NULL},
+        {"createCurrentRollbackPublisher", NULL, create_current_rollback_publisher, NULL, NULL, NULL, napi_default, NULL},
         {"openPreparedImportCandidate", NULL, open_prepared_import_candidate, NULL, NULL, NULL, napi_default, NULL},
         {"createKernelArchive", NULL, create_kernel_archive, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},

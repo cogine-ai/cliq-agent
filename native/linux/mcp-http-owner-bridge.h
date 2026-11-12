@@ -10,7 +10,7 @@
 #define CLIQ_MCP_OWNER_ABI 1u
 #define CLIQ_MCP_ID_BYTES 257u
 #if defined(NAPI_VERSION)
-static const napi_type_tag CLIQ_MCP_ADMIN_PEER_TAG = { UINT64_C(0xc869f775b3fe4db8), UINT64_C(0xb30a9c41f01952bc) };
+static const napi_type_tag CLIQ_MCP_ADMIN_PEER_TAG = {UINT64_C(0x4f4fa0bdd4b866f2), UINT64_C(0x41cda0115136ee6b)};
 #endif
 struct cliq_mcp_admin_binding {
     char operation[CLIQ_MCP_ID_BYTES], principal[CLIQ_MCP_ID_BYTES], method[32], dispatch[CLIQ_MCP_ID_BYTES], supervisor[CLIQ_MCP_ID_BYTES];

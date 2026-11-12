@@ -214,6 +214,12 @@ static inline bool cliq_mcp_stdio_input_header(const unsigned char *bytes, size_
     unsigned char digest[32]; cliq_mcp_admin_hash(h, offsetof(struct cliq_mcp_stdio_run_birth, digest), digest);
     return !memcmp(digest, h->digest, 32);
 }
+static inline bool cliq_mcp_stdio_recovery_program_matches(const struct cliq_worker_packet *packet,
+    const struct cliq_mcp_stdio_recovery_identity *identity) {
+    return packet->stdio_purpose == CLIQ_MCP_STDIO_RECOVERY &&
+        !strcmp(packet->stdio_server_digest, identity->adapterExecutableDigest) &&
+        strcmp(packet->stdio_init_digest, identity->adapterExecutableDigest);
+}
 static inline const unsigned char *cliq_mcp_stdio_header_digest(const struct cliq_mcp_stdio_history *h) {
     return h->purpose == CLIQ_MCP_STDIO_ADMIN ? h->header.admin.digest : h->purpose == CLIQ_MCP_STDIO_RECOVERY ? h->header.recovery.digest : h->header.run.digest;
 }
@@ -256,7 +262,8 @@ static inline bool cliq_mcp_stdio_history_bytes(const unsigned char *bytes, size
             frame.packet.stdio_call_deadline_ms != history->header.run.identity.call_deadline_ms)) return false;
         if (history->purpose == CLIQ_MCP_STDIO_RECOVERY &&
             (frame.packet.stdio_launch_deadline_ms != history->header.recovery.identity.probeDeadlineAtMs ||
-             frame.packet.stdio_call_deadline_ms != history->header.recovery.identity.probeDeadlineAtMs)) return false;
+             frame.packet.stdio_call_deadline_ms != history->header.recovery.identity.probeDeadlineAtMs ||
+             !cliq_mcp_stdio_recovery_program_matches(&frame.packet, &history->header.recovery.identity))) return false;
         if (i && (!cliq_mcp_stdio_packet_same(&history->first.packet, &frame.packet) || frame.controller_pid != history->first.controller_pid ||
             strcmp(frame.controller_start_token, history->first.controller_start_token) || strcmp(frame.controller_leaf_name, history->first.controller_leaf_name) ||
             memcmp(&frame.controller_root, &history->first.controller_root, sizeof(frame.controller_root)) ||

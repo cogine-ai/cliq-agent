@@ -22,7 +22,7 @@ function publisher(artifacts: ArtifactCatalog, signal: AbortSignal, four = false
   const source = readFileSync(new URL('./reducers/admission.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('admission.ts', source, ts.ScriptTarget.Latest, true);
   const admission = parsed.statements.find((node): node is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(node) && node.name?.text === 'admitRunInternal');
+    ts.isFunctionDeclaration(node) && node.name?.text === 'admitRunInternal' && node.body !== undefined);
   assert(admission?.body);
   const publications: ts.VariableDeclaration[] = [], raw: ts.CallExpression[] = [];
   const visit = (node: ts.Node) => {

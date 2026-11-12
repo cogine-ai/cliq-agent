@@ -35,7 +35,7 @@ import { PROVIDER_JOURNEY_FILES, runInstalledProviderJourney, runInstalledDailyP
   type InstalledProviderJourneyContext } from './installed-provider-journey.js';
 import { InstalledDailyCommandError, runInstalledDailyCommand } from './installed-daily-command.js';
 import { installedServiceProfiles } from '../../../src/state/installed-services.js';
-import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
+import { decodeInstalledInstallerDiagnostics, encodeInstalledInstallerDiagnostic, type InstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentialSecretScanFailureDiagnostic,
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
@@ -51,7 +51,8 @@ import { createInstalledMcpModelResponder } from './installed-mcp-model.js';
 import { runInstalledMcpCases, INSTALLED_MCP_PROFILE, type InstalledMcpContext } from './installed-mcp-journey.js';
 import { runInstalledMcpStdioCases, INSTALLED_MCP_STDIO_PROFILE } from './installed-mcp-stdio-journey.js';
 import { createInstalledMcpStdioModelResponder, INSTALLED_MCP_STDIO_MODEL_POSTS } from './installed-mcp-stdio-model.js';
-import { runInstalledMcpRecoveryCases, INSTALLED_MCP_RECOVERY_PROFILE } from './installed-mcp-recovery-journey.js';
+import { runInstalledMcpRecoveryCases, INSTALLED_MCP_RECOVERY_PROFILE, INSTALLED_MCP_STATUS_USER_REPLAY_PROFILE } from './installed-mcp-recovery-journey.js';
+import { prepareInstalledMcpRecoveryBirthObserver, type InstalledMcpRecoveryBirthSelector } from './installed-mcp-recovery-birth.js';
 import { createInstalledMcpRecoveryModelResponder, INSTALLED_MCP_RECOVERY_MODEL_POSTS } from './installed-mcp-recovery-model.js';
 import { createInstalledMcpRetryHttpHandler, MCP_RETRY_HTTP_PATH } from './installed-mcp-retry-http.js';
 import { INSTALLED_MCP_CASES, type InstalledMcpCase } from './installed-mcp-responder.js';
@@ -205,12 +206,14 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery' | 'mcp-status-user-replay',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
-  assert(journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' || journeyKind === 'provider-daily' || journeyKind === 'permission' || journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery');
-  const mcpJourney = journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery';
+  const mcpStatusUserReplay = journeyKind === 'mcp-status-user-replay', mcpRecoveryJourney = journeyKind === 'mcp-recovery' || mcpStatusUserReplay;
+  const mcpJourney = journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || mcpRecoveryJourney;
+  assert(mcpJourney || journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' ||
+    journeyKind === 'provider-daily' || journeyKind === 'permission');
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
   if (mcpJourney) assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
@@ -270,9 +273,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'mcp-recovery') {
     delete report.ordinaryGitFixtureProfile;
     Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_RECOVERY_PROFILE,
-      scope: 'actual signed Linux original full-charge UNKNOWN, independently signed immutable no-op target status, unavailable original payload, truthful model continuation, private edit, required Node verification, exact result review/apply, natural-EOF stdio retry launch-cap2 terminal closure, public HTTPS UNKNOWN/UNKNOWN/known three-attempt retry with one original key/deadline and later true claimed result, and owning active status cancel-and-join under original Stop2 with preserved nonce/count/deadline/backoff through reconnect/restart; not prior no-op effect execution, arbitrary status failure/unresolved, old-nonce successor cleanup, exhausted-state user replay, precise crash cuts, typed retention or complete I1-I4',
+      scope: 'Actual signed Linux full-charge UNKNOWN and independent immutable-target status, unavailable original payload, truthful model continuation, private edit, Node verification and exact review/apply. Covers natural-EOF stdio retry at launch capacity two, real HTTPS UNKNOWN/UNKNOWN/known with one original key and deadline, schema-valid nonmatching status, a signed failed effect caused by an immutable missing prerequisite, owning active status Stop2, bounded malformed status disposal, and strict successor cleanup of that original refused nonce. Prior effect execution, other crash cuts, exhausted user replay, typed retention and complete I1-I4 have separate qualification.',
       originalEffectExecutionQualified: false, originalEffectPayloadRecovered: false, reconcileAdapterQualified: false,
       statusOldNonceSuccessorCleanupQualified: false, typedRetentionQualified: false });
+  }
+  if (mcpStatusUserReplay) {
+    delete report.ordinaryGitFixtureProfile;
+    Object.assign(report, { mcpFixtureProfile: INSTALLED_MCP_STATUS_USER_REPLAY_PROFILE,
+      scope: 'Actual signed Linux status with eight real automatic unresolved outcomes, all original backoffs, one exhausted user probe and exact authenticated replay after reconnect and restart. Effect Journal and original full charge remain unchanged.',
+      actualProviderQualified: false });
   }
   if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
   if (journeyKind === 'delivery') Object.assign(report, {
@@ -335,14 +344,40 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     assert.equal(result.error, undefined, 'actual fixture command must join'); assert.equal(result.signal, null);
     return { status: result.status, stdout: result.stdout.toString('utf8'), stderr: result.stderr.toString('utf8') };
   };
+  const responseValue = (stdout: string, field: string) => {
+    const value = parseJsonStrict(stdout.trim()) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(value).sort(), ['schemaVersion', field].sort()); assert.equal(value.schemaVersion, 1);
+    assert.equal(stdout, canonicalJsonBytes(value).toString('utf8') + '\n'); return value[field];
+  };
   const success = (result: ReturnType<typeof command>, field: string) => {
     assert.equal(result.status, 0, 'same-user installed command refused');
-    const value = parseJsonStrict(result.stdout.trim()) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(value).sort(), ['schemaVersion', field].sort()); assert.equal(value.schemaVersion, 1);
-    assert.equal(result.stdout, canonicalJsonBytes(value).toString('utf8') + '\n'); return value[field];
+    return responseValue(result.stdout, field);
   };
-  const credential = (metadata: Record<string, unknown>, input?: Buffer) => command(path.join(recipe.stateRoot, 'runtime/bootstrap'),
-    ['--bootstrap-credential', canonicalJsonBytes(metadata).toString('base64url')], input, 60000);
+  const delayedBootstrap = options.publicationRetirementDiagnostics === true;
+  const joinedFixtureCommand = async (args: readonly string[], deadlineMs: 60_000 | 90_000 | 180_000, options: {
+    input?: Buffer; installerDiagnostics?: (rows: readonly InstalledInstallerDiagnostic[]) => void;
+  } = {}) => {
+    const fixtureScope = delayedBootstrap && deadlineMs === 180_000 ? 'installed_delayed_bootstrap' as const : undefined;
+    try {
+      return await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
+        args: [...prefix, ...args], env: environment, cwd: ledger.home, deadlineMs, scanner, fixtureScope, ...options });
+    } catch (error) {
+      if (error instanceof InstalledDailyCommandError) {
+        const { reason, elapsedMs, code, signal } = error.diagnostic;
+        const errorKind = reason === 'deadline' ? 'timeout' : reason === 'spawn' ? 'spawn' : signal ? 'signal' : undefined;
+        if (errorKind) report.commandJoinFailure ??= { diagnosticOnly: true, errorKind, originalDeadlineMs: deadlineMs,
+          elapsedMs, exitCode: code, signal: signal === null || signal === 'SIGTERM' || signal === 'SIGKILL' ? signal : 'other' };
+      }
+      throw error;
+    }
+  };
+  const registerEndpoint = async (input: Buffer) => {
+    const result = await joinedFixtureCommand([path.join(recipe.stateRoot, 'runtime/bootstrap'), '--bootstrap-endpoint'],
+      delayedBootstrap ? 180_000 : 90_000, { input });
+    try {
+      assert.equal(decodeEndpointAuthorityOperation(responseValue(result.stdout.toString('utf8'), 'operation')).disposition, 'registered');
+    } finally { result.stdout.fill(0); result.stderr.fill(0); }
+  };
   const dailyAlias = options.provider ? 'deepseek' : 'owned-daily';
   const dailyCommand = async (argv: readonly string[], timeout = 30_000, input?: Buffer) => {
     assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout) && ['setup', 'models', 'run', 'result', 'apply'].includes(argv[0]!));
@@ -704,7 +739,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     server = createServer({ key, cert, minVersion: 'TLSv1.3', maxVersion: 'TLSv1.3', maxHeaderSize: 65536 }, async (incoming, outgoing) => {
       try {
         if (journeyKind === 'mcp' && await mcpHandler.handle(incoming, outgoing)) return;
-        if (journeyKind === 'mcp-recovery' && await mcpRecoveryHttpResponder.handle(incoming, outgoing)) return;
+        if (mcpRecoveryJourney && await mcpRecoveryHttpResponder.handle(incoming, outgoing)) return;
         assert.equal(incoming.method, 'POST'); assert.equal(incoming.url, '/v1/chat/completions');
         assert.equal(incoming.headers.authorization, 'Bearer ' + secret.toString('utf8'));
         assert.equal(incoming.headers['content-type'], 'application/json');
@@ -735,7 +770,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           report.transport = { postCount, acceptedTcp, acceptedTls, tls13: true, exactCredentialMatched: true }; return;
         }
         if (mcpJourney) {
-          const payload = (journeyKind === 'mcp-recovery' ? mcpRecoveryModelResponder : journeyKind === 'mcp-stdio' ? mcpStdioModelResponder : mcpModelResponder).respond(body);
+          const payload = (mcpRecoveryJourney ? mcpRecoveryModelResponder : journeyKind === 'mcp-stdio' ? mcpStdioModelResponder : mcpModelResponder).respond(body);
           assert(payload, 'the MCP model endpoint accepts only its fixed owned objectives');
           postCount++; const response = Buffer.from(JSON.stringify(payload)); scanBytes(response);
           outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' });
@@ -874,7 +909,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       tls: { serverNameAscii: 'installed-verifier-fixture.invalid', caPem: cert, spkiSha256Pins: [pin] },
       claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
       requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      validFrom: new Date(Date.now() - 60000).toISOString(), validThrough: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() };
+      validFrom: new Date(Date.now() - 60000).toISOString(),
+      validThrough: new Date(Date.now() + (mcpStatusUserReplay ? 3 : 2) * 60 * 60 * 1000).toISOString() };
     }
     const buildOptions = { guestToolchain: 'node-test-v1' as const, publicationRetirementDiagnostics: options.publicationRetirementDiagnostics,
       serverAuthenticationDiagnostics: options.publicationRetirementDiagnostics,
@@ -882,9 +918,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       resourceDiagnostics: true as const,
       ...(dailyJourney ? { headlessSchemaVersion: 3 as const } : {}),
       ...(journeyKind === 'verifier' ? { bundledSkills: installedBundledSkill() } : {}),
-      ...(journeyKind === 'mcp' || journeyKind === 'mcp-recovery' ? { mcpHttp: true as const } : {}),
-      ...(journeyKind === 'mcp-stdio' || journeyKind === 'mcp-recovery' ? { mcpStdio: true as const } : {}),
-      ...(journeyKind === 'mcp-recovery' ? { mcpRecovery: true as const } : {}),
+      ...(journeyKind === 'mcp' || mcpRecoveryJourney ? { mcpHttp: true as const } : {}),
+      ...(journeyKind === 'mcp-stdio' || mcpRecoveryJourney ? { mcpStdio: true as const } : {}),
+      ...(mcpRecoveryJourney ? { mcpRecovery: true as const } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
       ...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {}) };
     const signed = options.provider
@@ -899,12 +935,43 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     await writeFile(recipe.installerEntry, installer.outputFiles![0]!.contents, { flag: 'wx', mode: 0o444 });
     await writeFile(installedClientDriver, await buildInstalledClientDriver(installedClientDriver), { flag: 'wx', mode: 0o444 });
     await writeFile(recipe.releaseKeysFile, canonicalJsonBytes(signed.releaseKeys), { flag: 'wx', mode: 0o444 });
+    let mcpBirthDecoder: { image: string; digest: string; byteCount: number } | undefined;
+    if (mcpRecoveryJourney && !mcpStatusUserReplay) {
+      const entry = signed.bundle.entries.find(entry => entry.entryId === 'state_owner_native');
+      const original = signed.contents.find(entry => entry.entryId === 'state_owner_native');
+      assert(entry?.executable && entry.role === 'platform_helper' && original && original.relativePath === entry.relativePath);
+      assert.equal(original.bytes.length, entry.byteCount); assert.equal(sha256Bytes(original.bytes), entry.digest);
+      // Only this root-owned copy is executable in the outer observer. The
+      // ordinary installer still receives the original transferred package.
+      const image = path.join(recipe.buildFixture, 'mcp-recovery-birth-decoder.node');
+      await writeFile(image, original.bytes, { flag: 'wx', mode: 0o500 });
+      mcpBirthDecoder = { image, digest: entry.digest, byteCount: entry.byteCount };
+    }
     await transferPackage(recipe.packageRoot, ledger.uid, ledger.gid);
     const cliqHome = path.join(ledger.home, '.cliq'); await mkdir(cliqHome, { mode: 0o700 }); await chown(cliqHome, ledger.uid, ledger.gid);
-    const installation = dailyJourney ? undefined : command(process.execPath, [recipe.installerEntry, recipe.packageRoot, recipe.stateRoot, recipe.releaseKeysFile]);
-    if (dailyJourney) await dailyCommand(['setup']);
-    else assert.equal(installation!.status, 0);
-    const bundleDigest = dailyJourney ? canonicalSha256(signed.bundle) : (parseJsonStrict(installation!.stdout.trim()) as { bundleDigest: string }).bundleDigest;
+    let bundleDigest: string;
+    if (dailyJourney) {
+      // The normal daily fixture's cold-install budget is separate from product deadlines.
+      await dailyCommand(['setup'], 60_000);
+      bundleDigest = canonicalSha256(signed.bundle);
+    } else {
+      const installerArgs = [recipe.installerEntry, recipe.packageRoot, recipe.stateRoot, recipe.releaseKeysFile];
+      let stdout: string;
+      if (options.publicationRetirementDiagnostics) {
+        // Only the fixed delayed-volume campaigns need a larger fixture window.
+        const installation = await joinedFixtureCommand([process.execPath, ...installerArgs], 90_000, {
+          installerDiagnostics: rows => {
+            for (const row of rows) console.log(encodeInstalledInstallerDiagnostic(row));
+          }
+        });
+        try { stdout = installation.stdout.toString('utf8'); }
+        finally { installation.stdout.fill(0); installation.stderr.fill(0); }
+      } else {
+        const installation = command(process.execPath, installerArgs);
+        assert.equal(installation.status, 0); stdout = installation.stdout;
+      }
+      bundleDigest = (parseJsonStrict(stdout.trim()) as { bundleDigest: string }).bundleDigest;
+    }
     assert.equal(bundleDigest, canonicalSha256(signed.bundle));
     assert.equal(signed.bundle.schemaVersion, 2); assert.equal(signed.bundle.installedLayout, 'single_cas_streams_v1');
     const imageRef = signed.guestToolchain.manifest.guestImageRef;
@@ -953,11 +1020,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const daemonImage = await stat('/proc/' + daemonPid + '/exe', { bigint: true }), namedDaemon = await lstat('/usr/bin/gnome-keyring-daemon', { bigint: true });
     for (const field of imageFields) assert.equal(daemonImage[field], namedDaemon[field]);
     if (!dailyJourney) {
-    const setup = credential({ schemaVersion: 1, kind: 'install_services' }); assert.equal(setup.status, 0);
-    const installed = parseJsonStrict(setup.stdout.trim()) as { schemaVersion: 1; supervisorUnit: string; keeperUnit: string };
-    assert.deepEqual(Object.keys(installed).sort(), ['schemaVersion', 'supervisorUnit', 'keeperUnit'].sort()); assert.equal(installed.schemaVersion, 1);
-    for (const unit of [installed.supervisorUnit, installed.keeperUnit]) assert.match(unit, /^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,240}\.service$/u);
-    services = installed;
+      const setup = await joinedFixtureCommand([path.join(recipe.stateRoot, 'runtime/bootstrap'), '--bootstrap-credential',
+        canonicalJsonBytes({ schemaVersion: 1, kind: 'install_services' }).toString('base64url')], delayedBootstrap ? 180_000 : 60_000);
+      try {
+        const installed = parseJsonStrict(setup.stdout.toString('utf8').trim()) as { schemaVersion: 1; supervisorUnit: string; keeperUnit: string };
+        assert.deepEqual(Object.keys(installed).sort(), ['schemaVersion', 'supervisorUnit', 'keeperUnit'].sort()); assert.equal(installed.schemaVersion, 1);
+        for (const unit of [installed.supervisorUnit, installed.keeperUnit]) assert.match(unit, /^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,240}\.service$/u);
+        services = installed;
+      } finally { setup.stdout.fill(0); setup.stderr.fill(0); }
     }
     const root = await lstat(recipe.stateRoot, { bigint: true });
     const rootDigest = canonicalSha256({ schemaVersion: 1, format: 'cliq-state-root-identity-v1', platform: 'linux',
@@ -976,9 +1046,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const registerCore = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration,
       expectedRegistrationArtifactRef: canonicalSha256(registration), commandDigest: '' };
     if (!dailyJourney) {
-    const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
-      schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...registerCore, commandDigest: digestOmitting(registerCore, 'commandDigest') } }));
-    assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+      await registerEndpoint(canonicalJsonBytes({
+        schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...registerCore, commandDigest: digestOmitting(registerCore, 'commandDigest') } }));
     }
     const registryEndpointId = 'installed-public-dependency-registry';
     if (registryOrigin) {
@@ -1010,7 +1079,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
       mcpEndpointIds.set(kind, endpointRegistrationId);
     }
-    if (journeyKind === 'mcp-recovery') {
+    if (mcpRecoveryJourney) {
       const target = { ...registration.target, basePath: MCP_RETRY_HTTP_PATH };
       const endpoint: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
         endpointRegistrationId: mcpRecoveryHttpEndpointId, registrationKind: 'user', ownerPrincipalId: principal, purposes: ['mcp_streamable_http'], target,
@@ -1019,9 +1088,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       endpoint.registrationDigest = digestOmitting(endpoint, 'registrationDigest');
       const core = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration: endpoint,
         expectedRegistrationArtifactRef: canonicalSha256(endpoint), commandDigest: '' };
-      const committed = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
+      await registerEndpoint(canonicalJsonBytes({
         schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
-      assert.equal(decodeEndpointAuthorityOperation(success(committed, 'operation')).disposition, 'registered');
     }
     const enrollment = { schemaVersion: 1, kind: 'enroll', requestId: nextId(), credentialGrantId: credentialId,
       purpose: 'model_endpoint', endpointRegistrationId: registration.endpointRegistrationId,
@@ -1056,12 +1124,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     else {
     let enrollmentResult: Awaited<ReturnType<typeof runOwnedEnrollDiagnostic>>;
     const enrollmentStarted = performance.now();
+    const enrollmentDeadline = delayedBootstrap ? 180_000 : 60_000;
     try {
       enrollmentResult = await runOwnedEnrollDiagnostic({ command: { executable: '/usr/sbin/runuser',
         args: [...prefix, path.join(recipe.stateRoot, 'runtime/bootstrap'), '--bootstrap-credential', canonicalJsonBytes(enrollment).toString('base64url')],
         env: environment, cwd: ledger.home }, input: secret, uid: ledger.uid,
         bootstrapImage: path.join(recipe.stateRoot, 'runtime/bootstrap'),
-        installedImage: path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), originalDeadlineMs: 60000,
+        installedImage: path.join(recipe.stateRoot, 'runtime/bundles', bundleDigest, 'supervisor'), originalDeadlineMs: enrollmentDeadline,
+        ...(delayedBootstrap ? { fixtureScope: 'delayed_delivery' as const } : {}),
         scanner, diagnostic: enrollDiagnostic, observeOwner: () => {
           try {
             const owners = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
@@ -1073,7 +1143,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             return { kind: value?.code === 'ERR_SQLITE_ERROR' && typeof value.errcode === 'number' && (value.errcode & 255) === 5 ? 'busy' : 'unavailable' };
           }
         } });
-      const enrollmentFailure = fixtureCommandJoinDiagnostic(enrollmentResult, 60000, enrollmentStarted);
+      const enrollmentFailure = fixtureCommandJoinDiagnostic(enrollmentResult, enrollmentDeadline, enrollmentStarted);
       if (enrollmentFailure) report.commandJoinFailure ??= enrollmentFailure;
     } finally {
       if (enrollDiagnostic.processAndPipesJoined && enrollDiagnostic.authJoined) report.enrollUnitStates.afterJoin = summarizeUnits();
@@ -1256,15 +1326,77 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
           assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
         } };
-      report.mcp = journeyKind === 'mcp-recovery'
+      const crashAfterRefusedStatus = async (probe: InstalledMcpRecoveryBirthSelector) => {
+        assert(services && client && inspectionClient);
+        const unit = services.supervisorUnit, prior = show(unit), pid = Number(prior.MainPID);
+        const start = probe.originalSupervisor.processStartToken.slice('linux-proc-start-ticks:'.length);
+        assert.match(probe.originalSupervisor.processStartToken, /^linux-proc-start-ticks:[1-9][0-9]*$/u);
+        assert.equal(pid, probe.originalSupervisor.pid);
+        const deadline = Date.parse(probe.probeDeadlineAt), observedBy = Math.min(Date.now() + 10_000, deadline);
+        const history = (await waitForInstalledOwnerHistory(recipe.stateRoot, observedBy)).owners, originalOwner = history.at(-1);
+        assert(originalOwner?.state === 'active');
+        assert.equal(originalOwner.ownerEpoch, probe.originalStateOwnerEpoch);
+        assert.equal(originalOwner.supervisorInstanceId, probe.originalSupervisorInstanceId);
+        const supervisorEntry = signed.bundle.entries.find(entry => entry.role === 'supervisor');
+        assert(supervisorEntry?.executable && mcpBirthDecoder);
+        const original = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid, pid, selectedImage: installedImage,
+          imageDigest: supervisorEntry.digest }, originalOwner, {});
+        assert.equal(original.processStartToken, probe.originalSupervisor.processStartToken);
+        const observeBirth = await prepareInstalledMcpRecoveryBirthObserver({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+          decoderImage: mcpBirthDecoder.image, decoderDigest: mcpBirthDecoder.digest, decoderBytes: mcpBirthDecoder.byteCount });
+        let proof: Awaited<ReturnType<typeof observeBirth>>;
+        for (;;) {
+          assert(Date.now() < observedBy, 'the exact original refused-output retirement was not observed before its deadline');
+          const checked = await observeBirth(probe);
+          if (checked) {
+            const controller = checked.lifecycle.controller, token = controller.processStartToken.slice('linux-proc-start-ticks:'.length);
+            assert.match(controller.processStartToken, /^linux-proc-start-ticks:[1-9][0-9]*$/u);
+            try { if (await processStart(controller.pid) !== token) { proof = checked; break; } }
+            catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; proof = checked; break; }
+          }
+          await delay(20);
+        }
+        assert(proof);
+        const socket = await lstat(path.join(recipe.stateRoot, 'runtime/control-v1.sock'), { bigint: true });
+        assert(socket.isSocket() && socket.uid === BigInt(ledger.uid));
+        await client.close(); client = undefined; await inspectionClient.close(); inspectionClient = undefined;
+        assert.equal(await fixtureProcess(pid, ledger.uid), start);
+        const sameUnit = show(unit); assert.equal(sameUnit.MainPID, prior.MainPID); assert.equal(sameUnit.InvocationID, prior.InvocationID);
+        const killedAt = Date.now();
+        assert(killedAt < deadline, 'the original nonce closed before its intended actual process exit');
+        assert.equal(command('/usr/bin/systemctl', ['--user', 'kill', '--kill-who=main', '--signal=SIGKILL', unit]).status, 0);
+        const by = killedAt + 30_000;
+        let successor: Record<string, string>;
+        for (;;) {
+          successor = show(unit);
+          if (successor.MainPID !== '0' && successor.MainPID !== prior.MainPID && successor.InvocationID !== prior.InvocationID &&
+              successor.ExecMainPID === successor.MainPID && successor.ActiveState === 'active' && successor.SubState === 'running') break;
+          assert(Date.now() < by, 'the original systemd recovery did not start the real successor'); await delay(50);
+        }
+        await absent(pid, start);
+        assert(Date.now() < deadline, 'actual original owner death was not independently observed before the nonce deadline');
+        await selectedSupervisor(unit, successor, installedImage, by, socket);
+        client = await persistentClient(); inspectionClient = await persistentClient();
+        const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by), newOwner = owners.owners.at(-1);
+        assert.equal(owners.owners.length, history.length + 1);
+        assert.equal(owners.owners.at(-2)!.terminalReason, 'superseded_after_owner_death');
+        assert(newOwner?.state === 'active'); assert.equal(newOwner.ownerEpoch, originalOwner.ownerEpoch + 1);
+        assert.equal(newOwner.runtimeBundleRef, bundleDigest);
+        assert.equal(show(services.keeperUnit).MainPID, keeperBefore.MainPID);
+        assert.deepEqual(await readFile(path.join(recipe.stateRoot, 'runtime/keeper.ready')), keeperReady);
+        return { birthDigest: proof.birthDigest, killedAt, originalStateOwnerEpoch: originalOwner.ownerEpoch,
+          successorStateOwnerEpoch: newOwner.ownerEpoch, successorSupervisorInstanceId: newOwner.supervisorInstanceId };
+      };
+      report.mcp = mcpRecoveryJourney
         ? await runInstalledMcpRecoveryCases({ ...mcpContext, runtimeBundleId: bundleDigest, modelResponder: mcpRecoveryModelResponder,
-          httpEndpointRegistrationId: mcpRecoveryHttpEndpointId, httpResponder: mcpRecoveryHttpResponder })
+          httpEndpointRegistrationId: mcpRecoveryHttpEndpointId, httpResponder: mcpRecoveryHttpResponder,
+          userReplayOnly: mcpStatusUserReplay, crashAfterRefusedStatus })
         : journeyKind === 'mcp-stdio'
         ? await runInstalledMcpStdioCases({ ...mcpContext, runtimeBundleId: bundleDigest, modelResponder: mcpStdioModelResponder })
         : await runInstalledMcpCases({ ...mcpContext, endpointIds: mcpEndpointIds, responder: mcpHandler.responder,
           modelResponder: mcpModelResponder, assertEndpointJoined: (kind, deadlineAt) => mcpHandler.waitForCaseJoined(kind, deadlineAt) });
       report.cases = report.mcp.cases;
-      assert.equal(postCount, journeyKind === 'mcp-recovery' ? INSTALLED_MCP_RECOVERY_MODEL_POSTS : journeyKind === 'mcp-stdio' ? INSTALLED_MCP_STDIO_MODEL_POSTS : 11);
+      assert.equal(postCount, mcpStatusUserReplay ? 1 : mcpRecoveryJourney ? INSTALLED_MCP_RECOVERY_MODEL_POSTS : journeyKind === 'mcp-stdio' ? INSTALLED_MCP_STDIO_MODEL_POSTS : 11);
       assert.equal(acceptedTcp, postCount + mcpHandler.posts() + mcpRecoveryHttpResponder.posts());
       assert.equal(acceptedTls, acceptedTcp); mcpHandler.assertJoined(); mcpRecoveryHttpResponder.assertJoined(); assert(!responderFailure);
     } else if (journeyKind === 'permission') {
@@ -2577,13 +2709,17 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
               if (mcpJourney) report.mcpAdminLifecycleDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
                 reason: storeFailureBinding ? 'original_lifetime_missing' : 'preexisting_binding_missing' };
-              if (storeFailureBinding && String(storeFailureBinding.pid) === before[0]!.MainPID &&
-                  storeFailureBinding.invocationId === before[0]!.InvocationID) try {
+              const sameStoppedLifetime = storeFailureBinding !== undefined && String(storeFailureBinding.pid) === before[0]!.MainPID &&
+                storeFailureBinding.invocationId === before[0]!.InvocationID;
+              if (storeFailureBinding && (sameStoppedLifetime || mcpJourney)) try {
                 assertRetained();
                 await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' });
-                report.publicationWorkDiagnostics = { diagnosticOnly: true, profile: 'publication_work_v2', kind: 'unavailable', reason: 'journal_unavailable' };
-                report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
-                report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+                if (sameStoppedLifetime) {
+                  report.publicationWorkDiagnostics = { diagnosticOnly: true, profile: 'publication_work_v2', kind: 'unavailable', reason: 'journal_unavailable' };
+                  report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+                  report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
+                }
+                if (mcpJourney) report.mcpAdminLifecycleDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
                 const until = Date.now(), logBy = until + 5000;
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
@@ -2607,15 +2743,16 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                     { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                   if (lifecycle) report.mcpAdminLifecycleDiagnostics = { diagnosticOnly: true, kind: 'observed',
                     source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
-                    originalInvocationBound: true, originalPidObservedAbsent: true, originalStopSucceeded: !originalStopFailed, ...lifecycle };
+                    originalInvocationBound: true, originalPidObservedAbsent: true,
+                    originalStopSucceeded: sameStoppedLifetime && !originalStopFailed, ...lifecycle };
                 } catch { /* A malformed passive marker cannot discard original stage/Stop observations or imply a join. */ }
-                if (observation) report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'observed',
+                if (sameStoppedLifetime && observation) report.publicationStageDiagnostics = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalPidObservedAbsent: true, phases: observation.phases };
-                if (stopPhase) report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'observed',
+                if (sameStoppedLifetime && stopPhase) report.originalStopPhaseDiagnostic = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalPidObservedAbsent: true, phase: stopPhase.phase };
-                try {
+                if (sameStoppedLifetime) try {
                   const work = readInstalledPublicationWorkJournal(text,
                     { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                   assert(Date.now() < logBy, 'actual publication work journal exceeded five seconds'); assertRetained();
@@ -2628,7 +2765,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   else if (work && publicationDeadlineRunId) report.publicationWorkDiagnostics = { diagnosticOnly: true,
                     profile: 'publication_work_v2', kind: 'unavailable', reason: 'terminal_deadline_run_not_observed' };
                 } catch { /* V2 absence/malformed data cannot discard V1 observations or the original failure. */ }
-                if (originalStopFailed) try {
+                if (sameStoppedLifetime && originalStopFailed) try {
                   // A separate fixed stream preserves the original journal's
                   // entry/byte bounds and its independent valid observations.
                   const remaining = logBy - Date.now(); assert(remaining > 0); assertRetained();

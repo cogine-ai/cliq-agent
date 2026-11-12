@@ -11,6 +11,13 @@ durable execution path is a qualification preview: its model, verification,
 review and Delivery integration is still being completed. It has not replaced
 the default CLI or passed the complete release gate.
 
+The first installed preview targets Linux and one active repository task:
+real-model code changes in a private workspace, required checks and bounded
+repair, result review, and explicit application. Reconnection, cancellation and
+Supervisor restart belong to the same workflow. Complete MCP coverage, managed
+local inference, automatic legacy migration and macOS execution are deferred.
+This scope describes the delivery in progress, not a completed qualification.
+
 ## Install
 
 Requirements: Node.js 22.13 or newer.

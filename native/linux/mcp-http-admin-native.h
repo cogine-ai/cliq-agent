@@ -1,9 +1,9 @@
 #ifndef CLIQ_MCP_HTTP_ADMIN_NATIVE_H
 #define CLIQ_MCP_HTTP_ADMIN_NATIVE_H
 #include "mcp-http-admin-protocol.h"
-static const    napi_type_tag MCP_ADMIN_CLEANUP_TAG = {UINT64_C(0xdc9baed351794135), UINT64_C(0xbc53d9542d980374)};
-static const    napi_type_tag MCP_ADMIN_CLEANUP_OBSERVATION_TAG = {UINT64_C(0xaae5fc94975d4326), UINT64_C(0x8311ae6b64cb5fca)};
-static const    napi_type_tag MCP_ADMIN_JOINED_TAG = {UINT64_C(0x486a01f6bc0a48ae), UINT64_C(0xa3151456604274b1)};
+static const    napi_type_tag MCP_ADMIN_CLEANUP_TAG = {UINT64_C(0xb1ce94ba56dc623f), UINT64_C(0xd559268dd2ab4a2f)};
+static const    napi_type_tag MCP_ADMIN_CLEANUP_OBSERVATION_TAG = {UINT64_C(0xf3ce4f3a1575065b), UINT64_C(0xaaf1098e780bd716)};
+static const    napi_type_tag MCP_ADMIN_JOINED_TAG = {UINT64_C(0x629f1cec934f2d1d), UINT64_C(0xfba90121ee20cff9)};
 struct mcp_admin_native_scope {
     struct cliq_mcp_admin_peer_handle bridge;
     struct controller *controller;

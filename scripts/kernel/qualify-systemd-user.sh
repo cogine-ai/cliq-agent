@@ -21,6 +21,7 @@ probe_volume_mode=loop
 probe_upgrade_source=
 probe_locked_node_archive=
 probe_provider_configuration=
+probe_local_inference_inputs=
 if [[ ${1:-} = --delay-volume ]]; then probe_volume_mode=delay-50ms; shift; fi
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
@@ -40,8 +41,18 @@ case ${1:-} in
   --run-permission-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--permission-campaign; shift ;;
   --run-mcp-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-campaign; shift ;;
   --run-mcp-stdio-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-stdio-campaign; shift ;;
+  --run-migration-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-campaign; shift ;;
+  --run-migration-live-legacy-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-live-legacy-campaign; shift ;;
+  --run-migration-archive-ready-crash-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-archive-ready-crash-campaign; shift ;;
+  --run-migration-restoring-crash-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-restoring-crash-campaign; shift ;;
   --run-mcp-recovery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-recovery-campaign; shift ;;
+  --run-mcp-status-user-replay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-status-user-replay-campaign; shift ;;
   --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
+  --run-local-inference-journey)
+    [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
+      printf 'local inference qualification requires its pinned offline input directory\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--local-inference-campaign; probe_local_inference_inputs=$2; shift 2 ;;
   --run-provider-journey)
     [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
       printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
@@ -75,6 +86,7 @@ if [[ ${1:-} = --locked-node ]]; then
   probe_locked_node_archive=$2; shift 2
 fi
 readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source probe_locked_node_archive probe_provider_configuration
+readonly probe_local_inference_inputs
 # After the optional fixed volume, one campaign and its bounded official npm
 # source, only positional paths are allowed. Reject mixed/duplicate modes
 # before even inspecting host identities.
@@ -95,6 +107,9 @@ done
 [[ "$probe_run_driver_mode" != --provider-daily-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the explicit provider scope requires the original non-delayed volume\n' >&2; exit 2;
 }
+[[ "$probe_run_driver_mode" != --local-inference-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the local inference scope requires the original non-delayed volume\n' >&2; exit 2;
+}
 [[ "$probe_run_driver_mode" != --daily-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the normal daily scope requires the original non-delayed volume\n' >&2; exit 2;
 }
@@ -108,8 +123,9 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
+  printf 'local model option: --run-local-inference-journey PINNED_INPUT_DIRECTORY ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -152,12 +168,17 @@ elif [[ "$probe_run_driver_mode" = --mcp-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-journey.ts"
 elif [[ "$probe_run_driver_mode" = --mcp-stdio-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-stdio-journey.ts"
-elif [[ "$probe_run_driver_mode" = --mcp-recovery-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --migration-campaign || "$probe_run_driver_mode" = --migration-live-legacy-campaign ||
+        "$probe_run_driver_mode" = --migration-archive-ready-crash-campaign || "$probe_run_driver_mode" = --migration-restoring-crash-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-migration-journey.ts"
+elif [[ "$probe_run_driver_mode" = --mcp-recovery-campaign || "$probe_run_driver_mode" = --mcp-status-user-replay-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-recovery-journey.ts"
 elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
 elif [[ "$probe_run_driver_mode" = --daily-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-daily-journey.ts"
+elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-local-inference-journey.ts"
 elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
 else
@@ -797,6 +818,17 @@ readonly probe_dropin="$probe_dropin_directory/50-cliq-probe.conf"
   printf 'UID-specific drop-in directory already exists; refusing to modify it\n' >&2; exit 1;
 }
 
+# The actual same-UID installer and clients execute this exact Node. Refuse
+# a private ancestor or an unexecutable carrier before signing or creating users.
+if [[ "$probe_campaign_kind" != secrets ]] && ! (
+  cd /
+  /usr/bin/timeout --kill-after=1s 5s /usr/bin/setpriv --reuid="$probe_uid" --regid="$probe_gid" --clear-groups -- \
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$probe_node" --version
+) </dev/null >/dev/null 2>&1; then
+  printf 'Node executable is unavailable to the disposable qualification UID\n' >&2
+  exit 2
+fi
+
 # Root-owned write-once ledger/config. It cannot be replaced through the new
 # user's home; cleanup uses its frozen hash and the in-process exact identities.
 "$probe_node" --input-type=module - "$probe_ledger" "$probe_fixture" "$probe_fixture_identity" \
@@ -1049,6 +1081,8 @@ elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # No arbitrary driver, production pause flag or manager-policy override.
   if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
+  elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_local_inference_inputs"
   elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign ]]; then
     # No key in argv/environment/config. The owner sends it only after this
     # original driver's fixed stdin-ready marker; all setup children are done.

@@ -183,9 +183,11 @@ test('an owned responder refusal retains only its original fixed source frames, 
     ['verifier', false, 'installed_verifier_journey_failed'],
     ['delivery', false, 'installed_delivery_journey_failed'],
     ['delivery', true, 'installed_provider_journey_failed'],
-    ['daily', false, 'installed_daily_journey_failed']
+    ['daily', false, 'installed_daily_journey_failed'],
+    ['mcp-recovery', false, 'installed_mcp_journey_failed']
   ]) {
-    const context = { primary, responderErrors: [responder], report: {}, journeyKind, dailyJourney: journeyKind === 'daily', options: { provider }, Error, AggregateError,
+    const context = { primary, responderErrors: [responder], report: {}, journeyKind, dailyJourney: journeyKind === 'daily',
+      mcpJourney: ['mcp', 'mcp-stdio', 'mcp-recovery'].includes(journeyKind), options: { provider }, Error, AggregateError,
       InstalledClientConsumerDeadlineError: class {}, InstalledClientDriverError: class {},
       InstalledVerifierOutcomeError: class {}, InstalledDeliveryOutcomeError: class {} };
     vm.runInNewContext(code, context);

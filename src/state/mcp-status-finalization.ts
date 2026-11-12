@@ -11,7 +11,7 @@ import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } 
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './canonical-time.js';
 import { prepareContinuationCommit } from './continuation-commit.js';
 import { KernelStorageError, stateOperation } from './errors.js';
-import { assertInstalledMcpStdioProbeFence } from './mcp-stdio-native-binding.js';
+import { assertInstalledMcpStdioProbeFence, assertInstalledMcpStdioUnavailableProbeFence } from './mcp-stdio-native-binding.js';
 import { readMcpStatusProbeEvidence } from './mcp-status-history.js';
 import { decodeMcpStatusProbeClosure, decodeMcpStatusProbeWrapper } from './mcp-status-proof.js';
 import { validateMcpInvocationWait } from './mcp-status-state.js';
@@ -43,14 +43,23 @@ export const finalizeMcpStatusProbe = stateOperation('RECOVERY_REQUIRED', async 
   }
   const held = readMcpStatusProbeTask(driver, artifacts, owner, task), original = held.prepared;
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
-  const fence = held.native.acquireProbeFence(original.binding);
+  const acquireFence = () => {
+    if (held.actual.ownerJoined.kind === 'mcp_stdio_recovery_response_unavailable_joined') {
+      if (held.capture) fail('MCP unavailable response cannot supply an authoritative or late result');
+      const fence = held.native.acquireUnavailableProbeFence(original.binding);
+      return { fence, assertFence: () => assertInstalledMcpStdioUnavailableProbeFence(fence, original.binding) };
+    }
+    const fence = held.native.acquireProbeFence(original.binding);
+    return { fence, assertFence: () => assertInstalledMcpStdioProbeFence(fence, original.binding) };
+  };
+  const { fence, assertFence } = acquireFence();
   try {
     // At most one local classification pivot is possible: an observation
     // prepared before the deadline may commit only before that same deadline.
     // If publication crossed it, retain the real result as a late audit and
     // prepare a genuine timeout using a newly sampled actual close time.
     for (let classification = 0; classification < 2; classification++) {
-      reads.assertReadActive(); assertInstalledMcpStdioProbeFence(fence, original.binding);
+      reads.assertReadActive(); assertFence();
       const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, reads, original.run.id);
       const selected = await validateMcpInvocationWait(driver, reads, cut), { run, wait, source } = selected;
       if (run.waitingOnRef !== original.run.waitingOnRef || canonicalSha256(wait) !== original.binding.waitingSubjectRef ||
@@ -149,7 +158,7 @@ export const finalizeMcpStatusProbe = stateOperation('RECOVERY_REQUIRED', async 
       }
       reads.assertReadActive(); let outcome: TimeFenceAdvance | undefined, updated!: Run, crossedDeadline = false;
       driver.transaction(connection => {
-        reads.assertReadActive(); assertActiveStateOwner(connection, owner); assertInstalledMcpStdioProbeFence(fence, original.binding);
+        reads.assertReadActive(); assertActiveStateOwner(connection, owner); assertFence();
         readMcpStatusProbeTask(driver, artifacts, owner, task);
         requireEqual(readRun(connection, run.id), run, 'MCP original status finalization Run');
         requireEqual(readInvocationJournal(connection, run.id), cut.journal, 'MCP original status finalization Journal');

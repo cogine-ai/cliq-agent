@@ -43,7 +43,8 @@ function fixture(count = 0): Omit<CompleteKernelArchiveManifest, 'manifestDigest
       sha256: canonicalSha256('data-only-image'), copyMethod: 'original_node_sqlite_online_backup', stateSchemaVersion: 8,
       signedSchemaRef: canonicalSha256('data-only-schema'), signedSchemaDigest: canonicalSha256('data-only-schema-profile'),
       completeSqlDigest: canonicalSha256('data-only-complete-sql'), productiveCut: decodeKernelArchiveSqlCut({ ...cut, cutDigest: canonicalSha256(cut) }) },
-    localModelStore: { kind: 'absent' }, cas: decodeKernelArchiveCasIdentity({ layout: 'cliq-flat-cas-v1', sourceDirectory: { deviceId: '1', fileId: '4', ownerUid: 1000 },
+    localInferenceRuntime: { kind: 'absent' }, localModelStore: { kind: 'absent' },
+    cas: decodeKernelArchiveCasIdentity({ layout: 'cliq-flat-cas-v1', sourceDirectory: { deviceId: '1', fileId: '4', ownerUid: 1000 },
       archiveDirectory: { deviceId: '1', fileId: '5', ownerUid: 1000 }, entryCount: entries.length, totalBytes,
       combinedPayloadBytes: totalBytes + 512, entriesDigest: hash.digest('hex') }), entries };
 }

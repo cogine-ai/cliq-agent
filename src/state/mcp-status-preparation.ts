@@ -78,18 +78,19 @@ export async function readMcpStatusProbePreparation(driver: SqliteDriver, artifa
     previousWaitingSubjectRef: preparation.previousWaitingSubjectRef, probeKind: preparation.probeKind, probeOrdinal: preparation.probeOrdinal,
     probeNonceDigest: preparation.probeNonceDigest, brokerDispatchId: preparation.brokerDispatchId,
     supervisorInstanceId: preparation.inspectorSupervisorInstanceId, stateOwnerEpoch: preparation.inspectorStateOwnerEpoch };
-  await readMcpStdioLaunchRecipeData(artifacts, { purpose: { kind: 'recovery', owner: processOwner, requestRef: preparation.brokerRequestRef,
-    requestDigest: preparation.brokerRequestDigest, targetRef: preparation.brokerTargetRef, targetDigest: preparation.brokerTargetDigest },
+  const launch = await readMcpStdioLaunchRecipeData(artifacts, { purpose: { kind: 'recovery', owner: processOwner, requestRef: preparation.brokerRequestRef,
+    requestDigest: preparation.brokerRequestDigest, targetRef: preparation.brokerTargetRef, targetDigest: preparation.brokerTargetDigest,
+    adapter: source.manifest },
     bundle: source.bundle, originalController: { subreaperStartToken: `linux-subreaper:${preparation.controller.pid}:${preparation.controller.processStartToken}` },
     cgroupParent: path.posix.dirname(plan.backend.cgroupPath), ownerUid: history.rootIdentity.ownerUid, executable: source.transport.executable,
     nonce: preparation.nonce, createdAt: preparation.createdAt, resources, plan, spec });
   if (plan.planDigest !== preparation.plannedContainmentDigest || spec.launchSpecDigest !== preparation.sandboxLaunchSpecDigest)
     fail('MCP status intent substitutes its complete original plan/spec digests');
   const recipeBytes = await artifacts.readBoundedBytes(preparation.nativeRecipeRef, MCP_STDIO_RECIPE_HEADER_BYTES + 128 * 8193 + 4 * MCP_RESPONSE_BYTES), recipe = decodeMcpStdioRecipeData(recipeBytes);
-  const server = source.bundle.entries.find(entry => entry.entryId === source.executable.executableId);
-  if (!server || recipe.recipeDigest !== preparation.nativeRecipeRef) fail('MCP status lost its exact original sealed recipe bytes');
-  assertMcpStdioRecipeData(recipe, { purpose: 'recovery', transport: source.transport, serverByteCount: server.byteCount, resources,
-    effectServerToolName: source.original.execution.serverToolName, statusOperationName: source.template.statusOperationName, arguments: source.argumentsValue });
+  if (recipe.recipeDigest !== preparation.nativeRecipeRef) fail('MCP status lost its exact original sealed recipe bytes');
+  assertMcpStdioRecipeData(recipe, { purpose: 'recovery', transport: source.transport, serverByteCount: launch.serverEntry.byteCount, resources,
+    adapterExecutableDigest: source.manifest.executableDigest, effectServerToolName: source.original.execution.serverToolName,
+    statusOperationName: source.template.statusOperationName, arguments: source.argumentsValue });
   return { wait, previous, dispatch, preparation, request, history, original, resources, plan, spec, recipe, recipeBytes,
     ...mcpStatusProbeBinding(source, wait, preparation) };
 }

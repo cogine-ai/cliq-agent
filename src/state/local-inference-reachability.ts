@@ -4,17 +4,20 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import { decodeLocalModelManifest, decodeLocalModelObjectClosure, decodeLocalModelRegistration, decodeLocalModelRegistryHead,
   decodeLocalInferenceServiceSpec, decodeLocalInferenceCycle, decodeLocalInferenceLaunch, decodeLocalInferenceFailure, decodeLocalInferenceBoundary,
-  type LocalModelRegistrationV1, type LocalInferenceActivationCycleV1 } from '../kernel/local-inference.js';
+  localInferenceFailureSources,
+  type LocalModelRegistrationV1, type LocalInferenceActivationCycleV1, type LocalInferenceServiceLaunchV1 } from '../kernel/local-inference.js';
+import { decodeBoundLocalInferenceNativeInput } from '../kernel/local-inference-native-input.js';
 import { decodeLocalZeroCostProvenanceData } from '../model/pricing.js';
 import { verifyLocalModelManifestAuthority } from '../policy/local-model-authority.js';
 import type { ReleaseTrustKey, RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import type { CoreRetentionArtifactPurpose } from '../kernel/retention-purpose.js';
 import { assertLocalModelRetiredCopy } from './local-model-registry-data.js';
+import { bindLocalInferenceRuntime, localInferenceRuntimeInputs, localInferenceRuntimeRoots } from './local-inference-runtime.js';
 
 export const LOCAL_INFERENCE_RETENTION_PURPOSES = [
   'local_model_manifest', 'local_model_signature', 'local_model_object_closure', 'local_model_registration', 'local_model_registry_head',
   'local_inference_service_spec', 'local_inference_activation_cycle', 'local_inference_service_launch', 'local_inference_activation_failure',
-  'local_inference_boundary', 'local_zero_cost_provenance'
+  'local_inference_boundary', 'local_inference_native_input', 'local_zero_cost_provenance'
 ] as const;
 export type LocalInferenceRetentionPurpose = typeof LOCAL_INFERENCE_RETENTION_PURPOSES[number];
 export type LocalInferenceRetentionEdge = Readonly<{ ref: string; purpose: LocalInferenceRetentionPurpose | CoreRetentionArtifactPurpose |
@@ -23,6 +26,9 @@ export type LocalInferenceRetentionContext = Readonly<{
   registration: LocalModelRegistrationV1;
   bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; signatureBytes: Buffer;
   cycle?: LocalInferenceActivationCycleV1;
+  launch?: LocalInferenceServiceLaunchV1;
+  cycleLaunches?: readonly LocalInferenceServiceLaunchV1[];
+  runtimeProfileBytes?: Buffer;
   originalActiveRegistration?: LocalModelRegistrationV1 & { state: 'active' };
 }>;
 export class UnsupportedLocalInferenceReachability extends TypeError {
@@ -88,8 +94,9 @@ export function readLocalInferenceEdges(purpose: LocalInferenceRetentionPurpose,
         record.serviceSpecRef !== registration.expectedServiceSpecRef || record.serviceSpecDigest !== service.serviceSpecDigest ||
         record.ownerPrincipalId !== registration.ownerPrincipalId || record.serviceId !== registration.serviceId) unsupported();
     const result = [edge(record.localModelRegistrationRef, 'local_model_registration'), edge(record.serviceSpecRef, 'local_inference_service_spec'),
-      ...record.participants.map(participant => participant.kind === 'run_submission'
-        ? edge(participant.runSubmitRequestRef, 'run_submit_request') : edge(participant.frontierRef, 'run_frontier'))];
+      ...record.participants.flatMap(participant => participant.kind === 'run_submission'
+        ? [edge(participant.runSubmitRequestRef, 'run_submit_request'), edge(participant.channelIdentityRef, 'control_channel')]
+        : [edge(participant.frontierRef, 'run_frontier')])];
     if (record.phase === 'active') result.push(edge(record.boundaryEvidenceRef, 'local_inference_boundary'));
     if (record.phase === 'failed') result.push(edge(record.failureDetailRef, 'local_inference_activation_failure'));
     return result;
@@ -101,20 +108,34 @@ export function readLocalInferenceEdges(purpose: LocalInferenceRetentionPurpose,
         cycle.launchIds[record.activationAttempt - 1] !== record.launchId || cycle.localModelRegistrationRef !== canonicalSha256(registration) ||
         cycle.localModelRegistrationDigest !== registration.registrationDigest) unsupported();
     const result = [edge(record.serviceSpecRef, 'local_inference_service_spec'), edge(record.containmentPlanRef, 'process_containment_plan'),
-      edge(record.sandboxLaunchSpecRef, 'sandbox_launch_spec')];
+      edge(record.sandboxLaunchSpecRef, 'sandbox_launch_spec'), edge(record.nativeInputRef, 'local_inference_native_input')];
     if ('processContainmentRef' in record) result.push(edge(record.processContainmentRef, 'process_containment'));
     if ('boundaryEvidenceRef' in record && record.boundaryEvidenceRef) result.push(edge(record.boundaryEvidenceRef, 'local_inference_boundary'));
     if (record.phase === 'retired') result.push(edge(record.retirementEvidenceRef, record.retirementKind === 'no_spawn' ? 'process_containment_no_spawn' : 'process_containment_death'));
     return result;
+  }
+  if (purpose === 'local_inference_native_input') {
+    if (!Buffer.isBuffer(value) || !context.cycle || !context.launch || !Buffer.isBuffer(context.runtimeProfileBytes)) unsupported();
+    const launch = decodeLocalInferenceLaunch(context.launch), cycle = decodeLocalInferenceCycle(context.cycle);
+    const source = decodeBoundLocalInferenceNativeInput(value, launch, cycle, registration);
+    const profile = localInferenceRuntimeRoots(context.bundle)[0], bytes = context.runtimeProfileBytes;
+    if (!profile || sha256Bytes(bytes) !== profile.artifactRef || bytes.byteLength > 1_048_576) unsupported();
+    const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (!canonicalJsonBytes(raw).equals(bytes)) unsupported();
+    const runtime = bindLocalInferenceRuntime(context.bundle, profile.artifactRef, raw);
+    const expected = localInferenceRuntimeInputs(context.bundle, runtime, registration.objectClosure);
+    const { files, bootstrap, controller, bubblewrap } = source.data;
+    if (canonicalSha256(expected) !== canonicalSha256({ files, bootstrap, controller, bubblewrap })) unsupported();
+    return [edge(profile.artifactRef, 'opaque_blob'), ...[bootstrap, controller, bubblewrap].map(image => edge(image.digest, 'opaque_blob')),
+      ...files.map(file => edge(file.artifactRef, file.kind === 'model_manifest' ? 'local_model_manifest' : 'opaque_blob'))];
   }
   if (purpose === 'local_inference_activation_failure') {
     const record = decodeLocalInferenceFailure(value), cycle = context.cycle && decodeLocalInferenceCycle(context.cycle);
     if (!cycle || cycle.phase !== 'failed' || record.activationCycleId !== cycle.activationCycleId || record.serviceId !== cycle.serviceId ||
         record.ownerPrincipalId !== cycle.ownerPrincipalId || record.serviceSpecRef !== cycle.serviceSpecRef || record.serviceSpecDigest !== cycle.serviceSpecDigest ||
         cycle.failureDetailRef !== canonicalSha256(record)) unsupported();
-    // Failure evidenceRefs have branch-specific native meanings. Without the
-    // owning completed lifecycle reader these edges cannot be guessed.
-    unsupported();
+    if (!context.cycleLaunches) unsupported();
+    return localInferenceFailureSources(cycle, record, context.cycleLaunches.map(decodeLocalInferenceLaunch));
   }
   if (purpose === 'local_inference_boundary') {
     const record = decodeLocalInferenceBoundary(value);

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs';
 import { prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
+import { STATE_OWNER_QUALIFICATION_COMPILE_TIMEOUT_MS } from './state-owner-compile-timeout.js';
 
 async function writableOwnedDirectories(directory: string, uid: number): Promise<void> {
   const info = await lstat(directory); if (!info.isDirectory()) return;
@@ -19,7 +20,7 @@ async function writableOwnedDirectories(directory: string, uid: number): Promise
 }
 
 test('canonical Legacy locks and original-driver archive retain and really join their original Linux resources',
-  { timeout: 180000 }, async () => {
+  { timeout: STATE_OWNER_QUALIFICATION_COMPILE_TIMEOUT_MS + 180_000 }, async () => {
     assert.equal(process.platform, 'linux'); assert.equal(process.env.CLIQ_DISPOSABLE_ACCOUNT_QUALIFICATION, '1');
     const user = os.userInfo(); assert.equal(user.username, 'cliq-kernel-gate-test');
     assert.equal(user.homedir, '/home/cliq-kernel-gate-test'); assert.ok(user.uid >= 1000); assert.equal(process.geteuid?.(), user.uid);
@@ -31,7 +32,7 @@ test('canonical Legacy locks and original-driver archive retain and really join 
       const source = fileURLToPath(new URL('../../../native/state-owner/state-owner.c', import.meta.url));
       const compile = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', '-shared', '-fPIC',
         '-I', await verifiedSqliteExtensionIncludes(), '-I', path.join(carrier.nodeRoot, 'include/node'), source, '-o', helper],
-      { encoding: 'utf8', timeout: 60000 });
+      { encoding: 'utf8', timeout: STATE_OWNER_QUALIFICATION_COMPILE_TIMEOUT_MS });
       assert.equal(compile.error, undefined); assert.equal(compile.status, 0, compile.stderr); await chmod(helper, 0o500);
       const modules = Object.fromEntries(['native-owner', 'sqlite-driver'].map(name => [name,
         new URL(`../../../dist/state/${name}.js`, import.meta.url).href]));
@@ -153,6 +154,21 @@ test('canonical Legacy locks and original-driver archive retain and really join 
               source.close();bound.close();owner.close();gate.close();await image.close();return;
             }
             const loaded={exports:{}};process.dlopen(loaded,helper);const native=loaded.exports;
+            const modelRootFd=mode==='locks_normal'?fs.openSync(root,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW):-1;
+            let modelTuple, publishedModelRef, temporaryModelLeaf;
+            if(modelRootFd>=0){
+              const identity=fs.fstatSync(modelRootFd,{bigint:true});modelTuple=[identity.dev,identity.ino,identity.uid,identity.gid,identity.mode];
+              const writer=native.acquireLocalModelStore(modelRootFd,root,modelTuple);
+              const bootstrap=new DatabaseSync(':memory:',{allowExtension:true});
+              try{bootstrap.loadExtension(helper,'sqlite3_cliqlocalmodelvfs_init');bootstrap.enableLoadExtension(false);}finally{bootstrap.close();}
+              const registry=new DatabaseSync('file:cliq-local-model-registry?vfs=cliq-local-model-store-v1');
+              registry.exec("PRAGMA locking_mode=EXCLUSIVE;PRAGMA journal_mode=DELETE;PRAGMA synchronous=FULL;CREATE TABLE original_model(head TEXT NOT NULL) STRICT;INSERT INTO original_model VALUES('component-head')");
+              registry.close();
+              const object=Buffer.alloc(1027,0x36);publishedModelRef=crypto.createHash('sha256').update(object).digest('hex');
+              writer.publishSmallObject(publishedModelRef,object);writer.close();
+              temporaryModelLeaf='.model-object-v1-'+'7'.repeat(32);
+              fs.writeFileSync(path.join(root,'local-models/objects',temporaryModelLeaf),Buffer.alloc(131075,0x7a),{mode:0o600});
+            }
             const legacy=root+'-legacy';fs.mkdirSync(legacy,{mode:0o700});
             for(const rel of ['sessions/2026/01/02','plans/workspace/session/plan','tx/tx_valid','foreign.lock'])fs.mkdirSync(path.join(legacy,rel),{recursive:true,mode:0o700});
             const sourcePath='sessions/2026/01/02/source.json';
@@ -165,6 +181,29 @@ test('canonical Legacy locks and original-driver archive retain and really join 
             }
             const gate=native.acquireKernelGlobalExclusive(), owner=native.acquireLock(root,true), bound=native.bindMigrationCredentialGate(owner,gate);
             const migrationId=crypto.randomBytes(32).toString('base64url'), scope=native.acquireMigrationFilesystem(bound,migrationId,legacy);
+            const processCut=()=>{
+              assert.deepEqual(scope.beginLegacyProcessCut(),{kind:'started'});
+              for(let i=0;i<10000;i++){
+                const value=scope.stepLegacyProcessCut();if(value.kind!=='progress')return value;
+              }
+              throw new Error('actual native process/FD census did not complete within its bounded step count');
+            };
+            if(mode==='locks_normal'){
+              assert.equal(scope.checkBeforeLegacyProcessControl(),true);
+              assert.deepEqual(scope.beginLegacyProcessCut(),{kind:'started'});
+              assert.deepEqual(scope.cancelLegacyProcessCut(),{kind:'retired'});
+              const {spawn}=require('node:child_process'),{once}=require('node:events');
+              const held=spawn(process.execPath,['--no-warnings','-e',
+                "const fs=require('node:fs');const fd=fs.openSync(process.argv[1],fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);"+
+                "process.stdout.write('!');process.stdin.once('end',()=>fs.closeSync(fd));process.stdin.resume();",path.join(legacy,sourcePath)],
+                {env:{HOME:process.env.HOME,PATH:'/usr/bin:/bin'},stdio:['pipe','pipe','ignore']});
+              const joined=once(held,'close');
+              try{
+                const [ready]=await once(held.stdout,'data');assert.equal(ready.toString('ascii'),'!');
+                assert.deepEqual(processCut(),{kind:'legacy_process_or_descriptor_open'});
+                assert.equal(scope.checkBeforeLegacyProcessControl(),true);
+              }finally{held.stdin.end();assert.deepEqual(await joined,[0,null]);}
+            }
             fs.mkdirSync(path.join(root,'cas'),{recursive:true,mode:0o700});
             // Actual component bytes and native durable publication; this is
             // not a SQL Owner/preparation or a completed migration receipt.
@@ -178,6 +217,7 @@ test('canonical Legacy locks and original-driver archive retain and really join 
             controlData.updatedAt=controlData.createdAt;controlData.controlDigest=digestOmitting(controlData,'controlDigest');
             const closed=await import(${JSON.stringify(new URL('../../../dist/kernel/migration-control.js', import.meta.url).href)});
             scope.publishInitialSpine(ref,canonicalJsonBytes(closed.decodeOwnedLegacyImportControl(controlData)));
+            if(mode==='locks_normal')assert.throws(()=>scope.checkBeforeLegacyProcessControl(),/retired scan/);
             const lockDirs=['auth.json.lock','workspace-state.lock',sourcePath+'.lock','plans/workspace/session/plan/plan.json.lock','plans/workspace/session/plan/progress.json.lock','tx/tx_valid/tx.lock'];
             if(mode.startsWith('locks_existing')){
               assert.throws(()=>{for(let i=0;i<10000;i++)if(scope.prepareLegacyLocksNext())throw new Error('unexpected complete');},error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
@@ -225,7 +265,14 @@ test('canonical Legacy locks and original-driver archive retain and really join 
               // One real original-holder online copy/namespace/seal. These
               // component bytes establish no SQL history or rollback authority.
               const archiveId=crypto.randomBytes(32).toString('base64url');
-              const physicalArchive=native.createKernelArchive(bound,migrationId,archiveId,fs.readFileSync(path.join(root,'migration/control-v1.json')));
+              const holdModels=()=>{
+                const derived=native.deriveLocalModelStoreGate(bound), store=native.acquireLocalModelStore(modelRootFd,root,modelTuple,derived);
+                assert(store);return {store,close(){store.close();derived.close();}};
+              };
+              const originalModels=holdModels();
+              const physicalArchive=native.createKernelArchive(bound,migrationId,archiveId,
+                fs.readFileSync(path.join(root,'migration/control-v1.json')),originalModels.store);
+              assert.throws(()=>originalModels.store.close(),error=>error.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
               const originalDatabase=new DatabaseSync(path.join(root,'kernel.sqlite3')), archiveUri=physicalArchive.beginBackup();
               const bootstrap=new DatabaseSync(':memory:',{allowExtension:true});
               try{bootstrap.loadExtension(helper,'sqlite3_cliqownedarchive_init');bootstrap.enableLoadExtension(false);}finally{bootstrap.close();}
@@ -233,15 +280,54 @@ test('canonical Legacy locks and original-driver archive retain and really join 
               assert.equal(physicalArchive.joinBackup().outcome,'commit_phase_two_observed');
               let imageSealed=false;for(let i=0;i<10000;i++)if(physicalArchive.sealNext()){imageSealed=true;break;}assert(imageSealed);
               const physicalImage=physicalArchive.identity(), physicalBirth=physicalArchive.describeBirth();
+              assert.equal(physicalBirth.localModelStore,'present');assert.equal(physicalBirth.localInferenceRuntime,'absent');
+              const step=(operation)=>{let complete=false;for(let i=0;i<10000;i++)if(operation()){complete=true;break;}assert(complete);};
+              physicalArchive.beginModelCapture();step(()=>physicalArchive.captureModelNext());
+              const modelManifest=physicalArchive.modelCaptureIdentity();
+              assert.equal(modelManifest.kind,'captured');assert.equal(modelManifest.entryCount,5);
+              physicalArchive.beginModelVerification();step(()=>physicalArchive.verifyModelNext());
               physicalArchive.beginCasCapture();let casComplete=false;for(let i=0;i<10000;i++)if(physicalArchive.captureCasNext()){casComplete=true;break;}assert(casComplete);
               const physicalCas=physicalArchive.casCaptureIdentity(), physicalEntries=[];
               for(let start=0;start<physicalCas.entryCount;start+=64)physicalEntries.push(...physicalArchive.readCasCaptureEntries(start));
-              const physicalManifestBytes=canonicalJsonBytes({format:'cliq-current-archive-native-component-v1',physicalImage,physicalCas,physicalEntries});
+              physicalArchive.beginModelVerification();step(()=>physicalArchive.verifyModelNext());
+              const physicalManifestBytes=canonicalJsonBytes({format:'cliq-current-archive-native-component-v1',physicalImage,physicalCas,physicalEntries,modelManifest});
               physicalArchive.beginManifest(physicalManifestBytes);let manifestSealed=false;
               for(let i=0;i<10000;i++)if(physicalArchive.sealManifestNext()){manifestSealed=true;break;}assert(manifestSealed);
-              const physicalManifest=physicalArchive.manifestIdentity();physicalArchive.close();originalDatabase.close();
-              const openCurrent=()=>native.openCurrentMigrationInspector(bound,migrationId,archiveId,legacy,roots,
-                fs.readFileSync(path.join(root,'migration/control-v1.json')),marker,marker,auth);
+              const physicalManifest=physicalArchive.manifestIdentity();
+              physicalArchive.beginModelVerification();step(()=>physicalArchive.verifyModelNext());
+              physicalArchive.close();originalModels.close();originalDatabase.close();
+              const modelModule=await import(${JSON.stringify(new URL('../../../dist/kernel/kernel-archive-model-store.js', import.meta.url).href)});
+              const archivedModels=path.join(root,'migration/kernel-archives',archiveId,'local-models');
+              const inventoryBytes=fs.readFileSync(path.join(archivedModels,'inventory-v1.bin'));
+              const inventory=new modelModule.KernelArchiveModelInventoryStream(modelManifest), modelEntries=[];
+              for(let index=0;index<inventoryBytes.length;index+=239)modelEntries.push(...inventory.feed(inventoryBytes.subarray(index,index+239)));
+              inventory.finish();
+              assert.deepEqual(modelEntries.map(entry=>entry.kind).sort(),['journal','lock','object','registry','temporary']);
+              assert(modelEntries.some(entry=>entry.kind==='object'&&entry.sha256===publishedModelRef));
+              assert(modelEntries.some(entry=>entry.kind==='temporary'&&entry.path.endsWith(temporaryModelLeaf)&&entry.sourceMode===0o600));
+              for(const entry of modelEntries){
+                const originalPath=path.join(root,entry.path), archivedPath=path.join(path.dirname(archivedModels),entry.path);
+                const before=fs.lstatSync(originalPath,{bigint:true}), after=fs.lstatSync(archivedPath,{bigint:true});
+                assert.equal(String(before.ino),entry.sourceFileId);assert.equal(String(after.ino),entry.archiveFileId);
+                assert.notEqual(before.ino,after.ino);assert.equal(after.nlink,1n);assert.equal(after.mode&0o777n,0o400n);
+                assert.deepEqual(fs.readFileSync(originalPath),fs.readFileSync(archivedPath));
+              }
+              const modelGuards=new Map();
+              const openCurrent=()=>{
+                const held=holdModels();
+                try{
+                  const reader=native.openCurrentMigrationInspector(bound,migrationId,archiveId,legacy,roots,
+                    fs.readFileSync(path.join(root,'migration/control-v1.json')),marker,marker,auth,held.store);
+                  modelGuards.set(reader,held);return reader;
+                }catch(error){held.close();throw error;}
+              };
+              const retireCurrentModels=reader=>{
+                const held=modelGuards.get(reader);if(!held)return;
+                held.close();modelGuards.delete(reader);
+              };
+              const closeCurrent=async reader=>{
+                await reader.releaseLegacyLocks();reader.close();retireCurrentModels(reader);
+              };
               const current=openCurrent();
               const originalCallbacks=['assertHeld','close','prepareLegacyLocksNext','assertLegacyLocks','releaseLegacyLocks','observeRoots',
                 'publishInitialSpine','advanceControl','observeOriginalAuth','publishAuthCutover','publishKernelAuthority','readControlBytes',
@@ -268,12 +354,12 @@ test('canonical Legacy locks and original-driver archive retain and really join 
               pair(64,physicalCas.sourceDirectory);pair(80,physicalCas.archiveDirectory);payload.writeBigUInt64LE(BigInt(physicalCas.entryCount),96);
               payload.writeBigUInt64LE(BigInt(physicalCas.totalBytes),104);payload.writeBigUInt64LE(BigInt(physicalCas.combinedPayloadBytes),112);
               payload.writeUInt32LE(process.geteuid(),120);Buffer.from(physicalCas.entriesDigest,'hex').copy(payload,128);
-              const step=(operation)=>{let complete=false;for(let i=0;i<10000;i++)if(operation()){complete=true;break;}assert(complete);};
               const openArchive=(reader)=>{
                 reader.selectOriginalKernelArchive(archivePackets.encodeCurrentArchiveManifestSelection(selection));
                 step(()=>reader.verifyArchiveManifestNext());const chunks=[];
                 for(;;){const next=reader.readArchiveManifestChunk();if(next===null)break;assert(next.length<=65536);chunks.push(next);}
                 assert.deepEqual(Buffer.concat(chunks),physicalManifestBytes);
+                reader.selectArchiveModelStore(modelModule.encodeCurrentKernelArchiveModelStore(modelManifest));
                 reader.selectArchivePayload(payload);step(()=>reader.verifyArchiveImageNext());reader.beginArchiveEntryPass();
                 // Native byte/identity coverage only. Production independently
                 // validates its full strict header and both bounded streams.
@@ -282,13 +368,17 @@ test('canonical Legacy locks and original-driver archive retain and really join 
                     reader.beginArchiveCasEntry(archivePackets.encodeCurrentArchiveCasEntry(entry));step(()=>reader.verifyArchiveCasEntryNext());}}}
               };
               openArchive(current);step(()=>current.verifyArchiveNamespaceNext());
+              step(()=>current.verifyArchiveModelStoreNext());
+              current.finishArchiveModelInspection();
+              retireCurrentModels(current);
               const archiveObserved=current.inspectVerifiedArchive();assert.equal(archiveObserved.kind,'current_checked_original_archive');
               assert.equal(archiveObserved.entryCount,physicalCas.entryCount);assert.equal(archiveObserved.manifestSha256,physicalManifest.sha256);
-              assert.equal(archiveObserved.totalBytes,physicalCas.combinedPayloadBytes+physicalManifest.byteCount);
+              assert.equal(archiveObserved.totalBytes,physicalCas.combinedPayloadBytes+physicalManifest.byteCount+
+                modelManifest.totalBytes+modelManifest.inventory.byteCount);
               assert.deepEqual(archiveObserved.databaseFile,physicalImage.file);assert.deepEqual(archiveObserved.casDirectory,physicalCas.archiveDirectory);
               fs.writeFileSync(path.join(legacy,'current-unexpected.txt'),'uncooperative-current-fixture',{mode:0o600});
               assert.throws(()=>{current.beginWholeTreeVerification();for(let i=0;i<10000;i++)if(current.verifyWholeTreesNext())throw new Error('unexpected complete');},error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
-              await current.releaseLegacyLocks();current.close();
+              await closeCurrent(current);
               for(const rel of lockDirs)assert.equal(fs.existsSync(path.join(legacy,rel)),false);
               fs.unlinkSync(path.join(legacy,'current-unexpected.txt'));
               // Data refusal cannot manufacture failed FD retirement. The
@@ -297,20 +387,27 @@ test('canonical Legacy locks and original-driver archive retain and really join 
               fs.chmodSync(damagedPath,0o600);const oldBytes=fs.readFileSync(damagedPath);fs.writeFileSync(damagedPath,Buffer.alloc(oldBytes.length,0x78));fs.chmodSync(damagedPath,0o400);
               const damagedReader=openCurrent();step(()=>damagedReader.prepareLegacyLocksNext());
               assert.throws(()=>openArchive(damagedReader),error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
-              await damagedReader.releaseLegacyLocks();damagedReader.close();bound.assertHeld();
+              await closeCurrent(damagedReader);bound.assertHeld();
               fs.chmodSync(damagedPath,0o600);fs.writeFileSync(damagedPath,oldBytes);fs.chmodSync(damagedPath,0o400);
               const extraPath=path.join(root,'migration/kernel-archives',archiveId,'cas','unregistered-extra');fs.writeFileSync(extraPath,'must not be omitted',{mode:0o400});
               const extraReader=openCurrent();step(()=>extraReader.prepareLegacyLocksNext());openArchive(extraReader);
               assert.throws(()=>step(()=>extraReader.verifyArchiveNamespaceNext()),error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
-              await extraReader.releaseLegacyLocks();extraReader.close();bound.assertHeld();fs.unlinkSync(extraPath);
+              await closeCurrent(extraReader);bound.assertHeld();fs.unlinkSync(extraPath);
+              const extraModelPath=path.join(archivedModels,'objects','unregistered-extra');
+              fs.writeFileSync(extraModelPath,'must not be omitted',{mode:0o400});
+              const modelReader=openCurrent();step(()=>modelReader.prepareLegacyLocksNext());openArchive(modelReader);
+              step(()=>modelReader.verifyArchiveNamespaceNext());
+              assert.throws(()=>step(()=>modelReader.verifyArchiveModelStoreNext()),error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
+              await closeCurrent(modelReader);bound.assertHeld();fs.unlinkSync(extraModelPath);
               fs.mkdirSync(existing,{mode:0o700});fs.writeFileSync(path.join(existing,'owner'),'999999:current-foreign',{mode:0o600});
               const oldCurrent=new Date(Date.now()-60000);fs.utimesSync(path.join(existing,'owner'),oldCurrent,oldCurrent);
               const refused=openCurrent();assert.throws(()=>{for(let i=0;i<10000;i++)if(refused.prepareLegacyLocksNext())throw new Error('unexpected complete');},error=>error.code==='ERR_CLIQ_MIGRATION_FILESYSTEM');
-              await refused.releaseLegacyLocks();refused.close();assert.equal(fs.readFileSync(path.join(existing,'owner'),'utf8'),'999999:current-foreign');
+              await closeCurrent(refused);assert.equal(fs.readFileSync(path.join(existing,'owner'),'utf8'),'999999:current-foreign');
               console.log(JSON.stringify({diagnosticOnly:true,scope:'native-current-inspector-component',entries:observed.entryCount,
                 oldReceiverRefusals:originalCallbacks.length,fullSourceAndBackup:true,unexpectedEntryRefused:true,foreignStaleLockPreserved:true,
                 originalOnlineArchive:true,fullArchiveImageAndNamespace:true,changedArchiveBytesRefused:true,extraArchiveObjectRefused:true,
-                originalResourcesJoinedAfterDataRefusal:true}));
+                completeOriginalModelNamespace:true,extraModelObjectRefused:true,originalResourcesJoinedAfterDataRefusal:true}));
+              assert.equal(modelGuards.size,0);fs.closeSync(modelRootFd);
 
             }
             bound.close();owner.close();gate.close();

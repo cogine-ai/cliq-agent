@@ -13,7 +13,7 @@ import { assertKernelSchemaVersion, KERNEL_AUTHORITY_TABLES } from './schema.js'
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { beginHeldKernelArchiveRead, endHeldKernelArchiveRead, sealHeldKernelArchive,
   assertHeldKernelArchive, describeHeldKernelArchiveBirth,
-  createHeldKernelArchive, type NativeStateOwner, type HeldMigrationCredentialGate,
+  createHeldKernelArchive, type NativeStateOwner, type HeldMigrationCredentialGate, type HeldCurrentMigrationInspector,
   type HeldKernelArchive, type KernelArchiveBirthObservation, type KernelArchiveImageObservation } from './native-owner.js';
 import { backupOriginalSqliteToKernelArchive, iterateNodeSqliteStatement,
   type SqliteDriver, type SqliteConnection, type SqliteRow, type SqliteStatement, type SqliteRunResult } from './sqlite-driver.js';
@@ -22,6 +22,10 @@ import { KERNEL_ARCHIVE_SQL_ORDER as TABLE_ORDER, readOriginalKernelProductiveCu
   assertSameKernelArchiveSqlCut } from './kernel-archive-cut.js';
 import { captureHeldKernelArchiveCas, sealHeldKernelArchiveManifest, type KernelArchiveManifestObservation } from './native-owner.js';
 import { encodeCompleteKernelArchiveManifest, type CompleteKernelArchiveManifest, type CompleteKernelArchiveHeader } from './kernel-archive-manifest.js';
+import { captureHeldKernelArchiveModels, verifyHeldKernelArchiveModels, revokeHeldKernelArchive,
+  captureHeldKernelArchiveRuntimeWitnesses, recheckHeldKernelArchiveRuntimeWitnesses } from './native-owner.js';
+import type { NativeLocalModelStore } from './local-model-store-native.js';
+import type { InstalledRuntimeWitnessCut } from './runtime-witness-archive-cut.js';
 
 const unretiredArchiveReaders = new Set<Readonly<{ database: DatabaseSync; scope: HeldKernelArchive }>>();
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
@@ -165,9 +169,11 @@ export function assertOriginalCompletedKernelArchive<T>(value: CompleteOriginalK
  * No archive data is published into the namespace being captured. */
 export async function archiveOriginalKernel<T>(native: NativeStateOwner, gate: HeldMigrationCredentialGate, image: FileHandle,
   control: KernelRollbackDrainingControlV1, driver: SqliteDriver, schema: SignedKernelSchemaV1,
-  operation: (projection: KernelArchiveProjection) => Promise<T>, signal?: AbortSignal): Promise<CompleteOriginalKernelArchive<T>> {
+  operation: (projection: KernelArchiveProjection) => Promise<T>, signal?: AbortSignal,
+  modelScope: NativeLocalModelStore | HeldCurrentMigrationInspector | null = null,
+  runtimeCut?: InstalledRuntimeWitnessCut): Promise<CompleteOriginalKernelArchive<T>> {
   decodeSignedKernelSchema(schema);
-  const archive = await createHeldKernelArchive(native, gate, image, control);
+  const archive = await createHeldKernelArchive(native, gate, image, control, modelScope);
   let result: CompleteOriginalKernelArchive<T> | undefined, failed = false, failure: unknown;
   try {
     const before = await readOriginalKernelProductiveCut(driver, archive, signal);
@@ -177,7 +183,11 @@ export async function archiveOriginalKernel<T>(native: NativeStateOwner, gate: H
       const value = await operation(projection), completeSqlDigest = await projection.digest();
       return Object.freeze({ value, productiveCut, completeSqlDigest });
     }, signal);
+    const localModelStore = await captureHeldKernelArchiveModels(archive, signal);
+    const localInferenceRuntime = await captureHeldKernelArchiveRuntimeWitnesses(archive, runtimeCut, signal);
     const cas = await captureHeldKernelArchiveCas(archive, captured.image.byteCount, signal);
+    await verifyHeldKernelArchiveModels(archive, signal);
+    await recheckHeldKernelArchiveRuntimeWitnesses(archive, signal);
     assertSameKernelArchiveSqlCut(before, await readOriginalKernelProductiveCut(driver, archive, signal));
     const core: Omit<CompleteKernelArchiveManifest, 'entries' | 'manifestDigest'> = {
       schemaVersion: 1, format: 'cliq-owned-kernel-archive-v1',
@@ -188,14 +198,21 @@ export async function archiveOriginalKernel<T>(native: NativeStateOwner, gate: H
         sha256: captured.image.sha256, copyMethod: 'original_node_sqlite_online_backup', stateSchemaVersion: 8,
         signedSchemaRef: canonicalSha256(schema), signedSchemaDigest: schema.profileDigest,
         completeSqlDigest: captured.value.completeSqlDigest, productiveCut: captured.value.productiveCut },
-      localModelStore: { kind: captured.image.localModelStore }, cas: cas.identity
+      localInferenceRuntime, localModelStore, cas: cas.identity
     };
     const encoded = await encodeCompleteKernelArchiveManifest(core, cas.entries, signal);
     const manifestObservation = await sealHeldKernelArchiveManifest(archive, encoded.bytes, signal);
+    await verifyHeldKernelArchiveModels(archive, signal);
+    await recheckHeldKernelArchiveRuntimeWitnesses(archive, signal);
     assertSameKernelArchiveSqlCut(before, await readOriginalKernelProductiveCut(driver, archive, signal));
     result = Object.freeze({ value: captured.value.value, birth: captured.birth, image: captured.image,
       manifest: encoded.header, manifestObservation });
-  } catch (error) { failed = true; failure = error; }
+  } catch (error) {
+    failed = true; failure = error;
+    try { revokeHeldKernelArchive(archive); }
+    catch (revocation) { failure = new ResourceRetirementError('original archive revocation did not complete',
+      new AggregateError([error, revocation])); }
+  }
   if (failure instanceof ResourceRetirementError) throw failure;
   try { archive.close(); }
   catch (error) { throw new ResourceRetirementError('original installed archive scope did not retire',
