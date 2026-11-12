@@ -206,6 +206,9 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
   definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets']; secret: Buffer;
 }>;
 
+// Retained verifier-history readers below use the existing full-cut BUSY wait
+// with a fixed one-second diagnostic ceiling. Only actual SQLITE_BUSY may
+// yield; schema/identity/fence failures and all outer deadlines stay intact.
 export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery' | 'mcp-status-user-replay',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
@@ -1293,14 +1296,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           const sessionCut = accepted(await sendMcp({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
           const evidence = await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, principalId: principal,
             caseKind: 'required_pass', expectedFiles,
-            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
           for (const retired of evidence.retirementIdentities) await assertVerifierProcessesAbsent(retired);
         },
         async assertDeliveryEvidence(cut, sourceCut, files) {
           const sessionCut = accepted(await sendMcp({ protocolVersion: 1, method: 'session.get', sessionId: cut.snapshot.run.sessionId }), 'session.get');
           const evidence = await assertInstalledDeliveryOutcome({ cut, sessionCut, sourceCut, sourceResultRef: sourceCut.snapshot.run.resultRef,
             kind: 'publish', expectedFiles: [...files].map(([path, text]) => ({ path, text })), readRetainedArtifact: readCas,
-            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
           assert.equal(evidence.directPolicyOnly, true);
           for (const retired of evidence.verifierRetirementIdentities) await assertVerifierProcessesAbsent(retired);
           if (evidence.publicationWorkerRetirement) {
@@ -1404,7 +1407,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       const controls = new Map<string, { request: Record<string, any>; response: Record<string, any> }>();
       const permission: InstalledPermissionEvidence = { controls,
         readRecord: selector => inspectInstalledPermissionRecord(recipe.stateRoot, ledger.uid, selector),
-        readOwnerHistory: async observe => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners };
+        readOwnerHistory: async observe => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners };
       const sendPermission = async (frame: Record<string, any>, timeout = 30000) => {
         assert(client); const response = await client.send(frame, timeout); recordRefusal(response, frame.method);
         if (response.ok && typeof frame.requestId === 'string') {
@@ -1546,7 +1549,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             caseKind: options.provider ? 'required_provider' : 'required_repair', principalId: principal,
             expectedFiles: [{ path: 'check.test.mjs', before: PROVIDER_JOURNEY_FILES['check.test.mjs'], after: PROVIDER_JOURNEY_FILES['check.test.mjs'] },
               { path: 'math.mjs', before: PROVIDER_JOURNEY_FILES['math.mjs'], after }],
-            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+            readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
           if (!options.provider) assert.equal(proof.retirementIdentities.length, 2);
           assert.equal(proof.retirementIdentities.length, proof.verifierAttemptCount);
           for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement);
@@ -1823,7 +1826,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       })() : undefined;
       const proof = toolsCase ? undefined : await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: kind, expectedFiles: files, principalId: principal,
         ...(expectedGit ? { expectedGit: true as const } : {}),
-        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
       const queries = await resultQueries(cut);
       if (proof) {
         assert.equal(proof.retirementIdentities.length, kind === 'required_repair' || kind === 'required_timeout' ? 2 : 1);
@@ -1907,7 +1910,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       assert.deepEqual(await resultQueries(cut), entry.resultQueries);
       await assertInstalledVerifierOutcome({ cut, sessionCut, readCas, caseKind: entry.kind, expectedFiles: entry.files, principalId: principal,
         ...(entry.expectedGit ? { expectedGit: true as const } : {}),
-        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
       for (const file of entry.files) {
         assert.deepEqual(sourceMetadata(await lstat(path.join(entry.workspace, file.path), { bigint: true })), entry.sourceIdentity.get(file.path));
         assert.equal(await readFile(path.join(entry.workspace, file.path), 'utf8'), file.before);
@@ -2100,7 +2103,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           recordRefusal(response, body.method as string); return response;
         },
         nextId, readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact, uid: ledger.uid, gid: ledger.gid, mark,
-        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners,
+        readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners,
         readParentRetirement: binding => inspectInstalledVerifierParentRetirement(recipe.stateRoot, ledger.uid, binding),
         assertVerifierProcessesAbsent,
         assertRunWorkersRetired: async (runId, observedLaunchIds, publicationRetirement, verifierParentRetirement) => {
@@ -2399,7 +2402,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               recovered = accepted(await client.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get');
               if (lateDiagnostic && canonicalSha256(recovered) !== lastSampledCutDigest) {
                 const sampled = await readInstalledPublicationProbeSample({ cut: recovered, originalBirth: claimed.birth,
-                  readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners });
+                  readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners });
                 // Identical actual public cuts cannot expose a new immutable
                 // CAS fact. Avoid rescanning their bytes on every poll; the
                 // full final readers independently reread all retained facts.
@@ -2416,7 +2419,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             }
             const recoveryInput = { cut: recovered, originalBirth: claimed.birth,
               expectedFiles: source.files.map(file => ({ path: file.path, text: file.after })), sourceResultRef: source.cut.snapshot.run.resultRef,
-              readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners };
+              readRetainedArtifact: readCas, readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners };
             if (lateDiagnostic) {
               // Preserve the actual single or dual observed packets before
               // asserting that this run hit the intended late cut. A normal

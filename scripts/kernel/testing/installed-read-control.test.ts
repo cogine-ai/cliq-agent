@@ -342,9 +342,12 @@ test('full-history readiness joins each real observation and returns the complet
     const before = inspectInstalledOwnerHistory(retained.stateRoot);
     await withExclusiveWriter(retained.filename, async release => {
       let returned = false;
-      const waiting = waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000).then(value => { returned = true; return value; });
+      const stages: string[] = [];
+      const waiting = waitForInstalledOwnerHistory(retained.stateRoot, Date.now() + 5000, stage => { stages.push(stage); })
+        .then(value => { returned = true; return value; });
       void waiting.catch(() => {}); // A failing implementation still releases and joins the real writer before rethrowing.
       await delay(30); assert.equal(returned, false, 'BUSY cannot be returned as a successful history');
+      assert(stages.includes('schema')); assert(!stages.includes('records'));
       release();
       assert.deepEqual(await waiting, before);
     });

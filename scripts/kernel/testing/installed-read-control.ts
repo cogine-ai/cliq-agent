@@ -89,8 +89,8 @@ export function assertInstalledOwnerHistoryCurrent(stateRoot: string, expected: 
     'the same owner canonical fence update must not regress');
 }
 
-export function observeInstalledOwnerHistory(stateRoot: string) {
-  try { return inspectInstalledOwnerHistory(stateRoot); }
+export function observeInstalledOwnerHistory(stateRoot: string, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
+  try { return inspectInstalledOwnerHistory(stateRoot, observer); }
   catch (error) {
     const sqlite = error as Error & { code?: unknown; errcode?: unknown };
     if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number' &&
@@ -101,11 +101,11 @@ export function observeInstalledOwnerHistory(stateRoot: string) {
 
 /** Only the caller's original absolute readiness budget permits waiting.
  * Every attempt closes its actual read transaction before yielding. */
-export async function waitForInstalledOwnerHistory(stateRoot: string, by: number) {
+export async function waitForInstalledOwnerHistory(stateRoot: string, by: number, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
   assert(Number.isSafeInteger(by) && by >= 0);
   for (;;) {
     assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
-    const history = observeInstalledOwnerHistory(stateRoot);
+    const history = observeInstalledOwnerHistory(stateRoot, observer);
     if (history !== undefined) {
       assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
       return history;
