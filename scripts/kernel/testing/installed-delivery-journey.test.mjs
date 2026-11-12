@@ -345,3 +345,43 @@ test('cleanup after the normal restart joins only an inspection client that is s
   assert(!crash.includes('inspectionClient!.close()'));
   assert(!crash.includes('inspectionClient = await persistentClient()'), 'the cut must not open an unnecessary second authenticated consumer');
 });
+
+// Execute the actual observation loop with inert response data. This checks
+// fixture scheduling/deadlines only, never creates installed Run authority.
+function sourceObservationLoop() {
+  const text = source('./installed-node-journey.ts');
+  const start = text.indexOf('      let cut: Record<string, any>;');
+  const end = text.indexOf("      const sessionCut = await send(", start);
+  assert(start >= 0 && end > start);
+  const body = ts.transpileModule(text.slice(start, end) + '\nreturn cut;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  return Function('assert', 'Date', 'performance', 'send', 'delay', 'sourceKind', 'by', 'report',
+    `return (async () => {
+      const admitted = {id: 'inert-run'}, responderFailure = undefined, toolsCase = false;
+      const activeCases = new Map([[sourceKind, {posts: 1}]]);
+      const projectInstalledRunProgress = input => ({status: input.cut.snapshot.run.status});
+      ${body}
+    })();`);
+}
+
+test('ordinary tools observation yields in proportion to its actual read without changing other probe cadence', async () => {
+  for (const [kind, readMs, expected] of [['ordinary_tools', 1000, 2000], ['ordinary_tools', 10, 250],
+    ['ordinary_tools', 3000, 5000], ['ordinary_tools_restart', 1000, 50], ['ordinary_tools_cancel', 1000, 50]]) {
+    let now = 0, reads = 0; const pauses = [];
+    await sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+      now += readMs; return {snapshot: {run: {status: ++reads === 2 ? 'succeeded' : 'running'}}};
+    }, async ms => { pauses.push(ms); now += ms; }, kind, 90000, {});
+    assert.deepEqual(pauses, [expected], kind);
+    assert.equal(reads, 2);
+  }
+});
+
+test('a late terminal response fails the original source-case deadline and retains its actual cut', async () => {
+  const report = {}; let now = 89999;
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now = 90000; return {snapshot: {run: {status: 'succeeded'}}};
+  }, async () => assert.fail('a late result cannot schedule another observation'), 'ordinary_tools', 90000, report),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.deepEqual(report.runProgressAtTerminalDeadline, {status: 'succeeded'});
+});

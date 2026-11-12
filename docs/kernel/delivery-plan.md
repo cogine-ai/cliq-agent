@@ -55,34 +55,42 @@ runner; no external host is required. Native setup, Secret Service enrollment,
 regional authenticated TLS pins and normal Run admission now pass. QEMU's old
 enrollment timeout is retained as historical evidence, not the active blocker.
 
-- The [controlled Linux daily journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43318173967)
-  passes actual modification, failed required check, repair, review and explicit
-  application. The same run passes signed schema7-to-schema8 upgrade,
-  admission/preparation cancellation and original-claim CAS-failure settlement.
-  Received-tool successor recovery and delayed/publication recovery remain
-  failures. The aggregate workflow is not green.
-- The [sixth funded journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43318210293)
-  at `725fb8118da9e75c5edb9b2bacac9c012bce282e` completes real directory/file
-  reads and an edit. A subsequent original Bash capture exits 127; the model
-  continues and misses the unchanged 90-second terminal bound. This does not
-  qualify result review/application or prove which command failed.
-- Read-only diagnostics retain original claim-bound outcome/exit codes and
-  bounded public progress, never raw model/tool text. The controlled tool
-  campaign now directly executes the signed `/usr/bin/node` inside Bash while
-  retaining exact stdout, empty stderr, exit and physical-retirement checks.
-  Its Linux result is still pending; do not infer it from a wiring test.
-- Script-capable signed prompts explain the actual available commands, final
-  candidate/check/repair flow and separate user review/application boundary.
-  This improves product instructions; it neither grants permissions nor proves
-  that the real-provider timeout is fixed.
+- The [current controlled Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43323840452)
+  passes the daily modification/check/repair/review/application flow, credential
+  diagnostics and admission/preparation cancellation. Its independent signed
+  Node-from-Bash probe also passes, including actual required verification,
+  exact results and resource retirement. This rules out a missing signed Node
+  capability, not the exact cause of the earlier real-provider Bash exit 127.
+- The same full verifier campaign now passes the first five cases and actual
+  reconnect/restart after the bounded read-only history fix. `ordinary_tools`
+  still reaches only seven completed tools before its original 90-second bound;
+  its final shutdown also lacks Stop2 proof (systemd reports timeout/SIGKILL).
+  Upgrade, received-tool successor and publication/delayed recovery jobs fail.
+  The aggregate workflow is not green.
+- The [seventh funded journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43324777724)
+  at `b67776ff702409d58d5882024306ffbeb8686895` completes four model turns,
+  directory discovery, two reads and an actual edit, but misses the unchanged
+  90-second terminal bound before checks, review and application. All observed
+  tools succeed, with no pre-stop scheduler failure; original writers and
+  resources join and cleanup reports zero errors. This is not full acceptance.
+- Read-only diagnostics retain original claim-bound outcomes and bounded public
+  progress, never raw model/tool text. The script-capable signed prompt explains
+  available commands, checks/repair and separate explicit application. Neither
+  the prompt nor controlled endpoint results qualify the real-provider flow.
+- Free-runner follow-up isolates observation overhead in `ordinary_tools`: its
+  authenticated reads now yield in proportion to measured read cost, capped at
+  five seconds; precise cancel/restart probes keep their cadence. A regression
+  also proves and fixes late terminal responses bypassing the original deadline.
+  The same 90-second bound now precedes terminal acceptance and still follows
+  control actions. Focused tests pass; a Linux rerun must establish any effect.
 
-Cumulative conservative reservations are CNY175, with CNY25 unreserved; these
-are not actual billed spending. Previous unresolved attempts keep their original
-reservations. A subsequent experiment uses at most USD3.50/CNY24.50, preserving
-full-request pricing and every original deadline and assertion. The second
-attempt's public TLS preflight failed before the credential step and sent zero
-model requests; only that attempt's zero-cost reservation was released. Do not
-start another paid attempt before the controlled command diagnosis is complete.
+Cumulative conservative reservations are CNY199.50, with CNY0.50 unreserved;
+these are not actual billed spending. Previous unresolved attempts keep their
+original reservations; the seventh reserved USD3.50/CNY24.50. The second attempt's
+public TLS preflight failed before the credential step and sent zero model
+requests; only that attempt's zero-cost reservation was released. No further paid
+full experiment fits the remaining reservation. The temporary Actions credential
+has been deleted and its absence verified; free controlled diagnosis continues.
 
 Local build and the full suite pass for production source `4126a7703b1255ff0664254677c1f777f8903968`
 (4,024 passed, 32 skipped). Subsequent changes affect CI, signed package data and
