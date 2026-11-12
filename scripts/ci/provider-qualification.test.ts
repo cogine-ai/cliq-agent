@@ -18,6 +18,9 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   assert.equal(input.definition.requestTokenCeiling.outputTokens, 393216);
   assert.equal(input.definition.claims.trustedUsageEvidence, false);
   assert.equal(input.definition.target.hostAscii, 'api.deepseek.com');
+  assert.deepEqual(input.definition.tls.spkiSha256Pins, [
+    '2ac9550952cd8f9b7f7baeccd3a140e4d4ae76c0a721a4e5231975f652a1a836',
+    'a19e7f96489037676b8e0804127357088934c6253f9c9131ffe58a509b259702']);
   assert.equal(input.definition.validFrom, '2026-11-12T23:59:00.000Z');
   assert.equal(input.definition.validThrough, '2026-11-13T04:00:00.000Z');
 });

@@ -22,7 +22,12 @@ export function providerSelection(now: Date) {
       prices: { cacheRead: 6000, cacheWrite: 0, input: 300000, output: 1200000 },
       requestTokenCeiling: { cacheReadTokens: 1048576, cacheWriteTokens: 0, inputTokens: 1048576, outputTokens: 393216 },
       target: { basePath: '/', hostAscii: 'api.deepseek.com', port: 443 },
-      tls: { serverNameAscii: 'api.deepseek.com', spkiSha256Pins: ['2ac9550952cd8f9b7f7baeccd3a140e4d4ae76c0a721a4e5231975f652a1a836'] },
+      // Both fixed public keys were observed after CA and hostname validation:
+      // local/Linux TLS and native GitHub run 43311719119 respectively. Never
+      // learn a replacement pin from an unauthenticated or failed connection.
+      tls: { serverNameAscii: 'api.deepseek.com', spkiSha256Pins: [
+        '2ac9550952cd8f9b7f7baeccd3a140e4d4ae76c0a721a4e5231975f652a1a836',
+        'a19e7f96489037676b8e0804127357088934c6253f9c9131ffe58a509b259702'] },
       validFrom: new Date(now.getTime() - 60_000).toISOString(),
       validThrough: new Date(now.getTime() + 4 * 60 * 60_000).toISOString() },
   });

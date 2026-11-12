@@ -80,6 +80,17 @@ These are being repaired together. The received-tool successor reaches finalize
 but misses its unchanged 30s terminal bound; upgrade fails second credential
 enrollment. Those failures remain open and are not converted into passing cuts.
 
+The follow-up candidate `4126a7703b1255ff0664254677c1f777f8903968` passes local
+build and the full suite (4,024 passed, 32 skipped), plus 33 focused native/control
+regressions for the final fixture-only changes. Its Ubuntu 24/GCC13 CI build now
+passes. The [second manual run](https://github.com/cogine-ai/cliq-agent/actions/runs/43311719119)
+authenticates the real provider's TLS certificate/hostname, but observes a
+different regional public key and correctly refuses the former single pin.
+The credential-bearing step is skipped: no credential or model request was sent.
+The configuration now explicitly includes both independently authenticated
+public keys. It does not accept arbitrary keys, disable TLS verification, or
+learn pins automatically. The real-model journey still requires a passing run.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model
