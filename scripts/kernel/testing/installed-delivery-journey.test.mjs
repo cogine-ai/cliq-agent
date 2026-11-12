@@ -154,7 +154,7 @@ test('owner history readiness shares the original status and restart absolute bu
   assert(restart.includes('const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);'));
   const wait = reader.slice(reader.indexOf('export async function waitForInstalledOwnerHistory('), reader.indexOf('/** One readiness observation'));
   assert(!/Date\.now\(\)\s*\+|5000|30000/u.test(wait), 'the caller deadline is never restarted within the reader');
-  assert(wait.includes('const history = observeInstalledOwnerHistory(stateRoot);'));
+  assert(wait.includes('const history = observeInstalledOwnerHistory(stateRoot, observer);'));
   assert(wait.includes('if (history !== undefined)'));
   assert.equal((wait.match(/Date\.now\(\) < by/gu) ?? []).length, 2, 'a completed read cannot be accepted after the original budget');
   assert(!/busy_timeout|timeout\s*:|setBusyTimeout/u.test(reader));
@@ -286,7 +286,7 @@ test('Delivery keeps retained proof reads distinct from the actual public downlo
   assert(!delivery.includes('delivery_cancel_real_inflight_verifier'));
   assert(delivery.includes('cancellation: { request: cancellation, response: cancellationResponse }'));
   assert(delivery.includes('await context.assertVerifierProcessesAbsent(identity)'));
-  assert(shared.includes('readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => inspectInstalledOwnerHistory(recipe.stateRoot, observe).owners'));
+  assert(shared.includes('readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners'));
   assert(!/new StateStore|\.transaction\(|new DatabaseSync|loadNativeStateOwner|process\.env/u.test(delivery));
 });
 

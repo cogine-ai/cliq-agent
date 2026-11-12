@@ -98,3 +98,12 @@ Do not dispatch beyond that total or treat an absent report as zero cost.
 Prior unresolved USD 5 attempts retain their original CNY 35 reservations.
 The fixed model, TLS pin and prices in `provider-qualification.ts` must be
 reverified before a later experiment; they are not automatically updated.
+
+The separate `Linux installed signed Node from Bash` job runs one fixed
+controlled-endpoint case through the same signed installation and cleanup owner.
+It verifies the real child Node command, private edits, required Node verifier,
+original result/replay/retirement and secret scanning. It uses no real-provider
+credential and has a ten-minute outer limit. Its bounded report explicitly does
+not qualify the full verifier/restart campaign, I1 or the provider flow. The
+original full campaign and its assertions remain independently required for
+their respective qualification claims.

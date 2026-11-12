@@ -37,6 +37,7 @@ case ${1:-} in
     }
     probe_campaign_kind=run-journey; probe_run_driver_mode=--runtime-upgrade-campaign; probe_upgrade_source=$2; shift 2 ;;
   --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
+  --run-builtin-node-probe) probe_campaign_kind=run-journey; probe_run_driver_mode=--builtin-node-campaign; shift ;;
   --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
   --run-permission-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--permission-campaign; shift ;;
   --run-mcp-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-campaign; shift ;;
@@ -123,7 +124,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   printf 'local model option: --run-local-inference-journey PINNED_INPUT_DIRECTORY ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
@@ -160,7 +161,7 @@ readonly probe_publication_observer_source="$probe_source_dir/testing/publicatio
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
 if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-runtime-upgrade.ts"
-elif [[ "$probe_run_driver_mode" = --verifier-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --verifier-campaign || "$probe_run_driver_mode" = --builtin-node-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
 elif [[ "$probe_run_driver_mode" = --permission-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-permission-journey.ts"

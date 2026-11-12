@@ -27,7 +27,9 @@ export function installedToolsCalls(before: string, after: string) {
 export function installedReadOnlyGitCall(after: string) {
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   return { callId: 'owned-installed-private-git-readonly', name: 'bash', input: { command:
-    "set -eu\n/usr/bin/git status --porcelain\n/usr/bin/git diff -- example.txt\n" +
+    "set -eu\n" +
+    "/usr/bin/node --no-addons -e \"process.stdout.write('CLIQ_SIGNED_NODE_FROM_BASH_OK\\n')\"\n" +
+    "/usr/bin/git status --porcelain\n/usr/bin/git diff -- example.txt\n" +
     "if GIT_OPTIONAL_LOCKS=1 /usr/bin/git add -- example.txt; then printf '%s\\n' 'UNEXPECTED_GIT_WRITE'; exit 42; fi\n" +
     "printf '%s' 'temporary authorized worktree write' > example.txt\n" +
     `printf '%s' ${quote(after)} > example.txt\n` + "printf '%s\\n' 'CLIQ_PRIVATE_GIT_READ_ONLY_OK'\n" } };

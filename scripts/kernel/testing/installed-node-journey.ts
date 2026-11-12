@@ -209,14 +209,15 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
 // Retained verifier-history readers below use the existing full-cut BUSY wait
 // with a fixed one-second diagnostic ceiling. Only actual SQLITE_BUSY may
 // yield; schema/identity/fence failures and all outer deadlines stay intact.
-export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery' | 'mcp-status-user-replay',
+export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'builtin-node-probe' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery' | 'mcp-status-user-replay',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
     npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   const mcpStatusUserReplay = journeyKind === 'mcp-status-user-replay', mcpRecoveryJourney = journeyKind === 'mcp-recovery' || mcpStatusUserReplay;
   const mcpJourney = journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || mcpRecoveryJourney;
-  assert(mcpJourney || journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' ||
+  assert(mcpJourney || journeyKind === 'builtin-node-probe' || journeyKind === 'verifier' || journeyKind === 'delivery' || journeyKind === 'provider' || journeyKind === 'daily' ||
     journeyKind === 'provider-daily' || journeyKind === 'permission');
+  if (journeyKind === 'builtin-node-probe') assert.deepEqual(Object.keys(options), [], 'the builtin probe has one fixed real installed case');
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
   if (mcpJourney) assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
@@ -287,6 +288,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       actualProviderQualified: false });
   }
   if (options.npmDependencyArchive) report.dependencyFixtureProfile = INSTALLED_DEPENDENCY_PROFILE;
+  if (journeyKind === 'builtin-node-probe') Object.assign(report, {
+    format: 'cliq-installed-builtin-node-probe-v1', ordinaryGitFixtureProfile: 'signed_node_from_bash_and_readonly_git_v1',
+    scope: 'one actual signed Linux ordinary Git Run also executes /usr/bin/node from Bash, edits privately and passes the required Node verifier; owned HTTPS, not full verifier/restart/provider/I1 qualification' });
   if (journeyKind === 'delivery') Object.assign(report, {
     scope: 'actual signed Linux explicit Delivery from verified yolo sources, direct-policy publication, noOp, real verifier merge, cancel and public reconnect/restart; not interactive ask/deny, paid provider, release, reboot or complete I1 qualification',
     interactiveApprovalQualified: false, preciseClaimedCloseCutQualified: false,
@@ -827,6 +831,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           if (sourceKind === 'ordinary_git') {
             const reply = body.messages.filter((entry: any) => entry.role === 'tool' && entry.tool_call_id === installedReadOnlyGitCall(afterText).callId);
             assert.equal(reply.length, 1); assert(reply[0].content.includes('CLIQ_PRIVATE_GIT_READ_ONLY_OK'));
+            assert(reply[0].content.includes('CLIQ_SIGNED_NODE_FROM_BASH_OK'));
           }
         }
         if (kind === 'required_repair' && ordinal === 3) {
@@ -1885,7 +1890,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         exactVerifierProcessLifetimesIndependentlyAbsent: proof !== undefined, ...(proof ? { proof } : toolProof ? { toolProof, skillProof } : { stopProof }) });
       return completedSource;
     };
-    if (journeyKind === 'verifier') {
+    if (journeyKind === 'builtin-node-probe') {
+      await createSource('ordinary_git');
+      assert.equal(postCount, 2); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+      assert.equal(originalPublicResultBytes.size, 2);
+    } else if (journeyKind === 'verifier') {
     for (const kind of cases) await createSource(kind);
     assert.equal(postCount, 10); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
     assert.equal(originalPublicResultBytes.size, 8, 'all four successful Runs must download their own result and diff');

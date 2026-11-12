@@ -173,6 +173,18 @@ const workflowHashes = {
   foundation: ['kernel-foundation.yml', '85cdc704ce6b2e38d685ac54d0cf42d82fc63e8c1607756d609fb3dbff8108f2'],
   permission: ['kernel-permission.yml', 'ade44fa27919c6d692b6a1c910933975c061cba8745a74d80df269fa6187952b'],
 };
+test('the independent Node probe cannot silently change its free runner, bounds or original entry', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  const probe = workflow.match(/^  linux-installed-builtin-node:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m)?.[0];
+  assert(probe);
+  for (const changed of [probe.replace('ubuntu-22.04', 'self-hosted'),
+    probe.replace('timeout-minutes: 10', 'timeout-minutes: 11'),
+    probe.replace('--run-builtin-node-probe', '--run-verifier-journey'), '']) {
+    assert.notEqual(changed, probe);
+    assert.throws(() => projectQualificationWorkflow(workflow.replace(probe, changed)));
+  }
+  assert.throws(() => projectQualificationWorkflow(workflow.replace(probe, probe + probe)));
+});
 function verifyWorkflow(workflow, kind) {
   const original = projectQualificationWorkflow(workflow, kind);
   assert.equal(createHash('sha256').update(original).digest('hex'), workflowHashes[kind][1],

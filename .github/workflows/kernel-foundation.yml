@@ -1151,6 +1151,40 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  linux-installed-builtin-node:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}
+    name: Linux installed signed Node from Bash
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check the original tool grammar and fixed probe wiring
+        run: node --test scripts/kernel/testing/installed-tools-result.test.mjs
+      - name: Install actual guest, transport and Secret Service prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Execute the signed child Node and retain the original Run checks and joins
+        shell: bash
+        run: |
+          probe_node=$(realpath "$(command -v node)")
+          sudo /bin/bash scripts/kernel/qualify-systemd-user.sh --run-builtin-node-probe "$probe_node" "$RUNNER_TEMP/cliq-installed-builtin-node"
+      - name: Retain bounded actual probe and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-builtin-node-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cliq-installed-builtin-node/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
   linux-installed-verifier:
     needs: ci-route
     if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}
