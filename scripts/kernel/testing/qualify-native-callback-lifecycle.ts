@@ -42,11 +42,13 @@ async function pin(filename: string, maximum = 132 * 1024 * 1024) {
 
 /** Test-build input only. Keep the original Git/archive bytes independently
  * pinned, then run both native sources with the same current, exact locked
- * tooling. This is an explicit source-view overlay, never original-tree proof. */
-export async function overlayCallbackDependencyInputs(root: string, repository: string,
+ * tooling and carrier builder. The callback tests, native recipes and native
+ * sources remain independently pinned. This is an explicit build-input overlay,
+ * never original-tree proof. */
+export async function overlayCallbackBuildInputs(root: string, repository: string,
   inventory: Array<{ path: string; size: number; sha256: string }>) {
   const inputs = [];
-  for (const relative of ['package.json', 'package-lock.json'] as const) {
+  for (const relative of ['package.json', 'package-lock.json', 'scripts/kernel/testing/supervisor-sea-builder.ts'] as const) {
     const member = inventory.find(row => row.path === relative); assert(member);
     const originalBytes = await heldBytes(path.join(root, relative), 16 * 1024 * 1024);
     assert.equal(originalBytes.length, member.size); assert.equal(sha(originalBytes), member.sha256);
@@ -54,7 +56,7 @@ export async function overlayCallbackDependencyInputs(root: string, repository: 
     inputs.push({ member, bytes, record: { path: relative, originalSha256: member.sha256,
       originalBytes: member.size, executionSha256: sha(bytes), executionBytes: bytes.length } });
   }
-  // Validate both original and replacement inputs before changing either file.
+  // Validate every original and replacement input before changing any file.
   for (const { member, bytes } of inputs) {
     await writeFile(path.join(root, member.path), bytes);
     assert((await heldBytes(path.join(root, member.path), 16 * 1024 * 1024)).equals(bytes));
@@ -102,8 +104,8 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
       if (name === 'baseline') await writeFile(path.join(root, relative), bytes); // Explicit fixture overlay, never a Git-tree claim.
       const row = inventory.find(row => row.path === relative)!; row.size = bytes.length; row.sha256 = expected;
     }
-    const dependencyFixtureOverlay = name === 'baseline'
-      ? await overlayCallbackDependencyInputs(root, repository, inventory) : [];
+    const buildInputOverlay = name === 'baseline'
+      ? await overlayCallbackBuildInputs(root, repository, inventory) : [];
     const lock = inventory.find(row => row.path === 'package-lock.json')!;
     assert.equal(lock.sha256, sha(await heldBytes(path.join(repository, 'package-lock.json'), 16 * 1024 * 1024)));
     for (const member of inventory) await chmod(path.join(root, member.path), member.mode === '100755' ? 0o555 : 0o444);
@@ -121,7 +123,7 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
     const before = await readQualificationSource(source);
     const dependencies = await readQualificationDependencyInventory(source); stage = 'source_inventory';
     return { source, before, dependencies, record: { name, originalGitCommit: revision, originalGitTree: expectedTree,
-      fixtureOverlay: name === 'baseline' ? overlays : {}, dependencyFixtureOverlay,
+      fixtureOverlay: name === 'baseline' ? overlays : {}, buildInputOverlay,
       sourceMembersMatchUnmodifiedGitTree: name !== 'baseline',
       nativeSha256: name === 'baseline' ? original.native : candidateNative, archive: await pin(archiveFile),
       manifest: await pin(manifestPath), provenance: before, dependencies } };
@@ -131,13 +133,16 @@ export async function qualifyNativeCallbackLifecycle(destination: string) {
     assert.match(current, /^[0-9a-f]{40}$/u); assert.match(currentTree, /^[0-9a-f]{40}$/u);
     const baseline = await prepareView('baseline', original.commit, original.tree), candidate = await prepareView('candidate', current, currentTree);
     const unchanged = [...suite, 'scripts/kernel/build-linux-credential-platform.mjs', 'scripts/kernel/build-linux-model-broker.mjs',
-      'scripts/kernel/testing/supervisor-sea-builder.ts', 'scripts/kernel/testing/credential-secret-service-fixture.h'];
+      'scripts/kernel/testing/credential-secret-service-fixture.h'];
     report.originalRecipeAndTestFiles = [];
     for (const relative of unchanged) {
       const bytes = await heldBytes(path.join(baseline.source.root, relative), 16 * 1024 * 1024);
       assert((await heldBytes(path.join(candidate.source.root, relative), 16 * 1024 * 1024)).equals(bytes));
       report.originalRecipeAndTestFiles.push({ path: relative, bytes: bytes.length, sha256: sha(bytes) });
     }
+    const carrierBuilder = 'scripts/kernel/testing/supervisor-sea-builder.ts';
+    assert((await heldBytes(path.join(baseline.source.root, carrierBuilder), 16 * 1024 * 1024))
+      .equals(await heldBytes(path.join(candidate.source.root, carrierBuilder), 16 * 1024 * 1024)));
     stage = 'dependencies'; assert.equal(baseline.dependencies.contentDigest, candidate.dependencies.contentDigest);
     report.dependencyMode = 'independent_shared_current_lock_integrity_no_scripts';
     report.identicalDependencyContentDigest = baseline.dependencies.contentDigest; report.views = [baseline.record, candidate.record];
