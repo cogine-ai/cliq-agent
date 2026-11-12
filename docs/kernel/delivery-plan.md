@@ -81,6 +81,18 @@ experiment retains at most 128 already-decoded public status/counter/timing
 samples to distinguish polling cost from advancing or stagnant execution. It
 adds no request, retry, model text, timeout extension or qualification authority.
 
+The fourth attempt ([run](https://github.com/cogine-ai/cliq-agent/actions/runs/43314512529),
+`96427503933aae5628710e0769c526316e204b6a`) shows continuous progress through
+model/tool steps, reaching Journal sequence 26. Its 46 complete authenticated
+status reads each take roughly 1.7 seconds; there is no pre-Stop scheduler failure.
+It still fails the original terminal deadline. The fixture now yields between
+observations for twice the measured read duration (250ms floor, 5s ceiling),
+retaining the same 90s terminal and 30s request checks. This changes observation
+load, not task authority or the acceptance deadline. Incremental, bounded Journal
+phase summaries distinguish completed/failed/unknown operations without retaining
+model/tool text. Whether reduced observer load fixes the real journey must still
+be measured; production behavior is unchanged.
+
 The same-source [ordinary Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302398092)
 passes the controlled daily modification/check/repair/review/application journey,
 credential authority/finalizer shutdown, admission/preparation shutdown and

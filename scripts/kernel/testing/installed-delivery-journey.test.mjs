@@ -227,10 +227,10 @@ test('verifier and Delivery are fixed consumers of one real installed lifecycle'
     assert(!entry.includes('buildInstalledSupervisorPackage('));
   }
   assert.equal((shared.match(/await buildInstalledSupervisorPackage\(/gu) ?? []).length, 1);
-  assert.equal((shared.match(/const setup = credential\(/gu) ?? []).length, 1);
+  assert.equal((shared.match(/const setup = await joinedFixtureCommand\(/gu) ?? []).length, 1);
   assert.equal((shared.match(/await runOwnedEnrollDiagnostic\(/gu) ?? []).length, 1);
   assert.equal((shared.match(/await scanCredentialSecretCorpus\(/gu) ?? []).length, 1);
-  for (const assertion of ["assert.equal(stopped.TimeoutStopUSec, '2s')", 'originalDeadlineMs: 60000',
+  for (const assertion of ["assert.equal(stopped.TimeoutStopUSec, '2s')", 'const enrollmentDeadline = delayedBootstrap ? 180_000 : 60_000;', 'originalDeadlineMs: enrollmentDeadline',
     "'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window'",
     "'installed image handoff exceeded the original 30-second restart budget'"])
     assert(shared.includes(assertion), 'original deadline/retirement assertion remains in the actual shared owner');
@@ -325,7 +325,11 @@ test('the cleanup crash is an additional strict physical subcase, never another 
   assert(fixture.includes('joinedAt <= proof.probeStartedAt'));
   assert(fixture.includes('await observer.close()')); assert(fixture.includes('originalReceiptCasObjectAbsenceQualified: false, rebootQualified: false'));
   assert(shell.includes('readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"'));
-  assert.equal((observer.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
+  const cleanup = observer.slice(observer.indexOf('int main(int argc, char **argv) {'));
+  const rollback = observer.slice(observer.indexOf('static int rollback_cut('), observer.indexOf('int main(int argc, char **argv) {'));
+  assert(cleanup.includes('if (rollback) return rollback_cut('));
+  assert.equal((cleanup.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
+  assert.equal((rollback.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
   assert(observer.includes('IN_CREATE | IN_DELETE | IN_ONLYDIR')); assert(observer.includes('named.st_nlink != 0'));
   assert(!/SIGSTOP|SIGCONT|ptrace\(|process\.kill\(|kill\(/u.test(observer));
 });

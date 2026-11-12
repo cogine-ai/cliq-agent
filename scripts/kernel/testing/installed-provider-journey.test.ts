@@ -115,7 +115,7 @@ test('UNKNOWN reconciliation remains an explicit failed journey without auto-pro
     refusedAt('execution')(error); assert(error instanceof InstalledProviderJourneyError);
     assert.equal(error.progress.length, 1);
     const cut = error.progress[0]!;
-    assert.deepEqual(Object.keys(cut).sort(), ['elapsedMs', 'itemSeq', 'journalSeq', 'nextStep', 'readElapsedMs', 'revision', 'stage', 'status']);
+    assert.deepEqual(Object.keys(cut).sort(), ['elapsedMs', 'itemSeq', 'journalSeq', 'nextStep', 'operations', 'readElapsedMs', 'revision', 'stage', 'status']);
     assert.equal(cut.status, 'waiting'); assert.equal(cut.stage, 'execution');
     assert.equal(cut.journalSeq, 0); assert.equal(cut.itemSeq, 0);
     assert(Number.isSafeInteger(cut.elapsedMs) && cut.elapsedMs >= 0);
@@ -195,4 +195,31 @@ test('actual shared accounting retains verified repairs independently from invoc
   assert(source.includes('const sourceVerification = await context.verifySource(source, session, fixedMath)'));
   assert(source.includes('await accounting(source, sourceVerification.repairCount)'));
   assert(!source.includes('accounting(source, source.snapshot.run.repairCount)'));
+});
+
+
+test('terminal observation yields after expensive authenticated reads without extending the original deadline or advancing a wait', async () => {
+  // Exercise only fixture scheduling with inert cuts; no installed authority.
+  const source = readFileSync(new URL('./installed-provider-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
+  let terminal: ts.FunctionDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'terminal') { assert.equal(terminal, undefined); terminal = node; }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(terminal);
+  const script = ts.transpileModule(terminal.getText(parsed) + '\nglobalThis.terminal = terminal;',
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const mode of ['complete', 'deadline', 'waiting'] as const) {
+    let now = 0, calls = 0; const waits: number[] = [];
+    const context = vm.createContext({ TERMINAL_MS: 90_000, Date: { now: () => now }, performance: { now: () => now },
+      started: 0, stage: 'execution', progress: [], check: assert.ok,
+      send: async () => { calls++; now += mode === 'deadline' ? 90_000 : 1700;
+        return { snapshot: { run: { status: mode === 'waiting' ? 'waiting' : calls === 1 ? 'running' : 'succeeded',
+          nextStep: 'agent', revision: calls } }, journal: [], nextJournalSeq: 0, highWaterJournalSeq: calls, highWaterItemSeq: calls }; },
+      delay: async (ms: number) => { waits.push(ms); now += ms; } });
+    vm.runInContext(script, context);
+    if (mode === 'complete') { await context.terminal('inert'); assert.equal(calls, 2); assert.deepEqual(waits, [3400]); }
+    else { await assert.rejects(context.terminal('inert')); assert.equal(calls, 1); assert.deepEqual(waits, []); }
+  }
 });

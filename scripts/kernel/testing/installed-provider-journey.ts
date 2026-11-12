@@ -34,6 +34,8 @@ export type ProviderJourneyStage = 'setup' | 'model_setup' | 'workspace' | 'sess
 export type ProviderJourneyProgress = Readonly<{
   stage: ProviderJourneyStage; elapsedMs: number; readElapsedMs: number; status: Cut['snapshot']['run']['status'];
   nextStep: Cut['snapshot']['run']['nextStep']; revision: number; journalSeq: number; itemSeq: number;
+  operations: ReadonlyArray<Readonly<{ seq: number; kind: Cut['journal'][number]['opKind'];
+    phase: Cut['journal'][number]['phase']; hasError: boolean }>>;
 }>;
 export class InstalledProviderJourneyError extends Error {
   readonly code = 'INSTALLED_PROVIDER_JOURNEY_REFUSED';
@@ -167,20 +169,27 @@ async function runProviderJourney(journey: Journey) {
 
     async function terminal(runId: string): Promise<Cut> {
       const by = Date.now() + TERMINAL_MS;
+      let afterJournalSeq = 0;
       for (;;) {
         check(Date.now() < by);
         const reading = performance.now();
-        const cut = await send({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, journalLimit: 1, checkpointLimit: 1 }, 'run.get');
+        const cut = await send({ protocolVersion: 1, method: 'run.get', runId, afterJournalSeq, itemLimit: 1, journalLimit: 32, checkpointLimit: 1 }, 'run.get');
         const observed = performance.now();
         progress.push({ stage, elapsedMs: Math.round(observed - started), readElapsedMs: Math.round(observed - reading),
           status: cut.snapshot.run.status, nextStep: cut.snapshot.run.nextStep, revision: cut.snapshot.run.revision,
-          journalSeq: cut.highWaterJournalSeq, itemSeq: cut.highWaterItemSeq });
+          journalSeq: cut.highWaterJournalSeq, itemSeq: cut.highWaterItemSeq,
+          operations: cut.journal.map(row => ({ seq: row.seq, kind: row.opKind, phase: row.phase, hasError: row.errorRef !== undefined })) });
+        afterJournalSeq = cut.nextJournalSeq;
         if (progress.length > 128) progress.shift();
         check(Date.now() < by);
         if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) return cut;
         // A wait is visible refusal to finish this particular autonomous case.
         // Never approve, probe, replace an admission or guess UNKNOWN here.
-        check(cut.snapshot.run.status !== 'waiting'); await delay(250);
+        check(cut.snapshot.run.status !== 'waiting');
+        // A full authenticated observation can cost more than its old 250ms
+        // pause. Give the actual task room to run instead of saturating the
+        // same runner with image checks. No deadline or response check changes.
+        await delay(Math.min(5000, Math.max(250, 2 * (observed - reading))));
       }
     }
     async function fullCut(runId: string): Promise<Cut> {
