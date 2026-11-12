@@ -500,9 +500,10 @@ test('concurrent native worker binds preserve the process umask in an isolated c
   const workerCode = `
     const { parentPort, workerData } = require('node:worker_threads');
     (async () => {
-      const { tsImport } = await import('tsx/esm/api');
-      const { loadNativeStateOwner } = await tsImport(workerData.nativeOwnerUrl, workerData.nativeOwnerUrl);
-      const native = await loadNativeStateOwner();
+      // Exercise the same actual native image selected by the parent, as in
+      // the worker teardown cases above. Starting 32 TypeScript compilers is
+      // unrelated to the simultaneous native binds and their unchanged bound.
+      const native = require(workerData.helperPath);
       const held = native.acquireLock(workerData.root, true);
       try {
         parentPort.postMessage({ kind: 'ready' });
@@ -532,7 +533,7 @@ test('concurrent native worker binds preserve the process umask in an isolated c
         const root = path.join(process.argv[1], String(index));
         await mkdir(root, { mode: 0o700 });
         const worker = new Worker(workerCode, { eval: true, execArgv: [],
-          workerData: { root, gate, nativeOwnerUrl: process.argv[2] } });
+          workerData: { root, gate, helperPath: process.argv[2] } });
         // Capture exit before any readiness/outcome wait: an exit can race its message.
         const exit = once(worker, 'exit');
         const started = once(worker, 'message');
@@ -557,7 +558,7 @@ test('concurrent native worker binds preserve the process umask in an isolated c
     }
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', script, root,
-    new URL('./native-owner.ts', import.meta.url).href], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    STATE_OWNER_NATIVE_PATH], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exited = once(child, 'exit');
   const reported = once(child, 'message');
   void exited.catch(() => {});

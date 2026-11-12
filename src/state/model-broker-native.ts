@@ -6,9 +6,18 @@ import { KernelStorageError } from './errors.js';
 
 /** Fixed diagnosis from the actual installed native adapter, never authority,
  * a transport outcome proof, remote text, or permission to refund/retry. */
+export const MODEL_BROKER_REFUSAL_REASONS = Object.freeze(['broker_response_refused', 'broker_tls_refused',
+  'broker_transport_interrupted', 'broker_cancelled_or_expired', 'broker_release_fenced',
+  'broker_worker_unavailable', 'credential_redemption_refused', 'broker_operation_refused'] as const);
+export type ModelBrokerRefusalReason = typeof MODEL_BROKER_REFUSAL_REASONS[number];
+export function modelBrokerRefusalReason(value: unknown): ModelBrokerRefusalReason | undefined {
+  return typeof value === 'string' && (MODEL_BROKER_REFUSAL_REASONS as readonly string[]).includes(value)
+    ? value as ModelBrokerRefusalReason : undefined;
+}
 export class InstalledModelBrokerRefusalError extends KernelStorageError {
-  readonly reason = 'broker_response_refused' as const;
-  constructor() { super('RECOVERY_REQUIRED', 'installed model broker refused the response'); }
+  constructor(readonly reason: ModelBrokerRefusalReason = 'broker_response_refused') {
+    super('RECOVERY_REQUIRED', 'installed model broker refused an operation');
+  }
 }
 export class InstalledLocalModelNotListeningError extends KernelStorageError {
   constructor() { super('RECOVERY_REQUIRED', 'the original private local inference listener is not ready'); }

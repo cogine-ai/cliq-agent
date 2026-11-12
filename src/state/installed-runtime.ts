@@ -46,7 +46,7 @@ import { checkCanonicalBytes, validateBundle, validateTrustStore, validateInstal
 import { bindLocalInferenceRuntime, localInferenceRuntimeRoots } from './local-inference-runtime.js';
 import { decodeInstalledModelAuthorityClosure, verifyInstalledModelAuthority,
   type VerifiedInstalledModelAuthority } from '../model/installed-authority.js';
-import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError,
+import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH, InstalledModelBrokerRefusalError, modelBrokerRefusalReason,
   InstalledLocalModelNotListeningError, type NativeLocalHealthTransport, type ModelBrokerBinding, type NativeModelBrokerBinding,
   type NativeModelTransport, type NativeModelNoReleaseFence, type ModelBrokerClosed } from './model-broker-native.js';
 import { assertInstalledLocalInferencePeer } from '../sandbox/linux-worker.js';
@@ -3012,8 +3012,10 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                     const failure = new ResourceRetirementError('model broker resources did not retire', undefined);
                     rememberRetirement(failure); throw failure;
                   }
-                  if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MODEL_BROKER' &&
-                      (error as { brokerCode?: unknown }).brokerCode === 'broker_response_refused') throw new InstalledModelBrokerRefusalError();
+                  if ((error as { code?: unknown; brokerCode?: unknown } | null)?.code === 'ERR_CLIQ_MODEL_BROKER') {
+                    const reason = modelBrokerRefusalReason((error as { brokerCode?: unknown }).brokerCode);
+                    if (reason) throw new InstalledModelBrokerRefusalError(reason);
+                  }
                   throw new KernelStorageError('RECOVERY_REQUIRED', 'installed model broker refused an operation');
                 };
                 const invoke = <T>(operation: () => Promise<T>, retiring = false): Promise<T> => {

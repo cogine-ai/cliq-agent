@@ -357,11 +357,11 @@ static int ka_read_hash_chunk(kernel_archive *held, int compare) {
     if (fstat(held->image_fd, &observed) != 0 || !source_metadata_same(&observed, &held->hash_before)) return -1;
     uint64_t remaining = held->byte_count - held->offset;
     size_t amount = remaining < sizeof(bytes) ? (size_t)remaining : sizeof(bytes), consumed = 0;
-    while (consumed < amount) {
-        ssize_t count = pread(held->image_fd, bytes + consumed, amount - consumed, (off_t)(held->offset + consumed));
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0 || (size_t)count > amount - consumed) return -1;
-        consumed += (size_t)count;
+    if (amount) {
+        ssize_t count;
+        do { count = pread(held->image_fd, bytes, amount, (off_t)held->offset); } while (count < 0 && errno == EINTR);
+        if (count <= 0 || (size_t)count > amount) return -1;
+        consumed = (size_t)count;
     }
     sha256_update(&held->hash, bytes, consumed);
     held->offset += consumed;

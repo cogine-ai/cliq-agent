@@ -215,7 +215,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
     mcpStdioBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-stdio-broker.node'));
     const compileMcpFixture = async (statusOnly: boolean) => {
       const filename = path.join(fixture, statusOnly ? 'mcp-static-status-adapter-fixture' : 'mcp-static-server-fixture');
-      const compiled = spawnSync(process.env.CLIQ_WORKER_CC ?? 'musl-gcc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+      const compiled = spawnSync('musl-gcc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
         '-static', '-fno-ident', `-ffile-prefix-map=${repository}=.`, '-Wl,--build-id=none', '-s',
         ...(statusOnly ? ['-DCLIQ_MCP_RECOVERY_STATUS_ONLY=1'] : []),
         path.join(repository, 'native/linux/mcp-stdio-server-fixture.c'), '-o', filename],

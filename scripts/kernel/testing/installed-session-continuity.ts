@@ -5,13 +5,15 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonic
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import type { RunSubmitRequest } from '../../../src/kernel/control-submit.js';
-import type { ArtifactDescriptorV1, SessionContextProjection } from '../../../src/kernel/types.js';
+import type { ArtifactDescriptorV1, SessionContextSegment } from '../../../src/kernel/types.js';
+import { decodeSessionContextHeadV2, SESSION_CONTEXT_PAGE_BYTES } from '../../../src/kernel/session-context-pages.js';
+import { walkSessionContextSegments } from '../../../src/kernel/session-context-page-reader.js';
 import type { SessionHandoffV1 } from '../../../src/kernel/session-continuity.js';
 import { controlWireRecord, controlWireInteger } from '../../../src/kernel/control-wire-data.js';
 
 type Data = Record<string, any>;
 type Inputs = Readonly<{
-  send(request: Data): Promise<Data>; readCas(ref: string): Promise<Buffer>; closeClient(): Promise<void>;
+  send(request: Data): Promise<Data>; readCas(ref: string, maximum?: number): Promise<Buffer>; closeClient(): Promise<void>;
   parentSessionId: string; submission: Omit<RunSubmitRequest, 'requestId' | 'requestDigest' | 'admissionKey' | 'sessionId' | 'expectedContextRevision' | 'objective'>;
   registerSubmission(request: Data): void; counts(): readonly [number, number, number]; providerHealthy(): boolean;
   enableResume(summaryUtf8: string, retainedUtf8: string): void;
@@ -27,16 +29,32 @@ export function assertInstalledSessionResumeBudget(value: unknown, expected: { m
   assert.deepEqual(canonicalJsonBytes(data), canonicalJsonBytes(expected));
 }
 
+/** Read-only fixture composition of the production bounded page decoder. */
+export async function readInstalledSessionFirstSegment(ref: string, readCas: Inputs['readCas']) {
+  const read = async (ref: string, maximum: number) => {
+    const bytes = await readCas(ref, maximum);
+    assert(bytes.length <= maximum && sha256Bytes(bytes) === ref); return bytes;
+  };
+  const bytes = await read(ref, SESSION_CONTEXT_PAGE_BYTES);
+  const head = decodeSessionContextHeadV2(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
+  assert(canonicalJsonBytes(head).equals(bytes));
+  let first: SessionContextSegment | undefined;
+  for await (const segment of walkSessionContextSegments({ readBoundedBytes: read, assertReadActive() {} }, head)) {
+    first = segment; break;
+  }
+  return { head, first };
+}
+
 /** Genuine installed consumer only. This adds no StateOwner, permission,
  * resource proof or alternate execution recipe; every new effect goes through
  * the existing authenticated public admission and physical result verifier. */
 export async function qualifyInstalledSessionContinuity(input: Inputs): Promise<Readonly<Data>> {
   const beforeCounts = input.counts(); assert.equal(beforeCounts[0], 4); assert(input.providerHealthy());
   const parentCut = accepted(await input.send(sessionGet(input.parentSessionId)), 'session.get'), parent = parentCut.snapshot.session;
-  const projection = parseJsonStrict((await input.readCas(parent.contextProjectionRef)).toString('utf8')) as SessionContextProjection;
+  const { head: projection, first: raw } = await readInstalledSessionFirstSegment(parent.contextProjectionRef, input.readCas);
   assert.equal(projection.sessionId, parent.id); assert.equal(projection.contextRevision, parent.contextRevision);
   assert.equal(projection.projectionDigest, digestOmitting(projection, 'projectionDigest'));
-  const raw = projection.segments[0]; assert(raw && raw.kind === 'raw' && raw.fromItemSeq === 1 && raw.items.length > 0);
+  assert(raw && raw.kind === 'raw' && raw.fromItemSeq === 1 && raw.items.length > 0);
   const retained = raw.items[0]!;
   const compact = mutation({ protocolVersion: 1, method: 'session.compact', requestId: '019a0012-0000-7000-8000-000000000900',
     sessionId: parent.id, expectedContextRevision: parent.contextRevision, fromItemSeq: raw.fromItemSeq, throughItemSeq: raw.throughItemSeq,

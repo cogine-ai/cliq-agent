@@ -42,6 +42,8 @@ jobs:
           scripts/kernel/testing/installed-provider-journey.test.ts
       - name: Install the original native, systemd and credential prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Verify the public provider TLS peer without a credential
+        run: node --import tsx scripts/ci/provider-tls-preflight.ts
       - name: Run the original installed provider journey once
         env:
           CLIQ_PROVIDER_API_KEY: ${{ secrets.provider_key }}
@@ -59,5 +61,6 @@ jobs:
             ${{ runner.temp }}/cliq-installed-provider/runner-baseline-after.json
             ${{ runner.temp }}/cliq-installed-provider/run-filesystem.json
             ${{ runner.temp }}/cliq-provider-invocation.json
+            ${{ runner.temp }}/cliq-provider-tls.json
           if-no-files-found: warn
           retention-days: 7

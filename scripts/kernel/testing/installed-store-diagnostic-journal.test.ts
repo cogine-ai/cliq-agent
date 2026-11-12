@@ -10,6 +10,23 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('original broker diagnosis retains only fixed reasons and refuses foreign or expanded records', async () => {
+  const { readInstalledModelBrokerDiagnosticJournal: read } = await import('./installed-store-diagnostic-journal.js');
+  const { MODEL_BROKER_REFUSAL_REASONS, modelBrokerRefusalReason } = await import('../../../src/state/model-broker-native.js');
+  const row = { diagnosticOnly: true, scope: 'installed-model-broker', runId: 'r', opId: 'o', attempt: 0 };
+  const messages = MODEL_BROKER_REFUSAL_REASONS.map(reason => JSON.stringify({ ...row, reason, dispatchId: 'd', dispatchJournalSeq: 1 }));
+  const observed = read(journal(messages), sender)!;
+  assert.deepEqual(observed, { reasons: [...MODEL_BROKER_REFUSAL_REASONS] });
+  assert(Object.isFrozen(observed) && Object.isFrozen(observed.reasons));
+  assert.equal(read(journal(), sender), undefined);
+  assert.equal(modelBrokerRefusalReason({ toString() { throw Error('must not coerce'); } }), undefined);
+  for (const change of [{ reason: 'remote text' }, { secret: 'private' }, { attempt: -1 },
+    { dispatchId: 'd' }, { dispatchJournalSeq: 1 }, { diagnosticOnly: false }])
+    assert.throws(() => read(journal([JSON.stringify({ ...row, reason: MODEL_BROKER_REFUSAL_REASONS[0], ...change })]), sender));
+  for (const change of [{ uid: 1001 }, { pid: 2001 }, { invocationId: 'b'.repeat(32) }])
+    assert.throws(() => read(journal(messages), { ...sender, ...change }));
+});
+
 test('one fixed original Stop phase is inert immutable retained data, not a completed task', async () => {
   const { readInstalledStoreStopPhaseJournal } = await import('./installed-store-diagnostic-journal.js');
   const observed = readInstalledStoreStopPhaseJournal(journal(['CLIQ_STORE_STOP_PHASE_V1:drive_agent']), sender);

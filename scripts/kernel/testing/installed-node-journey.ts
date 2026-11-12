@@ -79,7 +79,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledAssemblyWorkJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -1278,7 +1278,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         send: sendMcp, nextId, readCas, download: readPublicArtifact, mark, assertOriginalProcessAbsent: absent,
         async assertWorkerFree(runId, cut) {
           assert.equal(cut.snapshot.run.id, runId); assert.equal(cut.snapshot.run.activeWorkerLaunchId, undefined);
-          assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+          assert.deepEqual(canonicalJsonBytes(cut.snapshot.run.budgetReserved),
+            canonicalJsonBytes({ modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
           const observed = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
           for (const launchId of observed.launchIds) {
             const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
@@ -1415,7 +1416,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       };
       const workersRetired = async (runId: string, cut: Record<string, any>) => {
         assert.equal(cut.snapshot.run.id, runId); assert.equal(cut.snapshot.run.activeWorkerLaunchId, undefined);
-        assert.deepEqual(cut.snapshot.run.budgetReserved, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+        assert.deepEqual(canonicalJsonBytes(cut.snapshot.run.budgetReserved),
+          canonicalJsonBytes({ modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
         const latest = new Map<string, Record<string, any>>();
         for (const row of cut.journal) latest.set(`${row.opId}:${row.attempt}`, row);
         assert([...latest.values()].every(row => row.phase === 'completed' || row.phase === 'failed'));
@@ -2675,9 +2677,13 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
                 assert.equal(log.signal, null); assert.equal(log.status, 0);
                 const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
+                const broker = readInstalledModelBrokerDiagnosticJournal(text,
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 const summary = readInstalledStoreDiagnosticJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 assert(Date.now() < logBy, 'actual Store diagnostic journal exceeded five seconds'); assertRetained();
+                if (broker) report.modelBrokerDiagnostic = { diagnosticOnly: true,
+                  source: 'actual_joined_original_supervisor_journal', ...broker };
                 if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalServerJoined: true, summary };

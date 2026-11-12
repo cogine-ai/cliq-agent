@@ -73,12 +73,13 @@ static napi_value prepared_import_verify_next(napi_env env, napi_callback_info i
     unsigned char bytes[65536];
     uint64_t remaining = held->image.byte_count - held->offset;
     size_t amount = remaining < sizeof(bytes) ? (size_t)remaining : sizeof(bytes), consumed = 0;
-    while (consumed < amount) {
-        ssize_t read_count = pread(held->image.image_fd, bytes + consumed, amount - consumed,
-            (off_t)(held->offset + consumed));
-        if (read_count < 0 && errno == EINTR) continue;
-        if (read_count <= 0) { prepared_import_poison(held); return prepared_import_error(env, "candidate full-byte read failed"); }
-        consumed += (size_t)read_count;
+    if (amount) {
+        ssize_t read_count;
+        do { read_count = pread(held->image.image_fd, bytes, amount, (off_t)held->offset); } while (read_count < 0 && errno == EINTR);
+        if (read_count <= 0 || (size_t)read_count > amount) {
+            prepared_import_poison(held); return prepared_import_error(env, "candidate full-byte read failed");
+        }
+        consumed = (size_t)read_count;
     }
     if (prepared_import_check(held) != 0) return prepared_import_error(env, "candidate changed during full-byte verification");
     sha256_update(&held->hash, bytes, consumed);

@@ -142,8 +142,12 @@ static inline int cliq_model_store_archive_next(cliq_model_store_archive *source
       if (strcmp(item->d_name, ".") != 0 && strcmp(item->d_name, "..") != 0) break;
     }
     int kind = cliq_model_store_archive_name(item->d_name);
-    int length = snprintf(source->entry.relative_path, sizeof(source->entry.relative_path), "local-models/objects/%s", item->d_name);
-    if (!kind || length < 0 || (size_t)length >= sizeof(source->entry.relative_path)) return -1;
+    if (!kind) return -1;
+    const char prefix[] = "local-models/objects/";
+    size_t length = strlen(item->d_name);
+    if (length >= sizeof(source->entry.relative_path) - (sizeof(prefix) - 1)) return -1;
+    memcpy(source->entry.relative_path, prefix, sizeof(prefix) - 1);
+    memcpy(source->entry.relative_path + sizeof(prefix) - 1, item->d_name, length + 1);
     source->entry.kind = (enum cliq_model_store_archive_kind)kind;
     if (fstatat(source->ctx->fd[LMS_OBJECTS], item->d_name, &source->current, AT_SYMLINK_NOFOLLOW) != 0 ||
         (kind == CLIQ_MODEL_STORE_OBJECT ? !lms_object_file(&source->current) :

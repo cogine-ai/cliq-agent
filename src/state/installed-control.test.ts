@@ -109,7 +109,7 @@ const compatibleHello = { protocolVersion: 1, method: 'control.hello', clientBui
   controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: [] };
 
 test('the current migration frame joins earlier authenticated dispatches and fences new ones', async t => {
-  const fixture = await createQueuedFixture('wire-migration-fence');
+  const fixture = await createQueuedFixture('wire-mig');
   t.after(() => disposeFixture(fixture));
   function deferred<T>() {
     let resolve!: (value: T) => void;

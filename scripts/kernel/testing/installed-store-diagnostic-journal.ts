@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { types } from 'node:util';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { modelBrokerRefusalReason } from '../../../src/state/model-broker-native.js';
 import { INSTALLED_ASSEMBLY_WORK_PHASES, type InstalledAssemblyWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
 import { INSTALLED_APPLY_DIAGNOSTIC_STAGES, INSTALLED_AUTHORIZATION_DIAGNOSTIC_STAGES,
   INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES, INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES,
@@ -51,6 +52,28 @@ function originalJournalMessages(text: string, expected: OriginalJournalIdentity
     need(typeof record.MESSAGE === 'string');
     return record.MESSAGE;
   });
+}
+
+/** Closed reasons from the original joined broker only. No response text,
+ * credential, dispatch proof, billing conclusion or retry permission. */
+export function readInstalledModelBrokerDiagnosticJournal(text: string, expected: OriginalJournalIdentity) {
+  const reasons: string[] = [];
+  for (const message of originalJournalMessages(text, expected)) {
+    if (!message.startsWith('{')) continue;
+    const row = parseJsonStrict(message) as Record<string, unknown>;
+    if (row?.scope !== 'installed-model-broker') continue;
+    need(Buffer.byteLength(message) <= 4096 && row.diagnosticOnly === true);
+    const dispatched = Object.hasOwn(row, 'dispatchId');
+    const keys = ['diagnosticOnly', 'scope', 'runId', 'opId', 'attempt', 'reason',
+      ...(dispatched ? ['dispatchId', 'dispatchJournalSeq'] : [])];
+    need(Object.keys(row).length === keys.length && keys.every(key => Object.hasOwn(row, key)));
+    for (const key of ['runId', 'opId', ...(dispatched ? ['dispatchId'] : [])])
+      need(typeof row[key] === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(row[key] as string));
+    need(Number.isSafeInteger(row.attempt) && Number(row.attempt) >= 0);
+    if (dispatched) need(Number.isSafeInteger(row.dispatchJournalSeq) && Number(row.dispatchJournalSeq) > 0);
+    const reason = modelBrokerRefusalReason(row.reason); need(reason); reasons.push(reason);
+  }
+  return reasons.length ? Object.freeze({ reasons: Object.freeze(reasons) }) : undefined;
 }
 
 /** The caller must independently bind the live original image/start and later

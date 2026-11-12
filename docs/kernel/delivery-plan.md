@@ -58,6 +58,28 @@ The owner has now authorized the dedicated key in an explicit funded experiment
 on a free native GitHub runner. Its fixed-revision, original daily journey is the
 next validation path; no external-host handoff is required to continue.
 
+The first authorized native-runner attempt at `e09279d668d1177e5e659b549b4712b83dc7c2cb`
+([funded run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302434568))
+passed signed setup (10.1s), actual Secret Service/model enrollment (27.4s),
+and normal Run admission (21.7s). Execution then retained `RECOVERY_REQUIRED`
+at `drive_model_release`; it did not reach result review or application.
+The original services joined, cleanup reported zero errors, and the complete
+output scan found no secret. This closes the observed installation/enrollment
+blocker on that runner, not the real-model journey. Dispatch/spend remain
+unresolved; keep the first CNY35 reservation against the CNY200 experiment ceiling.
+The follow-up retains closed native broker reasons and checks the actual public
+TLS peer without a credential before running another funded journey.
+
+The same-source [ordinary Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43302398092)
+passes the controlled daily modification/check/repair/review/application journey,
+credential authority/finalizer shutdown, admission/preparation shutdown and
+original-claim settlement after CAS refusal. It also exposes GCC13 compilation
+failures, a forbidden extra compiler environment override in a fixture, and a
+Session continuity fixture still reading the former inline context format.
+These are being repaired together. The received-tool successor reaches finalize
+but misses its unchanged 30s terminal bound; upgrade fails second credential
+enrollment. Those failures remain open and are not converted into passing cuts.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

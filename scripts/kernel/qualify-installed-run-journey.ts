@@ -705,12 +705,13 @@ async function campaign(filename: string, mode: CampaignMode): Promise<void> {
     assert.equal(await fixtureProcess(pid, ledger.uid), start); assert.equal(await readlink(`/proc/${pid}/exe`), image);
     return start;
   };
-  const readCas = async (ref: string): Promise<Buffer> => {
+  const readCas = async (ref: string, maximum = 1048576): Promise<Buffer> => {
     assert.match(ref, /^[0-9a-f]{64}$/u);
+    assert(Number.isSafeInteger(maximum) && maximum > 0 && maximum <= 1048576);
     const held = await open(path.join(recipe.stateRoot, 'cas', ref), constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
       const before = await held.stat({ bigint: true }); assert(before.isFile() && before.uid === BigInt(ledger.uid) &&
-        (before.mode & 0o7777n) === 0o400n && before.nlink === 1n && before.size <= 1048576n);
+        (before.mode & 0o7777n) === 0o400n && before.nlink === 1n && before.size <= BigInt(maximum));
       const bytes = await held.readFile(); const after = await held.stat({ bigint: true });
       for (const key of imageFields) assert.equal(after[key], before[key]);
       assert.equal(sha256Bytes(bytes), ref); scanBytes(bytes); return bytes;
@@ -4803,7 +4804,7 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control|installed-client-consumer|installed-client-applications|installed-ink-consumer)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-run-journey|installed-supervisor-package|installed-model-package|installed-owner-history|installed-read-control|installed-client-consumer|installed-client-applications|installed-ink-consumer|installed-session-continuity)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           sourceFrames.push({ file: `${match[1]}.ts`, line: Number(match[2]), column: Number(match[3]) }); if (sourceFrames.length === 8) break;
         }
         if (error instanceof AggregateError) pending.unshift(...error.errors.slice(0, 4));
