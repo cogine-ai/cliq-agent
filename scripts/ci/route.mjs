@@ -69,6 +69,16 @@ function git(cwd, args) {
 // No API pagination or path-filter limit: inspect the real immutable Git range.
 // Disabling rename detection includes BOTH old and new paths as delete/add.
 export function routeEvent({ eventName, ref, event, cwd }) {
+  // This explicit experiment is independent of the ordinary complete manual
+  // qualification. Never select it from PR/push data or an unverified revision.
+  if (eventName === 'workflow_dispatch' && event?.inputs?.real_provider === 'true') {
+    const expected = event.inputs.expected_revision;
+    try {
+      if (typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected) &&
+          git(cwd, ['rev-parse', 'HEAD']).trim() === expected)
+        return selection(new Set(), 'explicit-real-provider-only', null);
+    } catch { /* Invalid manual selections retain the normal full scope. */ }
+  }
   if (eventName === 'workflow_dispatch' || eventName === 'merge_group' ||
       eventName === 'push' && ref === 'refs/heads/main') return full('full-qualification');
   const sha = value => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value) && !/^0{40}$/u.test(value);

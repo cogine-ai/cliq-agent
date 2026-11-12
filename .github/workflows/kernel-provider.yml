@@ -1,0 +1,63 @@
+name: Explicit real-provider qualification
+
+on:
+  workflow_call:
+    inputs:
+      expected_revision:
+        required: true
+        type: string
+    secrets:
+      provider_key:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cliq-real-provider-qualification
+  cancel-in-progress: false
+
+jobs:
+  installed-provider:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    name: Funded DeepSeek setup, code change, check, review and apply
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_revision }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Check the private input transport and original provider contracts
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          scripts/ci/provider-qualification.test.ts
+          scripts/kernel/testing/provider-journey-input.test.ts
+          scripts/kernel/testing/installed-provider-journey.test.ts
+      - name: Install the original native, systemd and credential prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
+      - name: Run the original installed provider journey once
+        env:
+          CLIQ_PROVIDER_API_KEY: ${{ secrets.provider_key }}
+          CLIQ_PROVIDER_EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: node --import tsx scripts/ci/provider-qualification.ts
+      - name: Retain only bounded original reports and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-real-provider-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cliq-installed-provider/installed-run-journey.json
+            ${{ runner.temp }}/cliq-installed-provider/cleanup.json
+            ${{ runner.temp }}/cliq-installed-provider/runner-baseline-before.json
+            ${{ runner.temp }}/cliq-installed-provider/runner-baseline-after.json
+            ${{ runner.temp }}/cliq-installed-provider/run-filesystem.json
+            ${{ runner.temp }}/cliq-provider-invocation.json
+          if-no-files-found: warn
+          retention-days: 7

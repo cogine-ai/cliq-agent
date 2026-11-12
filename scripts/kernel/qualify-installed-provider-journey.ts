@@ -1,4 +1,5 @@
-// Explicit billable experiment, never part of free CI. The same root-owned
+// Explicit billable experiment, including owner-authorized manual hosted CI.
+// Ordinary CI never selects it or receives its credential. The same root-owned
 // disposable UID/systemd/keyring/installer/finalizers own the complete journey.
 import assert from 'node:assert/strict';
 import { runInstalledNodeJourney } from './testing/installed-node-journey.js';

@@ -34,20 +34,29 @@ checks; no mock response, skipped check or evidence from another source qualifie
 the actual provider flow. No competitor benchmark is required before shipping
 this preview. The dated records below remain historical, source-bound evidence.
 
-Implementation update (2026-11-13): restored the retained candidate into the
-existing isolated Git worktree; updated the RFC, README and scheduling guidance.
-Installed settings now reject concurrency above one before persistence and on
-Supervisor startup, preserving old bytes for explicit user correction. The
-underlying capacity/recovery mechanisms remain intact. Build passes; six affected
-client tests and the daily-campaign wiring regression pass. The latter now checks
-the actual existing setup block and its fixed sixty-second fixture bound.
-The full local suite has not been rerun and no push/PR has been made.
+Implementation update (2026-11-13): the integrated production candidate
+`0dd7cad832866b3399a560ee601b2eae3af54dee` restores the retained source and aligns
+the RFC, README and one-task scheduling preference. Installed keeper/Supervisor
+startup now propagates the original cancellation through complete package/image
+verification, native anchor/keeper acquisition and client-directory preparation;
+all original producers and minted resources still join before close. Fixed
+credential-phase diagnostics preserve the original refusal without raw output.
 
-The existing x64 QEMU Linux VM remains reachable. No new model call or physical
-qualification ran in this update. Installation/authentication on the real-provider
-path remains the next blocker; the historical timing failures have not been
-cleared by source restoration or these component tests. Continue from this Git
-worktree, rather than creating another private source candidate.
+On Node 24.21.0, build and the full local suite pass: 4,024 passed, 32 skipped,
+zero failures. The identical production source also builds on Linux, where three
+real signed-file selection/revalidation cancellation regressions pass. These are
+component results, not installed Stop2 or complete I1 qualification. The manual
+CI transport added afterwards has independent subprocess/routing regressions and
+strict typechecking; the production source exercised by the full suite is unchanged.
+
+The current QEMU daily experiments pass normal setup, but model enrollment still
+reaches its original sixty-second command bound before secret storage or model
+execution. Keep those failures and their cleanup evidence. Direct TLS 1.3
+read-only DeepSeek checks confirm the selected account/model are available;
+they create no model generation request and do not qualify installed auth.
+The owner has now authorized the dedicated key in an explicit funded experiment
+on a free native GitHub runner. Its fixed-revision, original daily journey is the
+next validation path; no external-host handoff is required to continue.
 
 ### Current product and qualification status (2026-11-03)
 
@@ -616,7 +625,11 @@ package gate before deleting legacy composition and switching defaults.
   provider/model, explicit execution budget and authorized credentials. The
   owner has selected official direct DeepSeek, `deepseek-flash`, with a total
   CNY 200 experiment ceiling and explicitly authorized its dedicated key.
-  Never put that key in the repository, logs or CI. A manual provider request
+  On 2026-11-13 the owner explicitly authorized its dedicated credential in a
+  manually triggered, fixed-revision experiment on a free GitHub-hosted runner.
+  Use the temporary encrypted Actions secret and original stdin/Secret Service
+  enrollment described in [CI scope](../ci.md); remove the secret afterwards.
+  Never put the key in repository content, command arguments or logs. A manual provider request
   does not qualify the installed broker or establish a trusted billing ceiling.
 - Supported macOS qualification requires a controlled Apple Silicon
   Virtualization.framework host and signing/notarization authorization. Reboot,

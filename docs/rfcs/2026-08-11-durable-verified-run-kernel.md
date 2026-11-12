@@ -37,6 +37,14 @@ required before pushing. A ten-task competitor comparison and unrelated fault
 matrices are not prerequisites for implementing this delivery. The complete
 release gates below still govern default cutover and broader capability claims.
 
+The owner additionally authorized real-provider validation on a free GitHub-hosted
+Linux runner using a temporary encrypted Actions secret. Only an explicit manual
+dispatch at its reviewed commit may receive that secret; the test wrapper removes
+the transport environment value before children and uses the original private
+stdin enrollment into Secret Service. Ordinary CI remains uncredentialed. This
+changes the experiment's hosting boundary, not credential authority, billing,
+Trust, containment, time bounds or the meaning of qualification evidence.
+
 > **Product promise:** **Delegate. Detach. Return to verified work.**
 > **中文：**交出任务，离开终端，回来拿到经过验证的结果。
 

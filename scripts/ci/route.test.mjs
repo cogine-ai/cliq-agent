@@ -7,7 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { groups, routeEvent, routePaths } from './route.mjs';
-import { projectQualificationWorkflow } from './testing/workflow-projection.mjs';
+import { projectQualificationWorkflow, providerInputs } from './testing/workflow-projection.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const all = Object.fromEntries(groups.map(group => [group, true]));
@@ -119,6 +119,20 @@ test('PR scope uses the actual merge base and includes older commits in the same
   assert.notEqual(base, updatedBase);
 });
 
+test('only an explicit manual real-provider request at the actual exact commit selects its independent scope', t => {
+  const { cwd, commit } = repository(t), head = commit('README.md', 'reviewed source');
+  const event = { inputs: { real_provider: 'true', expected_revision: head } };
+  const selected = routeEvent({ eventName: 'workflow_dispatch', event, cwd });
+  assert.deepEqual(chosen(selected), []); assert.equal(selected.full, false);
+  assert.equal(selected.reason, 'explicit-real-provider-only');
+  for (const inputs of [{}, { real_provider: 'false', expected_revision: head },
+    { real_provider: 'true', expected_revision: 'f'.repeat(40) },
+    { real_provider: 'true', expected_revision: '--help' }])
+    assert.equal(routeEvent({ eventName: 'workflow_dispatch', event: { inputs }, cwd }).full, true);
+  for (const eventName of ['push', 'pull_request', 'merge_group'])
+    assert.equal(routeEvent({ eventName, event, cwd }).full, true);
+});
+
 test('actual Git renames and deletions retain every affected old and new input', t => {
   const { cwd, git, commit } = repository(t);
   const base = commit('src/runtime.ts', 'unchanged bytes');
@@ -176,7 +190,7 @@ test('routing projection rejects missing, duplicate, weakened or unexpected wiri
     const workflow = readFileSync(path.join(root, '.github/workflows', filename), 'utf8');
     const router = workflow.match(/  ci-route:\n[\s\S]*?(?=\n  [a-z][a-z0-9-]*:\n)/u)?.[0];
     assert(router);
-    const triggers = '  workflow_dispatch:\n  merge_group:\n    types: [checks_requested]\n';
+    const triggers = '  workflow_dispatch:\n' + (kind === 'foundation' ? providerInputs : '') + '  merge_group:\n    types: [checks_requested]\n';
     const mutations = [
       workflow.replace(router + '\n', '').replace('permissions:\n', 'permissions:\n' + router + '\n'),
       workflow.replace(triggers, '').replace('permissions:\n', 'permissions:\n' + triggers),

@@ -51,7 +51,7 @@ remain in place.
 
 ## Complete integration checks
 
-Pushes to main, merge-queue checks and manual `workflow_dispatch` always select
+Pushes to main, merge-queue checks and ordinary manual `workflow_dispatch` select
 all groups. For a complete development-branch check, run Kernel foundation,
 Installed ordinary permissions and Kernel MCP qualification on the same unchanged
 commit. The MCP branch-push run can supply that check before its new workflow
@@ -64,3 +64,35 @@ Skipped groups neither close old failures nor establish any unexecuted physical
 cut. Original runner labels, campaign budgets, cleanup, secret scans, assertions
 and artifact retention are unchanged. The router does not alter branch rules,
 publish the product or authorize default cutover.
+
+## Explicit funded provider experiment
+
+The owner authorized the dedicated DeepSeek credential on free GitHub-hosted
+Linux on 2026-11-13. This supersedes the earlier prohibition on real credentials
+in CI; it does not change product credential storage or any runtime safety check.
+
+Set the temporary Actions secret `CLIQ_PROVIDER_QUALIFICATION_KEY` through a
+private input channel. Dispatch **Kernel foundation** at the reviewed branch with
+`real_provider=true` and `expected_revision=<its complete commit SHA>`.
+The reusable provider workflow verifies that exact checkout and uses only the
+standard `ubuntu-22.04` runner. Pushes, PRs, merge queues and ordinary manual
+runs never enter this job. This explicitly selected experiment does not rerun
+unrelated qualification groups and cannot count as their qualification.
+
+The secret exists in the one CI step's private environment only as an Actions
+transport input. The wrapper removes it before spawning any child, sends its
+owned buffer once after the original ready marker, and closes stdin. The normal
+signed `models add` action still stores and finalizes it through Secret Service.
+No key enters source, command arguments, public configuration or retained logs.
+Only fixed phase messages and bounded original reports are retained; no raw child
+output is uploaded. Remove the temporary Actions secret when the experiment ends.
+
+Each explicitly dispatched journey retains the original USD 5 Run ceiling,
+conservative full-request token prices, five-minute Run budget and all original
+command, READY, request, stop and cleanup checks. There is no automatic retry.
+The operator must reserve CNY 35 against the authorized CNY 200 total before each
+attempt, including an ambiguous/unfinished attempt; the factor seven covers the
+selected published CNY/USD tariff ratios, not a currency-market assumption.
+Do not dispatch beyond that total or treat an absent report as zero cost.
+The fixed model, TLS pin and prices in `provider-qualification.ts` must be
+reverified before a later experiment; they are not automatically updated.
