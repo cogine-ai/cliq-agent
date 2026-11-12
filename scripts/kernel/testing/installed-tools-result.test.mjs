@@ -15,7 +15,7 @@ test('the complete installed tool batch uses the original compiled normalizers a
     for(const call of calls)assert(builtinInputContracts[call.name].parseInput(call.input),call.name+' must keep its exact compiled grammar');
     assert.equal(calls.slice(0,15).filter(call=>['read','ls','find','grep'].includes(call.name)).length,15);
     assert.deepEqual(calls.slice(15).map(call=>call.name),['edit','bash','bash','request_input']);
-    assert.equal(calls[16].input.command,"printf 'owned native bash output\\\\n'; exit 7");
+    assert.equal(calls[16].input.command,"/usr/bin/node --no-addons -e \\"process.stdout.write('owned native bash output\\\\n')\\"; exit 7");
     assert(builtinInputContracts.bash.parseInput(installedBashStopCall.input));
     assert(builtinInputContracts.bash.parseInput(installedReadOnlyGitCall('after\\n').input));
     assert(installedBashStopCall.input.command.includes("/usr/bin/node --no-addons -e 'setInterval(()=>{},1000)'; :"));

@@ -2259,7 +2259,9 @@ assert.equal(created,false);assert.equal(code,'EPERM');console.log(JSON.stringif
         assert(Date.now() < recoverBy, 'the actual effect successor did not reach its required final or independently cancellable cut');
         if (shutdownReceivedToolOnly ? requestsReceived === 2 && ready.journal.length === 9 && ready.journal[8].phase === 'completed' && ready.snapshot.run.status === 'completed_unverified'
           : ready.snapshot.run.status === 'queued' && !ready.snapshot.run.activeWorkerLaunchId && !ready.snapshot.run.waitingReason) break;
-        await delay(50);
+        // Observe recovery without flooding the same two-core runner. The
+        // original thirty-second deadline and final cut checks stay above.
+        await delay(250);
       }
       const successorStatus = accepted(await shutdownClient.send({ protocolVersion: 1, method: 'supervisor.status' }), 'supervisor.status');
       assert.equal(successorStatus.health, 'ready'); assert.equal(successorStatus.supervisorInstanceId, successorOwner.supervisorInstanceId);

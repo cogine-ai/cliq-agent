@@ -19,7 +19,7 @@ export function installedToolsCalls(before: string, after: string) {
     input: index % 4 === 0 ? { path: 'example.txt', start_line: index + 1, end_line: index + 1 } : index % 4 === 1 ? { path: '.' }
       : index % 4 === 2 ? { path: '.', name: 'example' } : { path: '.', pattern: 'before' } }));
   return [...reads, { name: 'edit', input: { path: 'example.txt', old_text: before, new_text: after } },
-    { name: 'bash', input: { command: "printf 'owned native bash output\\n'; exit 7" } },
+    { name: 'bash', input: { command: "/usr/bin/node --no-addons -e \"process.stdout.write('owned native bash output\\n')\"; exit 7" } },
     { name: 'bash', input: { command: "printf 'must never run\\n' > denied.txt" } },
     { name: 'request_input', input: { prompt: 'Confirm the owned installed tool result.', responseKind: 'text', maximumResponseBytes: 256 } }]
     .map((call, index) => ({ ...call, callId: `owned-installed-tools-${index}` }));
