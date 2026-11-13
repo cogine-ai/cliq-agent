@@ -129,9 +129,11 @@ but its TUI App test process remained alive after its assertions: mounted Ink
 instances had never been cleaned up. The owned hanging child was terminated and
 that file remains recorded as failed. Test-scoped `afterEach(cleanup)` now
 unmounts those instances; all 35 App tests pass and the real process exits.
-A final complete build/test run is in progress on the synchronized candidate,
-with task-scoped AC idle-sleep prevention. Updated offline child fixtures also
-pass alongside the unchanged expiry boundary tests. Installed evidence must
+The final complete build/test run for `4e6b1b940b75d01336da4005e71e9043e9e7c8ad`
+passes: 4,024 passed, 32 skipped, zero failures, with natural process exit. The
+short-path validation copy matches every tracked source/native/script and build
+configuration byte of that candidate. Updated offline child fixtures also pass
+alongside the unchanged expiry boundary tests. Installed evidence must
 still bind the exact package/fixture revision. The real-model task remains open.
 
 ### Current product and qualification status (2026-11-03)
