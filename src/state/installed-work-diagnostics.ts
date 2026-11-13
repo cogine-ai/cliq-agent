@@ -1,6 +1,7 @@
 // Diagnostic data only. No counter, clock or completion grants authority.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { channel } from 'node:diagnostics_channel';
+import { isBuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
 
 export const INSTALLED_WORK_CHANNEL = 'cliq.installed.work.v1';
 export const INSTALLED_INSTALL_PHASE_CHANNEL = 'cliq.installed.install.phase.v1';
@@ -21,6 +22,8 @@ export function noteInstalledInstallPhase(phase: InstalledInstallPhase, items = 
 }
 
 export const INSTALLED_ASSEMBLY_WORK_CHANNEL = 'cliq.installed.assembly.work.v1';
+export const INSTALLED_BUILTIN_WORK_CHANNEL = 'cliq.installed.builtin.work.v1';
+const builtinDiagnostic = channel(INSTALLED_BUILTIN_WORK_CHANNEL);
 export const INSTALLED_ASSEMBLY_WORK_PHASES = Object.freeze(['submit_request', 'submit_assembly_material',
   'submit_assembly_verifier_history', 'submit_assembly_verifier_current', 'submit_assembly_verifier_compose',
   'submit_assembly_verifier_publish', 'submit_assembly_policy', 'submit_assembly_final_check', 'original_store_stop',
@@ -84,7 +87,7 @@ export function noteInstalledWorkRead(bytesRead: number): void {
  * context or diagnostic output. Trusted subscribers must catch their own
  * errors: Node reports subscriber throws independently of publish(). */
 export function observeInstalledWork<T>(kind: InstalledWorkKind, operation: () => Promise<T>): Promise<T> {
-  if (!diagnostic.hasSubscribers && !assemblyDiagnostic.hasSubscribers || kind !== 'package' && kind !== 'revalidate' && kind !== 'create_compare') return operation();
+  if (!diagnostic.hasSubscribers && !assemblyDiagnostic.hasSubscribers && !builtinDiagnostic.hasSubscribers || kind !== 'package' && kind !== 'revalidate' && kind !== 'create_compare') return operation();
   let span: Span;
   try {
     span = { kind, started: performance.now(), settled: false };
@@ -115,6 +118,23 @@ const assemblyCounters = { casRead: counts(), publishFour: counts(), fileSync: c
 const assemblyActive = new Set<InstalledAssemblyWorkSpan>();
 let firstSubmit = false, submitOpen = false, submitStarted = 0, lastPhase = -1, assemblyTruncated = false;
 
+/** Process-wide actual counters at existing closed phase boundaries. Concurrent
+ * work may contribute; these are neither exclusive stage costs nor Run proof.
+ * Discard bytes are reported only after thread exit; an outstanding thread may
+ * have unreported bytes here, and its earlier bytes enter a later window.
+ * No subscriber means no clock, context, extra read or counter observation. */
+export function noteInstalledBuiltinWorkPhase(phase: unknown): void {
+  if (!builtinDiagnostic.hasSubscribers || !isBuiltinExecutionPhase(phase) && phase !== 'stop_entry') return;
+  try {
+    const values = [assemblyCounters.casRead.started, assemblyCounters.casRead.completed,
+      assemblyCounters.casRead.bytesRead, counters.revalidate.bytesRead];
+    if (assemblyTruncated || truncated || !values.every(value => Number.isSafeInteger(value) && value >= 0))
+      builtinDiagnostic.publish('truncated');
+    else builtinDiagnostic.publish(Object.freeze({ phase, readsStarted: values[0], readsSettled: values[1],
+      returnedBytes: values[2], revalidatedBytes: values[3] }));
+  } catch { /* Measurement cannot alter the original operation. */ }
+}
+
 function truncateAssembly(): void {
   if (assemblyTruncated) return;
   assemblyTruncated = true;
@@ -132,7 +152,7 @@ function truncateObservedWork(): void {
 /** A private measurement token, never a resource owner or authority. With no
  * trusted subscriber there is no token, clock sample, context or extra I/O. */
 export function beginInstalledAssemblyWork(kind: AssemblyWorkKind): InstalledAssemblyWorkSpan | undefined {
-  if (!assemblyDiagnostic.hasSubscribers) return;
+  if (!assemblyDiagnostic.hasSubscribers && !builtinDiagnostic.hasSubscribers) return;
   try {
     const span = { kind, started: performance.now(), settled: false };
     assemblyCounters[kind].started++; assemblyActive.add(span); return span;

@@ -1,4 +1,5 @@
 import { isBuiltinExecutionPhase, type BuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
+import { noteInstalledBuiltinWorkPhase } from './installed-work-diagnostics.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
@@ -480,7 +481,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   const builtinPhase = (phase: BuiltinExecutionPhase) => {
     if (!onBuiltinPhase || !isBuiltinExecutionPhase(phase)) return;
     currentBuiltinPhase = phase;
-    try { onBuiltinPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }
+    try { onBuiltinPhase(phase); noteInstalledBuiltinWorkPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }
   };
   // Delivery never reads or validates live model material. Agent resolvers
   // retain their original trusted functions and snapshot BEFORE the first

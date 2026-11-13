@@ -2,7 +2,7 @@ import { channel } from 'node:diagnostics_channel';
 import { types } from 'node:util';
 import { performance } from 'node:perf_hooks';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { beginInstalledAssemblySubmit, noteInstalledAssemblyStop } from './installed-work-diagnostics.js';
+import { beginInstalledAssemblySubmit, noteInstalledAssemblyStop, noteInstalledBuiltinWorkPhase } from './installed-work-diagnostics.js';
 import { BUILTIN_EXECUTION_PHASES } from '../sandbox/builtin-tool-diagnostics.js';
 
 export const INSTALLED_RUN_FAILURE_CHANNEL = 'cliq.installed.run.failures.v1';
@@ -178,6 +178,7 @@ export function noteInstalledStoreStop(input: unknown): void {
       multiplicities.set(entry.value, (multiplicities.get(entry.value) ?? 0) + 1);
     }
     if (length > counts[0]) return;
+    noteInstalledBuiltinWorkPhase('stop_entry');
     diagnostic.publish(Object.freeze({ kind: 'store_stop', driverTasks: counts[0], agentLoads: counts[1], admissions: counts[2],
       retainedFailures: counts[3], globalFailure: fields.globalFailure!.value,
       phases: Object.freeze(Object.fromEntries([...multiplicities].sort(([left], [right]) => left.localeCompare(right)))) }));

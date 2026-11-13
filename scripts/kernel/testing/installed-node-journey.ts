@@ -79,7 +79,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -2675,6 +2675,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         let serverAuthenticationObservation: Record<string, unknown> | undefined;
         let storeFailureObservation: Record<string, unknown> | undefined;
         let assemblyWorkObservation: Record<string, unknown> | undefined;
+        if (storeFailureDiagnostics) report.builtinWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
+          reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         if (storeFailureDiagnostics && primary) report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
           reason: storeFailureBinding ? 'original_join_missing' : 'preexisting_binding_missing' };
         if (storeFailureDiagnostics && primary) report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable',
@@ -2775,6 +2777,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 if (summary) storeFailureObservation = { diagnosticOnly: true, kind: 'observed',
                   source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
                   originalInvocationBound: true, originalServerJoined: true, summary };
+                try {
+                  const work = readInstalledBuiltinWorkJournal(text,
+                    { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                  assert(Date.now() < logBy, 'actual builtin work journal exceeded five seconds'); assertRetained();
+                  if (work) report.builtinWorkDiagnostics = { diagnosticOnly: true, kind: 'observed',
+                    source: 'actual_joined_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                    originalInvocationBound: true, originalServerJoined: true, ...work };
+                } catch { /* Fixed counters cannot replace a failure, identity or real join. */ }
                 try {
                   const work = readInstalledAssemblyWorkJournal(text,
                     { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });

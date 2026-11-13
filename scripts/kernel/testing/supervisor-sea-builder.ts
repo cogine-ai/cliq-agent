@@ -14,6 +14,7 @@ import { INSTALLED_WORK_CHANNEL } from '../../../src/state/installed-work-diagno
 import { PUBLICATION_RETIREMENT_CHANNEL } from '../../../src/state/publication-retirement-diagnostics.js';
 import { INSTALLED_STORE_DIAGNOSTIC_BANNER } from './installed-store-diagnostic-banner.js';
 import { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
+import { INSTALLED_BUILTIN_WORK_DIAGNOSTIC_BANNER } from './installed-builtin-work-banner.js';
 import { compareSupervisorCarrierLayout } from './supervisor-carrier-layout.js';
 import { installedClientBuildOptions } from './installed-client-build.js';
 export { INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER } from './installed-assembly-work-banner.js';
@@ -344,7 +345,7 @@ export async function buildSupervisorSeaImage(input: {
   const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
-    (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER + INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER : '');
+    (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER + INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER + INSTALLED_BUILTIN_WORK_DIAGNOSTIC_BANNER : '');
   assert(!Object.hasOwn(input.assets, SUPERVISOR_APPLICATION_ASSET), 'the signed application asset cannot be replaced');
   const application = await buildSupervisorSeaApplication(input);
   const main = path.join(input.fixture, `${input.variant}.cjs`);

@@ -1,6 +1,7 @@
 // Fixed retained data only, never process, deadline, permission or join proof.
 import assert from 'node:assert/strict';
 import { types } from 'node:util';
+import { BUILTIN_EXECUTION_PHASES } from '../../../src/sandbox/builtin-tool-diagnostics.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { modelBrokerRefusalReason } from '../../../src/state/model-broker-native.js';
 import { INSTALLED_ASSEMBLY_WORK_PHASES, type InstalledAssemblyWorkSnapshot } from '../../../src/state/installed-work-diagnostics.js';
@@ -52,6 +53,32 @@ function originalJournalMessages(text: string, expected: OriginalJournalIdentity
     need(typeof record.MESSAGE === 'string');
     return record.MESSAGE;
   });
+}
+
+/** Whole-process counter deltas between fixed phase notifications, including
+ * concurrent work. The stop-entry snapshot does not prove resource retirement. */
+export function readInstalledBuiltinWorkJournal(text: string, expected: OriginalJournalIdentity) {
+  const messages = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_BUILTIN_WORK_V1'));
+  if (!messages.length) return undefined;
+  need(messages.length === 1 && messages[0]!.length <= 8192);
+  const fields = messages[0]!.split(':');
+  need(fields.length === 5 && fields[0] === 'CLIQ_BUILTIN_WORK_V1');
+  const windowMicros = count(fields[1]!), pendingCasReadsAtStop = count(fields[2]!), size = count(fields[3]!);
+  const rows = fields[4]!.split(';'); need(size > 0 && size <= BUILTIN_EXECUTION_PHASES.length && rows.length === size);
+  let previous = -1, elapsed = 0;
+  const windows = rows.map(row => {
+    const values = row.split(','); need(values.length === 9);
+    const phase = values[0]!, index = (BUILTIN_EXECUTION_PHASES as readonly string[]).indexOf(phase);
+    need(index > previous); previous = index;
+    const [entries, elapsedMicros, readsStarted, readsSettled, returnedBytes, revalidatedBytes, userCpuMicros, systemCpuMicros] = values.slice(1).map(count);
+    need(entries! > 0); elapsed += elapsedMicros!; need(Number.isSafeInteger(elapsed));
+    return Object.freeze({ phase, entries: entries!, elapsedMicros: elapsedMicros!, readsStarted: readsStarted!, readsSettled: readsSettled!,
+      returnedBytes: returnedBytes!, revalidatedBytes: revalidatedBytes!, userCpuMicros: userCpuMicros!, systemCpuMicros: systemCpuMicros! });
+  });
+  need(elapsed === windowMicros);
+  return Object.freeze({ exclusiveStageCosts: false, runAttribution: false, boundary: 'stop_entry' as const,
+    byteAccounting: 'reported_at_read_callback_or_discard_worker_exit' as const, inFlightDiscardBytesMayBeUnreported: true,
+    windowMicros, pendingCasReadsAtStop, windows: Object.freeze(windows) });
 }
 
 /** Closed reasons from the original joined broker only. No response text,

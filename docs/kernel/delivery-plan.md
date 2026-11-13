@@ -241,8 +241,9 @@ at `ad92609db63cc23e0ef5cae9f7a38a579869fe3c` passes the daily
 edit/check/repair/review/apply journey and signed Node probe, with original joins,
 complete secret scans and zero cleanup errors. The maximum fixture passes its
 first five cases, then the ordinary-tools read-only worker identity inspection
-refuses after 16,721 ms (five observations); this is not the previous 90-second
-failure. The original Supervisor joins normally; this does not qualify the later
+refuses. Its last completed observation snapshot reports 16,721 ms and five
+observations; the intervening status request is not included in that snapshot.
+This is not the previous 90-second failure. The original Supervisor joins normally; this does not qualify the later
 precise Stop/restart cases, which were not reached.
 
 That inspection awaited another authenticated status request after obtaining its
@@ -258,6 +259,35 @@ unnecessary intervening request. All 96 diagnostic and 28 caller/deadline tests
 pass; another installed run is required to determine whether this was the actual
 refusal and to continue the remaining original cases. Production `src/` is
 unchanged from the complete local validation above.
+
+Free [run 43407420036](https://github.com/cogine-ai/cliq-agent/actions/runs/43407420036)
+at `5f8d24dcf65778ea3cb63d73b70eaf6b21f041c2` again passes daily delivery
+and signed Node. The maximum campaign passes its original five cases and their
+reconnect/restart checks. Ordinary tools obtains its required original live
+parent identity on the first attempt, with zero superseded observations, but
+still reaches the original 90-second bound: one model and nine tools completed,
+the tenth tool claimed. The original Supervisor now joins normally from
+`tool_release`, with no pre-Stop scheduler failure and zero cleanup errors. The
+later precise tool-stop/restart cases remain unexecuted. This is improvement,
+not completion of the maximum campaign or the actual-provider journey.
+
+The next diagnostic records process-wide numeric deltas between existing closed
+builtin phase notifications. Only the trusted disposable image subscribes; an
+ordinary image performs no new clock sampling or reads. A single frame of at
+most 8 KiB ends at the actual validated Store Stop entry and retains phase
+entries, elapsed microseconds, actual CAS reads/returned bytes, installation
+revalidation bytes and process CPU counters. Discard-reader bytes are reported
+only after their thread exits: outstanding reads can have unreported bytes, and
+earlier bytes can enter a later window. The decoded report explicitly retains
+this accounting boundary. Concurrent work may contribute; these are not exclusive
+phase costs, Run attribution, completion or resource-join proof. The retained decoder uses the existing full original
+UID/PID/invocation/image-bound journal and unchanged byte/line/time bounds, after
+original join. There is no process pause, profiler endpoint, raw input output,
+automatic retry, cache or changed acceptance deadline. Focused data/reader tests
+pass (18 tests), as do the diagnostic/carrier/release regressions (125 passed,
+two platform skips); strict script typechecking passes. The purpose is to choose
+the next execution-cost fix from measured Linux work, not continue speculative
+polling changes or paid retries.
 
 For the earlier history-scheduling candidate, local build passes. Its complete
 four-process run reports 4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
