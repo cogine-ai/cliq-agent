@@ -7,12 +7,17 @@ on:
     branches: [main, 'cliq/**', 'codex/**']
   workflow_dispatch:
     inputs:
+      qualification_group:
+        description: Manual free-runner diagnosis only; full remains the release gate
+        type: choice
+        options: [full, verifier]
+        default: full
       real_provider:
         description: Run only the explicitly funded, real-provider journey
         type: boolean
         default: false
       expected_revision:
-        description: Exact reviewed commit required for the real-provider journey
+        description: Exact reviewed commit required for a targeted manual journey
         type: string
         default: ''
   merge_group:
@@ -22,12 +27,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.real_provider && 'provider' || 'checks' }}
+  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}
   cancel-in-progress: ${{ !inputs.real_provider }}
 
 jobs:
   real-provider:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.qualification_group == 'full' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
     uses: ./.github/workflows/kernel-provider.yml
     with:
       expected_revision: ${{ inputs.expected_revision }}

@@ -47,7 +47,8 @@ zero failures. The identical production source also builds on Linux, where three
 real signed-file selection/revalidation cancellation regressions pass. These are
 component results, not installed Stop2 or complete I1 qualification. The manual
 CI transport added afterwards has independent subprocess/routing regressions and
-strict typechecking; the production source exercised by the full suite is unchanged.
+strict typechecking. That result describes the earlier production source; the
+three-image verification scheduling change below requires a new full local run.
 
 Current native-runner evidence (2026-11-13): the owner authorized the dedicated
 DeepSeek credential in a manual, fixed-revision experiment on a free GitHub
@@ -66,7 +67,10 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   still reaches only seven completed tools before its original 90-second bound;
   its final shutdown also lacks Stop2 proof (systemd reports timeout/SIGKILL).
   Upgrade, received-tool successor and publication/delayed recovery jobs fail.
-  The aggregate workflow is not green.
+  The TypeScript matrix also fails two obsolete fixture expectations (worker
+  wire version and verifier entry shape); macOS additionally exposes offline
+  child fixtures depending on runner speed for lease/proof freshness. The
+  aggregate workflow is not green.
 - The [seventh funded journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43324777724)
   at `b67776ff702409d58d5882024306ffbeb8686895` completes four model turns,
   directory discovery, two reads and an actual edit, but misses the unchanged
@@ -83,6 +87,29 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   also proves and fixes late terminal responses bypassing the original deadline.
   The same 90-second bound now precedes terminal acceptance and still follows
   control actions. Focused tests pass; a Linux rerun must establish any effect.
+- Complete-image verification now assigns the actual three-large-image layout
+  (bootstrap, Supervisor and single CAS guest) to the existing four-worker pool,
+  instead of queueing one behind a two-worker threshold. The four-worker maximum,
+  aggregate 1 MiB scratch budget, all complete reads, sixteen revalidations,
+  identity checks and cancel/join rules are unchanged. Real Linux/QEMU component
+  regression first reproduced two workers instead of four, then passed ten
+  cases covering both two-/three-image layouts, complete reads and worker joins.
+  This does not establish installed native-runner throughput or acceptance.
+- The ACK fixture now pins the retained wire-v9 protocol and rejects old v8
+  and nonzero stdio-purpose data; its actual compiled Linux test passes. The
+  verifier source assertion follows the separate fixed builtin-probe branch.
+  Two offline child ordering tests use test-scoped logical clocks, while the
+  independent five-second freshness acceptance/rejection tests remain intact.
+- A manual verifier-only CI route requires the exact expected revision and
+  cannot carry a real provider credential. Normal automatic and full manual
+  coverage is unchanged; this route is targeted evidence, not aggregate green.
+- The verifier's post-restart diagnostic binding now verifies the actual live
+  successor owner/image/PID/start/invocation before the next source admission.
+  The failed campaign previously retained its initial dead process binding,
+  leaving later Stop diagnostics unavailable. Refused successor observations
+  clear the stale binding; unchanged post-exit absence/journal/Stop checks still
+  determine what can be reported. Extracted-block identity regressions do not
+  substitute for an actual Linux rerun or qualify the failed Stop.
 
 Cumulative conservative reservations are CNY199.50, with CNY0.50 unreserved;
 these are not actual billed spending. Previous unresolved attempts keep their
@@ -92,10 +119,19 @@ requests; only that attempt's zero-cost reservation was released. No further pai
 full experiment fits the remaining reservation. The temporary Actions credential
 has been deleted and its absence verified; free controlled diagnosis continues.
 
-Local build and the full suite pass for production source `4126a7703b1255ff0664254677c1f777f8903968`
-(4,024 passed, 32 skipped). Subsequent changes affect CI, signed package data and
-qualification consumers, with focused regressions and strict script typechecking.
-The production TypeScript/native bytes are unchanged; installed evidence must
+Local build and the full suite previously passed for production source
+`4126a7703b1255ff0664254677c1f777f8903968` (4,024 passed, 32 skipped). The current
+candidate additionally changes production verification scheduling as described
+above. Its first local rerun was invalidated by a recorded low-battery system
+sleep of approximately two hours; the real expiry failure is retained, not
+waived. The next full run passed all 4,024 individual tests and skipped 32,
+but its TUI App test process remained alive after its assertions: mounted Ink
+instances had never been cleaned up. The owned hanging child was terminated and
+that file remains recorded as failed. Test-scoped `afterEach(cleanup)` now
+unmounts those instances; all 35 App tests pass and the real process exits.
+A final complete build/test run is in progress on the synchronized candidate,
+with task-scoped AC idle-sleep prevention. Updated offline child fixtures also
+pass alongside the unchanged expiry boundary tests. Installed evidence must
 still bind the exact package/fixture revision. The real-model task remains open.
 
 ### Current product and qualification status (2026-11-03)

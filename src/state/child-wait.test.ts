@@ -9,7 +9,12 @@ import { retireFixtureToolSelection } from './testing/tool-effects.js';
 
 // Storage/owner regression with the existing explicitly inert worker fixture;
 // no child model provider or physical Linux concurrency is claimed.
-test('await releases its original parent and settles children once; repeated await rereads their same owned results', async () => {
+test('await releases its original parent and settles children once; repeated await rereads their same owned results', async t => {
+  // Exercise sibling settlement order, not wall-clock expiry. The offline
+  // worker requests a fixed lease and cannot borrow time from a later deadline
+  // when a shared runner takes longer to verify the first child's history.
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   const fixture = await createChildRunFixture('children-await-and-reread', 2);
   try {
     const ids = fixture.children.map(child => child.childRunId);

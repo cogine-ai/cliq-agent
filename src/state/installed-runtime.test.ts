@@ -786,7 +786,8 @@ if (process.platform === 'linux') for (const copy of ['obsolete_bundle', 'cas'] 
   });
 }
 
-if (process.platform === 'linux') test('successive installed borrows re-read every byte while sharing only idle hash threads, and close joins them', async () => {
+if (process.platform === 'linux') for (const largeFiles of [2, 3] as const) test(`${largeFiles} large installed files re-read every byte while sharing only idle hash threads, and close joins them`, async () => {
+  const lanes = largeFiles === 2 ? 2 : 4;
   const fixture = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-hash-reuse-')));
   const diagnostic = channel(INSTALLED_WORK_CHANNEL), observed: InstalledWorkSnapshot[] = [];
   const subscriber = (value: unknown) => { if (value && typeof value === 'object') observed.push(value as InstalledWorkSnapshot); };
@@ -796,8 +797,9 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
   try {
     const packageRoot = path.join(fixture, 'package'), stateRoot = path.join(fixture, 'state');
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
-    const controller = Buffer.alloc(8 * 1_048_576 + 43, 0x43);
-    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image,
+    const controller = largeFiles === 2 ? Buffer.alloc(8 * 1_048_576 + 43, 0x43) : undefined;
+    const supervisor = largeFiles === 3 ? Buffer.alloc(8 * 1_048_576 + 31, 0x73) : undefined;
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisor, image,
       undefined, undefined, undefined, controller);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     await runtime.installInitial({ packageRoot, stateRoot });
@@ -819,27 +821,27 @@ if (process.platform === 'linux') test('successive installed borrows re-read eve
     selected = await runtime.openSelected(stateRoot);
     const initial = observed.at(-1)!.revalidate, bytes = initial.bytesRead - observed[0]!.revalidate.bytesRead;
     const initialImageJobs = imageJobs;
-    assert.equal(workers.size, 2); assert.equal(exited.size, 0);
+    assert.equal(workers.size, lanes); assert.equal(exited.size, 0);
     for (let round = 1; round <= 16; round++) {
       await selected.assertHeld();
       const current = observed.at(-1)!.revalidate;
       assert.equal(current.bytesRead - initial.bytesRead, round * bytes);
       assert.equal(current.completed - initial.completed, round);
       assert.equal(imageJobs - initialImageJobs, round, 'each original R fully hashes the one actual installed CAS image exactly once');
-      assert.equal(workers.size, 2, 'threads, not results or observations, may be retained');
+      assert.equal(workers.size, lanes, 'threads, not results or observations, may be retained');
       assert.equal(exited.size, 0);
     }
     const originalSmallJobs = smallJobs;
     other = await runtime.openSelected(stateRoot);
     assert(smallJobs > originalSmallJobs, 'fresh package standalone reads use the original idle pool');
-    assert.equal(workers.size, 2, 'fresh package verification reuses healthy threads, never FD or hash results');
+    assert.equal(workers.size, lanes, 'fresh package verification reuses healthy threads, never FD or hash results');
     assert.equal(exited.size, 0);
     await selected.assertHeld();
-    assert.equal(workers.size, 2, 'two live original Scopes share only the current idle executor');
+    assert.equal(workers.size, lanes, 'two live original Scopes share only the current idle executor');
     await selected.close(); selected = undefined;
     assert.equal(exited.size, workers.size, 'idle threads are genuine resources owned until selected close');
     await other.assertHeld();
-    assert.equal(workers.size, 4, 'a still-live Scope starts fresh threads after the shared close barrier');
+    assert.equal(workers.size, 2 * lanes, 'a still-live Scope starts fresh threads after the shared close barrier');
     await other.close(); other = undefined;
     assert.equal(exited.size, workers.size);
   } finally {

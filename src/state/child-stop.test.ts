@@ -139,7 +139,13 @@ test('a later parent cancellation registers once beneath a real higher user winn
   } finally { await disposeFixture(f); }
 });
 
-test('a received claimed child result survives the actual parent cancellation fence and settles the original claim once', async () => {
+test('a received claimed child result survives the actual parent cancellation fence and settles the original claim once', async t => {
+  // This offline reducer test orders the original CAS completion and parent
+  // cancellation; it has no native death observer to refresh its inert proof.
+  // Keep its logical clock deterministic. stop.test.ts independently checks
+  // both the 5,000 ms acceptance boundary and rejection at 5,001 ms.
+  const now = Date.now();
+  t.mock.method(Date, 'now', () => now);
   const f = await createChildRunFixture('child-parent-cancel-received-original-result');
   let release = () => {}, pending: Promise<unknown> | undefined;
   const publish = f.store.artifacts.publishBytes.bind(f.store.artifacts);

@@ -69,6 +69,20 @@ function git(cwd, args) {
 // No API pagination or path-filter limit: inspect the real immutable Git range.
 // Disabling rename detection includes BOTH old and new paths as delete/add.
 export function routeEvent({ eventName, ref, event, cwd }) {
+  // Manual diagnosis never replaces the complete PR/merge qualification or
+  // cancels an already-running full matrix. Match the actual checkout before
+  // choosing the one closed, non-funded group; malformed requests stay full.
+  if (eventName === 'workflow_dispatch' && event?.inputs?.qualification_group !== undefined &&
+      event.inputs.qualification_group !== 'full') {
+    const {qualification_group: group, expected_revision: expected, real_provider: funded} = event.inputs;
+    if (group === 'verifier' && funded === 'false' && typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected)) {
+      try {
+        if (git(cwd, ['rev-parse', 'HEAD']).trim() === expected)
+          return selection(new Set(['verifier']), 'explicit-verifier-only', null);
+      } catch { /* Keep all checks when the source cannot be bound. */ }
+    }
+    return full('invalid-targeted-qualification');
+  }
   // This explicit experiment is independent of the ordinary complete manual
   // qualification. Never select it from PR/push data or an unverified revision.
   if (eventName === 'workflow_dispatch' && event?.inputs?.real_provider === 'true') {

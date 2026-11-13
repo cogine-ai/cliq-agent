@@ -1456,7 +1456,10 @@ async function verifyDiscardFiles(files: readonly InstalledFile[], signal?: Abor
     }
     try {
       if (large.length >= 2) {
-        const laneCount = large.length >= 4 ? 4 : 2;
+        // The installed bootstrap, Supervisor and single CAS guest form
+        // three large holders. Use the existing four-lane bound so one does
+        // not wait behind another; each original FD is still fully verified.
+        const laneCount = large.length >= 3 ? 4 : 2;
         if (discardPool && discardPool.laneCount !== laneCount) await retireDiscardPoolLocked();
         if (!discardPool) { discardPool = new DiscardPool(laneCount); discardPool.start(); }
       }

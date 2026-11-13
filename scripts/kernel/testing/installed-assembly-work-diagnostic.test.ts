@@ -33,11 +33,14 @@ test('abnormal assembly diagnostics retain the original absence gate without cla
   assert(!names.includes('originalServerJoined'));
   const ancestors: ts.Node[] = [];
   for (let parent = object.parent; parent; parent = parent.parent) ancestors.push(parent);
-  assert(ancestors.some(node => ts.isIfStatement(node) && node.expression.getText(parsed) === 'originalStopFailed'));
+  assert(ancestors.some(node => ts.isIfStatement(node) && node.expression.getText(parsed) === 'sameStoppedLifetime && originalStopFailed'));
   const bound = ancestors.find(node => ts.isTryStatement(node) && node.getText(parsed).includes("await assert.rejects(lstat('/proc/' + storeFailureBinding.pid), { code: 'ENOENT' })"));
   assert(bound && bound.getText(parsed).indexOf("await assert.rejects(lstat('/proc/' + storeFailureBinding.pid)") < object.pos - bound.pos);
-  assert(ancestors.some(node => ts.isIfStatement(node) && node.expression.getText(parsed).includes('storeFailureBinding.invocationId === before[0]!.InvocationID') &&
-    node.expression.getText(parsed).includes('String(storeFailureBinding.pid) === before[0]!.MainPID')));
+  const lifetime = nodes.find((node): node is ts.VariableDeclaration => ts.isVariableDeclaration(node) &&
+    node.name.getText(parsed) === 'sameStoppedLifetime');
+  assert(lifetime?.initializer && lifetime.end < bound.pos && bound.pos < object.pos);
+  assert.equal(lifetime.initializer.getText(parsed).replace(/\s+/gu, ' '),
+    'storeFailureBinding !== undefined && String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID');
   const text = parsed.getText();
   assert(text.includes('} catch (error) { originalStopFailed = true; throw error; }'));
   assert(text.includes("assert.equal(stopped.TimeoutStopUSec, '2s')"));
@@ -76,8 +79,10 @@ test('the original publication V2 projection is saved before an optional assembl
   let optional: ts.Node | undefined = assembly[0]!.parent;
   while (optional && !ts.isIfStatement(optional)) optional = optional.parent;
   assert(optional && ts.isIfStatement(optional));
-  assert.equal(optional.expression.getText(parsed), 'originalStopFailed');
-  assert.equal(optional.parent, projectionTry.parent, 'both streams keep the original shared outer deadline');
+  assert.equal(optional.expression.getText(parsed), 'sameStoppedLifetime && originalStopFailed');
+  assert(ts.isIfStatement(projectionTry.parent));
+  assert.equal(projectionTry.parent.expression.getText(parsed), 'sameStoppedLifetime');
+  assert(optional.parent === projectionTry.parent.parent, 'both streams keep the original shared outer deadline');
   assert(!optional.getText(parsed).includes('report.publicationWorkDiagnostics'),
     'a timed-out or malformed optional stream cannot overwrite already retained V2 data');
 });

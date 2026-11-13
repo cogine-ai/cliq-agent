@@ -166,7 +166,7 @@ test('installed verifier uses its own free bounded manager journey without weake
   assert.match(shell, /probe_run_driver_mode" = --verifier-campaign[\s\S]*?qualify-installed-verifier-journey\.ts[\s\S]*?else[\s\S]*?qualify-installed-run-journey\.ts/u);
   const consumer = await readFile(new URL('../../scripts/kernel/qualify-installed-verifier-journey.ts', import.meta.url), 'utf8');
   assert.match(consumer, /import \{ runInstalledNodeJourney \} from '\.\/testing\/installed-node-journey\.js'/u);
-  assert.match(consumer, /assert\.equal\(mode, '--verifier-campaign'\); assert\(filename\)/u);
+  assert.match(consumer, /assert\(filename\);\s*if \(mode === '--builtin-node-campaign'\) \{\s*assert\.equal\(extra\.length, 0\);\s*await runInstalledNodeJourney\(filename, 'builtin-node-probe'\);\s*\} else \{\s*assert\.equal\(mode, '--verifier-campaign'\)/u);
   assert.match(consumer, /assert\(extra\.length === 0 \|\| extra\.length === 2 && extra\[0\] === '--locked-node' && extra\[1\]\)/u);
   assert.match(consumer, /constants\.O_RDONLY \| constants\.O_NOFOLLOW/u);
   assert.match(consumer, /before\.nlink === 1n && before\.size === BigInt\(NPM_DATA_RECIPE\.archiveBytes\)/u);

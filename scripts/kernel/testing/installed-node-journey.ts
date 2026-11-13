@@ -1949,6 +1949,23 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     report.reconnectAndRestart = { qualified: true, sameKeeper: true, sameTerminalRunAndSession: true, noRedispatch: true,
       exactOriginalAdmissionReplay: true, sourceFilesAndIdentitiesUnchanged: true, gracefulOriginalOwnerReleased: true,
       committedResultAndDiffDescriptorsPreserved: true, liveAndFailedNeverExposeCandidateAsResult: true };
+    if (storeFailureDiagnostics) {
+      // The next case runs in this successor. Bind its actual live image and
+      // owner before admission; the initial process cannot explain its later
+      // Stop. Missing evidence stays unavailable, never reconstructed on exit.
+      storeFailureBinding = undefined; storeBindingFailureStage = undefined;
+      try {
+        const entry = signed.bundle.entries.find(entry => entry.role === 'supervisor'); assert(entry);
+        const pid = Number(afterRestart.MainPID);
+        const actual = await qualifyInstalledOwnerProcess({ stateRoot: recipe.stateRoot, uid: ledger.uid,
+          pid, selectedImage: installedImage, imageDigest: entry.digest }, ownerHistory.owners[1]!, {});
+        assert.equal('linux-proc-start-ticks:' + await fixtureProcess(pid, ledger.uid), actual.processStartToken);
+        const same = show(services.supervisorUnit);
+        assert.equal(same.MainPID, afterRestart.MainPID); assert.equal(same.InvocationID, afterRestart.InvocationID);
+        storeFailureBinding = Object.freeze({ pid, processStartToken: actual.processStartToken,
+          invocationId: afterRestart.InvocationID!, windowOpenedAt: Date.now() });
+      } catch { /* Optional diagnosis cannot replace the original campaign or Stop result. */ }
+    }
     // Preserve the entire original five-case / ten-POST campaign and its
     // reconnect/restart assertions above before adding this complete vertical.
     inspectionClient = await persistentClient();

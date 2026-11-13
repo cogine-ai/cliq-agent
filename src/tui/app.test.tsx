@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 
 import type { ModelPickerSnapshot } from '../model/model-picker.js';
 import type { ProviderStatusReport } from '../model/provider-status.js';
@@ -16,6 +16,8 @@ import {
 } from './store.js';
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
+
+afterEach(cleanup);
 
 // createInitialState preserves the policy passed by the caller; this store uses
 // yolo intentionally so App tests can assert explicit UI policy rendering

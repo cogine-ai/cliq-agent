@@ -7,6 +7,47 @@ import ts from 'typescript';
 
 const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
 
+test('post-restart verifier diagnostics bind the live successor before ordinary tools and never reuse the old lifetime', async () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('journey.ts', text, ts.ScriptTarget.Latest, true);
+  const blocks = [];
+  const visit = node => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === 'storeFailureDiagnostics' &&
+        node.thenStatement.getText(parsed).includes('afterRestart.MainPID')) blocks.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(blocks.length, 1);
+  const block = blocks[0], body = block.getText(parsed);
+  assert(block.pos > text.indexOf("assert.equal(ownerHistory.owners[1]!.runtimeBundleRef, bundleDigest);"));
+  assert(block.end < text.indexOf("await createSource('ordinary_tools');"));
+  const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const execute = new (Object.getPrototypeOf(async () => {}).constructor)('context',
+    `with (context) { ${compiled}; return storeFailureBinding; }`);
+  const original = Object.freeze({ pid: 10, processStartToken: 'old', invocationId: 'old', windowOpenedAt: 1 });
+  for (const fault of ['none', 'owner', 'start', 'pid', 'invocation']) {
+    let reads = 0;
+    const owner = { state: 'active', runtimeBundleRef: 'bundle' };
+    const context = { assert, storeFailureDiagnostics: true, storeFailureBinding: original, storeBindingFailureStage: undefined,
+      signed: { bundle: { entries: [{ role: 'supervisor', digest: 'digest' }] } },
+      afterRestart: { MainPID: '20', InvocationID: 'new' }, ownerHistory: { owners: [{}, owner] },
+      recipe: { stateRoot: 'state' }, ledger: { uid: 42 }, installedImage: 'image', services: { supervisorUnit: 'unit' },
+      Date: { now: () => 100 },
+      async qualifyInstalledOwnerProcess(input, selected) {
+        reads++; assert.deepEqual(input, { stateRoot: 'state', uid: 42, pid: 20, selectedImage: 'image', imageDigest: 'digest' });
+        assert.equal(selected, owner); if (fault === 'owner') throw new Error('inert qualification refusal');
+        return { processStartToken: 'linux-proc-start-ticks:123' };
+      },
+      async fixtureProcess(pid, uid) { assert.equal(pid, 20); assert.equal(uid, 42); return fault === 'start' ? '456' : '123'; },
+      show(unit) { assert.equal(unit, 'unit'); return { MainPID: fault === 'pid' ? '30' : '20', InvocationID: fault === 'invocation' ? 'other' : 'new' }; }
+    };
+    const result = await execute(context); assert.equal(reads, 1);
+    if (fault === 'none') {
+      assert.deepEqual(result, { pid: 20, processStartToken: 'linux-proc-start-ticks:123', invocationId: 'new', windowOpenedAt: 100 });
+      assert(Object.isFrozen(result));
+    } else assert.equal(result, undefined, 'a failed successor observation cannot retain the old diagnostic source');
+  }
+});
+
 test('automatic successor selection waits for the same running Type=exec invocation before its strict identity checks', () => {
   const text = source('./installed-node-journey.ts');
   const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);

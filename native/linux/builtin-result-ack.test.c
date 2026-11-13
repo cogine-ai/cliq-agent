@@ -25,7 +25,7 @@ static int sealed_output(void) {
     return fd;
 }
 int main(void) {
-    check(CLIQ_WORKER_VERSION == 8 && CLIQ_WORKER_MAX_SCOPES == 16, "honest private wire version and unchanged arena ceiling");
+    check(CLIQ_WORKER_VERSION == 9 && CLIQ_WORKER_MAX_SCOPES == 16, "honest private wire version and unchanged arena ceiling");
     struct cliq_worker_packet packet = cliq_packet(CLIQ_ACK_BUILTIN_RESULT);
     packet.scope = 2; packet.parent = 1; packet.observed_at_ms = 7; memset(packet.nonce, 'a', 64);
     check(cliq_builtin_result_ack_valid(&packet), "closed ACK inert packet");
@@ -37,7 +37,7 @@ int main(void) {
     check(!cliq_builtin_result_ack_same(&packet, 2, 1, other, 7), "different original nonce rejected");
     struct cliq_worker_packet changed;
 #define REFUSE(mutation) do { changed = packet; mutation; check(!cliq_builtin_result_ack_valid(&changed), "unknown or productive packet field rejected"); } while (0)
-    REFUSE(changed.version = 6); REFUSE(changed.magic++); REFUSE(changed.command = CLIQ_RELEASE_BUILTIN);
+    REFUSE(changed.version = 6); REFUSE(changed.version = 8); REFUSE(changed.stdio_purpose = 1); REFUSE(changed.magic++); REFUSE(changed.command = CLIQ_RELEASE_BUILTIN);
     REFUSE(changed.status = 1); REFUSE(changed.scope = 0); REFUSE(changed.scope = CLIQ_WORKER_MAX_SCOPES);
     REFUSE(changed.parent = 0); REFUSE(changed.parent = packet.scope); REFUSE(changed.parent = CLIQ_WORKER_MAX_SCOPES);
     REFUSE(changed.observed_at_ms = 0); REFUSE(changed.observed_at_ms = UINT64_C(9007199254740992));

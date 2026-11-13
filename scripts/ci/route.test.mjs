@@ -227,3 +227,16 @@ test('routing projection rejects missing, duplicate, weakened or unexpected wiri
     }
   }
 });
+
+test('manual verifier diagnosis is exact-revision, non-funded and cannot narrow automatic qualification', t => {
+  const {cwd, commit} = repository(t), head = commit('README.md', 'owned diagnostic revision');
+  const inputs = {qualification_group: 'verifier', expected_revision: head, real_provider: 'false'};
+  const selected = routeEvent({eventName: 'workflow_dispatch', event: {inputs}, cwd});
+  assert.deepEqual(chosen(selected), ['verifier']); assert.equal(selected.full, false);
+  assert.equal(selected.reason, 'explicit-verifier-only');
+  for (const changed of [{expected_revision: 'f'.repeat(40)}, {expected_revision: '--help'},
+    {expected_revision: ''}, {real_provider: 'true'}, {qualification_group: 'unknown'}, {qualification_group: 'full'}])
+    assert.equal(routeEvent({eventName: 'workflow_dispatch', event: {inputs: {...inputs, ...changed}}, cwd}).full, true);
+  for (const eventName of ['push', 'pull_request', 'merge_group'])
+    assert.equal(routeEvent({eventName, event: {inputs}, cwd}).full, true);
+});

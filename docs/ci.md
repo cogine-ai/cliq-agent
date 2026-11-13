@@ -65,6 +65,18 @@ cut. Original runner labels, campaign budgets, cleanup, secret scans, assertions
 and artifact retention are unchanged. The router does not alter branch rules,
 publish the product or authorize default cutover.
 
+## Exact-revision verifier diagnosis
+
+For a free, focused development experiment, dispatch Kernel foundation with
+`qualification_group=verifier`, `real_provider=false` and
+`expected_revision=<the complete checked-out commit SHA>`. This runs the existing
+verifier group (daily flow, independent signed Node probe and full verifier
+campaign) with their original assertions, deadlines, cleanup and secret scans.
+Its separate concurrency lane does not cancel a running full matrix. Missing,
+conflicting or mismatched selections fall back to full qualification. Automatic
+push/PR/merge routing is unchanged; the ordinary manual default remains `full`.
+This diagnostic cannot replace the complete same-source checks before the PR.
+
 ## Explicit funded provider experiment
 
 The owner authorized the dedicated DeepSeek credential on free GitHub-hosted
@@ -73,7 +85,8 @@ in CI; it does not change product credential storage or any runtime safety check
 
 Set the temporary Actions secret `CLIQ_PROVIDER_QUALIFICATION_KEY` through a
 private input channel. Dispatch **Kernel foundation** at the reviewed branch with
-`real_provider=true` and `expected_revision=<its complete commit SHA>`.
+`qualification_group=full`, `real_provider=true` and
+`expected_revision=<its complete commit SHA>`.
 The reusable provider workflow verifies that exact checkout and uses only the
 standard `ubuntu-22.04` runner. Pushes, PRs, merge queues and ordinary manual
 runs never enter this job. This explicitly selected experiment does not rerun
