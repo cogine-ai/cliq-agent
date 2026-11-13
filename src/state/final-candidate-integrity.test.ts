@@ -14,6 +14,11 @@ import { createAgentFixture } from './testing/agent-fixtures.js';
 import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
+import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
+import { validateVerifierHistory } from './verifier-history.js';
+import { readVerifierProgress } from './verifier-recovery.js';
+import { checkpointFromRow } from './rows.js';
+import type { ContinuationItem } from '../kernel/types.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 
@@ -266,4 +271,42 @@ test('digest-only verifier artifacts cannot pass admission without the exact pub
     assert.deepEqual(counts(), originalCounts);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { database.close(); await disposeFixture(fixture); }
+});
+
+
+test('candidate lifecycle routes worker-free verifier consent to the complete permission history validator', async () => {
+  const fixture = await createAgentFixture('candidate-verifier-wait-route');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const { completed, owner, checkpointId } = await completeFinalTurn(fixture);
+    const proof = await quiescedToolCheckpoint(fixture, checkpointId);
+    await owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId), artifacts = fixture.store.artifacts;
+    const decodedItems = new Map(await Promise.all(cut.items.map(async row =>
+      [row.itemId, await artifacts.readCanonical<ContinuationItem>(row.payloadRef)] as const)));
+    const candidate = cut.items.find(row => decodedItems.get(row.itemId)?.kind === 'final_candidate')!;
+    const progress = await readVerifierProgress(driver, artifacts, cut, candidate.itemId);
+    const checkpoints = driver.prepare('SELECT * FROM checkpoints WHERE run_id = ? ORDER BY based_on_run_revision')
+      .all(fixture.runId).map(checkpointFromRow);
+    // This marker exercises only lifecycle routing. It is never registered as
+    // a wait or consent; the next real validator must reject its absent proof.
+    const waitingOnRef = (await artifacts.publishCanonical({ subject: { kind: 'verifier_launch' } }, 'inert-wait-data')).ref;
+    const input = { driver, artifacts, run: { ...cut.run, status: 'waiting' as const,
+      waitingReason: 'approval' as const, waitingOnRef }, spec: cut.runSpec, items: cut.items,
+      journal: cut.journal, checkpoints, workspaceGenerations: cut.workspaceGenerations, decodedItems,
+      verifierProgressByCandidate: new Map([[candidate.itemId, progress]]) };
+    await validateFinalCandidateRecovery(input);
+    await assert.rejects(validateVerifierHistory(input), 'a lifecycle tag cannot establish original verifier consent');
+    for (const changed of [
+      { activeWorkerLaunchId: 'inert-worker' }, { budgetReserved: { ...cut.run.budgetReserved, toolCalls: 1 } },
+      { waitingOnRef: undefined }, { waitingReason: 'input' as const }
+    ]) await assert.rejects(validateFinalCandidateRecovery({ ...input, run: { ...input.run, ...changed } }));
+    for (const kind of ['tool_call', 'dependency_script', 'unrecognized']) {
+      const ref = (await artifacts.publishCanonical({ subject: { kind } }, 'inert-wait-data')).ref;
+      await assert.rejects(validateFinalCandidateRecovery({ ...input, run: { ...input.run, waitingOnRef: ref } }));
+    }
+    await assert.rejects(validateFinalCandidateRecovery({ ...input, driver: undefined }));
+    assert.deepEqual((await fixture.store.readRecoveryClosure(fixture.runId)).run, cut.run,
+      'the read-only route did not install a wait or change any Run authority');
+  } finally { driver.close(); await disposeFixture(fixture); }
 });

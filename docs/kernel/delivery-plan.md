@@ -460,6 +460,29 @@ and missing historical tool Checkpoints. Fresh full and Linux results are
 required before claiming these changes close either failure. No paid retry or
 PR has been initiated.
 
+The next free runs at `b5e93789e77091e8057cf4c3add7aa6689407b08`
+([foundation](https://github.com/cogine-ai/cliq-agent/actions/runs/43446500252),
+[permissions](https://github.com/cogine-ai/cliq-agent/actions/runs/43446506032))
+retain daily workflow and signed Node passes. Permission restart still fails:
+the originally observed successor has exited and reports `RECOVERY_REQUIRED`.
+This is an actual startup refusal, not evidence that a longer readiness limit
+would fix it. Its initial closed diagnostic did not recognize wrapped recovery
+messages; no private message or path was retained.
+
+A second, independently reproduced lifecycle defect rejects verifier approval
+before the complete permission reader: candidate recovery recognizes queued,
+active, dependency consent and worker reconciliation, but omitted worker-free
+verifier consent. The correction routes only that exact subject with no active
+worker and zero reserved budget to the existing complete verifier-history walk.
+The latter still validates the original candidate, policy, wait, Checkpoint,
+revision and history; a subject tag alone never authorizes anything. The local
+regression first failed on the old candidate lifecycle guard, then passed with
+malformed/foreign waits still rejected. Original-invocation diagnostics now
+recognize the one fixed recovery wrapper and this closed failure reason. A
+new real installed permission/restart result is still required. The maximum
+fixture run remains pending at this record; no paid retry or PR is authorized
+by these component results.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

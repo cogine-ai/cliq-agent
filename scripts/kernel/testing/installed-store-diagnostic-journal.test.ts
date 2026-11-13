@@ -18,6 +18,13 @@ test('failed startup diagnostics retain closed reasons without exporting private
   assert.deepEqual(read(text, sender), { failures: [{ code: 'RECOVERY_REQUIRED', reason: 'tool_approval_subject' },
     { code: 'none', reason: 'unclassified' }] });
   assert(!JSON.stringify(read(text, sender)).includes('private'));
+  const reason = 'candidate recovery verifier cut has no exact queued or active execution lifecycle';
+  for (const prefix of ['', 'typed agent recovery closure is invalid: '])
+    assert.deepEqual(read(journal([JSON.stringify({ ...message, message: prefix + reason })]), sender),
+      { failures: [{ code: 'RECOVERY_REQUIRED', reason: 'candidate_verifier_lifecycle' }] });
+  for (const expanded of ['private: ' + reason, reason + ' private', 'typed agent recovery closure is invalid: private'])
+    assert.deepEqual(read(journal([JSON.stringify({ ...message, message: expanded })]), sender),
+      { failures: [{ code: 'RECOVERY_REQUIRED', reason: 'unclassified' }] });
   for (const change of [{ uid: 1001 }, { pid: 2001 }, { invocationId: 'b'.repeat(32) }])
     assert.throws(() => read(text, { ...sender, ...change }));
   assert.deepEqual(read(journal(), sender), { failures: [] });

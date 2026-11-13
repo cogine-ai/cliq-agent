@@ -193,6 +193,14 @@ export async function validateFinalCandidateRecovery(input: {
       const original = await (await import('./dependency-script-approval.js')).readDependencyScriptWaitingRun(input.driver, artifacts, run);
       requireEqual(current, original.frontier, 'dependency original source consent waiting frontier'); lifecycle = true;
     }
+    else if (!dependencyPending && run.status === 'waiting' && run.waitingReason === 'approval' &&
+        run.waitingOnRef && !run.activeWorkerLaunchId && isZeroBudget(run.budgetReserved) && input.driver) {
+      // Only route the lease-free lifecycle here. validateVerifierHistory in
+      // the same recovery walk independently checks the complete original
+      // candidate, policy, wait, Checkpoint and revision before returning.
+      const wait = await readCanonicalArtifact<import('../kernel/verifier-invocation.js').VerifierApprovalWait>(artifacts, run.waitingOnRef);
+      lifecycle = wait.subject?.kind === 'verifier_launch';
+    }
     else if (run.status === 'waiting' && run.waitingReason === 'reconciliation' && run.waitingOnRef && !run.activeWorkerLaunchId) {
       // This is the existing whole-worker death lifecycle, never a new
       // verifier status-query contract. Its complete launch/probe closure is

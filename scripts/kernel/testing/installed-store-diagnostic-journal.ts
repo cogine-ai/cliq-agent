@@ -64,6 +64,7 @@ export function readInstalledStartupFailureJournal(text: string, expected: Origi
     ['authorization history is not closed', 'authorization_history'],
     ['verifier admission source history is not closed', 'verifier_source_history'],
     ['verifier admission authorization history is not closed', 'verifier_authorization_history'],
+    ['candidate recovery verifier cut has no exact queued or active execution lifecycle', 'candidate_verifier_lifecycle'],
     ['StateStore opening validation did not complete retirement', 'opening_retirement']
   ]);
   const failures: { code: string; reason: string }[] = [];
@@ -72,8 +73,12 @@ export function readInstalledStartupFailureJournal(text: string, expected: Origi
     const row = parseJsonStrict(message) as Record<string, unknown>;
     if (row?.scope !== 'installed-read-startup') continue;
     need(row.diagnosticOnly === true && typeof row.message === 'string');
+    // The recovery boundary wraps its original fixed failure. Strip only
+    // that exact prefix; arbitrary surrounding text must remain unclassified.
+    const prefix = 'typed agent recovery closure is invalid: ';
+    const detail = row.message.startsWith(prefix) ? row.message.slice(prefix.length) : row.message;
     failures.push({ code: typeof row.code === 'string' && codes.has(row.code) ? row.code : 'none',
-      reason: reasons.get(row.message) ?? 'unclassified' });
+      reason: reasons.get(detail) ?? 'unclassified' });
   }
   return Object.freeze({ failures: Object.freeze(failures.map(value => Object.freeze(value))) });
 }
