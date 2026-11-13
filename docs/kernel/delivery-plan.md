@@ -169,6 +169,19 @@ No native baseline, assertion, overlay, deadline or evidence interpretation is
 changed. The affected diagnostic/preflight group passes 72 tests with two
 platform skips; the real baseline/candidate campaign must still be rerun.
 
+The coherent local validation at `691f5fd` covers all 578 test files: the main
+batch has 4,014 passes, 32 platform skips and one stale diagnostic-wiring string
+assertion; the isolated original timing/capacity batch passes all 21 tests.
+The assertion now requires both actual diagnostic calls inside the original
+contained try/catch. All 50 affected final-source tests pass at `b3c59a8`,
+including the additional fresh MCP selector regression. Build and strict script
+typechecking also pass. This is 4,069 distinct tests covered with no unresolved
+local failure, using the complete inventory plus affected reruns; it is not a
+claim that the original full run was clean. Original failed output is retained.
+Both review axes report no actionable findings. Exact-source Linux acceptance
+remains pending; no paid retry or PR follows from these local results.
+
+
 The owner approved a revised total ceiling of CNY235 and exactly one further
 experiment capped at CNY35, after the same-source free Linux product chain
 passes. That additional attempt is now consumed. Cumulative unresolved
