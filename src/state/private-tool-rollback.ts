@@ -178,8 +178,9 @@ export async function readPrivateBuiltinClaim(artifacts: ArtifactCatalog, prepar
       runtimeBundleManifestDigest: assembly.runtime.runtimeBundleManifestDigest, toolchain: { kind: 'guest_toolchain',
         guestToolchainManifestRef: execution.guestToolchainManifestRef, guestToolchainManifestDigest: execution.guestToolchainManifestDigest,
         guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest } }, 'private rollback original runtime closure');
-    for (const entry of [scriptEntry, ...members])
-      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original bytes; no current install. */ }
+    // Each original claim independently rereads every byte. Discard-only
+    // verification retains the stream's exact size, hash, root and join checks.
+    for (const entry of [scriptEntry, ...members]) await artifacts.verifyChunks(entry.digest, entry.byteCount);
   }
   return { request, spec };
 }

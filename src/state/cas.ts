@@ -5,6 +5,8 @@ import type { FileHandle } from 'node:fs/promises';
 import { beginInstalledAssemblyWork, noteInstalledAssemblyRead, settleInstalledAssemblyWork,
   type InstalledAssemblyWorkSpan } from './installed-work-diagnostics.js';
 import path from 'node:path';
+import { isMainThread } from 'node:worker_threads';
+import { discardCasChunks, withCasDiscardSlot } from './cas-discard.js';
 
 import type { ArtifactRef } from '../kernel/types.js';
 import { joinResourceOperations, ResourceRetirementError } from './errors.js';
@@ -707,6 +709,35 @@ export class ContentAddressedStore {
       });
       signal?.throwIfAborted(); return bytes;
     } finally { if (work) settleInstalledAssemblyWork(work); }
+  }
+
+  /** Exact original stream verification when the caller discards every chunk.
+   * Large reads keep all per-chunk root checks on a joined, bounded read thread.
+   * Retaining consumers continue to use readChunks and independent buffers. */
+  async verifyChunks(ref: ArtifactRef, expectedByteLength: number, signal?: AbortSignal): Promise<void> {
+    assertArtifactRef(ref);
+    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0)
+      throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
+    signal?.throwIfAborted();
+    if (!isMainThread || expectedByteLength < 8_388_608) {
+      for await (const _chunk of this.readChunks(ref, expectedByteLength, signal)) { /* Complete original stream. */ }
+      return;
+    }
+    await withCasDiscardSlot(signal, async () => {
+      const work = beginInstalledAssemblyWork('casRead');
+      try {
+        await this.withRoot(async root => {
+          signal?.throwIfAborted();
+          const opened = await openPublishedFile(this.root, root, ref);
+          try {
+            await discardCasChunks({ file: opened, rootPath: this.root, rootInfo: root.info, ref, byteLength: expectedByteLength },
+              signal, bytes => { if (work) noteInstalledAssemblyRead(work, bytes); });
+            await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+          } finally { await closeCasHandle(opened.handle); }
+        });
+        signal?.throwIfAborted();
+      } finally { if (work) settleInstalledAssemblyWork(work); }
+    });
   }
 
   async stat(ref: ArtifactRef): Promise<ArtifactStat> {

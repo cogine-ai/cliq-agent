@@ -1253,11 +1253,15 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         release: stateOperation('RECOVERY_REQUIRED', async (target: unknown): Promise<void> => {
           if (consumed) throw new KernelStorageError('LEASE_FENCED', 'tool release was already consumed');
           consumed = true;
-          for (const ref of policyArtifactRefs) await artifacts.readBytes(ref);
-          const currentCut = await cut(input.expectedRunRevision);
-          const currentProof = await verifyGrant(prepared.grantRef!);
+          // The original claim retains its read lifetime through the second
+          // gate. Stop must join these reads without ever releasing the tool.
+          reads.assertReadActive();
+          for (const ref of policyArtifactRefs) await reads.readBytes(ref);
+          const currentCut = await cut(input.expectedRunRevision, reads);
+          const currentProof = await verifyGrant(prepared.grantRef!, reads);
           requireEqual(currentProof.request, expected.request, 'released current tool request');
-          const releasedExecution = await builtinLaunch(currentCut, prepared, currentProof, input);
+          const releasedExecution = await builtinLaunch(currentCut, prepared, currentProof, input, reads);
+          reads.assertReadActive();
           let outcome: TimeFenceAdvance | undefined;
           let workerLaunchId!: string;
           let parentWorkerContainmentRef!: string;

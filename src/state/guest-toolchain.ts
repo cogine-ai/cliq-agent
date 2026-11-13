@@ -168,7 +168,8 @@ export async function readRetainedVerifierToolchain(artifacts: ArtifactCatalog, 
   const manifest = decodeGuestToolchainManifest(parseJsonStrict(new TextDecoder('utf-8', { fatal: true }).decode(bytes)));
   const signature = await readBounded(artifacts, manifest.signatureRef, 64, 64, input.signal);
   const selected = validateGuestToolchainMetadata(input.bundle, root.artifactRef, bytes, signature, input.releaseKeys);
-  for await (const _chunk of artifacts.readChunks(manifest.guestImageRef, manifest.guestImageByteCount)) { input.signal?.throwIfAborted(); }
+  await (input.signal ? artifacts.withReadSignal(input.signal) : artifacts)
+    .verifyChunks(manifest.guestImageRef, manifest.guestImageByteCount);
   input.signal?.throwIfAborted();
   return selected;
 }

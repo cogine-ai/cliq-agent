@@ -199,6 +199,27 @@ original 90-second deadline includes these waits and still rejects late terminal
 responses. Fixed per-case read/yield counters measure observation cost, confer no
 authority and cannot substitute for a successful full Linux campaign.
 
+Free [run 43395433185](https://github.com/cogine-ai/cliq-agent/actions/runs/43395433185)
+at `cd1e0f1593dcf96d357096c12d6b04952b92e705` again passes the daily journey
+and signed Node probe. The maximum campaign passes its first five cases, including
+ordinary Git, but still fails `ordinary_tools` at the original deadline. Its last
+complete public cut contains one completed model and six completed tools, with
+another tool claimed. The observer reports 23 reads (30,509 ms) and 58,470 ms of
+actual yielding, within a 90,860 ms failed observation window. Supervisor Stop
+still times out; the original retained phase is `tool_release`. Neither earlier
+passes nor fewer observations close these failures.
+
+The next coherent production candidate addresses both measured execution cost
+and a confirmed cancellation omission. The tool's original claimed read signal
+now remains attached to every read in its one-use release gate; an aborted read
+must join without releasing or rewriting the permanent claim. Discard-only large
+CAS consumers use at most four temporary read threads, retaining every original
+full-byte hash, exact length, metadata and per-64-KiB root-path check. Each thread
+exits before its original file/root handles close, and the slot remains held
+through those closes. There is no retained worker pool, content cache or proof
+reuse. Retaining streams and small-object readers remain unchanged. This candidate
+still requires the full original Linux campaign, including Stop2 and terminal90.
+
 For this candidate, local build passes. The complete four-process run reports
 4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
 one child fixture whose initial lease crossed its Run deadline, and two original

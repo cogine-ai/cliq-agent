@@ -15,10 +15,9 @@ import { validateBundle, validateInstalledStructuredArtifacts } from './installe
 
 // Real Ed25519/CAS data only. These deliberately non-ext4 bytes cannot qualify
 // a native executable, installation, StateOwner or Run admission.
-function fixture() {
+function fixture(image = Buffer.from('guest image data, not an execution fixture\n')) {
   const keys = generateKeyPairSync('ed25519'), keyId = 'explicit-guest-data-test-root';
   const releaseKeys = [{ keyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
-  const image = Buffer.from('guest image data, not an execution fixture\n');
   const executable = (logicalName: string) => ({ logicalName, canonicalGuestPath: `/runtime/${logicalName}`,
     digest: canonicalSha256({ logicalName }), version: '1' });
   const manifest: GuestToolchainManifest = { schemaVersion: 1, format: 'cliq-guest-toolchain-v1',
@@ -136,8 +135,8 @@ test('a newly signed bundle cannot omit, retarget or add a guest closure member'
   }
 });
 
-test('retained guest selection exhausts the actual image CAS stream and never resolves today\'s install', async () => {
-  const value = fixture(), directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-guest-retained-'));
+for (const large of [false, true]) test(`retained ${large ? 'large' : 'small'} guest selection verifies complete original CAS bytes without current install`, async () => {
+  const value = large ? fixture(Buffer.alloc(8 * 1024 * 1024, 0x73)) : fixture(), directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-guest-retained-'));
   const root = path.join(directory, 'cas');
   try {
     await mkdir(root, { mode: 0o700 });

@@ -1,0 +1,114 @@
+import assert from 'node:assert/strict';
+import { constants, promises as fs, renameSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { test, type TestContext } from 'node:test';
+import { Worker } from 'node:worker_threads';
+import ts from 'typescript';
+import { ContentAddressedStore } from './cas.js';
+import { ResourceRetirementError } from './errors.js';
+
+async function fixture(t: TestContext, size = 8 * 1024 * 1024) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-cas-discard-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const root = path.join(home, 'objects'); await fs.mkdir(root, { mode: 0o700 });
+  const cas = new ContentAddressedStore(root), ref = await cas.publish(Buffer.alloc(size, 0x73));
+  return { home, root, cas, ref, size, filename: path.join(root, ref) };
+}
+
+test('discard verification rereads complete real bytes and refuses size, corruption and link changes', async t => {
+  const f = await fixture(t);
+  await f.cas.verifyChunks(f.ref, f.size);
+  await assert.rejects(f.cas.verifyChunks(f.ref, f.size + 1));
+  await fs.link(f.filename, path.join(f.home, 'extra-link'));
+  await assert.rejects(f.cas.verifyChunks(f.ref, f.size));
+  await fs.unlink(path.join(f.home, 'extra-link'));
+  await fs.chmod(f.filename, 0o600);
+  await assert.rejects(f.cas.verifyChunks(f.ref, f.size));
+  const file = await fs.open(f.filename, 'r+');
+  try { await file.write(Buffer.from([0x74]), 0, 1, 0); } finally { await file.close(); }
+  await fs.chmod(f.filename, 0o400);
+  await assert.rejects(f.cas.verifyChunks(f.ref, f.size), /digest/);
+  await assert.rejects(async () => { for await (const _chunk of f.cas.readChunks(f.ref, f.size)) {} }, /corrupt/);
+});
+
+test('four discard slots include original FD closes and aborted queued work opens nothing', async t => {
+  const f = await fixture(t), actualOpen = fs.open.bind(fs), active = new Set<object>();
+  let release!: () => void, enter!: () => void, roots = 0, held = 0, peak = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const entered = new Promise<void>(resolve => { enter = resolve; });
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await actualOpen(...args); active.add(handle); peak = Math.max(peak, active.size);
+    if (args[0] === f.root) roots++;
+    const close = handle.close.bind(handle);
+    t.mock.method(handle, 'close', async () => {
+      await close(); assert(active.delete(handle));
+      if (args[0] === f.filename) { held++; if (held === 4) enter(); await gate; }
+    });
+    return handle;
+  });
+  const first = Array.from({ length: 4 }, () => f.cas.verifyChunks(f.ref, f.size));
+  const abort = new AbortController(), reason = new Error('queued observer stopped');
+  const queued = f.cas.verifyChunks(f.ref, f.size, abort.signal);
+  void queued.catch(() => {});
+  try {
+    await entered; abort.abort(reason); await assert.rejects(queued, error => error === reason);
+    assert.equal(roots, 4); assert(peak <= 8);
+    assert.equal(active.size, 4, 'original root handles remain held until file closes join');
+    release(); await Promise.all(first); assert.equal(active.size, 0);
+    t.mock.restoreAll(); await f.cas.verifyChunks(f.ref, f.size);
+  } finally { release(); await Promise.allSettled([...first, queued]); t.mock.restoreAll(); }
+});
+
+test('discard corruption still joins both real handles and preserves an original close failure', async t => {
+  const f = await fixture(t), actualOpen = fs.open.bind(fs), active = new Set<object>(), failure = new Error('original close failed');
+  await fs.chmod(f.filename, 0o600); await fs.writeFile(f.filename, Buffer.alloc(f.size, 0x74)); await fs.chmod(f.filename, 0o400);
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await actualOpen(...args); active.add(handle); const close = handle.close.bind(handle);
+    t.mock.method(handle, 'close', async () => {
+      await close(); assert(active.delete(handle)); if (args[0] === f.filename) throw failure;
+    });
+    return handle;
+  });
+  await assert.rejects(f.cas.verifyChunks(f.ref, f.size), error => error instanceof ResourceRetirementError && error.cause === failure);
+  assert.equal(active.size, 0);
+});
+
+// Run the exact production data-worker source over self-owned real FDs. The
+// counter observes actual returned bytes; no process is paused and no native
+// authority, Run, clock or recovery proof is manufactured.
+for (const fault of ['cancel', 'root_move'] as const) test(`actual discard reader ${fault} after real bytes joins its original thread`, async t => {
+  const f = await fixture(t, 128 * 1024 * 1024);
+  const source = await fs.readFile(new URL('./cas-discard.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('cas-discard.ts', source, ts.ScriptTarget.Latest, true);
+  const declaration = parsed.statements.filter(ts.isVariableStatement).flatMap(value => [...value.declarationList.declarations])
+    .find(value => value.name.getText(parsed) === 'CAS_DISCARD_SOURCE');
+  assert(declaration?.initializer);
+  const code = Function(`return (${declaration.initializer.getText(parsed)})`)() as string;
+  const root = await fs.open(f.root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const file = await fs.open(f.filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const info = await file.stat(), rootInfo = await root.stat();
+  const before = Object.fromEntries(['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeMs', 'ctimeMs']
+    .map(key => [key, info[key as keyof typeof info]]));
+  const control = new SharedArrayBuffer(16), bytes = new BigInt64Array(control, 8, 1), stop = new Int32Array(control, 0, 1);
+  const worker = new Worker(code, { eval: true, execArgv: [], env: {}, workerData: { control, before,
+    fd: file.fd, uid: info.uid, rootPath: f.root, rootDev: rootInfo.dev, rootIno: rootInfo.ino, ref: f.ref, byteLength: f.size } });
+  let reply: unknown, ended = false, error: unknown;
+  worker.on('message', value => { reply = value; }); worker.on('error', value => { error = value; });
+  const exit = new Promise<number>(resolve => worker.once('exit', code => { ended = true; resolve(code); }));
+  const moved = path.join(f.home, 'moved'); let renamed = false;
+  try {
+    while (!ended && Atomics.load(bytes, 0) === 0n) await new Promise<void>(resolve => setImmediate(resolve));
+    assert(!ended); assert(Atomics.load(bytes, 0) > 0n && Atomics.load(bytes, 0) < BigInt(f.size));
+    if (fault === 'cancel') Atomics.store(stop, 0, 1);
+    else { renameSync(f.root, moved); renamed = true; }
+    assert.equal(await exit, 0); assert.equal(error, undefined);
+    assert(fault === 'cancel' ? reply === 'cancelled' : reply === 'read' || reply === 'root');
+    assert(Atomics.load(bytes, 0) < BigInt(f.size), 'the original reader must stop after the observed fault');
+    assert.equal((await file.stat()).ino, info.ino, 'the original borrowed descriptor is still held after thread exit');
+  } finally {
+    Atomics.store(stop, 0, 1); await exit;
+    if (renamed) renameSync(moved, f.root);
+    await file.close(); await root.close();
+  }
+});

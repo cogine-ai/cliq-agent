@@ -215,6 +215,13 @@ export class ArtifactCatalog {
     this.readSignal?.throwIfAborted();
   }
 
+  /** Discard-only equivalent of exhausting readChunks at this exact size. */
+  async verifyChunks(ref: ArtifactRef, expectedByteLength: number): Promise<void> {
+    this.assertReadActive();
+    await this.cas.verifyChunks(ref, expectedByteLength, this.readSignal);
+    this.assertReadActive();
+  }
+
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {
     const bytes = await this.readBytes(ref);
     this.readSignal?.throwIfAborted();
