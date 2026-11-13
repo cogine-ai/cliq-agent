@@ -438,6 +438,28 @@ check shared-object reads, distinct inodes, distinct signals and fresh later
 reads. The fixed sixteen installed-image checks and all acceptance deadlines
 remain unchanged. Linux performance and complete delivery remain unverified.
 
+The subsequent [free Linux group](https://github.com/cogine-ai/cliq-agent/actions/runs/43438037231)
+at `ed5e1474197a2b79285dc14be5d17468b2ba8948` passes native dependency prechecks,
+daily modification/check/repair/review/apply, and signed Node execution. The
+maximum verifier retains its first five cases and reconnect/restart passes,
+but ordinary tools still fail the original 90s window: one model and thirteen
+tools complete, the next tool remains prepared, and the original scheduler
+records `LEASE_FENCED` before Stop. The original writers join and cleanup is
+clean. The separate [permission run](https://github.com/cogine-ai/cliq-agent/actions/runs/43438032658)
+still fails successor readiness at 30s. These failures are not aggregate green.
+
+The next combined correction addresses the actual recovery/read boundaries:
+whole-object large CAS checks now use the existing complete joined discard
+reader; the driver invokes the unchanged lease-renewal guard between joined
+tool operations; tool history no longer misparses a verifier approval already
+validated by the preceding verifier history walk. It still checks all prior
+tool results. Failed-readiness diagnostics retain only closed original-invocation
+startup reasons and the fixed failed observation stage. Focused regressions
+cover final-byte corruption, real descriptor joins, stopped/expired scheduling,
+and missing historical tool Checkpoints. Fresh full and Linux results are
+required before claiming these changes close either failure. No paid retry or
+PR has been initiated.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

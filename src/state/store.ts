@@ -3482,7 +3482,17 @@ export class StateStore {
           if (selection.disposition !== 'worker_required') throw new KernelStorageError('RECOVERY_REQUIRED', 'queued tool unexpectedly retains execution authority');
           if (!this.installedWorkerSlotAvailable(runId)) return;
         }
-        const executed = await (await nativeExecution()).executeCurrentTool({ expectedRunRevision: current.revision });
+        const toolExecution = await nativeExecution();
+        // Consecutive short invocations can leave no timer-visible idle gap:
+        // preparation and received-result joins correctly refuse renewal.
+        // Use that same guarded renewal at the joined operation boundary,
+        // before opening the next read/prepare lifetime. Never revive expiry.
+        if (toolExecution.renewCurrentWorkerLease() === 'expired') {
+          await beginWorkerRecovery(this.driver, this.artifacts, this.owner,
+            { runId, expectedRunRevision: current.revision });
+          continue;
+        }
+        const executed = await toolExecution.executeCurrentTool({ expectedRunRevision: current.revision });
         if (executed.revision === current.revision) return;
         continue;
       }

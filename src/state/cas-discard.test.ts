@@ -17,6 +17,30 @@ async function fixture(t: TestContext, size = 8 * 1024 * 1024) {
   return { home, root, cas, ref, size, filename: path.join(root, ref) };
 }
 
+test('whole-object discard verification uses the joined large reader and rereads after settlement', async t => {
+  const f = await fixture(t), actualOpen = fs.open.bind(fs), held = new Set<object>();
+  let mainThreadReads = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await actualOpen(...args); held.add(handle);
+    const close = handle.close.bind(handle);
+    t.mock.method(handle, 'close', async () => { await close(); assert(held.delete(handle)); });
+    if (args[0] === f.filename) {
+      const read = handle.read.bind(handle);
+      t.mock.method(handle, 'read', async (...args: Parameters<typeof read>) => { mainThreadReads++; return read(...args); });
+    }
+    return handle;
+  });
+  assert.deepEqual(await f.cas.verify(f.ref), { ref: f.ref, byteLength: f.size });
+  assert.equal(held.size, 0, 'the original root and file must close after actual worker exit');
+  assert.equal(mainThreadReads, 0, 'whole-object recovery must use the same bounded off-thread discard reader');
+  t.mock.restoreAll();
+  await fs.chmod(f.filename, 0o600);
+  const file = await fs.open(f.filename, 'r+');
+  try { await file.write(Buffer.from([0x74]), 0, 1, f.size - 1); } finally { await file.close(); }
+  await fs.chmod(f.filename, 0o400);
+  await assert.rejects(f.cas.verify(f.ref), /digest/, 'the final byte of a later read must still be checked');
+});
+
 test('discard verification rereads complete real bytes and refuses size, corruption and link changes', async t => {
   const f = await fixture(t);
   await f.cas.verifyChunks(f.ref, f.size);

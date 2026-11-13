@@ -10,6 +10,20 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('failed startup diagnostics retain closed reasons without exporting private text or accepting another invocation', async () => {
+  const { readInstalledStartupFailureJournal: read } = await import('./installed-store-diagnostic-journal.js');
+  const message = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED',
+    message: 'approval wait retains an execution worker or lacks its exact subject', path: '/private/never-export' };
+  const text = journal([JSON.stringify(message), JSON.stringify({ ...message, code: 'private-code', message: 'private-message' })]);
+  assert.deepEqual(read(text, sender), { failures: [{ code: 'RECOVERY_REQUIRED', reason: 'tool_approval_subject' },
+    { code: 'none', reason: 'unclassified' }] });
+  assert(!JSON.stringify(read(text, sender)).includes('private'));
+  for (const change of [{ uid: 1001 }, { pid: 2001 }, { invocationId: 'b'.repeat(32) }])
+    assert.throws(() => read(text, { ...sender, ...change }));
+  assert.deepEqual(read(journal(), sender), { failures: [] });
+  assert.throws(() => read(journal([JSON.stringify({ ...message, diagnosticOnly: false })]), sender));
+});
+
 test('original broker diagnosis retains only fixed reasons and refuses foreign or expanded records', async () => {
   const { readInstalledModelBrokerDiagnosticJournal: read } = await import('./installed-store-diagnostic-journal.js');
   const { MODEL_BROKER_REFUSAL_REASONS, modelBrokerRefusalReason } = await import('../../../src/state/model-broker-native.js');

@@ -134,15 +134,20 @@ export async function validateToolRecovery(input: {
   }
   // Worker-death reconciliation is validated against the full Run/launch/
   // generation/Journal cut by readRecoveryClosure, not as a tool approval.
-  const dependencyWait = run.waitingReason === 'approval' && run.waitingOnRef &&
-    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'dependency_install_scripts';
+  const approvalKind = run.waitingReason === 'approval' && run.waitingOnRef
+    ? (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind : undefined;
+  const dependencyWait = approvalKind === 'dependency_install_scripts';
   if (dependencyWait) {
     if (!input.driver || run.nextStep !== 'verify') throw new TypeError('dependency approval requires its original verify cut');
     // The complete consent-item history is owned by ordinary recovery; this
     // reader independently binds the actual current wait and source cut.
     await (await import('./dependency-script-approval.js')).readDependencyScriptWaitingRun(input.driver, artifacts, run);
   }
-  if (!dependencyWait && (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
+  // validateAgentRecovery has already validated the complete verifier wait,
+  // candidate, permission and Checkpoint before entering tool history. Keep
+  // validating all prior tool results below, without parsing that wait as a
+  // tool-call approval (notably when reopening a live Run after restart).
+  if (!dependencyWait && approvalKind !== 'verifier_launch' && (run.waitingReason === 'approval' || (run.status === 'waiting' && run.nextStep === 'tool' &&
       run.waitingReason !== 'input' && run.waitingReason !== 'reconciliation' && run.waitingReason !== 'child'))) {
     if (run.status !== 'waiting' || run.waitingReason !== 'approval' || !run.waitingOnRef || run.activeWorkerLaunchId || run.nextStep !== 'tool') {
       throw new TypeError('approval wait retains an execution worker or lacks its exact subject');

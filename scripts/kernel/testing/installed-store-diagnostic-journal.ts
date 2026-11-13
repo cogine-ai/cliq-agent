@@ -55,6 +55,29 @@ function originalJournalMessages(text: string, expected: OriginalJournalIdentity
   });
 }
 
+/** Failed readiness only: retain closed classifications from the originally
+ * observed invocation, even if that process has since exited. Never export
+ * its arbitrary error text/path or treat a log as readiness or death proof. */
+export function readInstalledStartupFailureJournal(text: string, expected: OriginalJournalIdentity) {
+  const reasons = new Map([
+    ['approval wait retains an execution worker or lacks its exact subject', 'tool_approval_subject'],
+    ['authorization history is not closed', 'authorization_history'],
+    ['verifier admission source history is not closed', 'verifier_source_history'],
+    ['verifier admission authorization history is not closed', 'verifier_authorization_history'],
+    ['StateStore opening validation did not complete retirement', 'opening_retirement']
+  ]);
+  const failures: { code: string; reason: string }[] = [];
+  for (const message of originalJournalMessages(text, expected)) {
+    if (!message.startsWith('{')) continue;
+    const row = parseJsonStrict(message) as Record<string, unknown>;
+    if (row?.scope !== 'installed-read-startup') continue;
+    need(row.diagnosticOnly === true && typeof row.message === 'string');
+    failures.push({ code: typeof row.code === 'string' && codes.has(row.code) ? row.code : 'none',
+      reason: reasons.get(row.message) ?? 'unclassified' });
+  }
+  return Object.freeze({ failures: Object.freeze(failures.map(value => Object.freeze(value))) });
+}
+
 /** Whole-process counter deltas between fixed phase notifications, including
  * concurrent work. The stop-entry snapshot does not prove resource retirement. */
 export function readInstalledBuiltinWorkJournal(text: string, expected: OriginalJournalIdentity) {

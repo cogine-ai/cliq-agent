@@ -8,6 +8,38 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
+import { validateToolRecovery } from './tool-recovery.js';
+import type { ContinuationItem } from '../kernel/types.js';
+import { checkpointFromRow } from './rows.js';
+
+test('tool history does not reinterpret a verifier wait, but still validates its prior tool results', async () => {
+  const fixture = await createAgentFixture('tool-history-verifier-wait', { wallTimeMs: 300_000 }, { mode: 'yolo' });
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await batch(fixture, [{ name: 'read', input: { path: 'a.ts' } }]);
+    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
+    await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
+      expectedRunRevision: prepared.run.revision, observationRef: await observation(fixture, claimed, { text: 'original' }) });
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId), artifacts = fixture.store.artifacts;
+    const checkpoints = driver.prepare('SELECT * FROM checkpoints WHERE run_id = ? ORDER BY based_on_run_revision')
+      .all(fixture.runId).map(checkpointFromRow);
+    const items = new Map(await Promise.all(cut.items.map(async row =>
+      [row.itemId, await artifacts.readCanonical<ContinuationItem>(row.payloadRef)] as const)));
+    // Pure history projection: this marker is never admitted as a Run or
+    // consent. The preceding verifier validator owns the complete wait proof.
+    const waitingOnRef = (await artifacts.publishCanonical({ subject: { kind: 'verifier_launch' } }, 'inert-wait-data')).ref;
+    const input = { artifacts, run: { ...cut.run, status: 'waiting' as const, nextStep: 'verify' as const,
+      activeWorkerLaunchId: undefined, waitingReason: 'approval' as const, waitingOnRef }, spec: cut.runSpec,
+      items, journal: cut.journal, checkpoints, workspaceGenerations: cut.workspaceGenerations };
+    await validateToolRecovery(input);
+    await assert.rejects(validateToolRecovery({ ...input, checkpoints: checkpoints.filter(checkpoint =>
+      checkpoint.journalSeq !== cut.journal.length) }), /tool result has no atomically matching ready Checkpoint/);
+    for (const kind of ['tool_call', 'unrecognized']) {
+      const ref = (await artifacts.publishCanonical({ subject: { kind } }, 'inert-wait-data')).ref;
+      await assert.rejects(validateToolRecovery({ ...input, run: { ...input.run, waitingOnRef: ref } }), /approval wait/);
+    }
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
 
 // Real SQLite/CAS history, with the existing offline authority fixture. This
 // exercises the recovery caller; it does not qualify native tool retirement.

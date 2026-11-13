@@ -79,7 +79,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -711,19 +711,44 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         // process-wide counters distinguish work from an idle startup; they
         // cannot establish a StateOwner, readiness, shutdown or recovery.
         report.restartReadinessDiagnostic = { diagnosticOnly: true, kind: 'unavailable' };
+        let stage = 'original_process';
         try {
           assert.equal(await fixtureProcess(pid, ledger.uid), start);
+          stage = 'process_counters';
           const counters = decodeEnrollProcessCounters(pid, await readFile(`/proc/${pid}/stat`, 'utf8'), await readFile(`/proc/${pid}/io`, 'utf8'));
           assert.equal(counters.startTicks, start);
+          stage = 'original_image';
           const current = await stat(`/proc/${pid}/exe`, { bigint: true });
           for (const field of imageFields) assert.equal(current[field], actual[field]);
+          stage = 'original_unit';
           const confirmed = show(unit);
           for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState']) assert.equal(confirmed[field], shown[field]);
           assert.equal(await fixtureProcess(pid, ledger.uid), start);
           report.restartReadinessDiagnostic = { diagnosticOnly: true, kind: 'observed',
             source: 'actual_successor_proc_after_failed_readiness_deadline', deadlineMs: 30000,
             preexistingProcessStartAndNamedImageBound: true, originalInvocationBound: true, counters };
-        } catch { /* Preserve the failed deadline when optional diagnosis is unavailable. */ }
+        } catch (error) {
+          const code = error instanceof Error ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
+          report.restartReadinessDiagnostic = { diagnosticOnly: true, kind: 'unavailable', stage,
+            code: ['ENOENT', 'EACCES', 'EPERM', 'ERR_ASSERTION'].includes(code) ? code : 'unclassified' };
+        }
+        let log: SpawnSyncReturns<Buffer> | undefined;
+        report.restartStartupDiagnostic = { diagnosticOnly: true, kind: 'unavailable' };
+        try {
+          const until = Date.now(), logBy = until + 5000;
+          log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--output=json', '--lines=80', '--boot=0',
+            `--until=@${Math.floor(until / 1000)}.${String(until % 1000).padStart(3, '0')}`,
+            `_UID=${ledger.uid}`, `_PID=${pid}`, '_TRANSPORT=stdout', `_SYSTEMD_INVOCATION_ID=${shown.InvocationID}`],
+          { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
+          assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
+          assert.equal(log.error, undefined); assert.equal(log.signal, null); assert.equal(log.status, 0);
+          const summary = readInstalledStartupFailureJournal(new TextDecoder('utf-8', { fatal: true }).decode(log.stdout),
+            { uid: ledger.uid, pid, invocationId: shown.InvocationID! });
+          assert(Date.now() < logBy);
+          report.restartStartupDiagnostic = { diagnosticOnly: true, kind: 'observed',
+            source: 'original_successor_invocation_after_failed_readiness_deadline', ...summary };
+        } catch { /* Optional diagnosis cannot replace the original failed readiness bound. */ }
+        finally { log?.stdout?.fill(0); log?.stderr?.fill(0); }
         assert.fail('public control readiness exceeded the original restart budget');
       }
       try {

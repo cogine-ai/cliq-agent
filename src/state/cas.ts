@@ -753,20 +753,31 @@ export class ContentAddressedStore {
   }
 
   async verify(ref: ArtifactRef, signal?: AbortSignal): Promise<ArtifactStat> {
-    const work = beginInstalledAssemblyWork('casRead');
-    try {
-      assertArtifactRef(ref);
-      signal?.throwIfAborted();
-      const result = await this.withRoot(async root => {
+    // Recovery often knows only a ref. Its original checked open supplies the
+    // exact length; large discard-only reads use the same joined reader as
+    // verifyChunks, without a second open or a completed-result cache. The
+    // slot includes both descriptor closes, even on cancellation or failure.
+    return withCasDiscardSlot(signal, async () => {
+      const work = beginInstalledAssemblyWork('casRead');
+      try {
+        assertArtifactRef(ref);
         signal?.throwIfAborted();
-        const opened = await openPublishedFile(this.root, root, ref);
-        try {
-          const result = await verifyOpened(ref, opened, signal, work);
-          await assertRootPathStable(this.root, root); signal?.throwIfAborted();
-          return result;
-        } finally { await closeCasHandle(opened.handle); }
-      });
-      signal?.throwIfAborted(); return result;
-    } finally { if (work) settleInstalledAssemblyWork(work); }
+        const result = await this.withRoot(async root => {
+          signal?.throwIfAborted();
+          const opened = await openPublishedFile(this.root, root, ref);
+          try {
+            let result: ArtifactStat;
+            if (isMainThread && opened.info.size >= 8_388_608) {
+              await discardCasChunks({ file: opened, rootPath: this.root, rootInfo: root.info, ref, byteLength: opened.info.size },
+                signal, bytes => { if (work) noteInstalledAssemblyRead(work, bytes); });
+              result = { ref, byteLength: opened.info.size };
+            } else result = await verifyOpened(ref, opened, signal, work);
+            await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+            return result;
+          } finally { await closeCasHandle(opened.handle); }
+        });
+        signal?.throwIfAborted(); return result;
+      } finally { if (work) settleInstalledAssemblyWork(work); }
+    });
   }
 }

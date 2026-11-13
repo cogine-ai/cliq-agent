@@ -2688,6 +2688,12 @@ genuine script invocation release has succeeded may maintenance renew that
 same claimed worker lease, using the existing owner/current generation checks,
 30s renewal threshold and 60s lease ceiling capped by the Run deadline. It
 cannot renew an unreleased preparation, a received completion or a stopped Run.
+Between fully joined tool operations the installed driver also invokes this
+same renewal guard before beginning the next operation. This prevents a series
+of short invocations from depending on a timer landing in an idle gap. The
+original owner, held native resources, lease version, 30s threshold, 60s ceiling
+and Run deadline are unchanged; an already expired lease enters original worker
+recovery and never prepares the next tool.
 
 Each read/search invocation must fully join its own output/descriptors and
 prove its actual invocation domain dead before publishing its result and
@@ -5546,6 +5552,12 @@ until its own descriptors close. No completed hash, byte buffer, observation or
 permission is cached; diagnostics count the physical bytes once. This does not
 combine installed-image revalidations, alter any transaction gate or deadline,
 or replace independent decoding of each historical claim and result.
+Whole-object recovery checks which have only a content reference use the same
+discard reader for large objects. Their original no-follow open supplies the
+exact size; they retain that same descriptor through the complete read and
+actual join. Small objects retain the existing bounded reader. Both forms
+share the four-slot bound through root/file closure, and neither retains a
+completed verification result.
 
 ### 9.1 Lease, Activation, And Process Containment
 
