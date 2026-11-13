@@ -38,7 +38,11 @@ export class ArtifactCatalog {
   /** Same real CAS and checks, with a tighter read lifetime. This view grants
    * no authority, starts no work and cannot discard a parent's cancellation. */
   withReadSignal(signal: AbortSignal): ArtifactCatalog {
-    const view = new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal, this.trustedReleases, this.runtimeConversionTarget);
+    // Reapplying the exact original signal does not tighten its lifetime.
+    // Keep that identity so simultaneous real-file reads can join; distinct
+    // signals still compose and can never cancel each other's parent scope.
+    const lifetime = this.readSignal && this.readSignal !== signal ? AbortSignal.any([this.readSignal, signal]) : signal;
+    const view = new ArtifactCatalog(this.cas, lifetime, this.trustedReleases, this.runtimeConversionTarget);
     view.readWidth = this.readWidth; return view;
   }
 

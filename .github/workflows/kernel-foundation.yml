@@ -1208,7 +1208,7 @@ jobs:
       - name: Measure the actual bounded reader without installed authority or provider traffic
         env:
           CLIQ_INSTALLED_READ_COST: '1'
-        run: node --test --test-concurrency=1 --import tsx src/state/installed-runtime-discard.test.ts src/state/installed-seed-read.test.ts
+        run: node --test --test-concurrency=1 --import tsx src/state/installed-runtime-discard.test.ts src/state/installed-seed-read.test.ts src/state/cas-discard.test.ts
 
   linux-installed-verifier:
     needs: ci-route

@@ -3651,3 +3651,16 @@ not manufacture authentication or replace the pending real Linux check.
 All 22 focused regressions pass in a short local path. An initial long-path
 run fails the existing native UDS path limit and is not counted as passing.
 No deadline, permission, fixture size or paid-run allowance changes.
+
+The same batch also preserves exact cancellation identity when an ArtifactCatalog
+view reapplies its existing signal. Previously `AbortSignal.any([s, s])` made
+independent signal objects and prevented the existing live-read sharing for
+real identical descriptors. Distinct signals still compose. Views remain
+separate objects; no completed bytes, history or authority are cached. A real
+CAS regression goes from two full 8 MiB reads to one joined live read, requires
+another full read after settlement, and preserves independent child/parent
+cancellation. All 46 related reader/guest regressions pass. A local four-round
+two-caller 256 MiB diagnostic reads 1 GiB instead of 2 GiB; elapsed time is
+454–457 ms versus 473–477 ms on this Mac, not an installed Linux speed claim.
+The same regression is added to the existing free Linux read-cost job; all
+original qualification jobs and their acceptance projections remain intact.

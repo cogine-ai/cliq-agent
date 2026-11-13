@@ -4,6 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { Worker } from 'node:worker_threads';
+import { channel } from 'node:diagnostics_channel';
+import { ArtifactCatalog } from './artifacts.js';
+import { INSTALLED_BUILTIN_WORK_CHANNEL, noteInstalledBuiltinWorkPhase } from './installed-work-diagnostics.js';
 import ts from 'typescript';
 import { ContentAddressedStore } from './cas.js';
 import { ResourceRetirementError } from './errors.js';
@@ -176,4 +179,46 @@ for (const fault of ['cancel', 'root_move'] as const) test(`actual discard reade
     if (fault === 'root_move') renameSync(moved, f.root);
     await file.close(); await root.close();
   }
+});
+
+
+test('nested catalog views preserve the same cancellation lifetime for one live full read', async t => {
+  const f = await fixture(t), catalog = new ArtifactCatalog(f.cas), owner = new AbortController();
+  const reads = catalog.withReadSignal(owner.signal), actualOpen = fs.open.bind(fs), active = new Set<object>();
+  const packets: Array<{ returnedBytes: number }> = [];
+  const diagnostic = channel(INSTALLED_BUILTIN_WORK_CHANNEL), receive = (value: unknown) => packets.push(value as typeof packets[number]);
+  diagnostic.subscribe(receive); t.after(() => diagnostic.unsubscribe(receive));
+  let entered = 0, release!: () => void;
+  const together = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await actualOpen(...args); active.add(handle);
+    const close = handle.close.bind(handle), stat = handle.stat.bind(handle); let gated = false;
+    t.mock.method(handle, 'close', async () => { await close(); assert(active.delete(handle)); });
+    if (args[0] === f.filename) t.mock.method(handle, 'stat', async (...args: Parameters<typeof stat>) => {
+      const info = await stat(...args);
+      if (args[0]?.bigint && !gated) { gated = true; if (++entered === 2) release(); await together; }
+      return info;
+    });
+    return handle;
+  });
+  noteInstalledBuiltinWorkPhase('tool_select'); const before = packets.at(-1)!.returnedBytes;
+  const timer = setTimeout(release, 2000);
+  try {
+    // The signed guest reader receives a signal-bound catalog and applies the
+    // same original signal again. It must not invent a distinct lifetime.
+    await Promise.all([reads.withReadSignal(owner.signal).verifyChunks(f.ref, f.size),
+      reads.withReadSignal(owner.signal).verifyChunks(f.ref, f.size)]);
+    assert.equal(entered, 2); assert.equal(active.size, 0);
+    noteInstalledBuiltinWorkPhase('tool_prepare');
+    assert.equal(packets.at(-1)!.returnedBytes - before, f.size, 'same-lifetime concurrent consumers share only the live full hash');
+    await reads.withReadSignal(owner.signal).verifyChunks(f.ref, f.size);
+    noteInstalledBuiltinWorkPhase('tool_claim');
+    assert.equal(packets.at(-1)!.returnedBytes - before, 2 * f.size, 'a later consumer still reads every byte again');
+    const child = new AbortController(), tighter = reads.withReadSignal(child.signal), childReason = new Error('child stopped');
+    child.abort(childReason); await assert.rejects(tighter.verifyChunks(f.ref, f.size), error => error === childReason);
+    await reads.verifyChunks(f.ref, f.size);
+    const parentReason = new Error('original owner stopped'); owner.abort(parentReason);
+    await assert.rejects(reads.withReadSignal(owner.signal).verifyChunks(f.ref, f.size), error => error === parentReason);
+    assert.equal(active.size, 0);
+  } finally { clearTimeout(timer); release(); }
 });
