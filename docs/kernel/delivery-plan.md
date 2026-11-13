@@ -479,9 +479,25 @@ revision and history; a subject tag alone never authorizes anything. The local
 regression first failed on the old candidate lifecycle guard, then passed with
 malformed/foreign waits still rejected. Original-invocation diagnostics now
 recognize the one fixed recovery wrapper and this closed failure reason. A
-new real installed permission/restart result is still required. The maximum
-fixture run remains pending at this record; no paid retry or PR is authorized
-by these component results.
+new real installed permission/restart result is still required.
+
+The completed maximum-fixture run at `b5e9378` passes its first five verifier
+cases and terminal reconnect/restart, then fails a new client's unchanged 5s
+READY deadline before ordinary tools begin. Thirteen original full revalidations
+read 6,780,300,046 bytes in 4,078ms of observed spans; hello arrives at 4,930ms
+of the consumer window, leaving the final three checks unfinished. This run
+therefore provides no new continuous-tool lease or 90s result evidence. Original
+writers/daemon join and cleanup pass. It is not an execution-queue failure.
+
+A separate free Linux diagnostic measures the unchanged discard reader on
+three ordinary owned files (128/128/256 MiB), sixteen complete rounds per
+sample, grouped/serial/serial/grouped ordering, and actual CPU, page-fault,
+context-switch and byte counts. It retains initialization and every sample,
+checks complete rereads and original thread/descriptor joins, and creates no
+installation, Run, provider call or authority. It cannot qualify READY or
+replace the maximum installed campaign; it distinguishes hashing/read cost
+from concurrency overhead before another performance change. No paid retry
+or PR has been initiated.
 
 ### Current product and qualification status (2026-11-03)
 

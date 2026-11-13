@@ -16,7 +16,7 @@ type Reader = { root(path: string): Promise<unknown>; file(root: unknown, path: 
 
 /** Original private FS/Worker implementation, extracted only for real resource
  * regression. This creates no selected installation, StateOwner or Run. */
-async function discardFixture() {
+async function discardFixture(sizes = [8_388_625, 8_388_625, 8_388_625, 8_388_625, 17]) {
   const source = await readFile(new URL('./installed-runtime.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('original-discard.ts', source, ts.ScriptTarget.Latest, true);
   const required = new Set(['CHUNK_BYTES', 'retirementFailure', 'mismatch', 'healthy', 'supportedPlatform', 'rememberRetirement',
@@ -51,8 +51,8 @@ async function discardFixture() {
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-idle-discard-'))), scope = new implementation.Scope();
   const root = await scope.root(directory), files: File[] = [];
   try {
-    for (let i = 0; i < 5; i++) {
-      const bytes = Buffer.alloc(i < 4 ? 8_388_625 : 17, i + 1), name = String(i);
+    for (let i = 0; i < sizes.length; i++) {
+      const bytes = Buffer.alloc(sizes[i]!, i + 1), name = String(i);
       await writeFile(path.join(directory, name), bytes, { mode: 0o400, flag: 'wx' });
       files.push(await scope.file(root, name, 0o400, bytes.length, createHash('sha256').update(bytes).digest('hex')));
     }
@@ -153,3 +153,38 @@ for (const kind of ['standalone', 'single_batch'] as const) {
     } finally { Object.defineProperty(Worker.prototype, 'postMessage', descriptor); await f.close(); }
   });
 }
+
+
+// Opt-in cost observation, separate from installed qualification. These three
+// ordinary owned files mimic holder sizes, not signed images or authority.
+if (process.platform === 'linux' && process.env.CLIQ_INSTALLED_READ_COST === '1')
+  test('observe complete original discard reads on three maximum-size holders', async t => {
+    const sizes = [128, 128, 256].map(mib => mib * 1024 * 1024);
+    const f = await discardFixture(sizes), bytesPerRound = sizes.reduce((a, b) => a + b, 0);
+    try {
+      const rows = [];
+      // Keep both orderings; initialization is included in the first row.
+      // No warmup or slow sample is discarded, and neither mode caches bytes.
+      for (const mode of ['grouped', 'serial', 'serial', 'grouped'] as const) {
+        const started = performance.now(), cpu = process.cpuUsage(), usage = process.resourceUsage(), before = f.bytes();
+        for (let round = 0; round < 16; round++) {
+          if (mode === 'grouped') await f.scope.verifyDiscard(f.files);
+          else for (const file of f.files) await f.scope.verifyDiscard([file]);
+        }
+        const elapsedMs = performance.now() - started, used = process.cpuUsage(cpu), after = process.resourceUsage();
+        assert.equal(f.bytes() - before, bytesPerRound * 16);
+        assert.equal(f.workers.length, 4); assert.equal(f.exited.size, 0);
+        rows.push({ mode, rounds: 16, bytes: f.bytes() - before, elapsedMs,
+          userCpuMicros: used.user, systemCpuMicros: used.system, fsRead: after.fsRead - usage.fsRead,
+          minorPageFaults: after.minorPageFault - usage.minorPageFault, majorPageFaults: after.majorPageFault - usage.majorPageFault,
+          voluntaryContextSwitches: after.voluntaryContextSwitches - usage.voluntaryContextSwitches,
+          involuntaryContextSwitches: after.involuntaryContextSwitches - usage.involuntaryContextSwitches });
+      }
+      await f.scope.close(); assert.equal(f.exited.size, 4);
+      for (const fd of f.fds) assert.throws(() => fstatSync(fd), { code: 'EBADF' });
+      const cpu = os.cpus();
+      t.diagnostic(JSON.stringify({ diagnosticOnly: true, installedQualified: false,
+        node: process.versions.node, architecture: process.arch, logicalCpus: cpu.length,
+        availableParallelism: os.availableParallelism(), sizes, rows, originalWorkersJoined: true }));
+    } finally { await f.close(); }
+  });
