@@ -40,7 +40,7 @@ import { CredentialSecretScanError, createCredentialSecretScanner, copyCredentia
   type CredentialSecretScanCode, type CredentialSecretScanFailureDiagnostic, type CredentialSecretScanFailureStage } from './credential-secret-scan.js';
 import { CredentialSecretCorpusError, scanCredentialSecretCorpus, readCredentialSecretCorpusScanProgress,
   type CredentialSecretCorpusScanProgress } from './credential-secret-corpus.js';
-import { inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
+import { InstalledWorkerIdentityObservationSupersededError, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease, assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds, type InstalledWorkerIdentityInspection, type InstalledWorkerRetirementBinding } from './installed-worker-lease.js';
 import { inspectInstalledOwnerHistory, waitForInstalledOwnerHistory, type InstalledOwnerHistoryReadStage } from './installed-read-control.js';
 import { assertInstalledVerifierOutcome, InstalledVerifierOutcomeError } from './installed-verifier-result.js';
 import { runInstalledDeliveryCases } from './installed-delivery-journey.js';
@@ -1678,6 +1678,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       let readParent: InstalledWorkerIdentityInspection | undefined;
       let executingBash: InstalledBashProcesses | undefined, bashObservationBy: number | undefined, bashPhysicallyJoined = false;
       let scriptLeaseRenewed = false;
+      // Capture the original Supervisor before reading a Run cut. Awaiting a
+      // second authenticated request after that cut unnecessarily ages it.
+      const readParentSupervisor = sourceKind === 'ordinary_tools'
+        ? await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status') : undefined;
+      let readParentAttempts = 0, readParentSuperseded = 0;
       let cut: Record<string, any>;
       const observationStarted = performance.now();
       let observationCount = 0, observationReadMs = 0, observationYieldMs = 0;
@@ -1711,11 +1716,21 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           if (!stoppedTools && !readParent && run.activeWorkerLaunchId) {
             const completedReads = cut.journal.filter((entry: any) => entry.opKind === 'tool' && entry.phase === 'completed').length;
             if (completedReads >= 2 && completedReads < 14) {
-              const status = await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status');
-              readParent = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
-                launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
-                supervisorInstanceId: status.supervisorInstanceId, deadlineAt: run.deadlineAt });
-              assert.equal('linux-proc-start-ticks:' + await fixtureProcess(readParent.pid, ledger.uid), readParent.processStartToken);
+              assert(readParentSupervisor); readParentAttempts++;
+              try {
+                const observed = inspectInstalledWorkerIdentity(recipe.stateRoot, { uid: ledger.uid, runId: run.id,
+                  launchId: run.activeWorkerLaunchId, leaseEpoch: run.leaseEpoch, runRevision: run.revision,
+                  supervisorInstanceId: readParentSupervisor.supervisorInstanceId, deadlineAt: run.deadlineAt });
+                assert.equal('linux-proc-start-ticks:' + await fixtureProcess(observed.pid, ledger.uid), observed.processStartToken);
+                readParent = observed;
+              } catch (error) {
+                if (!(error instanceof InstalledWorkerIdentityObservationSupersededError)) throw error;
+                readParentSuperseded++;
+              }
+              report.readParentObservation = { diagnosticOnly: true, attempts: readParentAttempts, superseded: readParentSuperseded };
+              // A superseded read supplies no identity. The existing loop must
+              // obtain another real cut within the unchanged original bound.
+              checkDeadline();
             }
           }
           if (stoppedTools && !bashPhysicallyJoined && run.status === 'running' && run.activeWorkerLaunchId) {

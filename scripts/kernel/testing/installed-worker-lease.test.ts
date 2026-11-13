@@ -448,6 +448,34 @@ async function workerFixture(t: TestContext) {
   return { ...value, cas, containment, worker, workerFilename, generation };
 }
 
+test('a superseded public revision is refused distinctly and only a fresh exact cut observes the same worker', async t => {
+  const value = await workerFixture(t);
+  update(value.filename, database => database.prepare('UPDATE runs SET revision=?').run(value.expected.runRevision + 1));
+  const before = await readFile(value.filename), names = await readdir(value.cas);
+  assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+    assert(error instanceof Error);
+    assert.equal(error.name, 'InstalledWorkerIdentityObservationSupersededError');
+    assert.equal(error.message, 'installed worker identity inspection refused');
+    assert.equal(error.cause, undefined); return true;
+  });
+  const fresh = inspectInstalledWorkerIdentity(value.stateRoot, { ...value.expected, runRevision: value.expected.runRevision + 1 });
+  assert.equal(fresh.launchId, value.expected.launchId); assert.equal(fresh.pid, value.worker.pid);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+});
+
+for (const fault of ['future_cut', 'corrupt_worker', 'other_owner', 'cancelled'] as const)
+  test(`a newer revision never hides ${fault} as a retryable identity observation`, async t => {
+    const value = await workerFixture(t);
+    update(value.filename, database => database.prepare('UPDATE runs SET revision=?').run(value.expected.runRevision + (fault === 'future_cut' ? -1 : 1)));
+    if (fault === 'corrupt_worker') { await chmod(value.workerFilename, 0o600); await writeFile(value.workerFilename, '{}'); await chmod(value.workerFilename, 0o400); }
+    if (fault === 'other_owner') value.expected.supervisorInstanceId = 'different-owner';
+    if (fault === 'cancelled') update(value.filename, database => database.exec('UPDATE runs SET cancel_requested=1'));
+    assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+      assert(error instanceof Error); assert.equal(error.name, 'Error');
+      assert.equal(error.message, 'installed worker identity inspection refused'); return true;
+    });
+  });
+
 test('active identity diagnostic fixes the original worker PID/start and generation without creating authority', async t => {
   const value = await workerFixture(t);
   const observed = inspectInstalledWorkerIdentity(value.stateRoot, value.expected);

@@ -397,9 +397,12 @@ function sourceObservationLoop() {
   const body = ts.transpileModule(text.slice(start, end) + '\nreturn cut;', {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
   }).outputText;
-  return Function('assert', 'Date', 'performance', 'send', 'delay', 'sourceKind', 'by', 'report',
+  return Function('assert', 'Date', 'performance', 'send', 'delay', 'sourceKind', 'by', 'report', 'bindings',
     `return (async () => {
-      const admitted = {id: 'inert-run'}, responderFailure = undefined, toolsCase = false;
+      const admitted = {id: 'inert-run'}, responderFailure = undefined, toolsCase = bindings?.toolsCase ?? false;
+      const {stoppedTools = false, readParentSupervisor, inspectInstalledWorkerIdentity,
+        InstalledWorkerIdentityObservationSupersededError, fixtureProcess, recipe, ledger} = bindings ?? {};
+      let readParent, readParentAttempts = 0, readParentSuperseded = 0;
       const activeCases = new Map([[sourceKind, {posts: 1}]]);
       const projectInstalledRunProgress = input => ({status: input.cut.snapshot.run.status});
       ${body}
@@ -442,4 +445,55 @@ test('ordinary completion yield remains clipped to the original deadline', async
   assert.deepEqual(pauses, [500]); assert.equal(reads, 2);
   assert.equal(report.sourceObservationWork.yieldMs, 500);
   assert.equal(report.sourceObservationWork.readMs, 2000);
+});
+
+
+function identityObservationBindings(inspect) {
+  class Superseded extends Error {}
+  return { toolsCase: true, readParentSupervisor: {supervisorInstanceId: 'original-owner'},
+    InstalledWorkerIdentityObservationSupersededError: Superseded,
+    inspectInstalledWorkerIdentity: (root, expected) => inspect(root, expected, Superseded),
+    fixtureProcess: async () => '500', recipe: {stateRoot: 'inert-root'}, ledger: {uid: 123} };
+}
+function identityObservationCut(revision, status = 'running') {
+  return {snapshot: {run: {status, id: 'inert-run', revision, activeWorkerLaunchId: 'original-launch',
+    leaseEpoch: 1, deadlineAt: 'inert-deadline'}}, journal: Array.from({length: 2}, () => ({opKind: 'tool', phase: 'completed'}))};
+}
+
+test('the actual polling loop refuses superseded identity data and obtains a fresh exact public cut', async () => {
+  let now = 0, reads = 0; const revisions = [], report = {}, pauses = [];
+  const bindings = identityObservationBindings((_root, expected, Superseded) => {
+    revisions.push(expected.runRevision); assert.equal(expected.supervisorInstanceId, 'original-owner');
+    if (revisions.length === 1) throw new Superseded();
+    return {pid: 123, processStartToken: 'linux-proc-start-ticks:500'};
+  });
+  await sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async frame => {
+    assert.equal(frame.method, 'run.get', 'no intervening authenticated status request ages this cut');
+    now += 100; return identityObservationCut(++reads, reads === 3 ? 'succeeded' : 'running');
+  }, async ms => {now += ms; pauses.push(ms);}, 'ordinary_tools', 90000, report, bindings);
+  assert.deepEqual(revisions, [1, 2]); assert.deepEqual(pauses, [250, 250]);
+  assert.deepEqual(report.readParentObservation, {diagnosticOnly: true, attempts: 2, superseded: 1});
+});
+
+test('identity corruption and lookalike stale errors still stop the original polling loop', async () => {
+  for (const name of ['Error', 'InstalledWorkerIdentityObservationSupersededError']) {
+    const failure = new Error('fixed refusal'); failure.name = name;
+    const bindings = identityObservationBindings(() => {throw failure;});
+    let reads = 0;
+    await assert.rejects(sourceObservationLoop()(assert, {now: () => 0}, {now: () => 0}, async () => {
+      reads++; return identityObservationCut(1);
+    }, async () => assert.fail('invalid evidence cannot request another observation'), 'ordinary_tools', 90000, {}, bindings), error => error === failure);
+    assert.equal(reads, 1);
+  }
+});
+
+test('superseded identity observations cannot extend the original terminal deadline', async () => {
+  let now = 0, reads = 0; const report = {};
+  const bindings = identityObservationBindings((_root, _expected, Superseded) => {throw new Superseded();});
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now += 1000; return identityObservationCut(++reads);
+  }, async ms => {now += ms;}, 'ordinary_tools', 1500, report, bindings),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.equal(reads, 2); assert.equal(report.readParentObservation.attempts, 1);
+  assert.equal(report.sourceObservationWork.yieldMs, 500);
 });

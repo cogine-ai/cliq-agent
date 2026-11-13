@@ -236,6 +236,29 @@ This is complete inventory coverage plus corrected affected reruns, not a clean
 original full-suite run. No production code changed during those reruns, no
 assertion or deadline was relaxed, and installed Linux acceptance remains open.
 
+Free [run 43404254555](https://github.com/cogine-ai/cliq-agent/actions/runs/43404254555)
+at `ad92609db63cc23e0ef5cae9f7a38a579869fe3c` passes the daily
+edit/check/repair/review/apply journey and signed Node probe, with original joins,
+complete secret scans and zero cleanup errors. The maximum fixture passes its
+first five cases, then the ordinary-tools read-only worker identity inspection
+refuses after 16,721 ms (five observations); this is not the previous 90-second
+failure. The original Supervisor joins normally; this does not qualify the later
+precise Stop/restart cases, which were not reached.
+
+That inspection awaited another authenticated status request after obtaining its
+Run cut. A real SQLite regression confirms that intervening revision advancement
+makes this cut stale. The diagnostic now finishes all original identity, CAS,
+root and close checks before distinguishing a strictly advanced revision; it
+still returns no identity for that cut. Only the ordinary polling observer may
+request a fresh authenticated cut, within the original deadline and original
+Supervisor binding. Corruption, owner/lifecycle mismatch, backward revisions and
+lookalike errors remain fatal. The final actual PID/start observation remains
+mandatory. The owner observation also moves before the Run cut to remove the
+unnecessary intervening request. All 96 diagnostic and 28 caller/deadline tests
+pass; another installed run is required to determine whether this was the actual
+refusal and to continue the remaining original cases. Production `src/` is
+unchanged from the complete local validation above.
+
 For the earlier history-scheduling candidate, local build passes. Its complete
 four-process run reports 4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
 one child fixture whose initial lease crossed its Run deadline, and two original

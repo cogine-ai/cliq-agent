@@ -467,6 +467,12 @@ function workerProjection(databaseIdentity: string, launch: BoundWorkerLaunch, g
     executableDigest: worker.executableDigest, activatedAt: launch.activatedAt, observedAt: encodeCanonicalTime(Date.now()) });
 }
 
+/** A refused data observation, never permission to accept the older cut.
+ * Only the ordinary polling fixture may request a fresh authenticated cut. */
+export class InstalledWorkerIdentityObservationSupersededError extends Error {
+  constructor() { super('installed worker identity inspection refused'); this.name = 'InstalledWorkerIdentityObservationSupersededError'; }
+}
+
 /** Captures data for an independent /proc observation before releasing the
  * already owned response. No process observation or execution authority here. */
 export function inspectInstalledWorkerIdentity(stateRoot: string,
@@ -476,19 +482,28 @@ export function inspectInstalledWorkerIdentity(stateRoot: string,
     for (const value of [expected.leaseEpoch, expected.runRevision]) requireValue(Number.isSafeInteger(value) && value > 0);
     for (const value of [expected.runId, expected.launchId, expected.supervisorInstanceId]) requireValue(boundedString(value));
     parseCanonicalTime(expected.deadlineAt);
-    return readWorkerDiagnostic(stateRoot, expected.uid, (database, databaseIdentity, readCas) => {
+    const observed = readWorkerDiagnostic(stateRoot, expected.uid, (database, databaseIdentity, readCas) => {
       const { row, launch, generation } = readWorkerRows(database, expected.runId, expected.launchId);
       const now = encodeCanonicalTime(Date.now());
       requireValue(row.active_worker_launch_id === expected.launchId && row.status === 'running' &&
-        row.lease_epoch === expected.leaseEpoch && row.revision === expected.runRevision && row.cancel_requested === 0 &&
+        row.lease_epoch === expected.leaseEpoch && row.cancel_requested === 0 &&
         row.stop_intent_ref === null && row.deadline_at === expected.deadlineAt && launch.phase === 'activated' &&
         launch.generationWriteState === 'active' && launch.supervisorInstanceId === expected.supervisorInstanceId &&
         launch.leaseEpoch === expected.leaseEpoch && launch.leaseExpiresAt && launch.leaseExpiresAt > now &&
         launch.leaseExpiresAt <= expected.deadlineAt && generation.phase === 'active' &&
         generation.activeWorkerLaunchId === launch.launchId && generation.leaseEpoch === launch.leaseEpoch);
-      return workerProjection(databaseIdentity, launch, generation, readCas);
+      requireValue(typeof row.revision === 'number' && Number.isSafeInteger(row.revision) && row.revision >= expected.runRevision);
+      const identity = workerProjection(databaseIdentity, launch, generation, readCas);
+      return { identity, current: row.revision === expected.runRevision };
     });
-  } catch { throw new Error('installed worker identity inspection refused'); }
+    // The original object/root checks and every real close above must finish
+    // before classifying only a strictly advanced revision as superseded.
+    if (!observed.current) throw new InstalledWorkerIdentityObservationSupersededError();
+    return observed.identity;
+  } catch (error) {
+    if (error instanceof InstalledWorkerIdentityObservationSupersededError) throw error;
+    throw new Error('installed worker identity inspection refused');
+  }
 }
 
 const projectionKeys = ['diagnosticOnly', 'databaseIdentity', 'launchIdentityDigest', 'runId', 'launchId', 'supervisorInstanceId',
