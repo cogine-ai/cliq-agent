@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import workerThreads from 'node:worker_threads';
+import { syncBuiltinESMExports } from 'node:module';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
@@ -42,7 +44,8 @@ test('completed mutating tool history consumes an existing large CAS file with b
     const file = entries.entries[0]!;
     assert.equal(file.kind, 'file'); if (file.kind !== 'file') assert.fail('fixture requires its actual persisted file');
     assert.equal(file.size, blobBytes);
-    const root = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY), target = path.join(root, file.blobRef);
+    const blobRef = file.blobRef;
+    const root = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY), target = path.join(root, blobRef);
     const open = fs.open.bind(fs), lstat = fs.lstat.bind(fs), allocate = Buffer.allocUnsafe;
     const overwriteLastByte = async (byte: number) => {
       await fs.chmod(target, 0o600);
@@ -50,12 +53,44 @@ test('completed mutating tool history consumes an existing large CAS file with b
       try { assert.equal((await held.write(Buffer.from([byte]), 0, 1, blobBytes - 1)).bytesWritten, 1); }
       finally { await held.close(); await fs.chmod(target, 0o400); }
     };
-    type Pass = { historyTool: boolean; bytes: number; reads: number; stats: number; closed: boolean; rootChecks: number };
+    type Pass = { fd: number; historyTool: boolean; bytes: number; reads: number; stats: number; closed: boolean; rootChecks: number;
+      threadJoined?: boolean; closedBeforeThread?: boolean };
     let historyTool = false, fault: 'none' | 'corrupt' | 'abort' | 'close' = 'none', injected = false;
     let controller = new AbortController(), rootChecks = 0, largestAllocation = 0, opened = 0, closed = 0, peak = 0;
     let passes: Pass[] = [];
     const active = new Set<object>(), cancellation = new Error('the original retained tool history read was cancelled');
     const closeFailure = new Error('the original history file really closed but returned retirement uncertainty');
+    const OriginalWorker = workerThreads.Worker;
+    // Observe the real synchronous syscalls in the data-only hash Worker too.
+    // Every syscall and the production hash/reply/exit still execute normally;
+    // counters supply no bytes, cancellation, result or authority to production.
+    const observe = `{
+      const d=require('node:worker_threads').workerData, c=new BigInt64Array(d.testReadCounters), fs=require('node:fs');
+      const read=fs.readSync, stat=fs.fstatSync, root=fs.lstatSync, allocate=Buffer.allocUnsafe;
+      fs.readSync=(...a)=>{const n=Reflect.apply(read,fs,a);if(a[0]===d.fd){Atomics.add(c,0,BigInt(n));Atomics.add(c,1,1n);}return n;};
+      fs.fstatSync=(...a)=>{const value=Reflect.apply(stat,fs,a);if(a[0]===d.fd)Atomics.add(c,2,1n);return value;};
+      fs.lstatSync=(...a)=>{const value=Reflect.apply(root,fs,a);if(a[0]===d.rootPath)Atomics.add(c,3,1n);return value;};
+      Buffer.allocUnsafe=size=>{if(BigInt(size)>Atomics.load(c,4))Atomics.store(c,4,BigInt(size));return allocate(size);};
+    }`;
+    workerThreads.Worker = class extends OriginalWorker {
+      constructor(source: string | URL, options?: workerThreads.WorkerOptions) {
+        const pass = typeof source === 'string' && options?.eval && options.workerData?.ref === blobRef
+          ? passes.find(pass => !pass.closed && pass.fd === options.workerData.fd) : undefined;
+        const counters = pass ? new SharedArrayBuffer(5 * 8) : undefined;
+        super(pass ? observe + source : source, pass ? { ...options, workerData: { ...options!.workerData, testReadCounters: counters } } : options);
+        if (pass) {
+          pass.threadJoined = false;
+          this.once('exit', () => {
+            const values = new BigInt64Array(counters!);
+            pass.bytes += Number(values[0]); pass.reads += Number(values[1]); pass.stats += Number(values[2]);
+            pass.rootChecks += Number(values[3]); largestAllocation = Math.max(largestAllocation, Number(values[4]));
+            pass.threadJoined = true;
+          });
+        }
+      }
+    };
+    syncBuiltinESMExports();
+    t.after(() => { workerThreads.Worker = OriginalWorker; syncBuiltinESMExports(); });
     t.mock.method(Buffer, 'allocUnsafe', (size: number) => { largestAllocation = Math.max(largestAllocation, size); return allocate(size); });
     t.mock.method(fs, 'lstat', (...args: Parameters<typeof lstat>) => {
       if (args[0] === root) rootChecks++;
@@ -69,8 +104,8 @@ test('completed mutating tool history consumes an existing large CAS file with b
       const held = await open(...args);
       if (args[0] !== root && !String(args[0]).startsWith(`${root}/`)) return held;
       active.add(held); opened++; peak = Math.max(peak, active.size);
-      const close = held.close.bind(held);
-      const pass: Pass | undefined = args[0] === target ? { historyTool, bytes: 0, reads: 0, stats: 0, closed: false, rootChecks } : undefined;
+      const close = held.close.bind(held), rootChecksAtOpen = rootChecks;
+      const pass: Pass | undefined = args[0] === target ? { fd: held.fd, historyTool, bytes: 0, reads: 0, stats: 0, closed: false, rootChecks: 0 } : undefined;
       if (pass) {
         passes.push(pass);
         const read = held.read.bind(held), stat = held.stat.bind(held);
@@ -82,8 +117,12 @@ test('completed mutating tool history consumes an existing large CAS file with b
         t.mock.method(held, 'stat', (...values: Parameters<typeof stat>) => { pass.stats++; return Reflect.apply(stat, held, values); });
       }
       t.mock.method(held, 'close', async () => {
+        const closedBeforeThread = pass?.threadJoined === false;
         await close(); assert(active.delete(held)); closed++;
-        if (pass) { pass.closed = true; pass.rootChecks = rootChecks - pass.rootChecks; }
+        if (pass) {
+          pass.closedBeforeThread = closedBeforeThread;
+          pass.closed = true; pass.rootChecks += rootChecks - rootChecksAtOpen;
+        }
         if (pass?.historyTool && fault === 'close' && !injected) { injected = true; throw closeFailure; }
       });
       return held;
@@ -94,13 +133,17 @@ test('completed mutating tool history consumes an existing large CAS file with b
       fault = next; injected = false; historyTool = false; controller = new AbortController();
       passes = []; rootChecks = 0; largestAllocation = 0; opened = 0; closed = 0; peak = 0;
     };
-    const joined = () => { assert.equal(active.size, 0); assert.equal(opened, closed); assert(passes.every(pass => pass.closed)); };
+    const joined = () => {
+      assert.equal(active.size, 0); assert.equal(opened, closed); assert(passes.every(pass => pass.closed));
+      assert(passes.every(pass => !pass.closedBeforeThread && pass.threadJoined !== false), 'real data Workers must exit before their borrowed files close');
+    };
     await t.test('complete original recovery reads every byte without allocating the file', async () => {
       reset('none');
       const recovered = await recover();
       assert.equal(recovered.run.budgetConsumed.toolCalls, 1); joined();
       const history = passes.filter(pass => pass.historyTool);
       assert.equal(history.length, 1); assert.ok(passes.length >= 4, 'every independent original workspace/history/seal consumer still reads');
+      assert(passes.some(pass => pass.threadJoined === true), 'the complete recovery must observe actual off-thread reads too');
       assert(passes.every(pass => pass.bytes === blobBytes && pass.stats >= 2), 'each issued original file read exhausts its bytes and held-file stat guards');
       assert.ok(largestAllocation <= ARTIFACT_CHUNK_BYTES, `retained recovery allocated ${largestAllocation} bytes for a ${blobBytes}-byte file`);
       assert.ok(history[0]!.rootChecks >= history[0]!.reads, 'the named root remains current between bounded streamed reads');
