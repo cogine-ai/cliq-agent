@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { Module } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import type { NativeWorkerBinding } from './linux-worker.js';
+import { SealedImages } from './sealed-images.js';
 
 test('fixed native recipe rejects relabelled configs and validates real sealed bytes, without creating execution authority', { skip: process.platform !== 'linux' }, async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'cliq-builtin-native-data-'));
@@ -39,12 +40,34 @@ test('actual native script receiver owns immutable bytes and a distinct non-exec
     const bytes = Buffer.from('opaque owned script fixture; not a signed tool or authority');
     const filename = path.join(dir, 'owned-data'); await writeFile(filename, bytes, { flag: 'wx', mode: 0o400 });
     const file = await open(filename, 'r');
+    const images = new SealedImages<ReturnType<typeof native.sealBuiltinToolScript>>();
     try {
-      const image = native.sealBuiltinToolScript(file.fd);
+      const scriptDescriptors = async () => {
+        const descriptors: string[] = [];
+        for (const fd of await readdir('/proc/self/fd')) {
+          try { if ((await readlink(`/proc/self/fd/${fd}`)).includes('memfd:cliq-source-git-inspector')) descriptors.push(fd); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+        return descriptors;
+      };
+      const before = new Set(await scriptDescriptors()); let seals = 0;
+      const acquire = () => images.get('owned-data', async () => { seals++; return native.sealBuiltinToolScript(file.fd); });
+      const image = await acquire();
       assert.deepEqual(image.identity, { sha256: createHash('sha256').update(bytes).digest('hex'), byteCount: bytes.length });
       assert(Object.isFrozen(image)); assert(Object.isFrozen(image.identity)); assert.equal('descriptor' in image, false);
-      assert.throws(() => image.close.call({})); image.close(); image.close();
-    } finally { await file.close(); }
+      const descriptors = (await scriptDescriptors()).filter(fd => !before.has(fd));
+      assert.equal(descriptors.length, 1);
+      const held = `/proc/self/fd/${descriptors[0]}`;
+      await chmod(filename, 0o600); await writeFile(filename, 'changed source data');
+      assert.equal(await acquire(), image); assert.equal(seals, 1);
+      assert.deepEqual(await readFile(held), bytes);
+      // The actual kernel seal, not a memoized digest, prevents mutation.
+      await assert.rejects(writeFile(held, 'cannot mutate sealed bytes'), { code: 'EPERM' });
+      assert.deepEqual(await readFile(held), bytes);
+      assert.throws(() => image.close.call({}));
+      await images.close(); await assert.rejects(readlink(held), { code: 'ENOENT' });
+      image.close();
+    } finally { await images.close(); await file.close(); }
     assert.throws(() => native.sealBuiltinToolScript(-1));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

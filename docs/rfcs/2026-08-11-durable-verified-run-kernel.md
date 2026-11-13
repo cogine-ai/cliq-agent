@@ -8134,6 +8134,21 @@ attempt; only positively proven no-release follows the separate refund protocol.
 
 For every non-read contract, `postEffect` is mandatory even on an error;
 read-only contracts forbid it and preserve the preceding workspace state.
+The fixed builtin data script may remain held as one genuine, immutable native
+seal in the original installation's launcher scope, like its existing sealed
+executable images. Acquisition stays lazy until an actual claimed invocation;
+queued admission does not open it. The original signed source read, complete
+pre/post installation revalidation, native sealing and exact identity checks
+still occur when that resource is created. Each use independently checks the
+complete claim/script/guest closure and current controller/generation, creates
+its own guest with both full installation revalidations, and passes the same
+native-tagged seal through the existing descriptor transfer. This is retention
+of an actual sealed resource, not cached integrity evidence or permission. It
+cannot cross an installation or process lifetime. Invocation cleanup joins its
+own extraction producer; launcher cleanup joins every controller and opening
+before closing the seal, and retains construction/retirement uncertainty.
+Historical readers and prepare/claim/release still reread their original bytes.
+
 The fixed `builtin_script` recipe additionally requires the closed
 `captureRef/captureDigest` pair. Its `cliq-builtin-tool-capture-v1` data binds
 the original claim/lease/request/target/grant, fixed tool, SandboxLaunchSpec,

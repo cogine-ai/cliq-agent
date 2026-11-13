@@ -1216,6 +1216,7 @@ jobs:
       - name: Check the actual native dependency family before installed qualification
         run: |
           node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts
+          node --test --test-concurrency=1 --import tsx src/sandbox/sealed-images.test.ts src/sandbox/builtin-tool-native.test.ts
           if ! git cat-file -e 'ba804a59dcadee80cb41c822e2d0e32198462f20^{commit}'; then
             git fetch --no-tags --depth=1 origin ba804a59dcadee80cb41c822e2d0e32198462f20
           fi

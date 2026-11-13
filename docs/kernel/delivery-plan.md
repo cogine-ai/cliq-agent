@@ -369,6 +369,29 @@ configuration byte of that candidate. Updated offline child fixtures also pass
 alongside the unchanged expiry boundary tests. Installed evidence must
 still bind the exact package/fixture revision. The real-model task remains open.
 
+Free [run 43419395262](https://github.com/cogine-ai/cliq-agent/actions/runs/43419395262)
+at `c0692cf1ff411c7976c4339967d42fa50de33f41` passes daily edit/check/repair/review/apply,
+signed Node and the original native callback comparison (baseline 3/4 with its
+expected refusal; candidate 4/4). The maximum fixture again passes its first
+five cases and reconnect/restart, but fails ordinary tools' unchanged 90 seconds:
+one model and ten tools completed, the next tool claimed. Original Stop joins
+from native guest opening, with no pre-Stop scheduler failure and cleanup zero.
+The new MCP routing window has zero CAS reads; planning now reads one complete
+cut. Runner-dependent completion counts alone do not establish a speedup.
+
+The remaining measured native guest-opening window is 22.7 seconds over eleven
+entries and 22.8 GB of installation revalidation bytes. The next implementation
+retains the real immutable builtin script seal in the existing launcher image
+owner, rather than constructing and retiring that identical resource per call.
+Both installation adapters retain their exact source/seal checks on acquisition;
+each fresh guest retains both full installation revalidations, and every claim,
+identity, history and release check remains independent. Close joins all actual
+borrowers and in-flight acquisitions before retiring the script. No guest,
+authorization or CAS verification result is cached. This requires fresh Linux
+qualification; it neither closes the original deadline failure nor authorizes a
+paid provider retry. The later precise stop/restart/children/dependency cases
+remain unexecuted and the complete preview remains unqualified.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

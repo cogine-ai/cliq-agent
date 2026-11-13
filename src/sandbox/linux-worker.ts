@@ -1,3 +1,4 @@
+import { SealedImages } from './sealed-images.js';
 import type { NativeBuiltinInvocationPhase } from './builtin-tool-diagnostics.js';
 import { installedResourcesObserved, noteInstalledResourceBoundary, type OriginalResourceSubject } from '../state/installed-resource-diagnostics.js';
 import type { ResourceBoundary } from '../state/installed-resource-kernel.js';
@@ -754,17 +755,15 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
         throw error;
       }
     },
-    async builtin(toolchain, bash, signal) {
-      let script: NativeBuiltinToolScriptImage | undefined, job: NativeGuestToolchain | NativeBuiltinBashToolchain | undefined;
+    builtinScript: signal => sealInstalledBuiltinToolScript(selected, signal),
+    async builtin(toolchain, bash, script, signal) {
+      let job: NativeGuestToolchain | NativeBuiltinBashToolchain | undefined;
       let closing: Promise<void> | undefined;
       const close = () => closing ??= (async () => {
-        const failures: unknown[] = [];
-        if (job) try { await closeInstalledGuestToolchain(selected, job); } catch (error) { failures.push(error); }
-        if (script) try { script.close(); } catch (error) { failures.push(error); }
-        if (failures.length) throw retirementError('fixed builtin runtime did not join', new AggregateError(failures));
+        if (job) try { await closeInstalledGuestToolchain(selected, job); }
+        catch (error) { throw retirementError('fixed builtin runtime did not join', error); }
       })();
       try {
-        script = await sealInstalledBuiltinToolScript(selected, signal);
         job = bash ? await startInstalledBuiltinBashToolchain(selected, toolchain, { ...(signal ? { signal } : {}) }) :
           await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
         signal?.throwIfAborted(); return Object.freeze({ script, job, close });
@@ -1650,19 +1649,12 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         throw error;
       }
     },
-    async builtin(toolchain, bash, signal) {
+    async builtinScript(signal) {
       const entry = bundle.entries.find(value => value.entryId === BUILTIN_SCRIPT_RECIPE.entryId);
       if (!loadedBinding || loadedBinding.builtinToolInterfaceVersion !== 2 || !entry || entry.role !== 'tool_adapter' || entry.executable ||
           entry.version !== '1' || entry.relativePath !== BUILTIN_SCRIPT_RECIPE.relativePath || entry.byteCount < 1 || entry.byteCount > 1_048_576)
         throw new LinuxExecutionIdentityError('the fixed signed preparing Git inspector is unavailable');
-      let inspector: NativeBuiltinToolScriptImage | undefined, guest: Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; close(): Promise<void> }> | undefined;
-      let closing: Promise<void> | undefined;
-      const close = () => closing ??= (async () => {
-        const failures: unknown[] = [];
-        if (guest) try { await guest.close(); } catch (error) { failures.push(error); }
-        if (inspector) try { inspector.close(); } catch (error) { failures.push(error); }
-        if (failures.length) throw retirementError('signed preparing Git runtime did not join', new AggregateError(failures));
-      })();
+      let inspector: NativeBuiltinToolScriptImage | undefined;
       try {
         const source = await openInstalledFile(installation, entry.relativePath);
         let sealingFailure: { error: unknown } | undefined;
@@ -1678,11 +1670,26 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
         try { await retireFiles([source]); }
         catch (error) { throw retirementError('preparing inspector source did not join', new AggregateError([...(sealingFailure ? [sealingFailure.error] : []), error])); }
         if (sealingFailure) throw sealingFailure.error;
+        return inspector!;
+      } catch (error) {
+        try { inspector?.close(); }
+        catch (cleanup) { throw retirementError('signed builtin script construction and join failed', new AggregateError([error, cleanup])); }
+        throw error;
+      }
+    },
+    async builtin(toolchain, bash, script, signal) {
+      let guest: Readonly<{ job: NativeGuestToolchain | NativeBuiltinBashToolchain; close(): Promise<void> }> | undefined;
+      let closing: Promise<void> | undefined;
+      const close = () => closing ??= (async () => {
+        if (guest) try { await guest.close(); }
+        catch (error) { throw retirementError('signed builtin runtime did not join', error); }
+      })();
+      try {
         guest = bash ? await startSignedGuest(toolchain, signal, 'bash') : await startSignedGuest(toolchain, signal, false); signal?.throwIfAborted();
-        return Object.freeze({ job: guest.job, script: inspector!, close });
+        return Object.freeze({ job: guest.job, script, close });
       } catch (error) {
         try { await close(); }
-        catch (cleanup) { throw retirementError('signed preparing Git construction and join failed', new AggregateError([error, cleanup])); }
+        catch (cleanup) { throw retirementError('signed builtin runtime construction and join failed', new AggregateError([error, cleanup])); }
         throw error;
       }
     },
@@ -1698,7 +1705,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   loadNative(recheck: () => void): Promise<NativeBinding>;
   image(entryId: string, binding: NativeBinding): Promise<NativeImage>;
   guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldGuestPreparation>;
-  builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
+  builtinScript?(signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage>;
+  builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, script: NativeBuiltinToolScriptImage, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
   dependency?(toolchain: RetainedVerifierToolchain, scripts: boolean, transport: NativeDependencyTransport,
     binding: DependencyBrokerBinding, signal?: AbortSignal): Promise<HeldDependencyRuntime>;
   preparing?(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldPreparingGitRuntime>;
@@ -1706,7 +1714,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   noteResources?(boundary: ResourceBoundary, subjects?: readonly OriginalResourceSubject[]): void;
 }): Promise<LinuxWorkerLauncher> {
   const controllers = new Set<NativeController>(); let closed = false, closing: Promise<void> | undefined;
-  const installed = new Map<string, Promise<NativeImage>>();
+  const installed = new SealedImages<NativeImage>();
+  const builtinScripts = new SealedImages<NativeBuiltinToolScriptImage>();
   const guestOpenings = new Set<Promise<HeldGuestPreparation>>(), guests = new Set<HeldGuestPreparation>();
   const installationAbort = new AbortController();
   const receiver = () => {
@@ -1728,15 +1737,11 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
     }
     for (const guest of guests) try { await guest.close(); } catch (error) { remember(error); }
     guests.clear(); guestOpenings.clear();
-    // The same cache owns in-flight seals too. Closing cannot outrun an image
-    // still being validated, and a concurrent reader never creates a second seal.
-    for (const opening of installed.values()) {
-      let image: NativeImage;
-      try { image = await opening; }
-      catch (error) { if (error instanceof ResourceRetirementError) remember(error); continue; }
-      try { retireImage(image); } catch (error) { remember(error); }
+    // All borrowers and extraction producers have joined. Both sets also own
+    // in-flight seals, so close cannot outrun a validation or leak a failed seal.
+    for (const images of [installed, builtinScripts]) {
+      try { await images.close(); } catch (error) { remember(error); }
     }
-    installed.clear();
     try { await source.close(); } catch (error) { remember(error); }
     if (failed) throw retirementError('worker installation retirement failed', failure);
   }
@@ -1746,23 +1751,16 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
     if (binding.interfaceVersion !== 3 || typeof binding.sealImage !== 'function' || typeof binding.sealImageBuffer !== 'function' ||
         typeof binding.openController !== 'function') mismatch('unsupported installed native worker interface');
     function image(entryId: string, role: string): Promise<NativeImage> {
-      receiver(); const existing = installed.get(entryId); if (existing) return existing;
+      receiver();
       const entry = bundle.entries.find(value => value.entryId === entryId);
       if (!entry || entry.role !== role || !entry.executable) mismatch('executable is not in the signed production bundle');
-      const opening = (async () => {
+      return installed.get(entryId, async () => {
         const sealed = await source.image(entryId, binding);
         try {
           if (await hashHeld(sealed.descriptor(), entry.byteCount, receiver) !== entry.digest) mismatch('sealed installed image differs from its signed digest');
           return sealed;
         } catch (error) { retireImage(sealed); throw error; }
-      })().catch(error => {
-        // A transient failure owns no image after cleanup; keep uncertain
-        // retirement observable by closeInstallation instead of erasing it.
-        if (!(error instanceof ResourceRetirementError) && installed.get(entryId) === opening) installed.delete(entryId);
-        throw error;
       });
-      installed.set(entryId, opening);
-      return opening;
     }
     const helper = await image('linux_worker_controller', 'platform_helper');
     const bwrap = await image('linux_bubblewrap', 'platform_helper');
@@ -2081,13 +2079,18 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       if (builtinBackend.kind !== 'linux' || invocationClosure.plan.parentContainmentRef !== canonicalSha256(containment) ||
                           invocationClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
                           invocationClosure.spec.filesystem.kind !== 'run_generation' || invocationClosure.spec.filesystem.generationRef !== closure.workspaceGenerationRef ||
-                          path.posix.dirname(builtinBackend.cgroupPath) !== backend.cgroupPath || binding.builtinToolInterfaceVersion !== 2 || typeof source.builtin !== 'function' ||
+                          path.posix.dirname(builtinBackend.cgroupPath) !== backend.cgroupPath || binding.builtinToolInterfaceVersion !== 2 || typeof source.builtin !== 'function' || typeof source.builtinScript !== 'function' ||
                           typeof native.createBuiltinTool !== 'function')
                         mismatch('builtin does not select the exact actual parent, generation and fixed native recipe');
                       const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal]);
                       signal.throwIfAborted();
                       phase('tool_native_guest_open');
-                      const opening = source.builtin(invocationClosure.toolchain, invocationClosure.call.toolName === 'bash', signal).then(guest => {
+                      const openScript = source.builtinScript, openGuest = source.builtin;
+                      const opening = (async () => {
+                        const script = await builtinScripts.get(BUILTIN_SCRIPT_RECIPE.entryId, () => openScript(signal));
+                        controllerReceiver(); borrowed.assertHeld(); signal.throwIfAborted();
+                        return openGuest(invocationClosure.toolchain, invocationClosure.call.toolName === 'bash', script, signal);
+                      })().then(guest => {
                         guests.add(guest); controllerGuests.add(guest); return guest;
                       });
                       guestOpenings.add(opening); controllerGuestOpenings.add(opening);
@@ -2136,6 +2139,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         // The authenticated SCM_RIGHTS send gave the original
                         // controller its own sealed descriptors. Retire the
                         // extraction producer, not the controller's copies.
+                        // The original immutable script remains installation-owned.
                         phase('tool_native_guest_join');
                         await guest.close(); guests.delete(guest); controllerGuests.delete(guest);
                         phase('tool_native_ready');
