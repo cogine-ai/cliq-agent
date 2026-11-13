@@ -131,16 +131,34 @@ enrollment timeout is retained as historical evidence, not the active blocker.
 
 The owner approved a revised total ceiling of CNY235 and exactly one further
 experiment capped at CNY35, after the same-source free Linux product chain
-passes. Cumulative unresolved conservative reservations are CNY199.50, leaving
-CNY35.50 before the new experiment is reserved; these are not actual billed spending. Previous unresolved attempts keep their
-original reservations; the seventh reserved USD3.50/CNY24.50. The second attempt's
+passes. That additional attempt is now consumed. Cumulative unresolved
+conservative reservations are CNY234.50, leaving CNY0.50; these are not actual
+billed spending. Previous unresolved attempts keep their original reservations;
+the seventh reserved USD3.50/CNY24.50. The second attempt's
 public TLS preflight failed before the credential step and sent zero model
 requests; only that attempt's zero-cost reservation was released. The funded
 fixture now has a USD5 hard Run allowance; existing conservative peak tariffs
 and full request ceilings remain unchanged, and automatic retries remain zero.
-The temporary Actions credential stays absent until the free prerequisite
-passes, then is installed for that one explicitly dispatched run and removed
-afterward. No new paid result is implied by this authorization or configuration.
+At source `f200e0094d8e4dd70bc495e1554fc128bb40755f`, free
+[run 43372552885](https://github.com/cogine-ai/cliq-agent/actions/runs/43372552885)
+passed the normal setup/edit/required-repair/review/apply journey and the signed
+Node-from-Bash probe before the temporary Actions credential was installed.
+These targeted successes do not imply the separate maximum verifier campaign
+or overall CI passed.
+
+The single additional paid
+[run 43373363981](https://github.com/cogine-ai/cliq-agent/actions/runs/43373363981)
+then completed five real model operations and six tool operations, including
+two Bash executions with exit code zero. It reached required-verifier
+preparation but failed the unchanged 90-second terminal deadline. There is no
+completed verifier, reviewed result or applied Delivery evidence from this
+attempt. Progress elapsed times include admission; they do not share the
+terminal poll's deadline origin. Before stop, no scheduler failure was recorded;
+the joined original journal places closing work in `drive_verify`. Original
+writers and daemon joined, cleanup reported zero errors, and the complete
+credential scan passed. The temporary Actions secret was deleted and its
+absence confirmed. No further paid retry is authorized; the unresolved
+reservations remain until actual accounting establishes otherwise.
 
 Local build and the full suite previously passed for production source
 `4126a7703b1255ff0664254677c1f777f8903968` (4,024 passed, 32 skipped). The current
