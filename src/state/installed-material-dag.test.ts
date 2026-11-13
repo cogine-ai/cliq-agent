@@ -207,7 +207,11 @@ test('source/native DAG keeps every original before/after R and does not move pu
   assert.equal(text(guest.arguments[0]!), 'reads');assert.equal(text(guest.arguments[1]!),'{bundle:runtime.bundle,releaseKeys:runtime.releaseKeys,guestToolchainManifestRef:assembly.runtime.guestToolchainManifestRef,signal}');
   assert.equal(descendants(fn(current,'readInstructions'),ts.isCallExpression).filter(value=>text(value.expression).endsWith('.mapReads')).length,0);
   const map=one(descendants(catalog,ts.isMethodDeclaration).filter(value=>text(value.name)==='mapReads'),'original four-reader catalog method');
-  assert.deepEqual(call(map,'Math.min').arguments.map(text),['4','length']);
+  assert.deepEqual(call(map,'Math.min').arguments.map(text),['this.readWidth','length']);
+  const width=one(descendants(catalog,ts.isPropertyDeclaration).filter(value=>text(value.name)==='readWidth'),'closed catalog read width');
+  assert.equal(text(width.type!), '1|4');assert.equal(text(width.initializer!), '4');
+  const grouped=one(descendants(catalog,ts.isMethodDeclaration).filter(value=>text(value.name)==='mapReadGroups'),'serial nested history view');
+  assert.equal(descendants(grouped,ts.isBinaryExpression).filter(value=>text(value)==='serial.readWidth=1').length,1);
 });
 
 

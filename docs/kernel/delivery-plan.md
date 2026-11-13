@@ -179,6 +179,16 @@ run `43372552885` still fails `ordinary_tools`/Stop on the previous source after
 its first five verifier cases and reconnect/restart pass. Original READY5, Stop2,
 request/probe30, terminal90, maximum image and paid-retry limits remain unchanged.
 
+For this candidate, local build passes. The complete four-process run reports
+4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
+one child fixture whose initial lease crossed its Run deadline, and two original
+2-second large-list Stop assertions. The source assertion now checks the closed
+`1 | 4` widths, default four and serial nested view. All 24 tests in those four
+files then pass with the repository-default serial file scheduling and unchanged
+assertions. The original parallel failures remain retained; this is complete
+coverage plus isolated reruns, not a clean parallel full-suite result. No Linux
+installed performance or Stop qualification is inferred from it.
+
 Local build and the full suite previously passed for production source
 `4126a7703b1255ff0664254677c1f777f8903968` (4,024 passed, 32 skipped). The current
 candidate additionally changes production verification scheduling as described
