@@ -251,3 +251,15 @@ test('manual verifier diagnosis is exact-revision, non-funded and cannot narrow 
   for (const eventName of ['push', 'pull_request', 'merge_group'])
     assert.equal(routeEvent({eventName, event: {inputs}, cwd}).full, true);
 });
+
+
+test('the additive read-cost observation cannot replace or weaken an original qualification job', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  const probe = workflow.match(/^  linux-installed-read-cost:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m)?.[0];
+  assert(probe);
+  for (const changed of ['', probe + probe, probe.replace('ubuntu-22.04', 'self-hosted'),
+    probe.replace('timeout-minutes: 10', 'timeout-minutes: 11'),
+    probe.replace('src/state/installed-runtime-discard.test.ts', 'src/state/other.test.ts'),
+    probe.replace("CLIQ_INSTALLED_READ_COST: '1'", "CLIQ_INSTALLED_READ_COST: '0'")])
+    assert.throws(() => verifyWorkflow(workflow.replace(probe, changed), 'foundation'));
+});

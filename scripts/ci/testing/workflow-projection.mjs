@@ -50,6 +50,10 @@ export function projectQualificationWorkflow(workflow, kind = 'foundation') {
     assert(probe, 'the fixed independent Node probe must be present');
     assert.equal(createHash('sha256').update(probe[0]).digest('hex'), '87acfb7dc2ecbd5e76a85158104bb3d8e3f6b0a701e631225642c0f113e4ca82');
     workflow = replaceOnce(workflow, probe[0], '');
+    const readCost = workflow.match(/^  linux-installed-read-cost:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m);
+    assert(readCost, 'the independent read-cost diagnostic must remain separate');
+    assert.equal(createHash('sha256').update(readCost[0]).digest('hex'), '7f008a268f79e38c3ab61f995072552c5e02565c6a9846442f36cd55e0f0b851');
+    workflow = replaceOnce(workflow, readCost[0], '');
     workflow = replaceOnce(workflow, '  workflow_dispatch:\n' + providerInputs, '  workflow_dispatch:\n');
     workflow = replaceOnce(workflow, 'jobs:\n' + providerJob + '\n', 'jobs:\n');
     workflow = replaceOnce(workflow,
