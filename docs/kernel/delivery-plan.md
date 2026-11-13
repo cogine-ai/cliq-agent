@@ -66,9 +66,9 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   results, not real-provider acceptance.
 - The same source passes credential diagnostics, admission/preparation/finalizer
   cancellation, post-admission credential revocation, request-byte compaction,
-  and original-claim settlement after actual CAS refusal. Linux Node 22.13.0 and
-  Node 24 full test jobs pass. The two macOS test jobs were still running at this
-  capture; their result is not inferred from local or Linux success.
+  and original-claim settlement after actual CAS refusal. All four Linux/macOS
+  Node 22.13.0/24 full test jobs pass. The installed qualification failures below
+  remain independent of those full-suite results.
 - The unchanged maximum 256 MiB verifier fixture fails its original five-second
   READY boundary during authentication. The exact-source
   [targeted verifier group](https://github.com/cogine-ai/cliq-agent/actions/runs/43364037062)
@@ -129,13 +129,18 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   determine what can be reported. The real targeted rerun now
   observes `tool_received_complete_tool`; this still does not qualify Stop.
 
-Cumulative conservative reservations are CNY199.50, with CNY0.50 unreserved;
-these are not actual billed spending. Previous unresolved attempts keep their
+The owner approved a revised total ceiling of CNY235 and exactly one further
+experiment capped at CNY35, after the same-source free Linux product chain
+passes. Cumulative unresolved conservative reservations are CNY199.50, leaving
+CNY35.50 before the new experiment is reserved; these are not actual billed spending. Previous unresolved attempts keep their
 original reservations; the seventh reserved USD3.50/CNY24.50. The second attempt's
 public TLS preflight failed before the credential step and sent zero model
-requests; only that attempt's zero-cost reservation was released. No further paid
-full experiment fits the remaining reservation. The temporary Actions credential
-has been deleted and its absence verified; free controlled diagnosis continues.
+requests; only that attempt's zero-cost reservation was released. The funded
+fixture now has a USD5 hard Run allowance; existing conservative peak tariffs
+and full request ceilings remain unchanged, and automatic retries remain zero.
+The temporary Actions credential stays absent until the free prerequisite
+passes, then is installed for that one explicitly dispatched run and removed
+afterward. No new paid result is implied by this authorization or configuration.
 
 Local build and the full suite previously passed for production source
 `4126a7703b1255ff0664254677c1f777f8903968` (4,024 passed, 32 skipped). The current

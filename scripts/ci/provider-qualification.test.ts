@@ -12,7 +12,7 @@ const environment = { PATH: process.env.PATH };
 
 test('funded selection keeps the exact endpoint, full request ceilings and one finite Run budget', () => {
   const input = providerSelection(new Date('2026-11-13T00:00:00.000Z'));
-  assert.equal(input.budgets.costMicros, 3_500_000);
+  assert.equal(input.budgets.costMicros, 5_000_000);
   assert.equal(input.budgets.wallTimeMs, 300_000);
   assert.equal(input.definition.requestTokenCeiling.inputTokens, 1048576);
   assert.equal(input.definition.requestTokenCeiling.outputTokens, 393216);
