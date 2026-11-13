@@ -548,7 +548,7 @@ export async function validateToolRecovery(input: {
       for (const entry of entries.entries) if (entry.kind === 'file') {
         // Exhaustion retains the exact size/hash/stat/root checks and real
         // closes without allocating an otherwise discarded workspace file.
-        await artifacts.verifyChunks(entry.blobRef, entry.size);
+        for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* complete original-byte verification */ }
       }
       if (workspace.privateGitStateRef) await artifacts.readBytes(workspace.privateGitStateRef);
       await artifacts.readBytes(snapshot.generationRef);

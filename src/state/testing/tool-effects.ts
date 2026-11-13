@@ -73,10 +73,9 @@ export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof 
     snapshot, workspaceStateRef: state.ref, priorWorkspaceStateRef: closure.latestCheckpoint.workspaceStateRef };
 }
 
-export async function postEffectObservation(fixture: Awaited<ReturnType<typeof createAgentFixture>>, observationRef: string, checkpointId: string,
-  contents?: string) {
+export async function postEffectObservation(fixture: Awaited<ReturnType<typeof createAgentFixture>>, observationRef: string, checkpointId: string) {
   const observation = await fixture.store.artifacts.readCanonical<ToolObservationV1>(observationRef);
-  const proof = await quiescedToolCheckpoint(fixture, checkpointId, contents ?? true);
+  const proof = await quiescedToolCheckpoint(fixture, checkpointId, true);
   observation.postEffect = proof.checkpoint;
   observation.observationDigest = digestOmitting(observation, 'observationDigest');
   const complete = await fixture.store.artifacts.publishCanonical(observation, observation.format);

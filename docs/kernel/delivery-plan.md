@@ -420,11 +420,13 @@ stops the original owner within Stop2, but its successor never exposes the publi
 socket within restart30 while waiting for verifier approval. It is unqualified;
 there is no confirmed root cause yet. A bounded read-only successor CPU/I/O
 diagnostic runs only after that deadline has already failed and preserves the
-failure. It confers no readiness or recovery evidence. Completed-tool workspace
-rehashing now uses the existing bounded discard reader, retaining every byte,
-stat, root and close check; a real large-CAS final-byte corruption regression
-checks rejection and subsequent fresh rereading. These changes require fresh
-Linux validation. No paid retry or PR has been initiated.
+failure. It confers no readiness or recovery evidence. An exploratory switch
+of completed-tool workspace rehashing to the discard reader passed its new
+tail-corruption regression, but the full suite exposed incompatibility with the
+existing real stream-byte/cancellation observers. That non-critical consumer
+change and its added fixture were reverted; the original stream lifecycle tests
+and assertions remain intact. The native and readiness diagnostic corrections
+require fresh Linux validation. No paid retry or PR has been initiated.
 
 The next critical-path change coalesces only concurrent discard reads after
 each caller has opened the same real CAS inode with matching full metadata,

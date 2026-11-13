@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { chmod, open, readdir, rename } from 'node:fs/promises';
+import { readdir, rename } from 'node:fs/promises';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
+import { digestOmitting } from '../kernel/identity.js';
 import type { ToolObservationV1, ToolPolicyChannelEvidenceV1, ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
@@ -355,31 +355,6 @@ for (const phase of ['unknown', 'abandoned'] as const) test(`${phase} typed tool
       ['model_turn', 'assistant_tool_batch', 'policy_decision']);
     assert.equal(recovered.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
     assert.equal(recovered.run.budgetConsumed.toolCalls, 1);
-  } finally { await disposeFixture(fixture); }
-});
-
-test('completed tool recovery rereads a large post-effect file and refuses a changed final byte', async () => {
-  const fixture = await createAgentFixture('tool-large-effect', undefined, { mode: 'accept-edits', tools: ['edit'] });
-  try {
-    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
-    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
-    const raw = await observation(fixture, claimed, { changed: true });
-    const contents = 'x'.repeat(8 * 1024 * 1024);
-    const proof = await postEffectObservation(fixture, raw, prepared.checkpointId, contents);
-    await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0, expectedRunRevision: prepared.run.revision,
-      observationRef: proof.observationRef });
-    const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    const filename = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, sha256Bytes(Buffer.from(contents)));
-    const changeLastByte = async (value: string) => {
-      await chmod(filename, 0o600);
-      const file = await open(filename, 'r+');
-      try { await file.write(Buffer.from(value), 0, 1, contents.length - 1); }
-      finally { await file.close(); await chmod(filename, 0o400); }
-    };
-    await changeLastByte('y');
-    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId));
-    await changeLastByte('x');
-    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
   } finally { await disposeFixture(fixture); }
 });
 
