@@ -197,6 +197,17 @@ test('both workflows retain every original job byte behind the exact conservativ
   }
 });
 
+test('the additive native seal regressions cannot disappear, move, duplicate or select a substitute', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  const command = '          node --test --test-concurrency=1 --import tsx src/sandbox/sealed-images.test.ts src/sandbox/builtin-tool-native.test.ts\n';
+  for (const changed of [workflow.replace(command, ''), workflow.replace(command, command + command),
+    workflow.replace(command, '').replace('jobs:\n', 'jobs:\n' + command),
+    workflow.replace('src/sandbox/builtin-tool-native.test.ts', 'src/sandbox/other.test.ts')]) {
+    assert.notEqual(changed, workflow);
+    assert.throws(() => verifyWorkflow(changed, 'foundation'));
+  }
+});
+
 test('routing projection rejects missing, duplicate, weakened or unexpected wiring', () => {
   for (const [kind, [filename]] of Object.entries(workflowHashes)) {
     const workflow = readFileSync(path.join(root, '.github/workflows', filename), 'utf8');

@@ -40,6 +40,11 @@ function replaceOnce(text, part, replacement) {
 export function projectQualificationWorkflow(workflow, kind = 'foundation') {
   assert(kind === 'foundation' || kind === 'permission');
   if (kind === 'foundation') {
+    // Check the additive real seal/ownership regressions in their exact
+    // original step; keep the historical campaign digest unchanged.
+    const nativeTests = '          node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts\n';
+    workflow = replaceOnce(workflow, nativeTests +
+      '          node --test --test-concurrency=1 --import tsx src/sandbox/sealed-images.test.ts src/sandbox/builtin-tool-native.test.ts\n', nativeTests);
     // A separate diagnostic cannot replace or modify an original campaign.
     const probe = workflow.match(/^  linux-installed-builtin-node:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m);
     assert(probe, 'the fixed independent Node probe must be present');
