@@ -49,8 +49,8 @@ test(`live discard sharing preserves the ${boundary} boundary and never retains 
     const together = new Promise<void>(resolve => { release = resolve; });
     for (const handle of handles) {
       const stat = handle.stat.bind(handle); let first = true;
-      t.mock.method(handle, 'stat', async () => {
-        const info = await stat();
+      t.mock.method(handle, 'stat', async (...args: Parameters<typeof stat>) => {
+        const info = await stat(...args);
         if (first) { first = false; if (++entered === 2) release(); await together; }
         return info;
       });
