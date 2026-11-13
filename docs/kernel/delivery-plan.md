@@ -392,6 +392,18 @@ qualification; it neither closes the original deadline failure nor authorizes a
 paid provider retry. The later precise stop/restart/children/dependency cases
 remain unexecuted and the complete preview remains unqualified.
 
+For the retained-script candidate `2e108204cfa625cbbe436ac47c996c5afd5ead4e`,
+local build passes and all 579 test files complete: 4,041 passed, 32 platform
+skips, zero failures. The main group uses four file workers; the four existing
+timing-sensitive files run separately with one worker and their original bounds.
+The short-path validation copy matches all 1,935 tracked source files. The
+CI-only follow-up `3471b77d3865fb5476d7eb6fa657b34fa82d6efa` preserves the original
+workflow hashes by validating/projecting only the exact added native regression
+command; omission, movement, duplication and substitution are rejected. Its
+33 routing/carrier/preflight tests pass. Both independent review axes report
+zero actionable findings. Linux qualification remains pending, not implied by
+these local results. No new provider call or PR is authorized by this evidence.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model
