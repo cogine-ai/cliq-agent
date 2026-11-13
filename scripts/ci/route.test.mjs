@@ -260,6 +260,7 @@ test('the additive read-cost observation cannot replace or weaken an original qu
   for (const changed of ['', probe + probe, probe.replace('ubuntu-22.04', 'self-hosted'),
     probe.replace('timeout-minutes: 10', 'timeout-minutes: 11'),
     probe.replace('src/state/installed-runtime-discard.test.ts', 'src/state/other.test.ts'),
+    probe.replace(' src/state/installed-seed-read.test.ts', ''),
     probe.replace("CLIQ_INSTALLED_READ_COST: '1'", "CLIQ_INSTALLED_READ_COST: '0'")])
     assert.throws(() => verifyWorkflow(workflow.replace(probe, changed), 'foundation'));
 });

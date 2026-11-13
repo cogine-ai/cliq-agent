@@ -52,7 +52,7 @@ export function projectQualificationWorkflow(workflow, kind = 'foundation') {
     workflow = replaceOnce(workflow, probe[0], '');
     const readCost = workflow.match(/^  linux-installed-read-cost:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m);
     assert(readCost, 'the independent read-cost diagnostic must remain separate');
-    assert.equal(createHash('sha256').update(readCost[0]).digest('hex'), '7f008a268f79e38c3ab61f995072552c5e02565c6a9846442f36cd55e0f0b851');
+    assert.equal(createHash('sha256').update(readCost[0]).digest('hex'), '6f341377e090d0f1eaab5db749dcec552c27880f02e035cb8b1c3c17aecc96fa');
     workflow = replaceOnce(workflow, readCost[0], '');
     workflow = replaceOnce(workflow, '  workflow_dispatch:\n' + providerInputs, '  workflow_dispatch:\n');
     workflow = replaceOnce(workflow, 'jobs:\n' + providerJob + '\n', 'jobs:\n');
