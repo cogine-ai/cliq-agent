@@ -56,21 +56,38 @@ runner; no external host is required. Native setup, Secret Service enrollment,
 regional authenticated TLS pins and normal Run admission now pass. QEMU's old
 enrollment timeout is retained as historical evidence, not the active blocker.
 
-- The [current controlled Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43323840452)
-  passes the daily modification/check/repair/review/application flow, credential
-  diagnostics and admission/preparation cancellation. Its independent signed
-  Node-from-Bash probe also passes, including actual required verification,
-  exact results and resource retirement. This rules out a missing signed Node
-  capability, not the exact cause of the earlier real-provider Bash exit 127.
-- The same full verifier campaign now passes the first five cases and actual
-  reconnect/restart after the bounded read-only history fix. `ordinary_tools`
-  still reaches only seven completed tools before its original 90-second bound;
-  its final shutdown also lacks Stop2 proof (systemd reports timeout/SIGKILL).
-  Upgrade, received-tool successor and publication/delayed recovery jobs fail.
-  The TypeScript matrix also fails two obsolete fixture expectations (worker
-  wire version and verifier entry shape); macOS additionally exposes offline
-  child fixtures depending on runner speed for lease/proof freshness. The
-  aggregate workflow is not green.
+- The [current controlled Linux run](https://github.com/cogine-ai/cliq-agent/actions/runs/43362573719)
+  at `3113fd72f32914e9ab4daaab2adf217100b75520` passes the normal daily
+  modification/check/repair/review/application flow and independent signed
+  Node-from-Bash probe. Its installed Run campaign also passes actual reconnect
+  and Supervisor restart, preserving the original result, Journal, budget and
+  Checkpoint without a new provider dispatch. The daily and funded recipes both
+  use the existing compact 160 MiB guest layout; these are controlled-endpoint
+  results, not real-provider acceptance.
+- The same source passes credential diagnostics, admission/preparation/finalizer
+  cancellation, post-admission credential revocation, request-byte compaction,
+  and original-claim settlement after actual CAS refusal. Linux Node 22.13.0 and
+  Node 24 full test jobs pass. The two macOS test jobs were still running at this
+  capture; their result is not inferred from local or Linux success.
+- The unchanged maximum 256 MiB verifier fixture fails its original five-second
+  READY boundary during authentication. The exact-source
+  [targeted verifier group](https://github.com/cogine-ai/cliq-agent/actions/runs/43364037062)
+  separately passes authentication, its first five required/repair/advisory/Git
+  cases and actual reconnect/restart, then misses the original 90-second
+  `ordinary_tools` bound and two-second Stop. Its pre-stop public cut has six
+  completed Journal operations (one model and five tools), with the next tool
+  claimed. The corrected successor diagnostic now retains the actual original
+  stopped phase, `tool_received_complete_tool`, before systemd's timeout/SIGKILL.
+  That observation identifies the outstanding operation, not its exact slow
+  internal await or a successful result handoff. Neither failed run is erased
+  by the daily/Node passes, which also repeat in the targeted group.
+- Upgrade, received-tool successor, native cancellation, publication/delayed
+  recovery, ordinary-permission and MCP qualification remain failed. In the
+  received-tool successor, finalization first appears at 28,924 ms but the
+  required terminal cut is absent at 30,007 ms; original Stop was graceful.
+  The permission campaign observes Supervisor exit-code 1 before cleanup, with
+  no qualified original-journal cause. Retain these distinct gaps; the aggregate
+  workflow and complete I1–I4 are not green.
 - The [seventh funded journey](https://github.com/cogine-ai/cliq-agent/actions/runs/43324777724)
   at `b67776ff702409d58d5882024306ffbeb8686895` completes four model turns,
   directory discovery, two reads and an actual edit, but misses the unchanged
@@ -86,7 +103,7 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   five seconds; precise cancel/restart probes keep their cadence. A regression
   also proves and fixes late terminal responses bypassing the original deadline.
   The same 90-second bound now precedes terminal acceptance and still follows
-  control actions. Focused tests pass; a Linux rerun must establish any effect.
+  control actions. Focused tests pass; the targeted maximum-fixture run still misses its deadline.
 - Complete-image verification now assigns the actual three-large-image layout
   (bootstrap, Supervisor and single CAS guest) to the existing four-worker pool,
   instead of queueing one behind a two-worker threshold. The four-worker maximum,
@@ -94,7 +111,8 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   identity checks and cancel/join rules are unchanged. Real Linux/QEMU component
   regression first reproduced two workers instead of four, then passed ten
   cases covering both two-/three-image layouts, complete reads and worker joins.
-  This does not establish installed native-runner throughput or acceptance.
+  Current-source daily/Node/normal Run flows pass, but the maximum-fixture
+  verifier still fails. This does not establish an installed throughput gain.
 - The ACK fixture now pins the retained wire-v9 protocol and rejects old v8
   and nonzero stdio-purpose data; its actual compiled Linux test passes. The
   verifier source assertion follows the separate fixed builtin-probe branch.
@@ -108,8 +126,8 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   The failed campaign previously retained its initial dead process binding,
   leaving later Stop diagnostics unavailable. Refused successor observations
   clear the stale binding; unchanged post-exit absence/journal/Stop checks still
-  determine what can be reported. Extracted-block identity regressions do not
-  substitute for an actual Linux rerun or qualify the failed Stop.
+  determine what can be reported. The real targeted rerun now
+  observes `tool_received_complete_tool`; this still does not qualify Stop.
 
 Cumulative conservative reservations are CNY199.50, with CNY0.50 unreserved;
 these are not actual billed spending. Previous unresolved attempts keep their
