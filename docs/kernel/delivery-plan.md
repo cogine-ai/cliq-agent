@@ -179,6 +179,26 @@ run `43372552885` still fails `ordinary_tools`/Stop on the previous source after
 its first five verifier cases and reconnect/restart pass. Original READY5, Stop2,
 request/probe30, terminal90, maximum image and paid-retry limits remain unchanged.
 
+At `f1e932041667b2da150eb0f138d7046962d14137`, free
+[run 43392138285](https://github.com/cogine-ai/cliq-agent/actions/runs/43392138285)
+passes the normal daily edit/required-repair/review/apply journey and signed
+Node-from-Bash probe. Both original cleanup reports have zero errors. The maximum
+verifier campaign passes its first four cases, then fails `ordinary_git` at the
+unchanged 90-second deadline with the verifier claimed. The original Supervisor
+joins normally; no pre-stop scheduler failure is observed. This does not prove
+that the ordinary-tools performance or Stop defect is fixed: that case was not
+reached, and cross-run timing variation is not a causal comparison.
+
+That failure exposes observer contention still present in the ordinary completion
+loop: only `ordinary_tools` yielded in proportion to its authenticated read;
+ordinary Git and required/advisory cases still polled after 50 ms. Extend the
+existing bounded observation yield to all ordinary completion waits, retaining
+50 ms for the exact cancellation/restart probes. Every actual request keeps all
+its full identity checks; no request result or integrity proof is cached. The
+original 90-second deadline includes these waits and still rejects late terminal
+responses. Fixed per-case read/yield counters measure observation cost, confer no
+authority and cannot substitute for a successful full Linux campaign.
+
 For this candidate, local build passes. The complete four-process run reports
 4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
 one child fixture whose initial lease crossed its Run deadline, and two original

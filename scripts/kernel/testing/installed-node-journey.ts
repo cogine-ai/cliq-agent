@@ -1679,6 +1679,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       let executingBash: InstalledBashProcesses | undefined, bashObservationBy: number | undefined, bashPhysicallyJoined = false;
       let scriptLeaseRenewed = false;
       let cut: Record<string, any>;
+      const observationStarted = performance.now();
+      let observationCount = 0, observationReadMs = 0, observationYieldMs = 0;
+      const noteObservation = () => {
+        try {
+          report.sourceObservationWork = { diagnosticOnly: true, caseKind: sourceKind,
+            observations: observationCount, readMs: Math.floor(observationReadMs), yieldMs: Math.floor(observationYieldMs),
+            elapsedMs: Math.floor(performance.now() - observationStarted), deadlineMs: 90000 };
+        } catch { /* Observation cannot change the original execution or deadline. */ }
+      };
       const checkDeadline = () => {
         try {
           assert(Date.now() < by, 'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window');
@@ -1693,6 +1702,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const reading = performance.now();
         cut = await send({ protocolVersion: 1, method: 'run.get', runId: admitted.id }, 'run.get');
         const readElapsed = performance.now() - reading;
+        observationCount++; observationReadMs += readElapsed; noteObservation();
         checkDeadline();
         assert(!responderFailure, 'owned responder must not refuse the literal expected request');
         if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) break;
@@ -1814,11 +1824,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           }
         }
         checkDeadline();
-        // Ordinary observations must leave room for the real tool producer:
-        // each authenticated read performs complete current-install checks.
-        // Precise cancellation/restart probes keep their original cadence.
-        const pause = sourceKind === 'ordinary_tools' ? Math.min(5000, Math.max(250, 2 * readElapsed)) : 50;
+        // Every ordinary completion observer must leave room for the real
+        // producer: authenticated reads fully revalidate the current install.
+        // Only precise cancellation/restart probes need the original cadence.
+        const pause = sourceKind === 'ordinary_tools_restart' || sourceKind === 'ordinary_tools_cancel'
+          ? 50 : Math.min(5000, Math.max(250, 2 * readElapsed));
+        const yielding = performance.now();
         await delay(Math.min(pause, Math.max(0, by - Date.now())));
+        observationYieldMs += performance.now() - yielding; noteObservation();
       }
       const sessionCut = await send({ protocolVersion: 1, method: 'session.get', sessionId: session.id }, 'session.get');
       let originalReadRetirement: ReturnType<typeof inspectInstalledWorkerRetirement> | undefined;

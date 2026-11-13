@@ -406,23 +406,40 @@ function sourceObservationLoop() {
     })();`);
 }
 
-test('ordinary tools observation yields in proportion to its actual read without changing other probe cadence', async () => {
+test('ordinary completion observation yields in proportion to its actual read without changing precise probe cadence', async () => {
   for (const [kind, readMs, expected] of [['ordinary_tools', 1000, 2000], ['ordinary_tools', 10, 250],
-    ['ordinary_tools', 3000, 5000], ['ordinary_tools_restart', 1000, 50], ['ordinary_tools_cancel', 1000, 50]]) {
-    let now = 0, reads = 0; const pauses = [];
+    ['ordinary_tools', 3000, 5000], ['ordinary_git', 1000, 2000], ['required_pass', 1000, 2000],
+    ['required_repair', 1000, 2000], ['advisory_failure', 1000, 2000], ['required_timeout', 1000, 2000],
+    ['ordinary_tools_restart', 1000, 50], ['ordinary_tools_cancel', 1000, 50]]) {
+    let now = 0, reads = 0; const pauses = [], report = {};
     await sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
       now += readMs; return {snapshot: {run: {status: ++reads === 2 ? 'succeeded' : 'running'}}};
-    }, async ms => { pauses.push(ms); now += ms; }, kind, 90000, {});
+    }, async ms => { pauses.push(ms); now += ms; }, kind, 90000, report);
     assert.deepEqual(pauses, [expected], kind);
+    assert.deepEqual(report.sourceObservationWork, {diagnosticOnly: true, caseKind: kind, observations: 2,
+      readMs: readMs * 2, yieldMs: expected, elapsedMs: readMs * 2 + expected, deadlineMs: 90000});
     assert.equal(reads, 2);
   }
 });
 
-test('a late terminal response fails the original source-case deadline and retains its actual cut', async () => {
+for (const kind of ['ordinary_tools', 'ordinary_git', 'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'])
+test(`${kind}: a late terminal response fails the original source-case deadline and retains its actual cut`, async () => {
   const report = {}; let now = 89999;
   await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
     now = 90000; return {snapshot: {run: {status: 'succeeded'}}};
-  }, async () => assert.fail('a late result cannot schedule another observation'), 'ordinary_tools', 90000, report),
+  }, async () => assert.fail('a late result cannot schedule another observation'), kind, 90000, report),
   error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
   assert.deepEqual(report.runProgressAtTerminalDeadline, {status: 'succeeded'});
+});
+
+// The observer yields only the remaining time; it cannot mint another budget.
+test('ordinary completion yield remains clipped to the original deadline', async () => {
+  let now = 0, reads = 0; const pauses = [], report = {};
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now += 1000; reads++; return {snapshot: {run: {status: 'running'}}};
+  }, async ms => {pauses.push(ms); now += ms;}, 'ordinary_git', 1500, report),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.deepEqual(pauses, [500]); assert.equal(reads, 2);
+  assert.equal(report.sourceObservationWork.yieldMs, 500);
+  assert.equal(report.sourceObservationWork.readMs, 2000);
 });
