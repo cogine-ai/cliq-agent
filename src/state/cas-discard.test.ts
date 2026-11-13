@@ -78,7 +78,7 @@ test('discard corruption still joins both real handles and preserves an original
 // counter observes actual returned bytes; no process is paused and no native
 // authority, Run, clock or recovery proof is manufactured.
 for (const fault of ['cancel', 'root_move'] as const) test(`actual discard reader ${fault} after real bytes joins its original thread`, async t => {
-  const f = await fixture(t, 128 * 1024 * 1024);
+  const f = await fixture(t);
   const source = await fs.readFile(new URL('./cas-discard.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('cas-discard.ts', source, ts.ScriptTarget.Latest, true);
   const declaration = parsed.statements.filter(ts.isVariableStatement).flatMap(value => [...value.declarationList.declarations])
@@ -91,24 +91,29 @@ for (const fault of ['cancel', 'root_move'] as const) test(`actual discard reade
   const before = Object.fromEntries(['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeMs', 'ctimeMs']
     .map(key => [key, info[key as keyof typeof info]]));
   const control = new SharedArrayBuffer(16), bytes = new BigInt64Array(control, 8, 1), stop = new Int32Array(control, 0, 1);
-  const worker = new Worker(code, { eval: true, execArgv: [], env: {}, workerData: { control, before,
+  // Cancel immediately after an actual readSync returns, inside this data-only
+  // test Worker. No fabricated bytes, paused process or scheduler race is used.
+  const injection = fault === 'cancel' ? `{
+    const fs = require('node:fs'), original = fs.readSync, job = require('node:worker_threads').workerData;
+    fs.readSync = (...args) => { const count = Reflect.apply(original, fs, args);
+      if (args[0] === job.fd && count > 0) Atomics.store(new Int32Array(job.control, 0, 1), 0, 1);
+      return count; };
+  }` : '';
+  const moved = path.join(f.home, 'moved');
+  if (fault === 'root_move') renameSync(f.root, moved);
+  const worker = new Worker(injection + code, { eval: true, execArgv: [], env: {}, workerData: { control, before,
     fd: file.fd, uid: info.uid, rootPath: f.root, rootDev: rootInfo.dev, rootIno: rootInfo.ino, ref: f.ref, byteLength: f.size } });
-  let reply: unknown, ended = false, error: unknown;
+  let reply: unknown, error: unknown;
   worker.on('message', value => { reply = value; }); worker.on('error', value => { error = value; });
-  const exit = new Promise<number>(resolve => worker.once('exit', code => { ended = true; resolve(code); }));
-  const moved = path.join(f.home, 'moved'); let renamed = false;
+  const exit = new Promise<number>(resolve => worker.once('exit', resolve));
   try {
-    while (!ended && Atomics.load(bytes, 0) === 0n) await new Promise<void>(resolve => setImmediate(resolve));
-    assert(!ended); assert(Atomics.load(bytes, 0) > 0n && Atomics.load(bytes, 0) < BigInt(f.size));
-    if (fault === 'cancel') Atomics.store(stop, 0, 1);
-    else { renameSync(f.root, moved); renamed = true; }
     assert.equal(await exit, 0); assert.equal(error, undefined);
     assert(fault === 'cancel' ? reply === 'cancelled' : reply === 'read' || reply === 'root');
-    assert(Atomics.load(bytes, 0) < BigInt(f.size), 'the original reader must stop after the observed fault');
+    assert.equal(Atomics.load(bytes, 0), 65536n, 'the original reader must stop after its actual first chunk');
     assert.equal((await file.stat()).ino, info.ino, 'the original borrowed descriptor is still held after thread exit');
   } finally {
     Atomics.store(stop, 0, 1); await exit;
-    if (renamed) renameSync(moved, f.root);
+    if (fault === 'root_move') renameSync(moved, f.root);
     await file.close(); await root.close();
   }
 });

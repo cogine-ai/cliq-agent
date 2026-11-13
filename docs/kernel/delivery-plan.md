@@ -220,8 +220,24 @@ through those closes. There is no retained worker pool, content cache or proof
 reuse. Retaining streams and small-object readers remain unchanged. This candidate
 still requires the full original Linux campaign, including Stop2 and terminal90.
 
-For this candidate, local build passes. The complete four-process run reports
-4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
+At production commit `8e7c358f62776485c0986856922925dac20f14b0`, the complete
+578-file local inventory was executed in two batches: 574 files with four
+processes, followed by the four original timing/capacity files serially. The
+main batch reports 4,012 passed, 32 platform skips and two test failures; the
+isolated batch passes all 21 tests, including the unchanged two-second Stop
+checks. The failures were an obsolete `readChunks` observation hook (the actual
+consumer now calls `verifyChunks`) and a concurrency test that incorrectly
+required one particular history's I/O to finish first. Both hooks are corrected;
+all 34 affected tests pass. Restoring sequential production history validation
+still makes the corrected overlap test fail. Deterministic CAS fault tests now
+cancel after an actual first read or move the original opened root before the
+read, checking actual bytes and thread exit without a parent scheduling race.
+This is complete inventory coverage plus corrected affected reruns, not a clean
+original full-suite run. No production code changed during those reruns, no
+assertion or deadline was relaxed, and installed Linux acceptance remains open.
+
+For the earlier history-scheduling candidate, local build passes. Its complete
+four-process run reports 4,023 passed, 32 skipped and four failures: the old fixed-width source assertion,
 one child fixture whose initial lease crossed its Run deadline, and two original
 2-second large-list Stop assertions. The source assertion now checks the closed
 `1 | 4` widths, default four and serial nested view. All 24 tests in those four

@@ -173,10 +173,10 @@ test('a selected reference does not validate executable bytes or bypass the late
   const reader = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'readVerifierRequestIdentities');
   assert(reader);
   let historyCalls = 0, imageReads = 0, rejectHistory = true;
-  const failure = new Error('inert history callback refusal; not authority evidence'), readChunks = catalog.readChunks.bind(catalog);
-  t.mock.method(catalog, 'readChunks', (...args: Parameters<typeof readChunks>) => {
+  const failure = new Error('inert history callback refusal; not authority evidence'), verifyChunks = catalog.verifyChunks.bind(catalog);
+  t.mock.method(catalog, 'verifyChunks', (...args: Parameters<typeof verifyChunks>) => {
     if (args[0] === f.signed.manifest.guestImageRef) imageReads++;
-    return readChunks(...args);
+    return verifyChunks(...args);
   });
   const context = { readAuthorizationGrant, sampleCanonicalNow, VerifierAuthorizationError, readRetainedVerifierToolchain,
     decodeAuthorizationConsumptionReceipt, same: (a: unknown, b: unknown) => canonicalJsonBytes(a).equals(canonicalJsonBytes(b)),

@@ -26,21 +26,29 @@ test('independent original tool histories read together and all join before reco
       await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
         expectedRunRevision: prepared.run.revision, observationRef: ref });
     }
-    let inHistory = false, firstHeld = false, overlapped = false, joined = 0;
+    let inHistory = false, held = false, entered = 0, overlapped = false, joined = 0;
     ContentAddressedStore.prototype.read = async function (ref, signal) {
-      const bytes = await actual.call(this, ref, signal);
-      if (inHistory && ref === refs[0]) {
-        firstHeld = true;
-        timer = setTimeout(release, 2000);
-        await gate; firstHeld = false; joined++;
-      } else if (inHistory && ref === refs[1]) {
-        overlapped ||= firstHeld; release(); joined++;
+      const observed = inHistory && refs.includes(ref);
+      if (observed) {
+        // Either original history can arrive first. Observe entry before real
+        // I/O so filesystem completion order cannot manufacture a failure.
+        entered++;
+        if (entered === 1) {
+          held = true;
+          timer = setTimeout(() => { held = false; release(); }, 2000);
+          await gate; held = false;
+        } else {
+          overlapped ||= held;
+          release();
+        }
       }
+      const bytes = await actual.call(this, ref, signal);
+      if (observed) joined++;
       return bytes;
     };
     const cut = await readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId,
       phase => { inHistory = phase === 'history_tool'; });
-    assert.equal(overlapped, true, 'the second original history must start before the first is released');
+    assert.equal(overlapped, true, 'both original histories must enter before either held read is released');
     assert.equal(joined, 2);
     assert.equal(cut.journal.filter(row => row.opKind === 'tool' && row.phase === 'completed').length, 2);
   } finally {
