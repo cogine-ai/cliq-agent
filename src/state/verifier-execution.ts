@@ -2,7 +2,7 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { planCanonicalArtifact } from '../kernel/artifact-plan.js';
 import { identityHash } from '../kernel/identity.js';
 import { toolApprovalDecision, toolApprovalRequestDigest, type ToolApprovalInput } from '../policy/tool-approval.js';
-import { assertCurrentControlFrame, validateControlChannelClosure } from './control-channel.js';
+import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { readTimeFence } from './canonical-time.js';
 import { readControlRequest, insertControlRequest } from './rows.js';
 import { readVerifierApproval, readVerifierGrant, readVerifierPermissionContext, readVerifierTemplateForRun, verifierApprovalCheckpointId,
@@ -227,12 +227,16 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
       });
       requireHealthyFence(outcome); return { run: readRun(driver, runId) };
     }),
-    approveVerifier: stateOperation('INVALID_REQUEST', async (input: ToolApprovalInput, signal?: AbortSignal) => {
+    approveVerifier: stateOperation('INVALID_REQUEST', async (input: ToolApprovalInput, signal?: AbortSignal,
+      frameIdentity: AuthenticatedControlIdentity = input) => {
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['principalId', 'channelIdentityRef', 'channelIdentityDigest', 'requestId', 'expectedRunRevision',
         'waitingOnRef', 'decision', ...(input.ttlMs === undefined ? [] : ['ttlMs'])])) throw new TypeError('unknown verifier approval field');
       const requestDigest = toolApprovalRequestDigest(runId, input);
       const channel = await validateControlChannelClosure(artifacts, owner, input);
+      // Request data is copied; live frame identity must remain the original
+      // object from the authenticated Store caller, including after restart.
+      if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, frameIdentity);
       const replay = async () => {
         const row = readControlRequest(driver, input.principalId, 'run.approve', input.requestId); if (!row) return undefined;
         if (row.requestDigest !== requestDigest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'verifier approval requestId was reused');
@@ -271,7 +275,7 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         const published = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
         let outcome: TimeFenceAdvance | undefined, committed = false;
         driver.transaction(connection => {
-          signal?.throwIfAborted(); if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, input);
+          signal?.throwIfAborted(); if (channel.channel.transport.kind === 'uds_peer') assertCurrentControlFrame(owner, frameIdentity);
           if (readControlRequest(connection, input.principalId, 'run.approve', input.requestId)) return;
           outcome = accept(connection, selected, at); if (outcome !== 'healthy') return;
           for (const artifact of [...channel.metadata, ...planned.metadata, requestArtifact, published]) insertArtifactMetadata(connection, artifact, at);

@@ -3626,3 +3626,28 @@ local component and static wiring results do not establish a HOME50 speedup
 or Linux qualification. The unchanged real complete-HOME campaign must still
 pass 30-second submit, five-second READY and two-second Stop in the complete
 integrated cohort; no fixture, R, storage boundary or time limit is removed.
+
+#### Free Linux follow-through at `651134d`
+
+Foundation run `43463833195` passes signed Node, the complete daily controlled
+endpoint edit/repair/review/apply journey, and all 17 read-cost regressions.
+The unchanged maximum 256 MiB verifier campaign passes its five original
+cases and reconnect/restart, then still fails the original 90-second ordinary
+tools bound. Its last actual cut has one model and 15 tools completed and is
+waiting for approval; this improves on 11 tools at `fc79fea`, but does not
+qualify that case or its later cases. Stage counters overlap and are not
+exclusive CPU costs. Both original writer/client joins and the complete
+no-echo scan pass; cleanup reports zero errors.
+
+Permission run `43463830612` now passes restart and successor client READY,
+then rejects legitimate verifier approval with `ARTIFACT_MISMATCH`. The
+production reducer copied the request before comparing its object identity
+to the exact live authenticated frame. Store now passes that original identity
+separately; copied immutable request data still goes through the original
+channel closure, and both entry and final transaction require the exact live
+frame. Missing/copied/closed identities remain rejected. The new regression
+executes the real Store route and reducer through inert callbacks; it does
+not manufacture authentication or replace the pending real Linux check.
+All 22 focused regressions pass in a short local path. An initial long-path
+run fails the existing native UDS path limit and is not counted as passing.
+No deadline, permission, fixture size or paid-run allowance changes.

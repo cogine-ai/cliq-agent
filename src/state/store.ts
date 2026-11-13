@@ -2131,7 +2131,7 @@ export class StateStore {
       // public clients cannot select an executable or manufacture a grant.
       if (mcpServerSubject && continuation.operation !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP server launch approval belongs to its exact agent tool call');
       const result = mcpServerSubject && continuation.operation === 'agent' ? await continuation.approveMcpServer(input, signal)
-        : verifierSubject ? await continuation.approveVerifier(input, signal)
+        : verifierSubject ? await continuation.approveVerifier(input, signal, identity)
         : continuation.operation === 'delivery' ? await continuation.approveDelivery(input) : await continuation.approveTool(input);
       if (result.run.stopIntentRef) this.requestInstalledRunStop(value.runId);
       this.scheduleInstalledRun(value.runId); return result;
