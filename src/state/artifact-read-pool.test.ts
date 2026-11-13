@@ -41,8 +41,43 @@ async function stoppedItemReader() {
   return context.invoke;
 }
 
-test('a production item read joins every issued real CAS close and preserves a later retirement failure before its owner can finish', async t => {
-  const invoke = await stoppedItemReader(), { root, cas, artifacts, refs } = await fixture(t);
+test('nested history groups and tightened read views retain four actual CAS readers and reread every object', async t => {
+  const { root, cas, artifacts, refs } = await fixture(t, 16);
+  const original = cas.read.bind(cas), firstWave = gate(), owner = new AbortController();
+  let active = 0, peak = 0, reads = 0;
+  const timer = setTimeout(firstWave.release, 2000);
+  t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+    active++; reads++; peak = Math.max(peak, active);
+    if (active === 4) firstWave.release();
+    try { await firstWave.promise; return await original(...args); }
+    finally { active--; }
+  });
+  try {
+    const groups = [0, 4, 8, 12].map(start => refs.slice(start, start + 4));
+    const result = await artifacts.mapReadGroups(groups, (serial, group) => serial.withReadSignal(owner.signal)
+      .mapReadGroups([group.slice(0, 2), group.slice(2)], (nested, pair) => nested.mapReads(pair, ref => nested.readCanonical(ref))));
+    assert.equal(peak, 4); assert.equal(reads, 16); assert.equal(active, 0);
+    assert.equal(result.flat(2).length, 16);
+    // Another read is fresh: a prior successful group cannot authenticate
+    // changed CAS bytes, even under the same original content reference.
+    await fs.chmod(path.join(root, refs[0]!), 0o600);
+    await fs.writeFile(path.join(root, refs[0]!), 'corrupt');
+    await fs.chmod(path.join(root, refs[0]!), 0o400);
+    await assert.rejects(artifacts.mapReadGroups([refs[0]!], (serial, ref) => serial.readCanonical(ref)));
+    assert.equal(reads, 17); assert.equal(active, 0);
+    owner.abort(new Error('original read owner stopped'));
+    await assert.rejects(artifacts.withReadSignal(owner.signal).mapReadGroups(refs, (serial, ref) => serial.readCanonical(ref)),
+      error => error === owner.signal.reason);
+    assert.equal(reads, 17);
+  } finally { clearTimeout(timer); firstWave.release(); }
+});
+
+for (const grouped of [false, true]) test(`${grouped ? 'grouped histories' : 'a production item read'} join every issued real CAS close and preserve a later retirement failure`, async t => {
+  const invoke = grouped
+    ? (artifacts: ArtifactCatalog, cut: { items: Array<{ payloadRef: string }> }) => artifacts.mapReadGroups(cut.items,
+      (serial, item) => serial.mapReads([item], row => serial.readCanonical(row.payloadRef)))
+    : await stoppedItemReader();
+  const { root, cas, artifacts, refs } = await fixture(t);
   const entered = gate(), release = gate(), ordinaryJoined = gate();
   const ordinary = new Error('an actual file read reported failure'), retirement = new Error('an actual closed file reported retirement failure');
   const open = fs.open.bind(fs), read = cas.read.bind(cas), active = new Set<object>(), raw: Promise<unknown>[] = [];

@@ -304,14 +304,14 @@ export async function validateToolRecovery(input: {
         !journal.some(entry => entry.opKind === 'skill_resource' && entry.phase === 'completed' && entry.grantRef === grantRef))
       throw new TypeError('direct skill read permission is not registered without its complete local effect');
   }
-  for (const prepared of journal.filter((entry) => entry.phase === 'prepared' && (entry.opKind === 'tool' || entry.opKind === 'mcp'))) {
+  async function validatePrepared(artifacts: ArtifactCatalog, prepared: InvocationJournalEntry): Promise<void> {
     if (prepared.target === 'builtin:dependency-acquire') {
       if (!input.driver || !spec.dependencyPolicyRef) throw new TypeError('dependency requires its complete original history');
       dependencyHistory ??= (await import('./dependency-history.js')).readDependencyHistory(input.driver, artifacts, { run, runSpec: spec,
         items: [...items.values()].map((item, index) => ({ schemaVersion: 1, itemId: item.itemId, itemSeq: index + 1,
           payloadRef: canonicalSha256(item), payloadDigest: canonicalSha256(item), createdAt: item.createdAt })), journal,
         workspaceGenerations: input.workspaceGenerations });
-      await dependencyHistory; continue;
+      await dependencyHistory; return;
     }
     const request = requests.get(prepared.requestRef);
     if (!request || !prepared.grantRef || !decisions.has(prepared.grantRef) || prepared.opId !== request.opId || prepared.target !== request.targetRef ||
@@ -347,7 +347,7 @@ export async function validateToolRecovery(input: {
         if (!input.driver || resolved.length !== 1) throw new TypeError('MCP signed status requires its sole actual retained resolution');
         await (await import('./mcp-status-result-history.js')).validateMcpReconciledToolResult(input.driver, artifacts,
           { run, runSpec: spec, journal }, prepared, resolved[0]!, items, input.checkpoints);
-        continue;
+        return;
       }
     }
     if (failed && run.stopIntentRef && failed.errorRef === run.stopIntentRef) {
@@ -387,7 +387,7 @@ export async function validateToolRecovery(input: {
           if (payload && (!Number.isSafeInteger(payload.attempt) || (payload.attempt as number) <= prepared.attempt) ||
               !payload && (['failed', 'cancelled', 'succeeded'].includes(run.status) || run.frontierRef !== request.frontierRef))
             throw new TypeError('MCP earlier positive retry failure loses its still-open call or real later attempt result');
-          continue; // The original positive no-release settlement above remains independently verified.
+          return; // The original positive no-release settlement above remains independently verified.
         }
         const history = retryHistories.get(prepared.opId);
         const stopped = run.stopIntentRef && decodeAgentStop(await readCanonicalArtifact(artifacts, run.stopIntentRef), run).createdAt <= item!.createdAt;
@@ -449,7 +449,7 @@ export async function validateToolRecovery(input: {
       requireEqual(failed.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, 'no-dispatch refund');
     }
     const completion = attempts.find((entry) => entry.attempt === prepared.attempt && entry.phase === 'completed');
-    if (!completion) continue;
+    if (!completion) return;
     const claim = claims.find((entry) => entry.attempt === completion.attempt);
     const result = completion.resultRef && await readCanonicalArtifact<ToolObservationV1>(artifacts, completion.resultRef);
     const item = [...items.values()].find((item) => item.kind === 'tool_result' && item.opId === prepared.opId);
@@ -559,5 +559,16 @@ export async function validateToolRecovery(input: {
       const prior = input.checkpoints.filter((candidate) => candidate.basedOnRunRevision < checkpoint.basedOnRunRevision).at(-1);
       if (!prior || checkpoint.workspaceStateRef !== prior.workspaceStateRef) throw new TypeError('read-only completion replaced workspace state');
     }
+  }
+  const prepared = journal.filter(entry => entry.phase === 'prepared' && (entry.opKind === 'tool' || entry.opKind === 'mcp'));
+  for (let index = 0; index < prepared.length;) {
+    const ordinary = (entry: InvocationJournalEntry) => entry.opKind === 'tool' && entry.target !== 'builtin:dependency-acquire';
+    if (!ordinary(prepared[index]!)) { await validatePrepared(artifacts, prepared[index++]!); continue; }
+    const start = index;
+    while (index < prepared.length && ordinary(prepared[index]!)) index++;
+    // Claims/results remain independently checked against the entire original
+    // cut. MCP/dependency histories keep their existing serial ordering; the
+    // builtin histories share no mutable validation state or native authority.
+    await artifacts.mapReadGroups(prepared.slice(start, index), validatePrepared);
   }
 }

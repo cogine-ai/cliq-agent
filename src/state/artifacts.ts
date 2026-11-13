@@ -17,6 +17,7 @@ export type PublishedArtifact = {
 type CanonicalPublication = Readonly<{ value: unknown; schemaKind: string }>;
 
 export class ArtifactCatalog {
+  private readWidth: 1 | 4 = 4;
   private readonly trustedReleases: readonly ReleaseTrustKey[] | undefined;
   private readonly runtimeConversionTarget: string | undefined;
   constructor(private readonly cas: ContentAddressedStore, private readonly readSignal?: AbortSignal,
@@ -37,7 +38,8 @@ export class ArtifactCatalog {
   /** Same real CAS and checks, with a tighter read lifetime. This view grants
    * no authority, starts no work and cannot discard a parent's cancellation. */
   withReadSignal(signal: AbortSignal): ArtifactCatalog {
-    return new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal, this.trustedReleases, this.runtimeConversionTarget);
+    const view = new ArtifactCatalog(this.cas, this.readSignal ? AbortSignal.any([this.readSignal, signal]) : signal, this.trustedReleases, this.runtimeConversionTarget);
+    view.readWidth = this.readWidth; return view;
   }
 
   /** Fixed signed-conversion data-audit context. It can only authorize parsing
@@ -45,7 +47,8 @@ export class ArtifactCatalog {
    * ordinary opening and the sole upgrade transaction retain their own gates. */
   withRuntimeConversionSource(targetBundleRef: string): ArtifactCatalog {
     assertArtifactRef(targetBundleRef);
-    return new ArtifactCatalog(this.cas, this.readSignal, this.releaseTrustRoots(), targetBundleRef);
+    const view = new ArtifactCatalog(this.cas, this.readSignal, this.releaseTrustRoots(), targetBundleRef);
+    view.readWidth = this.readWidth; return view;
   }
   runtimeConversionSourceRef(): string | undefined { return this.runtimeConversionTarget; }
 
@@ -72,9 +75,19 @@ export class ArtifactCatalog {
         } catch (error) { stopped = true; throw error; }
       }
     };
-    await joinResourceOperations(Array.from({ length: Math.min(4, length) }, () => run()));
+    await joinResourceOperations(Array.from({ length: Math.min(this.readWidth, length) }, () => run()));
     this.assertReadActive();
     return results;
+  }
+
+  /** Independent read-only histories may overlap, but their nested catalog
+   * groups must not multiply the four-reader bound. Each callback uses this
+   * serial view for all nested reads and awaits them before returning. No
+   * bytes, identities or validation results are cached or shared. */
+  async mapReadGroups<T, Result>(values: readonly T[], read: (artifacts: ArtifactCatalog, value: T, index: number) => Promise<Result>): Promise<Result[]> {
+    const serial = new ArtifactCatalog(this.cas, this.readSignal, this.trustedReleases, this.runtimeConversionTarget);
+    serial.readWidth = 1;
+    return this.mapReads(values, (value, index) => read(serial, value, index));
   }
 
   async publishBytes(

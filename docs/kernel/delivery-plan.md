@@ -160,6 +160,25 @@ credential scan passed. The temporary Actions secret was deleted and its
 absence confirmed. No further paid retry is authorized; the unresolved
 reservations remain until actual accounting establishes otherwise.
 
+The next free-runner performance candidate overlaps independent ordinary-tool
+history validations within a single recovery traversal. Every original claim,
+grant, capture, signed guest byte stream, output, Checkpoint and retirement
+check still executes; no content, digest, authority or successful read is cached.
+At most four histories run together. Each receives a serial nested catalog view,
+including derived cancellation/conversion views, so nested groups do not multiply
+that bound. MCP and dependency history ordering stays serial. Any issued sibling
+must join before the read returns or rejects, preserving retirement-error priority.
+
+The actual SQLite/CAS recovery regression first fails on the old sequential
+reader and then passes on the grouped reader. The 37 affected tests pass, including
+real CAS close failure, nested reader capacity and fresh corruption refusal.
+An alternating local comparison reads the same 256 MiB object six complete times
+per sample: sequential 2,276/2,362 ms, grouped 1,459/1,485 ms. This is component
+measurement, not installed Linux throughput or Stop qualification. Latest free
+run `43372552885` still fails `ordinary_tools`/Stop on the previous source after
+its first five verifier cases and reconnect/restart pass. Original READY5, Stop2,
+request/probe30, terminal90, maximum image and paid-retry limits remain unchanged.
+
 Local build and the full suite previously passed for production source
 `4126a7703b1255ff0664254677c1f777f8903968` (4,024 passed, 32 skipped). The current
 candidate additionally changes production verification scheduling as described
