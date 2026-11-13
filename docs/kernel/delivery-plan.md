@@ -404,6 +404,28 @@ command; omission, movement, duplication and substitution are rejected. Its
 zero actionable findings. Linux qualification remains pending, not implied by
 these local results. No new provider call or PR is authorized by this evidence.
 
+The [free Linux bundle at `d5d5695`](https://github.com/cogine-ai/cliq-agent/actions/runs/43426537323)
+passes daily delivery and signed Node execution, with joined writers, complete
+secret scans and zero cleanup errors. The maximum fixture passes its first five
+cases and reconnect/restart, but ordinary tools still exceeds 90 seconds: twelve
+tools completed and the thirteenth claimed. Native guest opening reports 17.8 s
+and 14.6 GB over thirteen entries; this is a whole-process window, not an isolated
+speedup measurement. The native precheck separately exposed glibc mount-header
+ordering and a test that hit mode-0400 DAC before testing the memfd write seal.
+The corrections preserve the original compile checks and require kernel EPERM
+on the original owned RDWR descriptor.
+
+The [same-source permission campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/43426813892)
+stops the original owner within Stop2, but its successor never exposes the public
+socket within restart30 while waiting for verifier approval. It is unqualified;
+there is no confirmed root cause yet. A bounded read-only successor CPU/I/O
+diagnostic runs only after that deadline has already failed and preserves the
+failure. It confers no readiness or recovery evidence. Completed-tool workspace
+rehashing now uses the existing bounded discard reader, retaining every byte,
+stat, root and close check; a real large-CAS final-byte corruption regression
+checks rejection and subsequent fresh rereading. These changes require fresh
+Linux validation. No paid retry or PR has been initiated.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

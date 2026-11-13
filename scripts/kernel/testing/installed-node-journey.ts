@@ -19,7 +19,7 @@ import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openI
 import { fixtureCommandJoinDiagnostic } from './fixture-command-diagnostic.js';
 import { preparingGitNativeInputData } from './preparing-git-native.js';
 import { DEFAULT_SANDBOX_RESOURCES } from '../../../src/kernel/control-submit.js';
-import { runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
+import { decodeEnrollProcessCounters, runOwnedEnrollDiagnostic, type InstalledEnrollDiagnostic } from './installed-enroll-diagnostic.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import type { AuthorizationGrantSummaryV1, VerifierIdentityCreateRequest } from '../../../src/kernel/authorization.js';
 import { decodeCredentialAuthorityOperation, decodeEndpointAuthorityOperation, type EndpointRegistrationV1 } from '../../../src/kernel/credential-authority.js';
@@ -706,7 +706,26 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     const actual = await stat('/proc/' + pid + '/exe', { bigint: true }), named = await lstat(image, { bigint: true });
     for (const field of imageFields) assert.equal(actual[field], named[field]);
     for (;;) {
-      assert(Date.now() < by, 'public control readiness exceeded the original restart budget');
+      if (Date.now() >= by) {
+        // Read only after the original deadline has already failed. These
+        // process-wide counters distinguish work from an idle startup; they
+        // cannot establish a StateOwner, readiness, shutdown or recovery.
+        report.restartReadinessDiagnostic = { diagnosticOnly: true, kind: 'unavailable' };
+        try {
+          assert.equal(await fixtureProcess(pid, ledger.uid), start);
+          const counters = decodeEnrollProcessCounters(pid, await readFile(`/proc/${pid}/stat`, 'utf8'), await readFile(`/proc/${pid}/io`, 'utf8'));
+          assert.equal(counters.startTicks, start);
+          const current = await stat(`/proc/${pid}/exe`, { bigint: true });
+          for (const field of imageFields) assert.equal(current[field], actual[field]);
+          const confirmed = show(unit);
+          for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState']) assert.equal(confirmed[field], shown[field]);
+          assert.equal(await fixtureProcess(pid, ledger.uid), start);
+          report.restartReadinessDiagnostic = { diagnosticOnly: true, kind: 'observed',
+            source: 'actual_successor_proc_after_failed_readiness_deadline', deadlineMs: 30000,
+            preexistingProcessStartAndNamedImageBound: true, originalInvocationBound: true, counters };
+        } catch { /* Preserve the failed deadline when optional diagnosis is unavailable. */ }
+        assert.fail('public control readiness exceeded the original restart budget');
+      }
       try {
         const socket = await lstat(path.join(recipe.stateRoot, 'runtime/control-v1.sock'), { bigint: true });
         assert(socket.isSocket() && socket.uid === BigInt(ledger.uid));

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { writeSync } from 'node:fs';
 import { chmod, mkdtemp, open, readdir, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { Module } from 'node:module';
 import os from 'node:os';
@@ -62,7 +63,10 @@ test('actual native script receiver owns immutable bytes and a distinct non-exec
       assert.equal(await acquire(), image); assert.equal(seals, 1);
       assert.deepEqual(await readFile(held), bytes);
       // The actual kernel seal, not a memoized digest, prevents mutation.
-      await assert.rejects(writeFile(held, 'cannot mutate sealed bytes'), { code: 'EPERM' });
+      // Use the still-owned RDWR descriptor: reopening its mode-0400 proc
+      // path would test DAC (EACCES), not the seal. Position zero tests WRITE
+      // independently of GROW, because sealing left the original offset at EOF.
+      assert.throws(() => writeSync(Number(descriptors[0]), Buffer.from('X'), 0, 1, 0), { code: 'EPERM' });
       assert.deepEqual(await readFile(held), bytes);
       assert.throws(() => image.close.call({}));
       await images.close(); await assert.rejects(readlink(held), { code: 'ENOENT' });

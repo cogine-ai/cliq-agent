@@ -4,6 +4,7 @@
 #include "verifier-protocol.h"
 #include "verifier-node.h"
 #include "verifier-setup.h"
+#include <sys/mount.h>
 #include <linux/audit.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
@@ -11,7 +12,6 @@
 #include <linux/seccomp.h>
 #include <linux/securebits.h>
 #include <linux/sched.h>
-#include <sys/mount.h>
 
 /* Ubuntu 22.04's fixed musl 1.2.2 syscall table predates mount_setattr.
  * Pin the Linux x86_64 UAPI number, not a permissive fallback: an older kernel
