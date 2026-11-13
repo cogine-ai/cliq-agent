@@ -262,6 +262,7 @@ test('the additive read-cost observation cannot replace or weaken an original qu
     probe.replace('src/state/installed-runtime-discard.test.ts', 'src/state/other.test.ts'),
     probe.replace(' src/state/installed-seed-read.test.ts', ''),
     probe.replace(' src/state/cas-discard.test.ts', ''),
+    probe.replace('node scripts/kernel/measure-linux-sha256.mjs', 'true'),
     probe.replace("CLIQ_INSTALLED_READ_COST: '1'", "CLIQ_INSTALLED_READ_COST: '0'")])
     assert.throws(() => verifyWorkflow(workflow.replace(probe, changed), 'foundation'));
 });

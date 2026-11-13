@@ -1209,6 +1209,8 @@ jobs:
         env:
           CLIQ_INSTALLED_READ_COST: '1'
         run: node --test --test-concurrency=1 --import tsx src/state/installed-runtime-discard.test.ts src/state/installed-seed-read.test.ts src/state/cas-discard.test.ts
+      - name: Compare the exact native SHA algorithm with fixed-round compiler unrolling
+        run: node scripts/kernel/measure-linux-sha256.mjs
 
   linux-installed-verifier:
     needs: ci-route

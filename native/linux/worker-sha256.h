@@ -104,6 +104,9 @@ static void sha256_transform_x86(struct sha256_context *context, const uint8_t b
                                (int)context->state[4], (int)context->state[5]);
     __m128i cdgh = _mm_set_epi32((int)context->state[2], (int)context->state[3],
                                (int)context->state[6], (int)context->state[7]);
+    /* Keep the four schedule vectors in registers at the baseline -O2 build.
+     * The fixed rounds, CPUID gate and portable fallback are unchanged. */
+    #pragma GCC unroll 16
     for (size_t group = 0; group < 16; group++) {
         size_t slot = group & 3;
         if (group >= 4) {

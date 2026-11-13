@@ -3664,3 +3664,29 @@ two-caller 256 MiB diagnostic reads 1 GiB instead of 2 GiB; elapsed time is
 454–457 ms versus 473–477 ms on this Mac, not an installed Linux speed claim.
 The same regression is added to the existing free Linux read-cost job; all
 original qualification jobs and their acceptance projections remain intact.
+
+#### Free Linux throughput follow-through at `582cdb9`
+
+Foundation `43471335040` passes signed Node, the controlled daily
+edit/required-check/repair/review/apply flow and 27 reader regressions. The
+maximum-image campaign passes the same five cases and reconnect/restart, but
+still fails ordinary tools at the original 90-second bound: one model and 11
+tools completed, with the next tool prepared. This is not an improvement over
+the previous run. Its stage windows are overlapping measurements: native guest
+opening takes 19.28 seconds, result waits 3.27 seconds, and the remaining time
+is largely in selection/prepare/claim/release/completion reads. They do not
+establish exclusive CPU attribution. The original clients/writers join, no-echo
+scan passes and cleanup has no errors. Permission `43471334885` fails READY at
+5001 ms after 13 full revalidations; the approval fix is still unqualified.
+
+The next measured candidate keeps the existing SHA-256 compression algorithm,
+real CPUID selection and portable fallback, and asks GCC/Clang to unroll its
+fixed 16 groups at the existing `-O2`. This removes dynamic schedule indexing;
+it does not omit any byte, hash, identity check or revalidation. The exact
+pre-change header is SHA-pinned in a separate data-only ABBA diagnostic, and
+both versions must pass the original algorithm vectors and the complete 64 MiB
+digest before timing is reported. QEMU Linux measures about 412 ms versus
+299–302 ms; emulated CPU throughput is not native runner or installed evidence.
+The free runner will measure the same comparison. All original qualification
+jobs and limits remain unchanged. No paid retry or PR is authorized by these
+partial results.
