@@ -65,6 +65,7 @@ export function readInstalledStartupFailureJournal(text: string, expected: Origi
     ['verifier admission source history is not closed', 'verifier_source_history'],
     ['verifier admission authorization history is not closed', 'verifier_authorization_history'],
     ['candidate recovery verifier cut has no exact queued or active execution lifecycle', 'candidate_verifier_lifecycle'],
+    ['Run is not at a tool frontier', 'tool_frontier'],
     ['StateStore opening validation did not complete retirement', 'opening_retirement']
   ]);
   const failures: { code: string; reason: string }[] = [];

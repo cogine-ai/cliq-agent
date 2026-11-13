@@ -350,12 +350,19 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
     if (item.decision !== (approval?.decision ?? evidence.effectiveDisposition)) throw new TypeError('policy item disposition mismatch');
   }
   if (admittedRun.waitingReason === 'approval' && admittedRun.waitingOnRef) {
-    const selected = await cut(undefined, openingReads);
     const subject = await readCanonicalArtifact<{ subject?: { kind?: string } }>(openingReads, admittedRun.waitingOnRef);
-    if (subject.subject?.kind !== 'mcp_server_launch') {
-      const proof = await waitProof(admittedRun.waitingOnRef, openingReads);
-      requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
-    } // The complete original server wait/owning call is audited by readToolCut.
+    const kind = subject.subject?.kind;
+    if (kind === 'tool_call' || kind === 'mcp_server_launch') {
+      const selected = await cut(undefined, openingReads);
+      if (kind === 'tool_call') {
+        const proof = await waitProof(admittedRun.waitingOnRef, openingReads);
+        requireEqual(proof.request, requestFor(selected).request, 'waiting current tool request');
+      } // readToolCut audits the complete original server wait and owning call.
+    } else if (kind !== 'verifier_launch' && kind !== 'child_merge' && kind !== 'dependency_install_scripts') {
+      throw new TypeError('tool construction encountered an unsupported approval subject');
+    }
+    // The sole caller's complete recovery walk already validates these other
+    // subjects. Their waits are not tool requests and cannot select a tool cut.
   }
 
   const controlAuthority = {

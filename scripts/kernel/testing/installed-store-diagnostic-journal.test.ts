@@ -19,6 +19,8 @@ test('failed startup diagnostics retain closed reasons without exporting private
     { code: 'none', reason: 'unclassified' }] });
   assert(!JSON.stringify(read(text, sender)).includes('private'));
   const reason = 'candidate recovery verifier cut has no exact queued or active execution lifecycle';
+  assert.deepEqual(read(journal([JSON.stringify({ ...message, code: 'STATE_TRANSITION_INVALID', message: 'Run is not at a tool frontier' })]), sender),
+    { failures: [{ code: 'STATE_TRANSITION_INVALID', reason: 'tool_frontier' }] });
   for (const prefix of ['', 'typed agent recovery closure is invalid: '])
     assert.deepEqual(read(journal([JSON.stringify({ ...message, message: prefix + reason })]), sender),
       { failures: [{ code: 'RECOVERY_REQUIRED', reason: 'candidate_verifier_lifecycle' }] });

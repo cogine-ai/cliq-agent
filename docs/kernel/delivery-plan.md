@@ -499,6 +499,25 @@ replace the maximum installed campaign; it distinguishes hashing/read cost
 from concurrency overhead before another performance change. No paid retry
 or PR has been initiated.
 
+The free `fc79fea` permission run
+([43453566191](https://github.com/cogine-ai/cliq-agent/actions/runs/43453566191))
+progresses past the history refusal but still refuses successor construction
+with `STATE_TRANSITION_INVALID`. Auditing every approval-wait recovery entry
+finds the same misplaced tool-cut selection in `loadToolContinuation`: it reads
+a tool cut before examining the subject. The correction selects a tool cut
+only for tool-call/MCP-server waits; verifier, dependency and child-merge waits
+retain their complete preceding subject-owned recovery. Unknown subjects still
+fail, and retained tool decisions remain fully checked. The routing regression
+fails on the original constructor and checks original failure propagation;
+this inert callback test is not a permission or installed-restart proof.
+
+The independent free read-cost job passes all 16 tests and observes grouped
+8-GiB rereads in 2.25–2.38s versus serial 4.45–4.47s, with actual joins and no
+filesystem-read/page-fault evidence of cold disk I/O. It ran on a different
+four-vCPU runner from the failed installed campaign, so it cannot attribute
+the latter's additional cost to metadata, hashing or contention. Preserve this
+limit and do not change the original guards based on cross-host timings.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model
