@@ -129,6 +129,38 @@ enrollment timeout is retained as historical evidence, not the active blocker.
   determine what can be reported. The real targeted rerun now
   observes `tool_received_complete_tool`; this still does not qualify Stop.
 
+Latest free measurement [43412882704](https://github.com/cogine-ai/cliq-agent/actions/runs/43412882704)
+at `40966d710bc29b53e99817389882941959a1c9d9` passes daily delivery and signed
+Node, with original joins and zero cleanup errors. The maximum fixture passes
+its original first five cases and reconnect/restart, but still fails ordinary
+tools at terminal90: one model and twelve tools complete, the thirteenth is
+claimed. Original Stop joins normally from `tool_received_complete_tool`.
+The 86.113-second diagnostic window reports 14.342 seconds in selection,
+17.051 in native guest opening, and about 9.7–10.5 each in preparation, claim,
+release and completion. Actual tool-result waiting occupies 2.048 seconds.
+These remain process windows, not exclusive function costs; outstanding discard
+bytes can be unreported. Cross-run tool counts alone do not establish speedup.
+
+The measured selection path performed two complete reads for the same planning
+decision. Its candidate now obtains the immutable invocation, Checkpoint and
+Journal from one complete cut, then preserves the post-worker-observation
+SQLite Run equality fence. All independent prepare/claim/release traversals,
+every historical claim's full-byte verification, original native checks,
+transactions and timing bounds remain. A real SQLite/CAS regression confirms
+that the projection cannot reserve work or bypass later missing-byte refusal.
+Build and 56 affected state tests pass; full local and exact-source Linux
+validation of this candidate are pending.
+
+The same run's native callback baseline failed because the shared current
+carrier builder eagerly imported a diagnostic absent from the pinned historical
+source. Its original TAP is retained; this is not an expected callback RED.
+The optional diagnostic is now imported only when requested. An actual child
+module regression reproduces the missing dependency, then proves ordinary
+composition loads while a requested missing diagnostic still fails closed.
+No native baseline, assertion, overlay, deadline or evidence interpretation is
+changed. The affected diagnostic/preflight group passes 72 tests with two
+platform skips; the real baseline/candidate campaign must still be rerun.
+
 The owner approved a revised total ceiling of CNY235 and exactly one further
 experiment capped at CNY35, after the same-source free Linux product chain
 passes. That additional attempt is now consumed. Cumulative unresolved

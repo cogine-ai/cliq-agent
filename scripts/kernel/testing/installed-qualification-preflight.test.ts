@@ -2,6 +2,8 @@
 // StateOwner, Run, native authority or qualification result is constructed.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,6 +23,43 @@ test('the callback qualifier candidate pin names the complete current native ima
   assert.match(source, /report\.qualified = report\.views\.every\(\(view: Record<string, any>\) => view\.evidence && !view\.evidenceRefused\)/u);
   assert.match(source, /assert\.equal\(baseline\.dependencies\.contentDigest, candidate\.dependencies\.contentDigest\)/u);
   assert.match(source, /dependencyMode = 'independent_shared_current_lock_integrity_no_scripts'/u);
+});
+
+test('the shared carrier builder does not load optional diagnostics in a source view without them', async () => {
+  const temporary = await mkdtemp(path.join(os.tmpdir(), 'cliq-carrier-import-'));
+  const repository = fileURLToPath(new URL('../../..', import.meta.url));
+  const folder = path.join(temporary, 'scripts/kernel/testing');
+  try {
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(temporary, 'package.json'), '{"type":"module"}');
+    await symlink(path.join(repository, 'node_modules'), path.join(temporary, 'node_modules'));
+    await symlink(path.join(repository, 'src'), path.join(temporary, 'src'));
+    const source = await readFile(new URL('./supervisor-sea-builder.ts', import.meta.url), 'utf8');
+    const parsed = ts.createSourceFile('supervisor-sea-builder.ts', source, ts.ScriptTarget.Latest, true);
+    // Real current dependencies, except the new optional diagnostic that the
+    // pinned historical callback source does not contain. No image is built.
+    for (const statement of parsed.statements) {
+      if ((!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) ||
+          !statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+      const name = statement.moduleSpecifier.text;
+      if (!name.startsWith('./') || name === './installed-builtin-work-banner.js') continue;
+      const relative = name.replace(/\.js$/u, '.ts');
+      const target = path.join(folder, relative);
+      try { await symlink(path.join(repository, 'scripts/kernel/testing', relative), target); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    }
+    const filename = path.join(folder, 'supervisor-sea-builder.ts');
+    await writeFile(filename, source);
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      const {buildSupervisorSeaImage} = await import(${JSON.stringify(pathToFileURL(filename).href)});
+      const input = {assets: {'cliq-supervisor-application.mjs': 'inert guard sentinel'}};
+      await assert.rejects(buildSupervisorSeaImage(input), /signed application asset cannot be replaced/);
+      await assert.rejects(buildSupervisorSeaImage({...input, storeFailureDiagnostics: true}), {code: 'ERR_MODULE_NOT_FOUND'});
+    `], { cwd: repository, timeout: 30000, maxBuffer: 65536, encoding: 'utf8' });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null);
+    assert.equal(child.status, 0, child.stderr);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });
 
 test('the original native source view records its exact build-input overlay without changing the archive or current input', async () => {

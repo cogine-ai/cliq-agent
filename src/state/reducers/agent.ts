@@ -241,7 +241,8 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase, resultPreparationSignal),
     model,
     resolveToolInput,
-    /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */
+    /** One immutable planning cut, including the original history and Checkpoint.
+     * This projection is neither a grant nor permission to dispatch it. */
     readToolInvocation: stateOperation('RECOVERY_REQUIRED', async (readSignal?: AbortSignal) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
@@ -249,7 +250,9 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (selected.run.specRef !== admittedRun.specRef || selected.run.deadlineAt !== admittedRun.deadlineAt ||
           selected.run.createdAt !== admittedRun.createdAt) throw new TypeError('loaded tool authority no longer belongs to this Run');
       const input = selected.call;
-      return immutableSnapshot({ run: selected.run, frontier: selected.frontier, batchItemId: selected.batch.itemId,
+      reads.assertReadActive();
+      return immutableSnapshot({ run: selected.run, checkpoint: selected.checkpoint, journal: selected.journal,
+        frontier: selected.frontier, batchItemId: selected.batch.itemId,
         ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value! }) });
     }),
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */

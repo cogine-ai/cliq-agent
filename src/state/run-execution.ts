@@ -37,7 +37,6 @@ import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, ty
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
 import { toolCheckpointId } from './tool-checkpoint.js';
-import { readToolCut } from './tool-cut.js';
 import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity, decodeWorkspaceIdentity } from './decoders.js';
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
 import { loadNativeStateOwner, type HeldWorkerReservation, type HeldWorkspaceRoot, type HeldPreparingGitInput } from './native-owner.js';
@@ -2283,7 +2282,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const work = (async () => {
         builtinPhase('tool_select');
         signal.throwIfAborted();
-        const selected = await readToolCut(driver, reads, runId, currentAgent.resolveToolInput);
+        const selected = await currentAgent.readToolInvocation(signal);
         signal.throwIfAborted();
         const queued = selected.run.status === 'queued' && selected.run.activeWorkerLaunchId === undefined;
         const retained = selected.run.status === 'running' && activeWorker !== undefined && worker !== undefined && generation !== undefined &&
@@ -2301,8 +2300,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await worker!.observeProcess();
           signal.throwIfAborted();
         }
-        const projection = await currentAgent.readToolInvocation(signal);
-        requireEqual(projection.run, selected.run, 'current native tool projection');
+        // Keep the original post-observation revision/lifecycle fence without
+        // replaying the same complete artifact graph for a second projection.
+        requireEqual(readRun(driver, runId), selected.run, 'current native tool projection');
+        // Projection and lifecycle planning belong to the same complete cut.
+        // prepare/claim/release still independently reread their own authority.
+        const projection = selected;
         if (projection.kind === 'tool' && !(projection.execution.kind === 'builtin' && projection.execution.adapterId === LINUX_WORKER_RECIPE.editId ||
             projection.execution.kind === 'builtin_script' || projection.execution.kind === 'mcp' || projection.execution.kind === 'supervisor_operation' && projection.execution.handlerId === 'skill_resource') ||
             projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {

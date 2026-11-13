@@ -14,6 +14,37 @@ import { postEffectObservation } from './testing/tool-effects.js';
 
 import { batch, prepareTool, claimTool, observation } from './testing/tool-calls.js';
 
+// The projection owns one complete read cut but is never reusable authority.
+// These are real SQLite/CAS operations in the existing offline Run fixture.
+test('tool selection includes one immutable checkpoint/history cut and preparation rereads retained bytes', async () => {
+  const fixture = await createAgentFixture('tool-selection-cut', { wallTimeMs: 300_000 }, { mode: 'yolo' });
+  let displaced: { source: string; destination: string } | undefined;
+  try {
+    await batch(fixture, [{ name: 'read', input: { path: 'a.ts' } }]);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const selected = await fixture.agent.readToolInvocation();
+    assert.deepEqual(selected.checkpoint, before.latestCheckpoint);
+    assert.deepEqual(selected.journal, before.journal);
+    assert.equal(selected.checkpoint.id, selected.run.latestCheckpointId);
+    assert(Object.isFrozen(selected.checkpoint)); assert(Object.isFrozen(selected.journal));
+    assert(Object.isFrozen(selected.journal[0]));
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run, 'selection cannot reserve or claim work');
+    const source = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.run.frontierRef!);
+    displaced = { source, destination: source + '.test-held-original' };
+    await rename(displaced.source, displaced.destination);
+    await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: selected.run.revision,
+      leaseEpoch: selected.run.leaseEpoch }), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run, 'a selected projection cannot bypass a later read refusal');
+    await rename(displaced.destination, displaced.source); displaced = undefined;
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const prepared = await prepareTool(fixture);
+    assert.equal(prepared.request.callId, selected.invocation.callId);
+  } finally {
+    if (displaced) await rename(displaced.destination, displaced.source);
+    await disposeFixture(fixture);
+  }
+});
+
 // Corrupt retained data at the existing disposable SQLite/CAS seam. These
 // refusals do not construct verifier admission, a launch, or physical proof.
 for (const subjectKind of ['verifier_launch', 'delivery_plan', 'unknown'] as const)

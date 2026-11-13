@@ -470,7 +470,7 @@ test('only fixed qualification composition opts into Store diagnostics, includin
   const builder = await readFile(new URL('./supervisor-sea-builder.ts', import.meta.url), 'utf8');
   const packaging = await readFile(new URL('./installed-supervisor-package.ts', import.meta.url), 'utf8');
   const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
-  assert.match(builder, /input.storeFailureDiagnostics \? INSTALLED_STORE_DIAGNOSTIC_BANNER \+ INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER \+ INSTALLED_BUILTIN_WORK_DIAGNOSTIC_BANNER : ''/u);
+  assert.match(builder, /input.storeFailureDiagnostics \? INSTALLED_STORE_DIAGNOSTIC_BANNER \+ INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER \+ builtinWorkBanner : ''/u);
   assert.match(packaging, /options.storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}/u);
   assert(journey.includes('const storeFailureDiagnostics = true;'), 'each fixed qualification composition enables its trusted subscriber');
   assert.match(journey, /\.\.\.\(storeFailureDiagnostics \? \{ storeFailureDiagnostics: true as const \} : \{\}\)/u);

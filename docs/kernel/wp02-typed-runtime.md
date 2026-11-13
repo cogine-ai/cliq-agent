@@ -76,7 +76,12 @@ packages or a declaration that Gate B has passed:
   ordered result prefix. Its immutable result contains the current invocation
   and display, plus an action-free policy subject only for ordinary tools, not
   an OperationGrant or dispatch permission. Restart reproduces the same
-  normalized input and loop signature.
+  normalized input and loop signature. The same immutable projection carries
+  its ready Checkpoint and Journal for execution planning. After observing the
+  original live worker, the execution owner compares the current SQLite Run to
+  that cut before planning capacity retirement or preparation. This removes a
+  second planning traversal, not any independent prepare/claim/release read,
+  policy reproduction, native identity check or transactional authority fence.
 - `prepareModel` derives the operation, zero-based Journal attempt, exact native
   body and full signed reservation. Generic invocation admission cannot bypass
   that path for typed Runs; generic completion/refunds cannot replace its checks.
