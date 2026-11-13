@@ -21,6 +21,37 @@ function between(text: string, start: string, end: string): string {
   return text.slice(first, last);
 }
 
+test('installed MCP failure inspection reads fresh Journal candidates without treating them as Stop authority', () => {
+  // Evaluate only the actual routing predicate over inert rows. Positive
+  // routing still enters the original complete reader and Stop reducer.
+  const text = source('./store.ts'), file = ts.createSourceFile('store.ts', text, ts.ScriptTarget.Latest, true);
+  let condition: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && ts.isBlock(node.thenStatement) && node.thenStatement.statements.some(statement =>
+      ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration =>
+        declaration.name.getText(file) === 'cause' && declaration.initializer?.getText(file).includes('.readMcpKnownUnusableCause('))))
+      condition = node.expression;
+    ts.forEachChild(node, visit);
+  }; visit(file); assert(condition);
+  const choose = new Function('agent', 'current', 'runId', 'readInvocationJournal', `return (${condition.getText(file)});`);
+  const driver = {}, owner = { driver }, runId = 'inert-routing-run';
+  let rows: Array<{ opKind: string; phase: string }> = [], reads = 0;
+  const read = (actualDriver: unknown, actualRun: string) => {
+    assert.equal(actualDriver, driver); assert.equal(actualRun, runId); reads++; return rows;
+  };
+  const route = (operation = 'agent', stopIntentRef?: string) => choose.call(owner, { operation }, { stopIntentRef }, runId, read);
+  assert.equal(route('delivery'), false); assert.equal(route('agent', 'inert-stop'), false); assert.equal(reads, 0);
+  for (const candidate of [[], [{ opKind: 'model', phase: 'completed' }], [{ opKind: 'mcp', phase: 'prepared' }],
+    [{ opKind: 'mcp', phase: 'unknown' }], [{ opKind: 'mcp-server', phase: 'completed' }]]) {
+    rows = candidate; assert.equal(route(), false);
+  }
+  rows = [{ opKind: 'mcp', phase: 'completed' }, { opKind: 'tool', phase: 'completed' }];
+  assert.equal(route(), true, 'a later ordinary entry cannot hide an MCP completion');
+  rows = []; assert.equal(route(), false); assert.equal(reads, 7, 'no negative or positive routing result is cached');
+  const refusal = new Error('original Journal decoder refused');
+  assert.throws(() => choose.call(owner, { operation: 'agent' }, {}, runId, () => { throw refusal; }), error => error === refusal);
+});
+
 test('installed waits retain reconciliation but let an actually registered Stop reach the original input or approval drain', () => {
   // Evaluate only the actual pure branch condition. No fixture can turn on
   // supportsInstalledRuns, construct a launcher or mint a native authority.

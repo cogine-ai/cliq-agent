@@ -151,7 +151,7 @@ test('builtin stage wiring keeps the original claim, release, result and unknown
   assert(body.slice(resultAt, captureAt).includes("if (onBuiltinPhase) currentBuiltinPhase = 'tool_capture'"));
   assert(body.includes('if (failedBuiltinPhase) builtinPhase(failedBuiltinPhase);\n        throw error;'));
   assert(execution.includes('if (!onBuiltinPhase || !isBuiltinExecutionPhase(phase)) return;'));
-  assert(execution.includes('try { onBuiltinPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }'));
+  assert(execution.includes('try { onBuiltinPhase(phase); noteInstalledBuiltinWorkPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }'));
   const store = await readFile(new URL('../state/store.ts', import.meta.url), 'utf8');
   assert(store.includes('} : undefined, installedRunDiagnosticsSubscribed() ? phase => {'));
   assert(store.includes('if (this.installedRunPhases.has(runId)) this.installedRunPhases.set(runId, phase);'));

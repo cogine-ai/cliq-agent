@@ -149,7 +149,15 @@ every historical claim's full-byte verification, original native checks,
 transactions and timing bounds remain. A real SQLite/CAS regression confirms
 that the projection cannot reserve work or bypass later missing-byte refusal.
 Build and 56 affected state tests pass; full local and exact-source Linux
-validation of this candidate are pending.
+validation of this candidate are pending. The same measured path also performed
+a full recovery traversal on every scheduling loop just to discover that no MCP
+call had completed. A fresh, strictly decoded Journal now selects candidates
+before that unrelated read; any completed MCP entry, including one before a
+later ordinary entry, still enters the unchanged full reader and Stop reducer.
+The negative selector neither grants execution nor skips a later operation's
+complete validation. Unrelated CAS corruption in a waiting non-MCP Run may be
+discovered by its next validating operation rather than this irrelevant MCP
+maintenance pass. No positive/negative routing result is cached.
 
 The same run's native callback baseline failed because the shared current
 carrier builder eagerly imported a diagnostic absent from the pinned historical

@@ -198,7 +198,7 @@ import { matchesLocalInferenceFrontier, prepareLocalInferenceFrontierFailure } f
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { decodeLocalModelRegistration, type LocalModelRegistrationV1 } from '../kernel/local-inference.js';
 import type { LocalZeroCostProvenanceV1 } from '../model/pricing.js';
-import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from './repositories/journal.js';
+import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal, readOperationJournal } from './repositories/journal.js';
 import { assertModelGrantDispatch } from './model-grant.js';
 import { readCheckpoint } from './rows.js';
 import { decodeRunSpec } from './decoders.js';
@@ -3159,7 +3159,11 @@ export class StateStore {
         await this.settleInstalledModelCompletion(runId, agent);
         continue;
       }
-      if (agent.operation === 'agent' && !current.stopIntentRef) {
+      // Structural routing only. Without a completed MCP call this cause is
+      // impossible; every candidate still enters the complete original read.
+      // The decoded Journal is fresh each loop and grants no Stop authority.
+      if (agent.operation === 'agent' && !current.stopIntentRef &&
+          readInvocationJournal(this.driver, runId).some(entry => entry.opKind === 'mcp' && entry.phase === 'completed')) {
         const cut = await readRecoveryClosure(this.driver, reads, runId);
         const cause = await (await import('./mcp-execution.js')).readMcpKnownUnusableCause(this.driver, reads, cut, sampleCanonicalNow());
         if (cause) {
