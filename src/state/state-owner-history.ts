@@ -150,26 +150,29 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
     for (const object of companion.objects) requireMember(object.artifactRef, object.byteCount);
   }
   if (expected.size !== inventory.size) invalid('retained installed genesis has missing or extra original seed objects');
-  for (const entry of data) {
+  // These are independent retained data checks. Bound their concurrent reads
+  // with the existing catalog group and join all issued work before decoding
+  // the complete structured closure; no completed proof crosses this call.
+  await artifacts.mapReadGroups(data, async (artifacts, entry) => {
     if (isNpmDataEntry(entry)) {
-      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete fixed signed image; no per-file CAS expansion. */ }
-      continue;
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
     }
     if (guestImages.has(entry.digest)) {
       if (entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         invalid('retained installed guest image exceeds its original recipe bound');
-      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original image, never a metadata-only digest. */ }
-      continue;
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
     }
     if (skillMembers.resources.has(entry.digest) && !skillMembers.instructions.has(entry.digest) && !guestSignatures.has(entry.digest)) {
       if (entry.byteCount > SKILL_RESOURCE_BYTES) invalid('retained installed skill resource exceeds its original bound');
-      for await (const _chunk of artifacts.readChunks(entry.digest, entry.byteCount)) { /* Complete original data, never an executable identity. */ }
-      continue;
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
     }
     const bytes = await read(entry.digest, entry.byteCount, guestSignatures.has(entry.digest) ? 64 : entry.role === 'trust_store' ? trustBytes : smallBytes);
     if (guestSignatures.has(entry.digest)) {
       if (bytes.length !== 64) invalid('retained installed guest signature is not complete');
-      continue;
+      return;
     }
     if (skillMembers.instructions.has(entry.digest)) {
       // SKILL.md is source text, not canonical JSON. The common structured
@@ -182,7 +185,7 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
       const value = checkCanonicalBytes(bytes);
       if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);
     }
-  }
+  });
   await validateBundledSkillReferences(skillClosures, async (ref, byteCount) => {
     const retained = buffers.get(ref); if (retained) return retained;
     requireMember(ref, byteCount);

@@ -518,6 +518,43 @@ four-vCPU runner from the failed installed campaign, so it cannot attribute
 the latter's additional cost to metadata, hashing or contention. Preserve this
 limit and do not change the original guards based on cross-host timings.
 
+The free maximum-fixture run at `fc79fea`
+([43453561324](https://github.com/cogine-ai/cliq-agent/actions/runs/43453561324))
+passes the five initial verifier cases and terminal reconnect/restart, then
+fails ordinary tools at the original 90s bound with one model and eleven tools
+completed. The queue is still running, with no scheduler failure before Stop.
+Original writers, daemon and public client join; cleanup reports zero errors.
+The job later hits its coordinator limit, which does not explain away the
+earlier 90s failure. The original process-wide diagnostic windows overlap and
+are not exclusive per-Run costs.
+
+The subsequent permission run at `d05306a`
+([43458781424](https://github.com/cogine-ai/cliq-agent/actions/runs/43458781424))
+no longer records the successor's prior constructor refusal. It still fails
+the first case: the new client's original 5s READY window expires after hello,
+with thirteen full revalidations completed and the final three unfinished.
+No permission case is qualified. Original shutdown, no-echo scan and cleanup
+join successfully. Local validation at that source passes 4,050 tests with
+32 platform skips, including the separately executed timing files.
+
+The next performance correction targets the retained installed birth reader:
+its guest/npm/opaque skill payloads still used discard-only main-thread chunk
+walks. They now use the existing complete `verifyChunks` reader and fixed-width
+catalog group. Every full hash, exact size, per-chunk root check, metadata guard,
+cancellation and actual thread/descriptor retirement remains mandatory; all
+issued reads join before structured closure validation. No completed result is
+cached, and the original signed inventory, roles, bounds and signatures remain
+unchanged. A real-CAS consumer regression checks fresh reads, four-reader
+capacity through close, final-byte corruption and retirement uncertainty.
+This data test does not qualify an installed genesis or the fixed npm image;
+those still require the original full Linux campaign.
+
+A separate policy-proof concurrency experiment was discarded: a twelve-tool
+local retained-history comparison saved only about 6–8ms per traversal, with
+the same 192 reads and 189,800 bytes. That is not evidence that it addresses
+the installed bottleneck. Do not ship that extra batching or infer Linux
+performance from the local sample. No paid retry or PR has been initiated.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model
