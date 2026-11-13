@@ -29,7 +29,7 @@ export async function withCasDiscardSlot<T>(signal: AbortSignal | undefined, ope
 }
 
 // Fixed trusted code, no retained pool or FD. The same 64 KiB read, hash and
-// root-path check run together off the event loop; each operation rereads all
+// root-path check run together off the event loop; each live producer reads all
 // bytes. This is data verification, not a worker launch or execution authority.
 const CAS_DISCARD_SOURCE = String.raw`
 const {parentPort,workerData:d}=require('node:worker_threads');
@@ -68,10 +68,42 @@ try {
 /** Borrow actual open descriptors only until the returned promise settles.
  * Both a reply and the real Worker exit are required. Cancellation sets a flag;
  * it never declares an outstanding OS read or thread joined by timeout. */
-export async function discardCasChunks(input: {
+type DiscardInput = {
   file: { handle: FileHandle; info: Stats }; rootPath: string; rootInfo: Stats;
   ref: string; byteLength: number;
-}, signal: AbortSignal | undefined, noteRead: (bytes: number) => void): Promise<void> {
+};
+const fileFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeMs', 'ctimeMs'] as const;
+type PendingRead = { key: string; signal: AbortSignal | undefined; joined: Promise<void> };
+const pendingReads = new Set<PendingRead>();
+
+/** Concurrent checks may share only a live read of the same actual file.
+ * Each caller already owns its own checked root/file descriptors and retains
+ * its slot through close. Matching content refs alone never suffice: a replaced
+ * inode, metadata change, different root or cancellation lifetime is separate.
+ * Removal precedes fulfillment, so later checks always read again. */
+export async function discardCasChunks(input: DiscardInput, signal: AbortSignal | undefined,
+  noteRead: (bytes: number) => void): Promise<void> {
+  signal?.throwIfAborted();
+  const assertFile = async () => {
+    const current = await input.file.handle.stat();
+    if (!current.isFile() || !fileFields.every(field => current[field] === input.file.info[field]))
+      throw new Error('CAS discard caller descriptor changed');
+    signal?.throwIfAborted();
+  };
+  await assertFile();
+  const key = JSON.stringify([input.rootPath, input.rootInfo.dev, input.rootInfo.ino, input.rootInfo.uid, input.rootInfo.mode,
+    input.ref, input.byteLength, ...fileFields.map(field => input.file.info[field])]);
+  let pending = [...pendingReads].find(read => read.key === key && read.signal === signal);
+  if (!pending) {
+    const read: PendingRead = { key, signal, joined: readDiscardChunks(input, signal, noteRead) };
+    read.joined = read.joined.finally(() => { pendingReads.delete(read); });
+    pendingReads.add(read); pending = read;
+  }
+  await pending.joined;
+  await assertFile();
+}
+
+async function readDiscardChunks(input: DiscardInput, signal: AbortSignal | undefined, noteRead: (bytes: number) => void): Promise<void> {
   signal?.throwIfAborted();
   const control = new SharedArrayBuffer(16), stop = new Int32Array(control, 0, 1), bytes = new BigInt64Array(control, 8, 1);
   const abort = () => { Atomics.store(stop, 0, 1); };

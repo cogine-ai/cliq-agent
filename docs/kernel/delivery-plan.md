@@ -426,6 +426,16 @@ stat, root and close check; a real large-CAS final-byte corruption regression
 checks rejection and subsequent fresh rereading. These changes require fresh
 Linux validation. No paid retry or PR has been initiated.
 
+The next critical-path change coalesces only concurrent discard reads after
+each caller has opened the same real CAS inode with matching full metadata,
+root, content identity and cancellation lifetime. Each caller retains its own
+descriptor checks and close; the pending entry disappears before completion.
+This targets duplicate live hashing within the existing four-reader history
+groups without reusing any settled verification. Real descriptor regressions
+check shared-object reads, distinct inodes, distinct signals and fresh later
+reads. The fixed sixteen installed-image checks and all acceptance deadlines
+remain unchanged. Linux performance and complete delivery remain unverified.
+
 ### Current product and qualification status (2026-11-03)
 
 The product remains a local-first, provider-neutral coding agent: a real model

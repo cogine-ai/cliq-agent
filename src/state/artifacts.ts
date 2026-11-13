@@ -83,7 +83,8 @@ export class ArtifactCatalog {
   /** Independent read-only histories may overlap, but their nested catalog
    * groups must not multiply the four-reader bound. Each callback uses this
    * serial view for all nested reads and awaits them before returning. No
-   * bytes, identities or validation results are cached or shared. */
+   * completed bytes, identities or validation results are cached. The CAS may
+   * coalesce live reads only after each caller opens the same actual object. */
   async mapReadGroups<T, Result>(values: readonly T[], read: (artifacts: ArtifactCatalog, value: T, index: number) => Promise<Result>): Promise<Result[]> {
     const serial = new ArtifactCatalog(this.cas, this.readSignal, this.trustedReleases, this.runtimeConversionTarget);
     serial.readWidth = 1;

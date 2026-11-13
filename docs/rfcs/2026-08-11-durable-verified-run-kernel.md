@@ -5531,6 +5531,20 @@ Failure/cancellation retires the original executor with full join and unchanged
 retirement-error precedence; selection close keeps its original join barrier.
 This changes neither the sixteen-read authentication path nor any deadline.
 
+Concurrent discard-only CAS verification may share one still-running byte
+reader only after every caller independently opens and checks its actual root
+and file descriptors. Root path/device/inode/owner/mode, content ref and exact
+length, every original file metadata field, and the identical cancellation
+signal must match. Each caller re-stats its own file before joining and after
+the reader's real exit; all original full-byte hash, per-chunk root, metadata,
+cancellation and close checks remain. Replaced inodes and distinct cancellation
+lifetimes never share. Remove the pending entry before fulfilling any caller;
+subsequent checks reread all bytes. Each caller holds its original bounded slot
+until its own descriptors close. No completed hash, byte buffer, observation or
+permission is cached; diagnostics count the physical bytes once. This does not
+combine installed-image revalidations, alter any transaction gate or deadline,
+or replace independent decoding of each historical claim and result.
+
 ### 9.1 Lease, Activation, And Process Containment
 
 The signed `sandbox_root_profile` entry is the closed, acyclic

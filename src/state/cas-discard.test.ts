@@ -7,6 +7,7 @@ import { Worker } from 'node:worker_threads';
 import ts from 'typescript';
 import { ContentAddressedStore } from './cas.js';
 import { ResourceRetirementError } from './errors.js';
+import { discardCasChunks } from './cas-discard.js';
 
 async function fixture(t: TestContext, size = 8 * 1024 * 1024) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cliq-cas-discard-'));
@@ -30,6 +31,41 @@ test('discard verification rereads complete real bytes and refuses size, corrupt
   await fs.chmod(f.filename, 0o400);
   await assert.rejects(f.cas.verifyChunks(f.ref, f.size), /digest/);
   await assert.rejects(async () => { for await (const _chunk of f.cas.readChunks(f.ref, f.size)) {} }, /corrupt/);
+});
+
+for (const boundary of ['same_object', 'different_inode', 'different_signal'] as const)
+test(`live discard sharing preserves the ${boundary} boundary and never retains a completed read`, async t => {
+  const f = await fixture(t), other = path.join(f.root, 'other');
+  if (boundary === 'different_inode') await fs.copyFile(f.filename, other);
+  const handles: Awaited<ReturnType<typeof fs.open>>[] = [];
+  try {
+    handles.push(await fs.open(f.filename, 'r'));
+    handles.push(await fs.open(boundary === 'different_inode' ? other : f.filename, 'r'));
+    const rootInfo = await fs.lstat(f.root), infos = await Promise.all(handles.map(file => file.stat()));
+    // Synchronize only the completion of two genuine descriptor stats. Both
+    // callers then enter before any worker can reply; no digest/read/exit is
+    // fabricated and the production worker consumes the actual file bytes.
+    let entered = 0, release!: () => void;
+    const together = new Promise<void>(resolve => { release = resolve; });
+    for (const handle of handles) {
+      const stat = handle.stat.bind(handle); let first = true;
+      t.mock.method(handle, 'stat', async () => {
+        const info = await stat();
+        if (first) { first = false; if (++entered === 2) release(); await together; }
+        return info;
+      });
+    }
+    const signals = [new AbortController().signal, new AbortController().signal];
+    let bytes = 0;
+    const verify = (index: number) => discardCasChunks({ file: { handle: handles[index]!, info: infos[index]! },
+      rootPath: f.root, rootInfo, ref: f.ref, byteLength: f.size },
+    signals[boundary === 'different_signal' ? index : 0], count => { bytes += count; });
+    await Promise.all([verify(0), verify(1)]);
+    assert.equal(bytes, f.size * (boundary === 'same_object' ? 1 : 2));
+    await verify(0);
+    assert.equal(bytes, f.size * (boundary === 'same_object' ? 2 : 3), 'a settled read is never reused');
+    for (const handle of handles) assert((await handle.stat()).isFile(), 'each caller still owns its original descriptor');
+  } finally { await Promise.all(handles.map(handle => handle.close())); }
 });
 
 test('four discard slots include original FD closes and aborted queued work opens nothing', async t => {
