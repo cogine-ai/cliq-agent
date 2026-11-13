@@ -5535,7 +5535,9 @@ Concurrent discard-only CAS verification may share one still-running byte
 reader only after every caller independently opens and checks its actual root
 and file descriptors. Root path/device/inode/owner/mode, content ref and exact
 length, every original file metadata field, and the identical cancellation
-signal must match. Each caller re-stats its own file before joining and after
+signal must match. The shared file/version key additionally uses exact bigint
+device/inode and nanosecond mtime/ctime; an inexact numeric root identity disables
+sharing. Each caller re-stats its own file before joining and after
 the reader's real exit; all original full-byte hash, per-chunk root, metadata,
 cancellation and close checks remain. Replaced inodes and distinct cancellation
 lifetimes never share. Remove the pending entry before fulfilling any caller;

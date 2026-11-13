@@ -73,6 +73,7 @@ type DiscardInput = {
   ref: string; byteLength: number;
 };
 const fileFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeMs', 'ctimeMs'] as const;
+const versionFields = ['dev', 'ino', 'size', 'uid', 'gid', 'mode', 'nlink', 'mtimeNs', 'ctimeNs'] as const;
 type PendingRead = { key: string; signal: AbortSignal | undefined; joined: Promise<void> };
 const pendingReads = new Set<PendingRead>();
 
@@ -91,15 +92,22 @@ export async function discardCasChunks(input: DiscardInput, signal: AbortSignal 
     signal?.throwIfAborted();
   };
   await assertFile();
+  // Sharing needs an exact object/version key even on filesystems whose inode
+  // or nanosecond timestamps cannot be represented by ordinary numeric Stats.
+  const version = await input.file.handle.stat({ bigint: true });
+  signal?.throwIfAborted();
   const key = JSON.stringify([input.rootPath, input.rootInfo.dev, input.rootInfo.ino, input.rootInfo.uid, input.rootInfo.mode,
-    input.ref, input.byteLength, ...fileFields.map(field => input.file.info[field])]);
-  let pending = [...pendingReads].find(read => read.key === key && read.signal === signal);
+    input.ref, input.byteLength, ...fileFields.map(field => input.file.info[field]), ...versionFields.map(field => String(version[field]))]);
+  const exactRoot = Number.isSafeInteger(input.rootInfo.dev) && Number.isSafeInteger(input.rootInfo.ino);
+  let pending = exactRoot ? [...pendingReads].find(read => read.key === key && read.signal === signal) : undefined;
   if (!pending) {
     const read: PendingRead = { key, signal, joined: readDiscardChunks(input, signal, noteRead) };
     read.joined = read.joined.finally(() => { pendingReads.delete(read); });
     pendingReads.add(read); pending = read;
   }
   await pending.joined;
+  const current = await input.file.handle.stat({ bigint: true });
+  if (!versionFields.every(field => current[field] === version[field])) throw new Error('CAS discard caller version changed');
   await assertFile();
 }
 
