@@ -74,7 +74,10 @@ cliq --provider anthropic --model claude-sonnet-4-20250514 "inspect this repo"
 cliq --provider openai --model gpt-5.2 "inspect this repo"
 cliq --provider zhipu --model glm-5.2 "inspect this repo"
 cliq --provider ollama --model qwen3.5:4b "inspect this repo"
+cliq --provider openai-compatible --model deepseek-flash --base-url https://api.deepseek.com "inspect this repo"
 ```
+
+DeepSeek uses the `openai-compatible` provider. The current official API model id is `deepseek-flash` and the base URL is `https://api.deepseek.com` (see [DeepSeek API docs](https://api-docs.deepseek.com/)). Cliq sends that host JSON-object responses and turns thinking off for agent turns, because the official API rejects OpenAI `json_schema` and its default thinking mode does not match this CLI's tool history. A normal task still asks before each edit and shell command. Approved edits are already in the working tree; review them with `git diff`. Transaction mode remains optional and does not roll back shell commands.
 
 Save provider credentials locally:
 

@@ -282,6 +282,227 @@ test('openai-compatible auto streaming falls back when streaming is rejected bef
   }
 });
 
+test('deepseek structured turns use json object mode and disable thinking', async () => {
+  const seen: { url?: string; body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.url = String(url);
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({
+      choices: [{ message: { content: '{"type":"final","message":"ok"}' } }]
+    });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'local-key',
+      streaming: 'off',
+      maxOutputTokens: 1024
+    });
+    const result = await client.complete(
+      buildModelPromptRequest({
+        modelConfig: {
+          provider: 'openai-compatible',
+          model: 'deepseek-flash',
+          baseUrl: 'https://api.deepseek.com',
+          streaming: 'off'
+        },
+        modelCapabilities: { ...textModelCapabilities, toolCalling: false },
+        instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+        input: [{ kind: 'message', role: 'user', content: 'fix the test' }],
+        registry: createToolRegistry()
+      })
+    );
+
+    assert.equal(seen.url, 'https://api.deepseek.com/chat/completions');
+    assert.equal(seen.body?.stream, false);
+    assert.deepEqual(seen.body?.thinking, { type: 'disabled' });
+    assert.equal(seen.body?.max_tokens, 1024);
+    assert.deepEqual(seen.body?.response_format, { type: 'json_object' });
+    assert.equal(seen.body?.tools, undefined);
+    const messages = seen.body?.messages as Array<{ role: string; content: string }>;
+    const guide = messages.find((message) => message.content.includes('Example tool call'));
+    assert.equal(guide?.role, 'system');
+    assert.match(guide?.content ?? '', /json object/);
+    assert.match(guide?.content ?? '', /"type":"tool"/);
+    assert.deepEqual(result.structuredOutput, { type: 'final', message: 'ok' });
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('deepseek native tool calls disable thinking without claiming json schema', async () => {
+  const seen: { body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({
+      choices: [
+        {
+          message: {
+            content: '',
+            tool_calls: [
+              {
+                id: 'call_1',
+                function: { name: 'bash', arguments: '{"command":"npm test"}' }
+              }
+            ]
+          }
+        }
+      ]
+    });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com/v1',
+      streaming: 'off'
+    });
+    const result = await client.complete(
+      buildModelPromptRequest({
+        modelConfig: {
+          provider: 'openai-compatible',
+          model: 'deepseek-flash',
+          baseUrl: 'https://api.deepseek.com/v1',
+          streaming: 'off'
+        },
+        modelCapabilities: textModelCapabilities,
+        instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+        input: [{ kind: 'message', role: 'user', content: 'run the test' }],
+        registry: createToolRegistry()
+      })
+    );
+
+    assert.deepEqual(seen.body?.thinking, { type: 'disabled' });
+    assert.equal(seen.body?.max_tokens, 8192);
+    assert.equal(seen.body?.response_format, undefined);
+    assert.equal((seen.body?.tools as unknown[]).length > 0, true);
+    assert.deepEqual(result.toolCalls, [{ id: 'call_1', name: 'bash', arguments: { command: 'npm test' } }]);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('a lookalike deepseek host keeps generic openai-compatible json schema', async () => {
+  const seen: { body?: Record<string, unknown> } = {};
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    seen.body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return sseResponse({ choices: [{ delta: { content: '{"type":"final","message":"ok"}' } }] });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com.example/v1',
+      streaming: 'auto'
+    });
+    await client.complete(
+      typedPrompt(
+        { ...textModelCapabilities, toolCalling: false }
+      )
+    );
+    const responseFormat = seen.body?.response_format as { type?: string };
+    assert.equal(responseFormat.type, 'json_schema');
+    assert.equal(seen.body?.thinking, undefined);
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('deepseek blank json content stops the turn instead of looking successful', async () => {
+  const fetchMock = mock.method(globalThis, 'fetch', async () => {
+    return sseResponse({
+      choices: [{ delta: { reasoning_content: 'planning the edit' } }]
+    }, {
+      choices: [{ delta: { content: '   ' } }]
+    });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com',
+      streaming: 'on'
+    });
+    await assert.rejects(
+      () =>
+        client.complete(
+          buildModelPromptRequest({
+            modelConfig: {
+              provider: 'openai-compatible',
+              model: 'deepseek-flash',
+              baseUrl: 'https://api.deepseek.com',
+              streaming: 'on'
+            },
+            modelCapabilities: { ...textModelCapabilities, toolCalling: false },
+            instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+            input: [{ kind: 'message', role: 'user', content: 'fix the test' }],
+            registry: createToolRegistry()
+          })
+        ),
+      /DeepSeek returned blank content/
+    );
+  } finally {
+    fetchMock.mock.restore();
+  }
+});
+
+test('deepseek requests use a 120s model timeout', async () => {
+  const delays: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: () => void, delay?: number) => {
+    if (typeof delay === 'number') delays.push(delay);
+    return originalSetTimeout(callback, delay);
+  }) as unknown as typeof setTimeout;
+  const controller = new AbortController();
+  const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    assert.equal(delays.includes(120_000), true);
+    assert.equal(delays.includes(20_000), false);
+    controller.abort();
+    return new Promise<Response>((_resolve, reject) => {
+      const abort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      if (init?.signal?.aborted) abort();
+      else init?.signal?.addEventListener('abort', abort, { once: true });
+    });
+  });
+
+  try {
+    const client = createOpenAICompatibleClient({
+      provider: 'openai-compatible',
+      model: 'deepseek-flash',
+      baseUrl: 'https://api.deepseek.com',
+      streaming: 'off'
+    });
+    await assert.rejects(
+      () =>
+        client.complete(
+          buildModelPromptRequest({
+            modelConfig: {
+              provider: 'openai-compatible',
+              model: 'deepseek-flash',
+              baseUrl: 'https://api.deepseek.com',
+              streaming: 'off'
+            },
+            modelCapabilities: { ...textModelCapabilities, toolCalling: false },
+            instructions: [{ role: 'system', content: 'BASE', source: 'test', layer: 'core' }],
+            input: [{ kind: 'message', role: 'user', content: 'fix the test' }],
+            registry: createToolRegistry()
+          }),
+          { signal: controller.signal }
+        ),
+      /Model request cancelled/
+    );
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    fetchMock.mock.restore();
+  }
+});
+
 test('openai-compatible streaming on does not fall back when streaming is rejected', async () => {
   const seenStreamFlags: boolean[] = [];
   const fetchMock = mock.method(globalThis, 'fetch', async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
