@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raised the minimum supported Node.js version from 22.0 to 22.13 so the M0
   state backend can use the unflagged built-in `node:sqlite` API.
 
+### Fixed
+
+- DeepSeek agent turns through `openai-compatible` now use the official
+  `api.deepseek.com` JSON-object format, disable default thinking, and wait up
+  to 120 seconds. The previous request used OpenAI `json_schema` and the shared
+  20-second model timeout, so a read, edit, and check loop failed before it
+  could show a result.
+
 ## [0.15.0] - 2026-06-25
 
 This release adds the native Zhipu AI provider, hardens bash allowlist parsing,

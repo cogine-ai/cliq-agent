@@ -33,6 +33,55 @@ type ChatCompletionsResp = {
 type CompleteOptions = ModelCompleteOptions;
 
 const AUTO_STREAM_FALLBACK_STATUSES = new Set([400, 404, 405, 415, 422]);
+const DEEPSEEK_HOSTNAME = 'api.deepseek.com';
+const DEEPSEEK_MAX_OUTPUT_TOKENS = 8192;
+const DEEPSEEK_REQUEST_TIMEOUT_MS = 120_000;
+
+function isDeepSeekCompatibleEndpoint(baseUrl: string) {
+  try {
+    return new URL(baseUrl).hostname === DEEPSEEK_HOSTNAME;
+  } catch {
+    return false;
+  }
+}
+
+function deepSeekMaxOutputTokens(config: ResolvedModelConfig) {
+  if (typeof config.maxOutputTokens === 'number' && config.maxOutputTokens > 0) {
+    return config.maxOutputTokens;
+  }
+  return DEEPSEEK_MAX_OUTPUT_TOKENS;
+}
+
+function requestTimeoutMs(config: ResolvedModelConfig) {
+  return isDeepSeekCompatibleEndpoint(config.baseUrl) ? DEEPSEEK_REQUEST_TIMEOUT_MS : undefined;
+}
+
+function deepSeekJsonInstructions(request: ModelPromptRequest) {
+  return [
+    'Return one json object and no other text.',
+    'Example tool call: {"type":"tool","tool":"read","arguments":{"path":"README.md"}}',
+    'Example final answer: {"type":"final","message":"Done."}',
+    `JSON schema: ${JSON.stringify(request.outputSchema.schema)}`
+  ].join('\n');
+}
+
+function withDeepSeekJsonGuide(
+  messages: ReturnType<typeof typedPromptToOpenAIMessages>,
+  request: ModelPromptRequest
+) {
+  const guide = deepSeekJsonInstructions(request);
+  const index = messages.findIndex((message) => message.role === 'system');
+  if (index < 0) {
+    return [{ role: 'system' as const, content: guide }, ...messages];
+  }
+  return messages.map((message, messageIndex) =>
+    messageIndex === index ? { ...message, content: `${message.content}\n\n${guide}` } : message
+  );
+}
+
+function blankDeepSeekContentError() {
+  return new Error('DeepSeek returned blank content, so this turn stopped.');
+}
 
 function headers(config: ResolvedModelConfig) {
   return {
@@ -78,16 +127,20 @@ function parseContent(json: ChatCompletionsResp, provider: string) {
 async function completeWithoutStreaming(config: ResolvedModelConfig, messages: ChatMessage[], options?: CompleteOptions) {
   await emitStartEvent(config, options, false);
 
-  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: headers(config),
-    body: JSON.stringify({
-      model: config.model,
-      messages,
-      stream: false
-    }),
-    signal: options?.signal
-  });
+  const response = await fetchWithTimeout(
+    joinUrl(config.baseUrl, '/chat/completions'),
+    {
+      method: 'POST',
+      headers: headers(config),
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        stream: false
+      }),
+      signal: options?.signal
+    },
+    requestTimeoutMs(config)
+  );
 
   const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
   const content = parseContent(json, config.provider);
@@ -100,30 +153,53 @@ async function completeWithoutStreaming(config: ResolvedModelConfig, messages: C
   };
 }
 
-function typedChatBody(request: ModelPromptRequest, mode: ReturnType<typeof selectTypedRequestMode>, stream: boolean) {
+function typedChatBody(
+  config: ResolvedModelConfig,
+  request: ModelPromptRequest,
+  mode: ReturnType<typeof selectTypedRequestMode>,
+  stream: boolean
+) {
+  const deepSeek = isDeepSeekCompatibleEndpoint(config.baseUrl);
+  const messages = typedPromptToOpenAIMessages(request, mode);
   return {
     model: request.model.model,
-    messages: typedPromptToOpenAIMessages(request, mode),
+    messages: deepSeek && mode === 'structured-output' ? withDeepSeekJsonGuide(messages, request) : messages,
     stream,
+    ...(deepSeek
+      ? {
+          thinking: { type: 'disabled' as const },
+          max_tokens: deepSeekMaxOutputTokens(config)
+        }
+      : {}),
     ...(mode === 'native-tools'
       ? {
           tools: toolSpecsToOpenAIChatTools(request.toolSpecs),
-          tool_choice: 'auto'
+          tool_choice: 'auto' as const
         }
       : {}),
-    ...(mode === 'structured-output' ? { response_format: openAIJsonSchemaResponseFormat(request) } : {})
+    ...(mode === 'structured-output'
+      ? {
+          response_format: deepSeek
+            ? { type: 'json_object' as const }
+            : openAIJsonSchemaResponseFormat(request)
+        }
+      : {})
   };
 }
 
 async function completeTypedWithoutStreaming(config: ResolvedModelConfig, request: ModelPromptRequest, options?: CompleteOptions) {
   const mode = selectTypedRequestMode(request);
   await emitStartEvent(config, options, false);
-  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: headers(config),
-    body: JSON.stringify(typedChatBody(request, mode, false)),
-    signal: options?.signal
-  });
+  const response = await fetchWithTimeout(
+    joinUrl(config.baseUrl, '/chat/completions'),
+    {
+      method: 'POST',
+      headers: headers(config),
+      body: JSON.stringify(typedChatBody(config, request, mode, false)),
+      signal: options?.signal
+    },
+    requestTimeoutMs(config)
+  );
 
   const json = await readJsonResponse<ChatCompletionsResp>(response, config.provider);
   const message = json.choices?.[0]?.message;
@@ -133,7 +209,9 @@ async function completeTypedWithoutStreaming(config: ResolvedModelConfig, reques
   const toolCalls = parseOpenAIToolCalls(message);
   const content = message.content?.trim() ?? '';
   if (!content && toolCalls.length === 0) {
-    throw new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
+    throw isDeepSeekCompatibleEndpoint(config.baseUrl)
+      ? blankDeepSeekContentError()
+      : new Error(`${config.provider} response missing choices/content: ${JSON.stringify(json)}`);
   }
 
   const structuredOutput = content ? maybeParseStructuredOutput(mode, content) : undefined;
@@ -154,12 +232,16 @@ async function completeTypedWithStreaming(config: ResolvedModelConfig, request: 
     await emitStartEvent(config, options, true);
   }
 
-  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: headers(config),
-    body: JSON.stringify(typedChatBody(request, mode, true)),
-    signal: options?.signal
-  });
+  const response = await fetchWithTimeout(
+    joinUrl(config.baseUrl, '/chat/completions'),
+    {
+      method: 'POST',
+      headers: headers(config),
+      body: JSON.stringify(typedChatBody(config, request, mode, true)),
+      signal: options?.signal
+    },
+    requestTimeoutMs(config)
+  );
 
   if (!response.ok) {
     if (request.streaming.mode === 'auto' && shouldFallbackFromStreamingResponse(response)) {
@@ -185,7 +267,9 @@ async function completeTypedWithStreaming(config: ResolvedModelConfig, request: 
   ).trim();
   const toolCalls = openAIToolCallsFromDeltaParts(toolCallParts);
   if (!content && toolCalls.length === 0) {
-    throw new Error(`${config.provider} stream missing text/tool content`);
+    throw isDeepSeekCompatibleEndpoint(config.baseUrl)
+      ? blankDeepSeekContentError()
+      : new Error(`${config.provider} stream missing text/tool content`);
   }
 
   const structuredOutput = content ? maybeParseStructuredOutput(mode, content) : undefined;
@@ -205,16 +289,20 @@ async function completeWithStreaming(config: ResolvedModelConfig, messages: Chat
     await emitStartEvent(config, options, true);
   }
 
-  const response = await fetchWithTimeout(joinUrl(config.baseUrl, '/chat/completions'), {
-    method: 'POST',
-    headers: headers(config),
-    body: JSON.stringify({
-      model: config.model,
-      messages,
-      stream: true
-    }),
-    signal: options?.signal
-  });
+  const response = await fetchWithTimeout(
+    joinUrl(config.baseUrl, '/chat/completions'),
+    {
+      method: 'POST',
+      headers: headers(config),
+      body: JSON.stringify({
+        model: config.model,
+        messages,
+        stream: true
+      }),
+      signal: options?.signal
+    },
+    requestTimeoutMs(config)
+  );
 
   if (!response.ok) {
     if (config.streaming === 'auto' && shouldFallbackFromStreamingResponse(response)) {
