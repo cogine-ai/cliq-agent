@@ -1601,6 +1601,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       };
       git('init', '-q', '-b', 'main'); git('add', '--all'); git('-c', 'user.name=Cliq preview', '-c', 'user.email=preview@example.invalid',
         'commit', '-qm', 'Original source with unchanged regression check');
+      // Match a normal fresh clone. Sending a newly synthesized repository
+      // with hundreds of loose objects adds unrelated native snapshot I/O.
+      const gitHead = git('rev-parse', 'HEAD');
+      git('repack', '-a', '-d', '-q');
+      assert.equal(git('rev-parse', 'HEAD'), gitHead);
+      assert.match(git('count-objects', '-v'), /^count: 0$/m);
       // The disposable fixture owner explicitly trusts this one staged tree.
       // Git and ignore-rule reads still require their separately minted grants.
       const workspaceId = sha256Bytes(Buffer.from(workspace));
