@@ -96,6 +96,11 @@ export async function runInstalledPr532Journey(input: {
       context.progress(cut);
       const run = cut.snapshot.run;
       if (run.status === 'succeeded') return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
+      if (run.status !== 'queued' && run.status !== 'running') {
+        const stopped = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, checkpointLimit: 1,
+          afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
+        context.progress(stopped);
+      }
       assert(run.status === 'queued' || run.status === 'running', `installed Run stopped at ${run.status}/${run.nextStep}`);
       assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
       await delay(2000);

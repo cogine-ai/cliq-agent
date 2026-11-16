@@ -1646,8 +1646,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
-        progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq }) => {
-          report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, highWaterJournalSeq, highWaterItemSeq };
+        progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq, journal }) => {
+          report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, waitingReason: run.waitingReason,
+            terminalReason: run.terminalReason, highWaterJournalSeq, highWaterItemSeq,
+            journal: journal.map(({ seq, opKind, phase }) => ({ seq, opKind, phase })) };
         },
         verifyHost: async expected => {
           assert((await readFile(path.join(workspace, PR532_FILE))).equals(expected));
@@ -2838,6 +2840,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         server.closeAllConnections();
         await bounded(new Promise<void>(resolve => server!.close(() => resolve())), 10000, 'owned HTTPS server did not join');
         await bounded(Promise.all(sockets), 10000, 'owned HTTPS sockets did not join'); report.httpsJoined = true;
+        if (pr532) report.pr532ControlledTransport = { postCount, acceptedTcp, acceptedTls, responderFailure };
       }
     } catch (error) { cleanup.push(error); }
     try {
