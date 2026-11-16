@@ -21,7 +21,7 @@ import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readDependencyLaunchClosure, readDependencyPreparedLaunchData, type DependencyLaunchClosure,
   type DependencyLaunchClosureInput } from './execution-closure.js';
 import { assertInstalledDependencySettlement, assertInstalledDependencyTransportConfiguration, loadInstalledDependencyBroker,
-  readInstalledRuntimeObservation, withCredentialAuthorityLock, type HeldInstalledRuntime } from './installed-runtime.js';
+  withCredentialAuthorityLock, type HeldInstalledRuntime } from './installed-runtime.js';
 import { assertLiveDispatchState, claimValidatedInvocation, requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './reducers/invocation.js';
 import { readInvocationAttempt } from './repositories/journal.js';
 import { readRun } from './rows.js';
@@ -121,13 +121,11 @@ async function releaseWithEndpoints<T>(held: Held, phase: 'prepared' | 'claimed'
   requireEqual(data.grant, held.data.grant, 'dependency original complete grant');
   requireEqual(data.spec, held.data.spec, 'dependency original complete sandbox recipe');
   return withCredentialAuthorityLock(held.selected, async token => {
-    // Both release and preparation use the credential queue. The original
-    // installed observation is fully verified without waiting on that queue.
-    const installed = await readInstalledRuntimeObservation(held.selected, held.signal);
+    // The credential scope has just revalidated this signed selection and
+    // revalidates it again before releasing its native lock.
     const bundle = held.selected.bundle;
     requireEqual(bundle, held.data.bundle, 'dependency original selected signed bundle');
-    requireEqual(installed.bundleDigest, canonicalSha256(bundle), 'dependency observed selected signed bundle');
-    requireEqual(installed.manifestDigest, bundle.manifestDigest, 'dependency observed selected signed manifest');
+    requireEqual(held.selected.bundleDigest, canonicalSha256(bundle), 'dependency original selected bundle digest');
     token.assertHeld(); live(held);
     for (const endpoint of held.endpoints) {
       const source = readEndpointAuthoritySource(token, endpoint.endpointRegistrationId);
@@ -158,7 +156,7 @@ async function releaseWithEndpoints<T>(held: Held, phase: 'prepared' | 'claimed'
     } else { started = true; operation = action(); }
     if (!started) invalid('dependency release did not pass its original canonical time fence');
     const result = await operation as T;
-    await readInstalledRuntimeObservation(held.selected, held.signal);
+    held.signal?.throwIfAborted();
     token.assertHeld(); held.reads.assertReadActive(); return result;
   }, held.signal);
 }

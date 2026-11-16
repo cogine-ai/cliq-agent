@@ -22,11 +22,8 @@ export async function readDependencySignedAssets(artifacts: ArtifactCatalog, inp
     throw new TypeError('dependency npm requires its exact signed Linux Node identity');
   assertBuiltinScriptGuest(toolchain.manifest, input.allowScripts ? ['bash'] : []);
   assertBuiltinScriptResources(toolchain.manifest.guestImageByteCount, input.resources);
-  for (const entry of [adapter, image]) {
-    let count = 0;
-    for await (const bytes of artifacts.readChunks(entry.digest, entry.byteCount)) { artifacts.assertReadActive(); count += bytes.length; }
-    if (count !== entry.byteCount) throw new TypeError('dependency signed data differs from its complete original bytes');
-  }
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  for (const entry of [adapter, image]) await reads.verifyChunks(entry.digest, entry.byteCount);
   artifacts.assertReadActive();
   return { adapter, image, toolchain, execution: {
     runtimeBundleRef: canonicalSha256(input.bundle), runtimeBundleManifestDigest: input.bundle.manifestDigest,

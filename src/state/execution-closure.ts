@@ -400,7 +400,7 @@ async function readExecutionEnvironment(artifacts: ArtifactCatalog, owner: State
   if ((spec.executable.kind === 'runtime_bundle' && (selected?.role !== spec.executable.role || !selected.executable || selected.digest !== spec.executable.executableDigest)) ||
       launcher?.role !== 'platform_helper' || !launcher.executable || launcher.digest !== spec.runtime.launcher.executableDigest) mismatch('executable or launcher does not resolve the exact signed entry');
   for (const mount of spec.mounts) {
-    if (mount.kind === 'cas_artifact') await artifacts.readBytes(mount.artifactRef);
+    if (mount.kind === 'cas_artifact') await artifacts.verifyBytes(mount.artifactRef);
     if (mount.kind === 'run_generation' && (spec.filesystem.kind !== 'run_generation' || mount.generationRef !== spec.filesystem.generationRef)) mismatch('mount selects another generation');
   }
   for (const [purpose, target] of [['home', spec.environment.home], ['tmp', spec.environment.tmpdir]] as const) {
@@ -847,7 +847,8 @@ async function readDependencyLaunchData(driver: SqliteDriver, artifacts: Artifac
   const plan = decodeLinuxContainmentPlan(await readCanonicalArtifact(reads, spec.containmentPlanRef), 'run_invocation');
   const generation = decodeWorkspaceGenerationIdentity(await readCanonicalArtifact(reads, row.generationRef));
   const selected = await readRetainedDependencyCandidate(driver, reads, run.id, { candidateItemId: request.candidateItemId,
-    sourceCheckpointId: input.sourceCheckpointId, dependencyPlanRef: request.dependencyPlanRef, resultSourceRef: request.resultSourceRef, releaseKeys, signal });
+    sourceCheckpointId: input.sourceCheckpointId, dependencyPlanRef: request.dependencyPlanRef, resultSourceRef: request.resultSourceRef, releaseKeys, signal,
+    ...(phase === 'claimed' ? { renewingLaunchId: launch.launchId } : {}) });
   const runSpec = selected.spec, execution = await readExecutionEnvironment(reads, owner, runSpec, spec, generation);
   const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
   if (frontier.kind !== 'verify' || frontier.phase !== 'dependencies' || frontier.nextVerifierIndex !== 0 ||

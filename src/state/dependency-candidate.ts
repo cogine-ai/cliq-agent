@@ -91,7 +91,7 @@ export async function readCurrentDependencyCandidate(driver: SqliteDriver, artif
  * today's frontier. Original model/merge source, physical seal and all CAS
  * bytes are reread. The enclosing reader owns that locator's registration. */
 export async function readRetainedDependencyCandidate(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string,
-  input: Locator & Options) {
+  input: Locator & Options & { renewingLaunchId?: string }) {
   if (normalizeBoundedText(input.candidateItemId, 1, 128) !== input.candidateItemId ||
       normalizeBoundedText(input.sourceCheckpointId, 1, 128) !== input.sourceCheckpointId) invalid('locator is malformed');
   assertArtifactRef(input.dependencyPlanRef); assertArtifactRef(input.resultSourceRef);
@@ -197,7 +197,22 @@ export async function readRetainedDependencyCandidate(driver: SqliteDriver, arti
     bindingGyp: selected.plan.bindingGyp.kind === 'absent' ? { kind: 'absent' } : { kind: 'present', contentDigest: selected.plan.bindingGyp.contentDigest },
     execution: { ...signed.execution, registryTargetsDigest: canonicalSha256({ registryEndpoints: policy.registryEndpoints, credentialGrantRefs: policy.credentialGrantRefs }) } });
   function assertUnchanged(connection: SqliteConnection | SqliteDriver) {
-    requireEqual(databaseCut(connection, runId), cut, 'dependency complete original SQL cut');
+    const current = databaseCut(connection, runId);
+    // Only the claimed live dependency reader permits its active worker's
+    // heartbeat to cross the artifact reads. Every other row and field stay
+    // bound to the original cut. The release transaction checks live expiry.
+    if (input.renewingLaunchId !== undefined && input.renewingLaunchId === cut.run.activeWorkerLaunchId) {
+      const before = cut.workers.find(worker => worker.launchId === input.renewingLaunchId);
+      const after = current.workers.find(worker => worker.launchId === input.renewingLaunchId);
+      if (before?.phase === 'activated' && after?.phase === 'activated' &&
+          before.generationWriteState === 'active' && after.generationWriteState === 'active' &&
+          before.leaseExpiresAt && after.leaseExpiresAt && after.leaseVersion > before.leaseVersion &&
+          after.leaseExpiresAt > before.leaseExpiresAt && after.leaseExpiresAt <= cut.run.deadlineAt) {
+        current.workers = current.workers.map(worker => worker === after
+          ? { ...after, leaseVersion: before.leaseVersion, leaseExpiresAt: before.leaseExpiresAt } : worker);
+      }
+    }
+    requireEqual(current, cut, 'dependency complete original SQL cut');
     requireEqual(readCheckpoint(connection, checkpoint.id), checkpoint, 'dependency original source Checkpoint');
     originAssert(connection);
   }

@@ -1661,9 +1661,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       return Promise.all(joined).then(() => {});
     },
     renewCurrentWorkerLease: () => {
-      // An operation in flight owns its current lease. Maintenance cannot
-      // race its native activation, revocation or Checkpoint transition.
-      if (closed || isClosing() || pending && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') || receivedCompletion ||
+      // Acquisition registers its original completion before the first GET
+      // so it can retain custody on failure. While claimed, that is pending
+      // I/O. Native activation, revocation and Checkpoint still fence renewal.
+      const acquiringDependencies = dependencyOwner !== undefined && operationPhase === 'claimed' &&
+        receivedCompletion?.kind === 'dependency_acquisition';
+      if (closed || isClosing() || pending && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
+          receivedCompletion && !acquiringDependencies ||
           !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
       if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
       if (pending && dependencyOwner) assertDependencyLeaseMaintenance(driver, owner, dependencyOwner);
@@ -1684,10 +1688,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
       requireEqual(live.launch, launch, 'worker maintenance current launch');
       requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
-      if (parseCanonicalTime(launch.leaseExpiresAt) - nowMs > 30_000) return 'unchanged';
+      const expiryMs = parseCanonicalTime(launch.leaseExpiresAt);
+      const nextExpiryMs = Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt));
+      if (expiryMs - nowMs > 30_000 || nextExpiryMs <= expiryMs) return 'unchanged';
       const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
         runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
-        newLeaseExpiresAt: new Date(Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt))).toISOString() });
+        newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
       retained.activated = { ...retained.activated, launch: renewed };
       return 'renewed';
     },
