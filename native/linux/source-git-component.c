@@ -352,6 +352,7 @@ int main(void) {
     file_at(pack, "fixture.pack", payload, payload_bytes); file_at(pack, "fixture.idx", "index", 5);
     file_at(pack, "fixture.rev", "not captured", 12); file_at(pack, "fixture.bitmap", "not captured", 12);
     file_at(info, "packs", "not captured", 12);
+    file_at(git_info, "refs", "not captured", 12);
     const char rule[] = "independent-authorized-rule-sentinel";
     file_at(git_info, "exclude", rule, sizeof(rule) - 1);
     int notifications = inotify_init1(IN_NONBLOCK | IN_CLOEXEC); char observed_rule[96];
@@ -391,6 +392,8 @@ int main(void) {
         "non-dumpable trusted producer rule FD is not visible to the helper child through proc");
     check(prctl(PR_SET_DUMPABLE, original_dumpable, 0, 0, 0) == 0, "restore only the component fixture dumpability");
     struct stat absent_rule;
+    check(fstatat(authorized_input, "info/refs", &absent_rule, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT,
+        "generated server-info refs never become input to local Git inspection");
     check(fstatat(authorized_input, "info/exclude", &absent_rule, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT &&
         fstatat(authorized_input, "config", &absent_rule, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT,
         "neither ignore rule nor raw config becomes Git/helper input");
@@ -400,7 +403,7 @@ int main(void) {
     unlink_fixture(authorized_input, "objects/pack/fixture.idx", false); unlink_fixture(authorized_input, "objects/pack", true);
     unlink_fixture(authorized_input, "objects/info", true); unlink_fixture(authorized_input, "objects", true);
     check(source_close_fd(&authorized_input), "authorized private input close"); unlink_fixture(root, "authorized-input", true);
-    unlink_fixture(git_info, "exclude", false);
+    unlink_fixture(git_info, "exclude", false); unlink_fixture(git_info, "refs", false);
     size_t before = descriptor_count(); struct cliq_source_snapshot captured;
     check(source_capture_snapshot(git, &request, &captured, 4 * 1048576) && captured.count == 2, "real bounded capture into multiple memfds");
     for (uint32_t i = 0; i < captured.count; i++) {

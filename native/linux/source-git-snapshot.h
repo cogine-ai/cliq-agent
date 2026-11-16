@@ -118,23 +118,26 @@ static bool source_walk_snapshot(int directory, dev_t device, unsigned int depth
         char relative[CLIQ_SOURCE_PATH_BYTES];
         int length = snprintf(relative, sizeof(relative), "%s%s%s", prefix, *prefix ? "/" : "", entry->d_name);
         if (length <= 0 || (size_t)length >= sizeof(relative) || !cliq_source_path(relative, (uint32_t)length) ||
-            source_forbidden_path(relative) || (strcmp(prefix, "info") == 0 && strcmp(entry->d_name, "exclude") != 0)) { valid = false; break; }
+            source_forbidden_path(relative)) { valid = false; break; }
         /* Optional accelerators are not object roots. Do not open their
          * payload, pass them to Git, or let them enter permanent CAS. */
         size_t name_bytes = strlen(entry->d_name);
         bool accelerator = strcmp(prefix, "objects/pack") == 0 &&
             ((name_bytes > 4 && strcmp(entry->d_name + name_bytes - 4, ".rev") == 0) ||
              (name_bytes > 7 && strcmp(entry->d_name + name_bytes - 7, ".bitmap") == 0));
+        /* git repack can regenerate both indexes for dumb HTTP clients. Local
+         * refs and objects remain the only roots of the inspected history. */
+        if (accelerator || strcmp(relative, "objects/info/packs") == 0 || strcmp(relative, "info/refs") == 0) {
+            if (!S_ISREG(named.st_mode) || named.st_nlink != 1) { valid = false; break; }
+            continue;
+        }
         bool exclude = strcmp(relative, "info/exclude") == 0;
+        if (strcmp(prefix, "info") == 0 && !exclude) { valid = false; break; }
         /* Metadata can establish that the independent ignore input exists;
          * its inspection grant cannot grant that payload. Refuse in the
          * first metadata-only pass, before any copy, rather than capture a
          * projection that silently treats the effective rule as absent. */
         if (exclude && !snapshot->exclude_enabled) { errno = EACCES; valid = false; break; }
-        if (accelerator || strcmp(relative, "objects/info/packs") == 0) {
-            if (!S_ISREG(named.st_mode) || named.st_nlink != 1) { valid = false; break; }
-            continue;
-        }
         bool ignored_directory = strcmp(relative, "info") == 0 && S_ISDIR(named.st_mode);
         if (!ignored_directory && !source_add_u64(entries, 1, CLIQ_SOURCE_MAX_ENTRIES)) { valid = false; break; }
         struct cliq_source_entry_header header = { .magic = CLIQ_SOURCE_HEADER_MAGIC,
