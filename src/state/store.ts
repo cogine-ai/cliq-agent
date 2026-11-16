@@ -2664,7 +2664,7 @@ export class StateStore {
         assertInstalledLocalRunRecipe(normalized.request);
         const frame = pinLocalInferenceAdmissionFrame(this.owner, identity);
         diagnosis?.stage('submit_source_capture');
-        const source = await this.captureSubmittedSource({ request, identity });
+        const source = await this.captureSubmittedSource({ request, identity }, diagnosis);
         if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
         if (source.outcome.kind !== 'captured') {
           const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
@@ -2706,7 +2706,7 @@ export class StateStore {
       signal.throwIfAborted();
       assertRecipe(normalized.request, authority.endpoint);
       diagnosis?.stage('submit_source_capture');
-      const source = await this.captureSubmittedSource({ request, identity });
+      const source = await this.captureSubmittedSource({ request, identity }, diagnosis);
       if (source.phase !== 'retired') throw new KernelStorageError('RECOVERY_REQUIRED', 'Run source inspection has not completely retired');
       if (source.outcome.kind !== 'captured') {
         const { readSourceInspectionErrorResponse } = await import('./source-inspection-owner.js');
@@ -4573,11 +4573,12 @@ export class StateStore {
       const sandboxProfile = deliverySource
         ? decodeSandboxProfile(await this.artifacts.withReadSignal(abort.signal).readCanonical(deliverySource.spec.sandboxProfileRef))
         : normalized.request.method === 'run.submit' && this.installedRuntime ? installedSandboxProfile(normalized.request.sandboxResources) : undefined;
-      diagnosis?.stage('capture');
+      if (normalized.request.method === 'run.apply') diagnosis?.stage('capture');
       return captureSubmittedSource(this.driver, this.artifacts, this.owner,
         { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys, ...bootstrap.sourceInspection,
           ...(sandboxProfile ? { sandboxProfile } : {}) },
-        { ...input, identity: frameIdentity, ...(deliverySource ? { deliverySource } : {}) }, abort.signal, this.installedRuntime, this.installedAnchor);
+        { ...input, identity: frameIdentity, ...(deliverySource ? { deliverySource } : {}) }, abort.signal,
+        this.installedRuntime, this.installedAnchor, diagnosis);
     });
     const task: SourceInspectionTask = { abort, promise };
     this.sourceInspectionTasks.add(task);

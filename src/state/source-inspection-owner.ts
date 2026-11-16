@@ -16,6 +16,7 @@ import { validateControlChannelClosure, type AuthenticatedControlIdentity } from
 import { decodeSourceManifest, decodeSourceProjection, decodeWorkspaceEntries, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { withHeldInstalledRuntime, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
+import type { InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { loadNativeStateOwner, readSourceInspectionStagingRetirement, retireSourceInspectionStaging,
   openRetainedSourceGitInput, openRegisteredAbsentSourceGitInput, readSourceInspectionStagingPresence,
   type HeldSourceInspectionStaging, type HeldWorkspaceRoot, type SourceInspectionStagingRetirement } from './native-owner.js';
@@ -401,7 +402,7 @@ export async function retireAbandonedSourceInspections(driver: SqliteDriver, art
  * durable capturing row and prevents another capture of that workspace. */
 export async function captureSubmittedSource(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: SourceInspectionOwnerBootstrap, input: { request: unknown; identity: AuthenticatedControlIdentity; deliverySource?: VerifiedDeliverySource }, signal?: AbortSignal,
-  selectedRuntime?: HeldInstalledRuntime, selectedAnchor?: HeldInstalledAnchor):
+  selectedRuntime?: HeldInstalledRuntime, selectedAnchor?: HeldInstalledAnchor, diagnostic?: InstalledApplyDiagnostic):
 Promise<SourceInspectionAttemptV1> {
   const normalized = normalizeSourceInspectionRequest(input.request), wire = normalized.request, identity = immutableSnapshot(input.identity);
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
@@ -467,10 +468,11 @@ Promise<SourceInspectionAttemptV1> {
     if (workspaceRoot.repositoryDirectory) {
       if (!selectedRuntime || !selectedAnchor) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'Git source inspection requires its genuine installed native owner');
       gitCapture = createInstalledSourceGitCapture(driver, artifacts, owner, bootstrap,
-        { row, target, staging: stage, installed: selectedRuntime, anchor: selectedAnchor, signal: captureSignal });
+        { row, target, staging: stage, installed: selectedRuntime, anchor: selectedAnchor, signal: captureSignal, diagnostic });
       processClosure = undefined;
       gitResult = await gitCapture.run(); await gitCapture.close();
       const joined = readInstalledSourceGitCapture(owner, gitCapture); row = joined.row;
+      diagnostic?.stage('source_git_project');
       const rules = request.frozenProjection ? undefined : await captureSourceGitRules(driver, artifacts, owner, target, home,
         { index: gitResult.index, exclude: gitResult.exclude, signal: captureSignal });
       const projected = await publishGitSourceProjection({ ...projectionInput, git: {
@@ -538,7 +540,9 @@ Promise<SourceInspectionAttemptV1> {
     } else {
       if (failure === undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'source capture has no original complete result');
       let cancelled = signal?.aborted === true;
-      refusal = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, cancelled, row.method), 'cliq-control-response-v1');
+      const response = errorResponse(failure, row.inspectionId, cancelled, row.method);
+      if (response.error.code === 'INTERNAL') diagnostic?.failure(failure, cancelled);
+      refusal = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
       if (!cancelled && signal?.aborted) {
         cancelled = true;
         refusal = await artifacts.publishCanonical(errorResponse(failure, row.inspectionId, true, row.method), 'cliq-control-response-v1');

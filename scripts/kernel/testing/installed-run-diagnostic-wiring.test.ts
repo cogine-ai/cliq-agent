@@ -259,7 +259,7 @@ test('submit diagnosis preserves the registered producer, actual admission resol
   assert.match(body, /this.retainInstalledAgent\(runId, assembled.material, admission\);\s*const result = await admission;\s*diagnosis\?\.stage\('submit_postcommit_load'\);/u);
   assert.doesNotMatch(body, /await (?:this\.retainInstalledAgent|agentLoad)/u,
     'diagnosis cannot make durable acknowledgement wait for the driver-owned load');
-  assert.match(body, /captureSubmittedSource\(\{ request, identity \}\)/u);
+  assert.match(body, /captureSubmittedSource\(\{ request, identity \}, diagnosis\)/u);
   const publicBody = between('async submitInstalledRun(', 'async applyInstalledRun(');
   assert.match(publicBody, /request = immutableSnapshot\(request\);\s*return this.ownInstalledAdmission\(signal => this.submitInstalledRunOwned\(request, identity, signal\)\);/u);
   const caught = body.match(/catch \(error\) \{\s*diagnosis\?\.failure\(error, this.closeRequested\);\s*throw error;\s*\}/u)?.[0];

@@ -1,4 +1,5 @@
 import { noteInstalledResourceBoundary } from './installed-resource-diagnostics.js';
+import type { InstalledApplyDiagnostic } from './installed-run-diagnostics.js';
 import { withInstalledWorkerRoot as borrowInstalledResourceRoot } from './installed-runtime.js';
 import { randomBytes } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
@@ -58,7 +59,8 @@ export function readInstalledSourceGitCapture(owner: StateOwnerContext, capture:
  * cannot be replayed as a replacement scope after a failure. */
 export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   bootstrap: SourceInspectionBootstrap, context: { row: Capturing; target: VerifiedSourceInspectionTarget;
-    staging: HeldSourceInspectionStaging; installed: HeldInstalledRuntime; anchor: HeldInstalledAnchor; signal: AbortSignal }): InstalledSourceGitCapture {
+    staging: HeldSourceInspectionStaging; installed: HeldInstalledRuntime; anchor: HeldInstalledAnchor; signal: AbortSignal;
+    diagnostic?: InstalledApplyDiagnostic }): InstalledSourceGitCapture {
   const { target, staging, installed, anchor } = context;
   const cancellation = new AbortController(), signal = AbortSignal.any([context.signal, cancellation.signal]);
   const held = readVerifiedSourceInspectionTarget(owner, target);
@@ -139,6 +141,7 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
     run() {
       if (closed || pending) return Promise.reject(new KernelStorageError('STATE_TRANSITION_INVALID', 'source capture is single-use'));
       return pending = (async () => {
+        context.diagnostic?.stage('source_git_reserve');
         const input = await readSourceGitInputIntent(reads, context.row.inputRef!, signal);
         if (canonicalSha256(input) !== context.row.inputRef || input.inputDigest !== context.row.inputDigest ||
             input.targetRef !== context.row.targetRef || input.targetDigest !== context.row.targetDigest ||
@@ -173,6 +176,7 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
           target: original, input, reservation, toolchain }, launchNonceDigest, signal);
         await refresh(); transition({ ...state.row, phase: 'prepared', inputRef: launch.inputRef,
           inputDigest: input.inputDigest, plan: launch.plan } as Prepared, launch.metadata);
+        context.diagnostic?.stage('source_git_ready');
         cut(() => scope!.createBlocked(launch.plan.containmentPlanRef, launch.plan.sandboxLaunchSpecRef, launch.plan.sandboxLaunchSpecDigest));
         const actual = await scope.ready();
         const containment: ProcessContainment = { schemaVersion: 1, planRef: launch.plan.containmentPlanRef,
@@ -187,11 +191,14 @@ export function createInstalledSourceGitCapture(driver: SqliteDriver, artifacts:
         if (!signal.aborted) noteInstalledResourceBoundary('active', operation => borrowInstalledResourceRoot(installed, anchor, operation), [{
           role: 'source', pid: actual.pid, start: actual.processStartToken, device: reservation.deviceId, inode: actual.cgroupId,
           relative: reservation.cgroupPath.split('/').at(-1)! }]);
+        context.diagnostic?.stage('source_git_seal');
         cut(() => scope!.releaseCapture()); await scope.sealed();
+        context.diagnostic?.stage('source_git_result');
         await refresh(); cut(() => scope!.continueFixedGit());
         const result = await scope.result();
         if (!signal.aborted) noteInstalledResourceBoundary('result_received', operation => borrowInstalledResourceRoot(installed, anchor, operation), [{
           role: 'source', device: reservation.deviceId, inode: reservation.cgroupId, relative: reservation.cgroupPath.split('/').at(-1)! }]);
+        context.diagnostic?.stage('source_git_publish');
         const published = await publishInstalledSourceGitResult(artifacts, state.input, result, {
           repositoryIdentityDigest: input.repositoryIdentityDigest, resources: input.resources,
           exclude: exclude ? { grantCoreDigest: excludeRow!.grantCoreDigest,
