@@ -238,7 +238,7 @@ type AssemblyCut = InstalledAssemblyWorkSnapshot & Readonly<{ ordinal: number;
 export function readInstalledAssemblyWorkJournal(text: string, expected: OriginalJournalIdentity) {
   const rows = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_ASSEMBLY_WORK'));
   if (!rows.length) return;
-  need(rows.length <= 13 && rows.reduce((bytes, row) => bytes + row.length + 1, 0) <= 4096);
+  need(rows.length <= INSTALLED_ASSEMBLY_WORK_PHASES.length && rows.reduce((bytes, row) => bytes + row.length + 1, 0) <= 4096);
   const cuts: AssemblyCut[] = [];
   let previousPhase = -1, previousElapsed = 0, previous: number[] | undefined, previousCPU: number[] | undefined;
   for (const [index, row] of rows.entries()) {

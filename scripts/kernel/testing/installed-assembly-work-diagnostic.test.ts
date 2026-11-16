@@ -312,9 +312,11 @@ test('the fixed four-KiB output bound includes its final explicit truncation rec
 });
 
 
-test('assembly admission phases append fixed codes and the original Stop closes a late admission prefix', async () => {
+test('source and admission phase codes are fixed and the original Stop closes a late admission prefix', async () => {
   const { INSTALLED_ASSEMBLY_WORK_PHASES: phases } = await import('../../../src/state/installed-work-diagnostics.js');
-  assert.deepEqual(phases, ['submit_request', 'submit_assembly_material', 'submit_assembly_verifier_history',
+  assert.deepEqual(phases, ['submit_request', 'submit_source_capture', 'source_git_reserve', 'source_git_ready', 'source_git_seal',
+    'source_git_result', 'source_git_publish', 'source_git_project', 'submit_assembly', 'submit_assembly_native',
+    'submit_assembly_source', 'submit_assembly_platform', 'submit_assembly_material', 'submit_assembly_verifier_history',
     'submit_assembly_verifier_current', 'submit_assembly_verifier_compose', 'submit_assembly_verifier_publish',
     'submit_assembly_policy', 'submit_assembly_final_check', 'original_store_stop', 'submit_final_admission',
     'submit_final_admission_scope_held', 'submit_final_admission_committed', 'submit_postcommit_load']);

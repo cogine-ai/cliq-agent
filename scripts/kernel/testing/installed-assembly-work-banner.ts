@@ -51,7 +51,7 @@ export const INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER = `;(() => { try {
       }
     } catch {}
     const frame = prefix + (emitted + 1) + ':' + phase + ':' + elapsed + ':' + numbers.join(':') + ':' + cpu.join(':') + '\\n';
-    if (emitted >= 13 || frame.length > 512 || total + frame.length + truncatedFrame.length > 4096) { truncate(); return; }
+    if (emitted >= phases.length || frame.length > 512 || total + frame.length + truncatedFrame.length > 4096) { truncate(); return; }
     emitted++; total += frame.length; previousPhase = order; previousElapsed = elapsed; previous = numbers; output(frame);
   } catch { truncate(); } });
 } catch {} })();`;

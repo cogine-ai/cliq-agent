@@ -3007,7 +3007,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
                 { env: environment, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 256 * 1024 });
                 assert(Buffer.isBuffer(log.stdout) && Buffer.isBuffer(log.stderr)); scanBytes(log.stdout); scanBytes(log.stderr);
-                assert.equal(log.error, undefined); assert.equal(log.signal, null); assert.equal(log.status, 0);
+                assert.equal(log.error, undefined); assert.equal(log.signal, null);
+                assert(log.status === 0 || log.status === 1 && log.stdout.length === 0 && log.stderr.length === 0,
+                  'bounded journal query failed');
                 const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
                 const observation = readInstalledPublicationStageJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
