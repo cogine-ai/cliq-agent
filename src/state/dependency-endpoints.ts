@@ -7,7 +7,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeStateRootIdentity } from './decoders.js';
 import { KernelStorageError } from './errors.js';
-import { withCredentialAuthorityLock, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { readInstalledRuntimeObservation, withCredentialAuthorityLock, type HeldInstalledRuntime } from './installed-runtime.js';
 import { readEndpointAuthoritySource } from './store.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
@@ -44,38 +44,36 @@ export async function readInstalledDependencyEndpoints(driver: SqliteDriver, art
   const active = assertActiveStateOwner(driver, owner);
   const root = decodeStateRootIdentity(await readCanonicalArtifact(reads, owner.stateRootIdentityRef));
   if (root.identityDigest !== owner.stateRootIdentityDigest) throw new KernelStorageError('ARTIFACT_MISMATCH', 'dependency owner root differs');
-  return withHeldInstalledRuntime(selected, async installed => {
-    await installed.revalidate(signal); reads.assertReadActive();
-    if (active.runtimeBundleRef !== installed.bundleDigest || active.runtimeBundleManifestDigest !== installed.bundle.manifestDigest ||
+  // The credential scope owns the installed runtime's serial queue. Its
+  // read-only observation verifies the same selected image without enqueueing.
+  return withCredentialAuthorityLock(selected, async token => {
+    const installed = await readInstalledRuntimeObservation(selected, signal);
+    const bundle = selected.bundle;
+    if (active.runtimeBundleRef !== installed.bundleDigest || active.runtimeBundleManifestDigest !== installed.manifestDigest ||
+        canonicalSha256(bundle) !== installed.bundleDigest || bundle.manifestDigest !== installed.manifestDigest ||
         installed.stateRoot.canonicalPath !== root.canonicalAbsolutePath || installed.stateRoot.deviceId !== root.deviceId ||
         installed.stateRoot.fileId !== root.directoryFileId || installed.stateRoot.ownerUid !== root.ownerUid)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'dependency registry lookup differs from its current selected root and owner');
-    const result = await withCredentialAuthorityLock(selected, async token => {
-      token.assertHeld(); reads.assertReadActive(); assertActiveStateOwner(driver, owner);
-      const objects = new Map<string, Readonly<{ artifactRef: string; bytes: Buffer }>>();
-      const records = input.endpointIds.map(id => {
-        const source = readEndpointAuthoritySource(token, id);
-        if (!source) throw new KernelStorageError('NOT_FOUND', 'dependency registry is not registered');
-        assertCurrentPublicDependencyEndpoint(source.record, input.principalId, installed.bundle);
-        const shared = source.objects.map(object => {
-          const previous = objects.get(object.artifactRef);
-          if (previous) {
-            if (!previous.bytes.equals(object.bytes)) throw new KernelStorageError('ARTIFACT_MISMATCH', 'dependency registry source aliases different complete bytes');
-            return previous;
-          }
-          objects.set(object.artifactRef, object); return object;
-        });
-        // All original per-endpoint history/signature/full-byte checks above
-        // still run. Only these already verified snapshots share storage in
-        // this operation; no cross-cut observation or hash result is cached.
-        return Object.freeze({ ...source, objects: Object.freeze(shared) });
+    token.assertHeld(); reads.assertReadActive(); assertActiveStateOwner(driver, owner);
+    const objects = new Map<string, Readonly<{ artifactRef: string; bytes: Buffer }>>();
+    const records = input.endpointIds.map(id => {
+      const source = readEndpointAuthoritySource(token, id);
+      if (!source) throw new KernelStorageError('NOT_FOUND', 'dependency registry is not registered');
+      assertCurrentPublicDependencyEndpoint(source.record, input.principalId, bundle);
+      const shared = source.objects.map(object => {
+        const previous = objects.get(object.artifactRef);
+        if (previous) {
+          if (!previous.bytes.equals(object.bytes)) throw new KernelStorageError('ARTIFACT_MISMATCH', 'dependency registry source aliases different complete bytes');
+          return previous;
+        }
+        objects.set(object.artifactRef, object); return object;
       });
-      token.assertHeld(); reads.assertReadActive();
-      // Preserve raw CA/signed object bytes as independent streams, never
-      // base64 in the 1MiB dependency JSON root or as native authority.
-      return Object.freeze(records);
+      // Share byte-identical snapshots only within this one verified read.
+      return Object.freeze({ ...source, objects: Object.freeze(shared) });
     });
-    await installed.revalidate(signal); assertActiveStateOwner(driver, owner); reads.assertReadActive();
-    return result;
+    await readInstalledRuntimeObservation(selected, signal);
+    token.assertHeld(); assertActiveStateOwner(driver, owner); reads.assertReadActive();
+    // Keep raw CA and signed object bytes as independent streams.
+    return Object.freeze(records);
   }, signal);
 }

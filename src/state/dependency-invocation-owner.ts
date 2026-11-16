@@ -21,7 +21,7 @@ import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readDependencyLaunchClosure, readDependencyPreparedLaunchData, type DependencyLaunchClosure,
   type DependencyLaunchClosureInput } from './execution-closure.js';
 import { assertInstalledDependencySettlement, assertInstalledDependencyTransportConfiguration, loadInstalledDependencyBroker,
-  withCredentialAuthorityLock, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+  readInstalledRuntimeObservation, withCredentialAuthorityLock, type HeldInstalledRuntime } from './installed-runtime.js';
 import { assertLiveDispatchState, claimValidatedInvocation, requireHealthyFence, settleValidatedInvocation, type ClaimInvocationDispatchInput } from './reducers/invocation.js';
 import { readInvocationAttempt } from './repositories/journal.js';
 import { readRun } from './rows.js';
@@ -120,42 +120,46 @@ async function releaseWithEndpoints<T>(held: Held, phase: 'prepared' | 'claimed'
   requireEqual(data.request, held.data.request, 'dependency original complete request');
   requireEqual(data.grant, held.data.grant, 'dependency original complete grant');
   requireEqual(data.spec, held.data.spec, 'dependency original complete sandbox recipe');
-  return withHeldInstalledRuntime(held.selected, async installed => {
-    await installed.revalidate(held.signal); live(held);
-    requireEqual(installed.bundle, held.data.bundle, 'dependency original selected signed bundle');
-    return withCredentialAuthorityLock(held.selected, async token => {
-      token.assertHeld(); live(held);
-      for (const endpoint of held.endpoints) {
-        const source = readEndpointAuthoritySource(token, endpoint.endpointRegistrationId);
-        if (!source) invalid('dependency registry no longer has its original registered authority');
-        assertCurrentPublicDependencyEndpoint(source.record, held.data.grant.principalId, installed.bundle);
-        requireEqual(source.record.registration, endpoint, 'dependency current complete original registry registration');
-      }
-      token.assertHeld(); live(held);
-      if ('assertUnchanged' in data) data.assertUnchanged(held.driver);
-      assertInstalledDependencyTransportConfiguration(held.selected, held.transport, held.configurationBytes);
-      let operation: T | Promise<T> | undefined, started = false;
-      if (phase === 'claimed') {
-        let fence: TimeFenceAdvance | undefined;
-        held.driver.transaction(connection => {
-          const at = sampleCanonicalNow();
-          assertActiveStateOwner(connection, held.owner);
-          fence = advanceTimeFence(connection, held.owner.ownerEpoch, at); if (fence !== 'healthy') return;
-          const run = live(held, connection, at);
-          requireEqual(run, data.run, 'dependency freshly read release Run cut');
-          requireEqual(readInvocationAttempt(connection, run.id, held.data.prepared.opId, held.data.prepared.attempt),
-            [held.data.prepared, held.claim], 'dependency unique original live claim');
-          token.assertHeld(); assertInstalledDependencyTransportConfiguration(held.selected, held.transport, held.configurationBytes);
-          // The fixed native start is synchronous; its real async work is
-          // joined outside SQLite while the credential scope stays held.
-          started = true; operation = action();
-        });
-        requireHealthyFence(fence);
-      } else { started = true; operation = action(); }
-      if (!started) invalid('dependency release did not pass its original canonical time fence');
-      const result = await operation as T;
-      token.assertHeld(); held.reads.assertReadActive(); return result;
-    });
+  return withCredentialAuthorityLock(held.selected, async token => {
+    // Both release and preparation use the credential queue. The original
+    // installed observation is fully verified without waiting on that queue.
+    const installed = await readInstalledRuntimeObservation(held.selected, held.signal);
+    const bundle = held.selected.bundle;
+    requireEqual(bundle, held.data.bundle, 'dependency original selected signed bundle');
+    requireEqual(installed.bundleDigest, canonicalSha256(bundle), 'dependency observed selected signed bundle');
+    requireEqual(installed.manifestDigest, bundle.manifestDigest, 'dependency observed selected signed manifest');
+    token.assertHeld(); live(held);
+    for (const endpoint of held.endpoints) {
+      const source = readEndpointAuthoritySource(token, endpoint.endpointRegistrationId);
+      if (!source) invalid('dependency registry no longer has its original registered authority');
+      assertCurrentPublicDependencyEndpoint(source.record, held.data.grant.principalId, bundle);
+      requireEqual(source.record.registration, endpoint, 'dependency current complete original registry registration');
+    }
+    token.assertHeld(); live(held);
+    if ('assertUnchanged' in data) data.assertUnchanged(held.driver);
+    assertInstalledDependencyTransportConfiguration(held.selected, held.transport, held.configurationBytes);
+    let operation: T | Promise<T> | undefined, started = false;
+    if (phase === 'claimed') {
+      let fence: TimeFenceAdvance | undefined;
+      held.driver.transaction(connection => {
+        const at = sampleCanonicalNow();
+        assertActiveStateOwner(connection, held.owner);
+        fence = advanceTimeFence(connection, held.owner.ownerEpoch, at); if (fence !== 'healthy') return;
+        const run = live(held, connection, at);
+        requireEqual(run, data.run, 'dependency freshly read release Run cut');
+        requireEqual(readInvocationAttempt(connection, run.id, held.data.prepared.opId, held.data.prepared.attempt),
+          [held.data.prepared, held.claim], 'dependency unique original live claim');
+        token.assertHeld(); assertInstalledDependencyTransportConfiguration(held.selected, held.transport, held.configurationBytes);
+        // The fixed native start is synchronous; its real async work is
+        // joined outside SQLite while the credential scope stays held.
+        started = true; operation = action();
+      });
+      requireHealthyFence(fence);
+    } else { started = true; operation = action(); }
+    if (!started) invalid('dependency release did not pass its original canonical time fence');
+    const result = await operation as T;
+    await readInstalledRuntimeObservation(held.selected, held.signal);
+    token.assertHeld(); held.reads.assertReadActive(); return result;
   }, held.signal);
 }
 function bindingOf(held: Held): DependencyBrokerBinding {
