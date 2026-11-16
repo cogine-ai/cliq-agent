@@ -1589,6 +1589,36 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     });
     return ownOperation(work, abort, true);
   }
+  function renewOwnedWorkerLease(refreshAtBoundary = false): ReturnType<RunExecution['renewCurrentWorkerLease']> {
+    if (!activeWorker || !worker || !generation || !controller || !reservation || closed || isClosing()) return 'inactive';
+    if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
+    if (pending && dependencyOwner) assertDependencyLeaseMaintenance(driver, owner, dependencyOwner);
+    const retained = activeWorker, run = readRun(driver, runId);
+    if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
+    const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
+    if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return 'inactive';
+    if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
+        launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
+        launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
+      throw new KernelStorageError('LEASE_FENCED', 'worker maintenance differs from its original physical owner');
+    }
+    reservation.assertHeld();
+    worker.assertHeld();
+    assertActiveStateOwner(driver, owner);
+    const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
+    if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
+    const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
+    requireEqual(live.launch, launch, 'worker maintenance current launch');
+    requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
+    const expiryMs = parseCanonicalTime(launch.leaseExpiresAt);
+    const nextExpiryMs = Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt));
+    if (nextExpiryMs <= expiryMs || (!refreshAtBoundary && expiryMs - nowMs > 30_000)) return 'unchanged';
+    const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
+      runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
+      newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
+    retained.activated = { ...retained.activated, launch: renewed };
+    return 'renewed';
+  }
   const execution: RunExecution = Object.freeze({
     hasPendingOperation: () => pending !== undefined,
     reconcilePublication: value => runPublicationReconciliation(value),
@@ -1666,36 +1696,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // I/O. Native activation, revocation and Checkpoint still fence renewal.
       const acquiringDependencies = dependencyOwner !== undefined && operationPhase === 'claimed' &&
         receivedCompletion?.kind === 'dependency_acquisition';
-      if (closed || isClosing() || pending && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
-          receivedCompletion && !acquiringDependencies ||
-          !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
-      if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
-      if (pending && dependencyOwner) assertDependencyLeaseMaintenance(driver, owner, dependencyOwner);
-      const retained = activeWorker, run = readRun(driver, runId);
-      if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
-      const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
-      if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return 'inactive';
-      if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
-          launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
-          launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
-        throw new KernelStorageError('LEASE_FENCED', 'worker maintenance differs from its original physical owner');
-      }
-      reservation.assertHeld();
-      worker.assertHeld();
-      assertActiveStateOwner(driver, owner);
-      const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
-      if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
-      const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
-      requireEqual(live.launch, launch, 'worker maintenance current launch');
-      requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
-      const expiryMs = parseCanonicalTime(launch.leaseExpiresAt);
-      const nextExpiryMs = Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt));
-      if (expiryMs - nowMs > 30_000 || nextExpiryMs <= expiryMs) return 'unchanged';
-      const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
-        runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
-        newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
-      retained.activated = { ...retained.activated, launch: renewed };
-      return 'renewed';
+      if (pending && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
+          receivedCompletion && !acquiringDependencies) return 'inactive';
+      return renewOwnedWorkerLease();
     },
     assertCurrentModelWorker: value => {
       requireAgent();
@@ -2212,6 +2215,15 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             ownedLaunchId !== current.activated.launch.launchId || readRun(driver, runId).activeWorkerLaunchId !== ownedLaunchId)
           throw new KernelStorageError('LEASE_FENCED', 'verifier cannot adopt another parent worker');
         const currentWorker = worker, run = readRun(driver, runId);
+        // Refresh only between phases, when no verifier reader holds a
+        // WorkerLaunch cut. The held worker and original lease still decide.
+        const refreshVerifierLease = () => {
+          if (activeWorker !== current || worker !== currentWorker)
+            throw new KernelStorageError('LEASE_FENCED', 'verifier phase lost its original physical parent');
+          const result = renewOwnedWorkerLease(true);
+          if (result === 'inactive' || result === 'expired')
+            throw new KernelStorageError('LEASE_FENCED', 'verifier phase lost its original live parent lease');
+        };
         const prepared = await continuation.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, signal);
         if (prepared.disposition !== 'prepared') {
           const waiting = await preparePermission(prepared.run.revision);
@@ -2225,9 +2237,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const sandboxLaunchSpecRef = await publishVerifierRecipe(reads, current.recipe.spec, current.processContainmentRef,
           currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         signal.throwIfAborted();
+        refreshVerifierLease();
         const claimed = await continuation.claimVerifier({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch,
           opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
         claimedVerifier = claimed; operationPhase = 'claimed';
+        refreshVerifierLease();
         const grant = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierOperationGrantV1>(claimed.entry.grantRef!);
         const evidence = claimed.evidence;
         const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, prepared.run.leaseEpoch, sampleCanonicalNow());
@@ -2235,6 +2249,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           request: claimed.request, target: claimed.target, grant, evidence, dispatchId, sandboxLaunchSpecRef }, bootstrap!.releaseKeys, signal, driver);
         const invocation = await currentWorker.createVerifier(closure, { signal });
         signal.throwIfAborted();
+        refreshVerifierLease();
         await claimed.release(invocation); verifierReleased = true;
         const result = await invocation.result();
         verifierReleased = false; operationPhase = 'received';
