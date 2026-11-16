@@ -7,7 +7,7 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "72f055cbc1d29c6727e97d4ad16aa2e4cf0b5227c3edd67bf910ec7b4254a72a";
+export const CONTROL_V1_SOURCE_DIGEST = "4a909da971a74cb0520d26f6c1baee84032bf364a86c5755fc7333114b5aaed1";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
@@ -21,7 +21,7 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/control-apply.ts": "eb3129bf940a92a1f601f4015323a8ae462a9a6776b813ee1aa1e02d70197e5d",
   "src/kernel/control-list.ts": "66ef7efddbb92aef34d2ab35b02f2f0e0a153b5e74acabe75b153856a6cfb723",
   "src/kernel/control-submit.ts": "c9d6ec30110293419c1b47797e2a6561b10e0651d13bcc9cc85ee4371b8014e9",
-  "src/kernel/control-wire-data.ts": "3f118aa136b580bf7c4e4234096730647dad039c97f702164c440a94d5630fd8",
+  "src/kernel/control-wire-data.ts": "69f8837ee95a8ec5a0d997c868fef0ac3e33f3eb1355d448a0c7c99afe271ebf",
   "src/kernel/control-wire.ts": "11bbbfc4ed12a2c680b6656a51fd25a65de89b50835d24606af29834f093571e",
   "src/kernel/credential-authority.ts": "b6033172e68f5d1808a5433f3a4723fcf99c61e416d1e9ee84f10c4940bde400",
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
