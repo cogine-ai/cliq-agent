@@ -14,7 +14,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
-  decodeVerifierRepairModelContent, verifierRepairModelContent } from './verifier-artifacts.js';
+  decodeVerifierCommand, decodeVerifierRepairModelContent, verifierRepairModelContent, verifierReportedLocations } from './verifier-artifacts.js';
 import { type SessionCompactionIndex, type SessionContextEntry } from './session-context.js';
 import type { SessionContextHead } from '../kernel/session-context-pages.js';
 import { readSessionContextGraphHead, readSessionContextEntryStream } from './session-context-stream.js';
@@ -204,15 +204,27 @@ async function readModelContextProjection(input: ContextProjectionInput, childPe
           const diagnostic = decodeVerifierRepairDiagnostic(await readCanonicalArtifact(artifacts, entry.diagnosticRef));
           const receipt = decodeVerificationReceipt(await readCanonicalArtifact(artifacts, diagnostic.receiptRef));
           const content = decodeVerifierRepairModelContent(await readCanonicalArtifact(artifacts, entry.modelContentRef));
+          let check: typeof content.check;
+          if (diagnostic.redactionAlgorithm === 'cliq-verifier-repair-location-v1') {
+            if (!content.check || receipt.stdoutTruncated) throw new TypeError('verifier location requires its complete bounded output');
+            const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, receipt.commandRef));
+            if (command.commandDigest !== receipt.commandDigest || command.verifierId !== receipt.verifierId ||
+                command.verifierVersion !== receipt.verifierVersion) throw new TypeError('verifier location is for another command');
+            const chunks: Buffer[] = [];
+            for await (const chunk of artifacts.readChunks(receipt.stdoutRef, content.check.stdoutBytes)) chunks.push(chunk);
+            check = verifierReportedLocations(command, Buffer.concat(chunks));
+            if (!check) throw new TypeError('verifier command has no supported location projection');
+          }
           if (diagnostic.runId !== run.id || diagnostic.candidateItemId !== repair.candidateItemId || diagnostic.verifierPlanRef !== repair.verifierPlanRef ||
               diagnostic.verifierId !== entry.verifierId || diagnostic.diagnosticDigest !== entry.diagnosticDigest ||
               diagnostic.modelContentRef !== entry.modelContentRef || diagnostic.modelContentDigest !== entry.modelContentDigest ||
               content.contentDigest !== entry.modelContentDigest || receipt.runId !== run.id || receipt.verifierId !== entry.verifierId ||
               receipt.receiptDigest !== diagnostic.receiptDigest || receipt.stdoutRef !== diagnostic.stdoutRef || receipt.stderrRef !== diagnostic.stderrRef ||
-              canonicalSha256(content) !== canonicalSha256(verifierRepairModelContent(receipt)))
+              canonicalSha256(content) !== canonicalSha256(verifierRepairModelContent(receipt, check)))
             throw new TypeError('verifier repair model content differs from its fixed receipt projection');
-          // Raw stdout/stderr are deliberately never opened by prompt construction.
-          user('verifier_repair', repair.itemId, content.message);
+          const location = check ? ` Reported locations (check output, untrusted): ${canonicalJsonBytes({
+            path: check.path, lines: check.reportedLines }).toString('utf8')}.` : '';
+          user('verifier_repair', repair.itemId, content.message + location);
         }
       } else throw new TypeError(`control item ${item.kind} cannot be projected as raw model context`);
   };

@@ -7,7 +7,7 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "360e9c9be998382235853754fe19717c271d933485811ba76d361d17c2186a26";
+export const CONTROL_V1_SOURCE_DIGEST = "72f055cbc1d29c6727e97d4ad16aa2e4cf0b5227c3edd67bf910ec7b4254a72a";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
@@ -23,7 +23,7 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/control-submit.ts": "c9d6ec30110293419c1b47797e2a6561b10e0651d13bcc9cc85ee4371b8014e9",
   "src/kernel/control-wire-data.ts": "3f118aa136b580bf7c4e4234096730647dad039c97f702164c440a94d5630fd8",
   "src/kernel/control-wire.ts": "11bbbfc4ed12a2c680b6656a51fd25a65de89b50835d24606af29834f093571e",
-  "src/kernel/credential-authority.ts": "9f859359d7ef7e6471a57f8d2be6a2244c3fc6894ce73ebce343c545b71a83ea",
+  "src/kernel/credential-authority.ts": "b6033172e68f5d1808a5433f3a4723fcf99c61e416d1e9ee84f10c4940bde400",
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
   "src/kernel/delivery.ts": "0a83da75cc71220fea91e85fc2e5722faafb59364b41a37b8bbd295dba490734",
   "src/kernel/dependency-script-approval.ts": "04ac826a5ff6394e14540ddd78d3c9db11e840a527d17c2d6ad8be420eacefda",
@@ -50,7 +50,7 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/types.ts": "06cd4da118f5d0a268ec3dbb9145b91b2e5aba419e20ac86823d60196d27921d",
   "src/kernel/user-input.ts": "010bd6ca988106cddf40aaa238930670a653deb567e347178ffc11851e291e89",
   "src/kernel/verifier-invocation.ts": "d80548b2e14f65bf6fc3f07271c332e61d0ae7fe7481736aa23f0677ffadfd4c",
-  "src/kernel/verifier.ts": "246cdbc141c103d844379eb5a5a22255e7c9e155a9b13fe834ddc5bc036ed4a3",
+  "src/kernel/verifier.ts": "f67b20b72d8c908287e7e54183288e9c75c34b98c878dde860ab8b9eba5a83f7",
   "src/model/immutable.ts": "e9c476c73e33d2edda489764bc403a6e2aae4c59191e67fc8c708ed376abbb0a",
   "src/protocol/agent-ir.ts": "028fb3e10b6571169bab406bcdc2fa8a7466f3cae8361ab1cbdea2835366cd4a",
   "src/tools/input-schema.ts": "9e051fb062b18976a79ec8a6e5c4dae2c463554cbc2add104e373e7a19d7780e"

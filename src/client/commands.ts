@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { parseJsonStrict } from '../kernel/json.js';
 import { assertArtifactRef, assertRequestId, normalizeAbsolutePath, normalizeBoundedText } from '../kernel/identity.js';
+import { nodeTestArguments } from '../kernel/verifier.js';
 import { decodeInstalledControlRequest, type InstalledControlRequestV1 } from '../control/v1.js';
 import { mergeBudgets, type RunModelRequest, type RunSubmitRequest } from '../kernel/control-submit.js';
 import type { ClientCommand, ClientPreferencesV1 } from './types.js';
@@ -49,12 +50,6 @@ function usdMicros(value: string): number {
   const micros = BigInt(whole!) * 1_000_000n + BigInt(fraction.padEnd(6, '0'));
   if (micros < 1n || micros > 1_000_000_000_000n) throw new TypeError('USD budget is outside the existing Run bound');
   return Number(micros);
-}
-function checkNodePath(value: string): string {
-  if (normalizeBoundedText(value, 1, 4096) !== value || !value.endsWith('.mjs') || value.startsWith('-') || value.includes('\\') ||
-      value.split('/').some(part => !part || part === '.' || part === '..' || part === '.git' || Buffer.byteLength(part) > 255))
-    throw new TypeError('Node check must be a canonical relative .mjs path');
-  return value;
 }
 function parsed(argv: readonly string[]) {
   const positionals: string[] = [], flags = new Map<string, string[]>();
@@ -144,7 +139,8 @@ export function parseClientInvocation(argv: readonly string[], workspacePath: st
       const guestToolchainManifestId = defaults?.guestToolchainManifestId;
       if (typeof guestToolchainManifestId !== 'string' || normalizeBoundedText(guestToolchainManifestId, 1, 128) !== guestToolchainManifestId)
         throw new TypeError('the selected installation has no supported Node verifier toolchain');
-      nodeCheck = { path: checkNodePath(checkPath), guestToolchainManifestId };
+      nodeTestArguments(checkPath);
+      nodeCheck = { path: checkPath, guestToolchainManifestId };
     }
     const intent = { workspacePath: normalizeAbsolutePath(p.take('--workspace') ?? workspacePath), objective, model: selectedModel,
       policyMode, verifiers: [], dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [],

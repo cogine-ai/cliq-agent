@@ -1,5 +1,6 @@
 import { digestOmitting, normalizeAbsolutePath, normalizeBoundedText, assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { nodeTestArguments, nodeTestProfile } from '../kernel/verifier.js';
 import type { RepairDiagnosticItem, VerificationReceipt, VerifierCommandV1, VerifierEnvironmentV1, VerifierExecutableIdentityV1,
   VerifierRepairDiagnosticV1, VerifierRepairModelContentV1, VerifierResultItem, VerifierStopEvidence, VerifierStopItem, VerifierSkipItem } from '../kernel/verifier.js';
 import type { VerifierSpec } from '../kernel/types.js';
@@ -214,24 +215,58 @@ export function decodeVerifierResultItem(value: unknown): VerifierResultItem {
 const repairSuffix = '). Revise the candidate and try again.';
 function repairPrefix(verifierId: string): string { return `Verifier ${canonicalJsonBytes(verifierId).toString('utf8')} failed an assertion (exit `; }
 
-/** No stdout/stderr, identity, path or evidence field is permitted in model content. */
+export const VERIFIER_REPAIR_LOCATION_BYTES = 65_536;
+export function verifierReportedLocations(command: VerifierCommandV1, stdout: Buffer): VerifierRepairModelContentV1['check'] {
+  if (nodeTestProfile(command.argv) !== 'tsx' || stdout.byteLength > VERIFIER_REPAIR_LOCATION_BYTES) return undefined;
+  const path = [command.cwd === '.' ? '' : command.cwd, command.argv.at(-1)!.value].filter(Boolean).join('/');
+  if (Buffer.byteLength(path) > 1024) return undefined;
+  nodeTestArguments(path);
+  const reportedLines = new Set<number>();
+  const marker = `/work/${path}:`;
+  for (const line of stdout.toString('utf8').split('\n')) {
+    if (!line.startsWith('    at ') && !line.startsWith('      at ')) continue;
+    const at = line.lastIndexOf(marker);
+    if (at < 0 || !/^[ (]$/u.test(line[at - 1] ?? '') && line.slice(at - 7, at) !== 'file://') continue;
+    const located = /^([1-9]\d{0,6}):[1-9]\d{0,6}\)?\s*$/u.exec(line.slice(at + marker.length));
+    if (located) reportedLines.add(Number(located[1]));
+    if (reportedLines.size === 8) break;
+  }
+  if (!reportedLines.size) return undefined;
+  return { path, reportedLines: [...reportedLines].sort((left, right) => left - right), stdoutBytes: stdout.byteLength };
+}
+
+/** A reported line is untrusted data. Only the approved relative check path
+ * and bounded numeric locations cross from the captured verifier output. */
 export function decodeVerifierRepairModelContent(value: unknown): VerifierRepairModelContentV1 {
-  const data = closed(value, ['schemaVersion', 'format', 'verifierId', 'outcome', 'message', 'contentDigest']);
+  const data = closed(value, ['schemaVersion', 'format', 'verifierId', 'outcome', 'message', 'contentDigest'], ['check']);
   if (data.schemaVersion !== 1 || data.format !== 'cliq-verifier-repair-model-content-v1' || data.outcome !== 'assertion_failed') mismatch();
   const verifierId = text(data.verifierId), message = text(data.message, 4096), prefix = repairPrefix(verifierId);
   if (!message.startsWith(prefix) || !message.endsWith(repairSuffix)) mismatch();
   const decimal = message.slice(prefix.length, -repairSuffix.length), exitCode = Number(decimal);
   if (!Number.isSafeInteger(exitCode) || exitCode === 0 || String(exitCode) !== decimal || canonicalJsonBytes(data).byteLength > 4096) mismatch();
+  if (Object.hasOwn(data, 'check')) {
+    const check = closed(data.check, ['path', 'reportedLines', 'stdoutBytes']);
+    const path = text(check.path, 1024);
+    try { if (nodeTestArguments(path).length !== 5) mismatch(); } catch { mismatch(); }
+    const lines = array(check.reportedLines, 8);
+    if (!lines.length) mismatch();
+    integer(check.stdoutBytes, 0, VERIFIER_REPAIR_LOCATION_BYTES);
+    for (let index = 0; index < lines.length; index++) {
+      integer(lines[index], 1, 9_999_999);
+      if (index > 0 && Number(lines[index - 1]) >= Number(lines[index])) mismatch();
+    }
+  }
   digest(data, 'contentDigest');
   return data as VerifierRepairModelContentV1;
 }
 
 /** Exact RFC redaction of a decoded assertion receipt; receipt authority remains the consumer's job. */
-export function verifierRepairModelContent(value: unknown): VerifierRepairModelContentV1 {
+export function verifierRepairModelContent(value: unknown, check?: VerifierRepairModelContentV1['check']): VerifierRepairModelContentV1 {
   const receipt = decodeVerificationReceipt(value);
   if (receipt.outcome !== 'assertion_failed' || receipt.terminationReason !== 'exit' || receipt.exitCode === 0) mismatch();
   const content = { schemaVersion: 1 as const, format: 'cliq-verifier-repair-model-content-v1' as const, verifierId: receipt.verifierId,
-    outcome: 'assertion_failed' as const, message: `${repairPrefix(receipt.verifierId)}${receipt.exitCode}${repairSuffix}`, contentDigest: '' };
+    outcome: 'assertion_failed' as const, message: `${repairPrefix(receipt.verifierId)}${receipt.exitCode}${repairSuffix}`,
+    ...(check ? { check } : {}), contentDigest: '' };
   content.contentDigest = digestOmitting(content, 'contentDigest');
   return decodeVerifierRepairModelContent(content);
 }
@@ -240,7 +275,8 @@ export function verifierRepairModelContent(value: unknown): VerifierRepairModelC
 export function decodeVerifierRepairDiagnostic(value: unknown): VerifierRepairDiagnosticV1 {
   const data = closed(value, ['schemaVersion', 'format', 'runId', 'candidateItemId', 'verifierPlanRef', 'verifierId', 'receiptRef', 'receiptDigest',
     'stdoutRef', 'stderrRef', 'redactionAlgorithm', 'modelContentRef', 'modelContentDigest', 'diagnosticDigest']);
-  if (data.schemaVersion !== 1 || data.format !== 'cliq-verifier-repair-diagnostic-v1' || data.redactionAlgorithm !== 'cliq-verifier-repair-redaction-v1') mismatch();
+  if (data.schemaVersion !== 1 || data.format !== 'cliq-verifier-repair-diagnostic-v1' ||
+      (data.redactionAlgorithm !== 'cliq-verifier-repair-redaction-v1' && data.redactionAlgorithm !== 'cliq-verifier-repair-location-v1')) mismatch();
   text(data.runId); text(data.candidateItemId); text(data.verifierId);
   for (const key of ['verifierPlanRef', 'receiptRef', 'receiptDigest', 'stdoutRef', 'stderrRef', 'modelContentRef', 'modelContentDigest']) ref(data[key]);
   digest(data, 'diagnosticDigest');

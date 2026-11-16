@@ -5,10 +5,10 @@ import { constants, fstatSync, readdirSync, readlinkSync } from 'node:fs';
 import { copyFile, mkdtemp, open, readFile, rm, rmdir, type FileHandle } from 'node:fs/promises';
 import { Module } from 'node:module';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { testFixture } from '../../../src/model/testing/fixtures.js';
+import { waitForGuestToolchainReady } from '../../../src/sandbox/guest-toolchain-wait.js';
 import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractionInput, type NativeGuestExtractorBinding,
   type NativeGuestToolchain } from '../../../src/sandbox/guest-toolchain.js';
 import { verifyRuntimeBundle } from '../../../src/policy/runtime-authority.js';
@@ -100,10 +100,9 @@ export async function qualifyGuestToolchainExtraction(input: { installationRoot:
       'the unchanged official Node must exercise the owner-approved large-table acceptance');
     async function ready(job: NativeGuestToolchain) {
       const started = performance.now();
-      while (!job.pollReady()) {
+      await waitForGuestToolchainReady(() => job.pollReady(), () => {
         assert.ok(performance.now() - started < 10_000, 'actual bounded image extraction must finish');
-        await delay(1);
-      }
+      });
       return job.describe();
     }
     async function close(job: NativeGuestToolchain) {

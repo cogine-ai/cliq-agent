@@ -409,7 +409,8 @@ static void verifier_bubblewrap(int generation_source, int helper_source, int bw
          * init verifies its complete bytes and self binds that same held copy
          * before applying the unchanged executable-mount confinement. */
         ARG("--perms"); ARG("0555");
-        ARG(strcmp(config->files[i].path, "/usr/bin/node") == 0 || (bash &&
+        ARG(strcmp(config->files[i].path, "/usr/bin/node") == 0 ||
+            strcmp(config->files[i].path, CLIQ_VERIFIER_TSX_COMPILER) == 0 || (bash &&
             (!strcmp(config->files[i].path, "/usr/bin/git") || !strcmp(config->files[i].path, "/bin/bash"))) ? "--file" : "--ro-bind-data");
         ARG(descriptors[i + 1]); ARG(config->files[i].path);
     }

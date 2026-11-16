@@ -3,7 +3,7 @@ import { digestOmitting, identityHash, parseCanonicalTime } from '../kernel/iden
 import type { ProcessContainment, ProcessContainmentDeathEvidenceV1 } from '../kernel/execution.js';
 import type { FinalCandidateItem, InvocationJournalEntry, RecoveryClosureV1, RunFrontier, VerifierSpec } from '../kernel/types.js';
 import type { VerificationClosureV1, VerifierPlan } from '../kernel/result.js';
-import type { VerificationReceipt, VerifierResultItem, VerifierSkipItem } from '../kernel/verifier.js';
+import { nodeTestProfile, type VerificationReceipt, type VerifierRepairModelContentV1, type VerifierResultItem, type VerifierSkipItem } from '../kernel/verifier.js';
 import { readVerifierApproval, readVerifierGrant, readVerifierSkip, verifierPolicyItem } from './verifier-permission-history.js';
 import type { VerifierOperationGrantV1, VerifierPolicyChannelEvidenceV1, VerifierPolicyDecisionItem } from '../kernel/verifier-invocation.js';
 import type { RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
@@ -23,7 +23,8 @@ import { readSupervisorInspector } from './supervisor-inspector.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateMatchingWorkerDeath, validateRetainedWorkerSeal } from './tool-checkpoint.js';
-import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierResultItem, decodeVerifierSpec, decodeVerifierSkipItem } from './verifier-artifacts.js';
+import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierResultItem, decodeVerifierSpec, decodeVerifierSkipItem,
+  verifierReportedLocations, VERIFIER_REPAIR_LOCATION_BYTES } from './verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest, verifierOperationId } from './verifier-policy.js';
 import { isZeroBudget } from './invariants.js';
 
@@ -43,6 +44,7 @@ type LocalEntry = Extract<VerificationClosureV1['verification'], { kind: 'local'
 export type VerifierProgressEntry = {
   planEntry: VerifierPlan['entries'][number]; specEntry: VerifierSpec['verifiers'][number];
   resultItem?: VerifierResultItem; receipt?: VerificationReceipt; terminalJournal?: InvocationJournalEntry;
+  reportedCheck?: VerifierRepairModelContentV1['check'];
   disposition?: LocalEntry['disposition'];
   skipItem?: VerifierSkipItem; skipCheckpointId?: string;
 };
@@ -290,20 +292,28 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
         throw new TypeError('verifier receipt substitutes its immutable claim, source, command or environment');
       const retirement = await readVerifierRetirement(driver, artifacts, cut, candidate, receipt, claim, terminal);
       previous.checkpointAt = readCheckpoint(driver, retirement.proof.checkpointId).createdAt;
-      let outputBytes = 0;
-      for (const outputRef of [receipt.stdoutRef, receipt.stderrRef]) {
+      let outputBytes = 0, reportedCheck: VerifierProgressEntry['reportedCheck'];
+      for (const stream of ['stdout', 'stderr'] as const) {
+        const outputRef = stream === 'stdout' ? receipt.stdoutRef : receipt.stderrRef;
         const metadata = driver.prepare('SELECT byte_length FROM artifacts WHERE ref = ?').get<{ byte_length: bigint }>(outputRef);
         const byteLength = Number(metadata?.byte_length);
         outputBytes += byteLength;
         if (!metadata || !Number.isSafeInteger(byteLength) || byteLength < 0 || outputBytes > specEntry.outputLimitBytes)
           throw new TypeError('verifier output exceeds its frozen byte ceiling or lacks retained metadata');
+        const chunks = stream === 'stdout' && attemptIndex === preparations.length - 1 &&
+          receipt.outcome === 'assertion_failed' && !receipt.stdoutTruncated &&
+          byteLength <= VERIFIER_REPAIR_LOCATION_BYTES && nodeTestProfile(command.argv) === 'tsx' ? [] as Buffer[] : undefined;
         let count = 0;
-        for await (const chunk of artifacts.readChunks(outputRef, byteLength)) count += chunk.byteLength;
+        for await (const chunk of artifacts.readChunks(outputRef, byteLength)) {
+          count += chunk.byteLength; chunks?.push(chunk);
+        }
         if (count !== byteLength) throw new TypeError('verifier output byte count differs');
+        if (chunks) reportedCheck = verifierReportedLocations(command, Buffer.concat(chunks, byteLength));
       }
       previous.receipt = receipt;
       if (attemptIndex !== preparations.length - 1) continue;
       Object.assign(progress, { resultItem, receipt, terminalJournal: terminal });
+      if (reportedCheck) progress.reportedCheck = reportedCheck;
       // Retain the genuine received fact so the deadline Stop can still drain
       // it; a late durable completion is never eligible to advance or succeed.
       if (previous.checkpointAt >= cut.run.deadlineAt || terminal.timestamp >= cut.run.deadlineAt) continue;

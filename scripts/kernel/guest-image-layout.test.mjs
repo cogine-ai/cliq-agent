@@ -36,8 +36,8 @@ test('the actual shared builder defaults to compact while only fixed qualificati
   const builder = source('./build-linux-guest-toolchain.mjs'), publisher = source('./testing/installed-guest-package.ts');
   const installed = source('./testing/installed-supervisor-package.ts'), journey = source('./testing/installed-node-journey.ts');
   const native = source('./run-linux-guest-verifier-campaign.ts');
-  assert(builder.includes("guestImageLayout(totalBytes, extra.length ? 'qualification_max' : 'compact')"));
-  assert(builder.includes("extra[0] !== '--qualification-max'"));
+  assert(builder.includes("guestImageLayout(totalBytes, extra.includes('--qualification-max') ? 'qualification_max' : 'compact')"));
+  assert(builder.includes("flag !== '--qualification-max' && flag !== '--preview-tsx'"));
   assert(publisher.includes('guestImageLayout(total,'));
   assert(installed.includes("guestImageProfile?: 'qualification_max'"));
   assert(installed.includes("...(options.guestImageProfile ? ['--qualification-max'] : [])"));

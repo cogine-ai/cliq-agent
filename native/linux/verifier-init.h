@@ -198,6 +198,16 @@ static bool verifier_node_mount(const struct cliq_verifier_config *config, uint3
         mount(source, "/usr/bin/node", NULL, MS_BIND, NULL) == 0 &&
         cliq_verifier_node_current(directory, image, &held);
     if (image >= 0 && close(image) != 0) valid = false;
+    for (uint32_t i = 0; valid && i < config->file_count; i++) {
+        if (strcmp(config->files[i].path, CLIQ_VERIFIER_TSX_COMPILER) != 0) continue;
+        image = cliq_verifier_named_open(directory, "esbuild", config->files[i].byte_count, config->files[i].digest, &held);
+        length = snprintf(source, sizeof(source), "/proc/self/fd/%d", image);
+        valid = image >= 0 && length > 0 && (size_t)length < sizeof(source) &&
+            cliq_verifier_named_current(directory, "esbuild", image, &held) &&
+            mount(source, CLIQ_VERIFIER_TSX_COMPILER, NULL, MS_BIND, NULL) == 0 &&
+            cliq_verifier_named_current(directory, "esbuild", image, &held);
+        if (image >= 0 && close(image) != 0) valid = false;
+    }
     if (directory >= 0 && close(directory) != 0) valid = false;
     return valid;
 }

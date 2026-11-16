@@ -40,11 +40,11 @@ export function planVerifierRepair(progress: VerifierProgress, input: { runId: s
         result.receiptRef !== canonicalSha256(receipt) || terminal.receiptRef !== result.receiptRef ||
         receipt.runId !== input.runId || entry.specEntry.id !== receipt.verifierId)
       throw new TypeError('repair assertion lacks its exact owned result and receipt');
-    const content = verifierRepairModelContent(receipt), contentPlan = planCanonicalArtifact(content, content.format);
+    const content = verifierRepairModelContent(receipt, entry.reportedCheck), contentPlan = planCanonicalArtifact(content, content.format);
     const diagnostic: VerifierRepairDiagnosticV1 = { schemaVersion: 1, format: 'cliq-verifier-repair-diagnostic-v1',
       runId: input.runId, candidateItemId: progress.candidate.itemId, verifierPlanRef: progress.planRef, verifierId: receipt.verifierId,
       receiptRef: result.receiptRef, receiptDigest: receipt.receiptDigest, stdoutRef: receipt.stdoutRef, stderrRef: receipt.stderrRef,
-      redactionAlgorithm: 'cliq-verifier-repair-redaction-v1', modelContentRef: contentPlan.ref,
+      redactionAlgorithm: content.check ? 'cliq-verifier-repair-location-v1' : 'cliq-verifier-repair-redaction-v1', modelContentRef: contentPlan.ref,
       modelContentDigest: content.contentDigest, diagnosticDigest: '' };
     diagnostic.diagnosticDigest = digestOmitting(diagnostic, 'diagnosticDigest');
     decodeVerifierRepairDiagnostic(diagnostic);

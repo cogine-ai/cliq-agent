@@ -70,10 +70,13 @@ function target(resolved: unknown, endpoints: readonly EndpointRegistrationV1[])
   if (url!.protocol !== 'https:' || url!.username || url!.password || url!.search || url!.hash || url!.toString() !== resolved ||
       !/^\/[A-Za-z0-9_~.@+/-]+$/u.test(url!.pathname) || url!.pathname.split('/').slice(1).some(segment => !segment || segment === '.' || segment === '..'))
     fail('package registry URL is not a canonical HTTPS artifact path');
-  const matches = endpoints.filter(endpoint => endpoint.target.hostAscii === url!.hostname && endpoint.target.port === Number(url!.port || 443) &&
-    (endpoint.target.basePath === '/' || url!.pathname.startsWith(`${endpoint.target.basePath.replace(/\/$/u, '')}/`)));
+  const matches = endpoints.filter(endpoint => endpoint.npmLockOrigin !== undefined
+    ? url!.origin === endpoint.npmLockOrigin
+    : endpoint.target.hostAscii === url!.hostname && endpoint.target.port === Number(url!.port || 443) &&
+      (endpoint.target.basePath === '/' || url!.pathname.startsWith(`${endpoint.target.basePath.replace(/\/$/u, '')}/`)));
   if (matches.length !== 1) fail('package registry target has no unique frozen endpoint');
-  const endpoint = matches[0]!, base = endpoint.target.basePath === '/' ? '' : endpoint.target.basePath.replace(/\/$/u, '');
+  const endpoint = matches[0]!, base = endpoint.npmLockOrigin !== undefined || endpoint.target.basePath === '/'
+    ? '' : endpoint.target.basePath.replace(/\/$/u, '');
   return { endpointRegistrationRef: canonicalSha256(endpoint), canonicalPackagePath: url!.pathname.slice(base.length) };
 }
 export function lockedPackageKey(item: LockedPackageV1): string {

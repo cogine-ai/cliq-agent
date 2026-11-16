@@ -1,6 +1,7 @@
 import type { createClientApplication } from './application.js';
 import { clientMutation, type ClientInvocation } from './commands.js';
 import type { InstalledControlFeature, InstalledControlRequestV1, InstalledControlResponseFor } from '../control/v1.js';
+import { nodeTestArguments } from '../kernel/verifier.js';
 
 export type ClientApplication = ReturnType<typeof createClientApplication>;
 type Response = InstalledControlResponseFor<InstalledControlFeature>;
@@ -103,7 +104,7 @@ export async function executeClientAction(app: ClientApplication, invocation: Cl
       throw new TypeError('Node check did not receive its exact active identity-read grant');
     intent = { ...intent, verifiers: [{ id: 'node-tests', version: '1', required: true,
       executable: { kind: 'toolchain', toolId: 'node' },
-      argv: ['--test', '--test-concurrency=1', invocation.nodeCheck.path].map(value => ({ kind: 'non_secret_literal' as const, value })),
+      argv: nodeTestArguments(invocation.nodeCheck.path).map(value => ({ kind: 'non_secret_literal' as const, value })),
       cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: authorized.result.grant.grantId,
       timeoutMs: 10_000, retries: 0, outputLimitBytes: 65_536 }] };
   }

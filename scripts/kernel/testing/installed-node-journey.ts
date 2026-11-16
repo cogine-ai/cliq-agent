@@ -86,6 +86,8 @@ import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, ins
   createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
 import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped, type InstalledBashProcesses } from './installed-tools-stop.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
+import { PR532_BASE, PR532_CHECK_SOURCE, PR532_FILE, PR532_CHECK, PR532_REGISTRY, PR532_REGISTRY_BASE, PR532_REGISTRY_ID,
+  readPr532PublisherInputs, runInstalledPr532Journey } from './installed-pr532-journey.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -211,7 +213,7 @@ export type InstalledProviderNodeJourneyInput = Readonly<{
 // yield; schema/identity/fence failures and all outer deadlines stay intact.
 export async function runInstalledNodeJourney(filename: string, journeyKind: 'verifier' | 'builtin-node-probe' | 'delivery' | 'provider' | 'daily' | 'provider-daily' | 'permission' | 'mcp' | 'mcp-stdio' | 'mcp-recovery' | 'mcp-status-user-replay',
   options: Readonly<{ publicationRetirementDiagnostics?: true; publicationRetirementStop?: true; publicationRetirementLate?: true;
-    npmDependencyArchive?: Buffer; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
+    npmDependencyArchive?: Buffer; pr532?: true; provider?: InstalledProviderNodeJourneyInput }> = {}): Promise<void> {
   assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
   const mcpStatusUserReplay = journeyKind === 'mcp-status-user-replay', mcpRecoveryJourney = journeyKind === 'mcp-recovery' || mcpStatusUserReplay;
   const mcpJourney = journeyKind === 'mcp' || journeyKind === 'mcp-stdio' || mcpRecoveryJourney;
@@ -221,17 +223,19 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
   if (mcpJourney) assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
-  if (journeyKind === 'daily') assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
+  if (journeyKind === 'daily' && !options.pr532) assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
     ...(options.publicationRetirementStop === true ? ['publicationRetirementStop'] : []),
     ...(options.publicationRetirementLate === true ? ['publicationRetirementLate'] : []),
     ...(options.npmDependencyArchive === undefined ? [] : ['npmDependencyArchive']),
     ...(options.provider === undefined ? [] : ['provider']),
+    ...(options.pr532 === true ? ['pr532'] : []),
   ].sort());
   assert.equal(journeyKind === 'provider' || journeyKind === 'provider-daily', options.provider !== undefined);
+  if (options.pr532) assert(dailyJourney && !options.npmDependencyArchive);
   if (options.provider) {
-    assert.deepEqual(Object.keys(options), ['provider'], 'real provider scope cannot borrow a fixture or fault campaign');
+    assert.deepEqual(Object.keys(options).sort(), options.pr532 ? ['pr532', 'provider'] : ['provider'], 'real provider scope cannot borrow a fixture or fault campaign');
     providerModelDefinition(options.provider.definition);
     assert(Buffer.isBuffer(options.provider.secret) && options.provider.secret.length > 0 && options.provider.secret.length <= 4096);
   }
@@ -243,6 +247,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   // Trusted disposable qualification composition only, including the three
   // owned delayed-volume campaigns. No runtime or public-wire option exists.
   const storeFailureDiagnostics = true;
+  const pr532 = options.pr532 ? await readPr532PublisherInputs() : undefined;
   assert.equal(process.geteuid!(), 0);
   const ledger = await readLedger(filename), recipe = ledger.runJourney;
   const installedClientDriver = path.join(recipe.buildFixture, 'installed-control-client-driver.mjs');
@@ -556,6 +561,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   };
   let server: Server | undefined, registryServer: Server | undefined, daemon: ChildProcess | undefined, daemonExit: Promise<void> | undefined;
   const registrySockets: Promise<void>[] = [];
+  const repository = fileURLToPath(new URL('../../..', import.meta.url));
+  const readGitBlob = (commit: string, name: string) => {
+    const result = spawnSync('/usr/bin/git', ['show', `${commit}:${name}`], { cwd: repository, env: environment,
+      timeout: 10_000, maxBuffer: 1_048_576 });
+    assert.equal(result.status, 0); return result.stdout;
+  };
   const dependencyResponder = createInstalledDependencyResponder({ model, readCas,
     async readCut(runId) { assert(inspectionClient); return accepted(await inspectionClient.send({ protocolVersion: 1, method: 'run.get', runId }), 'run.get'); } });
   const dependencyArchive = options.npmDependencyArchive ? installedDependencyPackage() : undefined;
@@ -800,6 +811,26 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
         assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
         assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
+        if (pr532) {
+          assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
+          const ordinal = ++postCount;
+          assert(ordinal <= 3);
+          const edit = ordinal === 2;
+          if (edit) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
+            entry.content.includes('Verifier "node-tests" failed an assertion (exit 1)') &&
+            entry.content.includes(JSON.stringify(PR532_CHECK)) && entry.content.includes('"lines":[')),
+          'the model request must carry the original check failure locations');
+          const response = Buffer.from(JSON.stringify({ id: 'pr532-preview-' + ordinal, object: 'chat.completion', model,
+            choices: [{ index: 0, finish_reason: edit ? 'tool_calls' : 'stop', message: edit ? { role: 'assistant', content: '',
+              tool_calls: [{ id: 'pr532-preview-edit', type: 'function', function: { name: 'edit', arguments: JSON.stringify({
+                path: PR532_FILE, old_text: readGitBlob(PR532_BASE, PR532_FILE).toString('utf8'),
+                new_text: readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } }] }
+              : { role: 'assistant', content: ordinal === 1 ? 'Run the baseline check.' : 'Run the check against the private repair.' } }],
+            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
+          scanBytes(response);
+          outgoing.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(response.length), Connection: 'close' }); outgoing.end(response);
+          return;
+        }
         if (dailyJourney) {
           assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
           const ordinal = ++postCount; assert(ordinal <= 4, 'normal daily workflow must not resend a completed or unknown model claim');
@@ -974,6 +1005,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       ...(journeyKind === 'mcp-stdio' || mcpRecoveryJourney ? { mcpStdio: true as const } : {}),
       ...(mcpRecoveryJourney ? { mcpRecovery: true as const } : {}),
       ...(options.npmDependencyArchive ? { npmDependencyArchive: options.npmDependencyArchive } : {}),
+      ...(pr532 ? { npmDependencyArchive: pr532.npmArchive, previewTsx: true as const } : {}),
       ...(journeyKind === 'verifier' || journeyKind === 'permission' ? { guestImageProfile: 'qualification_max' as const } : {}) };
     const signed = options.provider
       ? await buildInstalledProviderQualificationPackage(recipe.buildFixture, options.provider.definition, buildOptions)
@@ -1044,7 +1076,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       actualReadOnlyImageCopies: imageCopies.length, totalImageCopyBytes: imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount,
       imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096,
       ...(signed.guestToolchain.imageLayout.kind === 'compact' ? { guestImageLayout: signed.guestToolchain.imageLayout } : {}) };
-    if (options.npmDependencyArchive) {
+    if (options.npmDependencyArchive || pr532) {
       const data = signed.bundle.entries.filter(entry => entry.entryId === NPM_DATA_RECIPE.entryId);
       assert.equal(data.length, 1); assert.equal(data[0]!.digest, NPM_DATA_RECIPE.completeImageDigest);
       assert.equal(data[0]!.byteCount, NPM_DATA_RECIPE.completeImageBytes); assert.equal(data[0]!.executable, false);
@@ -1114,6 +1146,21 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       const registered = command(path.join(recipe.stateRoot, 'runtime/bootstrap'), ['--bootstrap-endpoint'], canonicalJsonBytes({
         schemaVersion: 1, kind: 'commit', requestId: nextId(), commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
       assert.equal(decodeEndpointAuthorityOperation(success(registered, 'operation')).disposition, 'registered');
+    }
+    if (pr532) {
+      const target = { scheme: 'https' as const, hostAscii: PR532_REGISTRY, port: 443, basePath: PR532_REGISTRY_BASE, redirectPolicy: 'reject_all' as const };
+      const tls = { ...registration.tls, serverNameAscii: PR532_REGISTRY, spkiSha256Pins: [pr532.registryPin] };
+      const tlsPolicyDigest = canonicalSha256(tls);
+      const dependencyRegistration: EndpointRegistrationV1 = { schemaVersion: 1, format: 'cliq-endpoint-registration-v1',
+        endpointRegistrationId: PR532_REGISTRY_ID, registrationKind: 'user', ownerPrincipalId: principal, purposes: ['dependency_registry'],
+        npmLockOrigin: 'https://registry.npmjs.org',
+        target, tls, tlsPolicyDigest, endpointIdentityDigest: canonicalSha256({ target, tlsPolicyDigest }),
+        createdAt: new Date().toISOString(), registrationDigest: '' };
+      dependencyRegistration.registrationDigest = digestOmitting(dependencyRegistration, 'registrationDigest');
+      const core = { schemaVersion: 1, kind: 'register', ownerPrincipalId: principal, registration: dependencyRegistration,
+        expectedRegistrationArtifactRef: canonicalSha256(dependencyRegistration), commandDigest: '' };
+      await registerEndpoint(canonicalJsonBytes({ schemaVersion: 1, kind: 'commit', requestId: nextId(),
+        commandCore: { ...core, commandDigest: digestOmitting(core, 'commandDigest') } }));
     }
     const credentialId = options.provider ? 'installed-provider-credential' : 'installed-verifier-credential';
     if (journeyKind === 'mcp') for (const kind of INSTALLED_MCP_CASES) {
@@ -1532,6 +1579,48 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         } });
       report.cases = report.permission.cases;
       assert.equal(postCount, 20); assert.equal(acceptedTcp, postCount); assert.equal(acceptedTls, postCount); assert(!responderFailure);
+    } else if (pr532) {
+      mark('pr532_workspace');
+      const workspace = path.join(recipe.workspace, 'pr532');
+      await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
+      const archive = spawnSync('/usr/bin/git', ['archive', PR532_BASE], { cwd: repository, env: environment,
+        timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
+      assert.equal(archive.status, 0);
+      const staged = spawnSync('/usr/sbin/runuser', [...prefix, '/usr/bin/tar', '-xf', '-', '-C', workspace], {
+        input: archive.stdout, env: environment, timeout: 30_000, maxBuffer: 65_536 });
+      assert.equal(staged.status, 0);
+      const testBytes = readGitBlob(PR532_CHECK_SOURCE, PR532_CHECK), originalBytes = readGitBlob(PR532_BASE, PR532_FILE);
+      const lockBytes = readGitBlob(PR532_BASE, 'package-lock.json');
+      assert((await readFile(path.join(workspace, PR532_FILE))).equals(originalBytes));
+      const checkPath = path.join(workspace, PR532_CHECK);
+      await writeFile(checkPath, testBytes); await chown(checkPath, ledger.uid, ledger.gid);
+      const git = (...args: string[]) => {
+        const selected = spawnSync('/usr/sbin/runuser', [...prefix, '/usr/bin/git', '-C', workspace, ...args],
+          { env: environment, timeout: 30_000, maxBuffer: 65_536 });
+        assert.equal(selected.status, 0); return selected.stdout.toString('utf8');
+      };
+      git('init', '-q', '-b', 'main'); git('add', '--all'); git('-c', 'user.name=Cliq preview', '-c', 'user.email=preview@example.invalid',
+        'commit', '-qm', 'Original source with unchanged regression check');
+      report.pr532Preview = await runInstalledPr532Journey({ workspace, alias: dailyAlias, originalBytes, testBytes, lockBytes,
+        budgets: options.provider?.budgets ?? { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000,
+          toolCalls: 24, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
+        command: dailyCommand, send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
+        artifact: readPublicArtifact, retained: readCas,
+        reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
+        progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq }) => {
+          report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, highWaterJournalSeq, highWaterItemSeq };
+        },
+        verifyHost: async expected => {
+          assert((await readFile(path.join(workspace, PR532_FILE))).equals(expected));
+          assert((await readFile(checkPath)).equals(testBytes));
+          assert((await readFile(path.join(workspace, 'package-lock.json'))).equals(lockBytes));
+          assert.equal(git('--no-optional-locks', 'status', '--porcelain=v1'), expected.equals(originalBytes) ? '' : ` M ${PR532_FILE}\n`);
+        },
+      });
+      assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 3 && acceptedTcp === 3 && acceptedTls === 3);
+      assert(!responderFailure);
+      report.pr532Preview.realModelUsed = options.provider !== undefined;
+      report.normalCliWorkflowComplete = true; report.protocolWorkflowComplete = true;
     } else if (options.provider || dailyJourney) {
       const workspace = path.join(recipe.workspace, dailyJourney ? 'daily' : 'provider');
       await mkdir(workspace, { mode: 0o700 }); await chown(workspace, ledger.uid, ledger.gid);
@@ -3033,7 +3122,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         else if (diagnostic.code === 'ERR_ASSERTION') failureKinds.push({ kind: 'assertion' });
         else if (diagnostic.code === 'ERR_SQLITE_ERROR' && typeof diagnostic.errcode === 'number' && Number.isSafeInteger(diagnostic.errcode) &&
             diagnostic.errcode >= 0 && diagnostic.errcode <= 65535) failureKinds.push({ kind: 'sqlite', primaryCode: diagnostic.errcode & 0xff });
-        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|qualify-installed-permission-journey|installed-permission-journey|installed-permission-result|installed-permission-evidence|installed-node-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-skills|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
+        for (const match of (error.stack ?? '').matchAll(/\b(qualify-installed-verifier-journey|qualify-installed-delivery-journey|qualify-installed-permission-journey|installed-permission-journey|installed-permission-result|installed-permission-evidence|installed-node-journey|installed-pr532-journey|installed-delivery-journey|installed-delivery-result|installed-verifier-result|installed-tools-result|installed-tools-stop|installed-skills|installed-guest-package|installed-supervisor-package|installed-model-package|installed-read-control|installed-client-consumer|installed-enroll-diagnostic|installed-worker-lease|installed-publication-recovery|installed-publication-crash-observer|installed-publication-stop-result|installed-publication-journal|installed-publication-retirement|installed-publication-late-result)\.ts:([1-9][0-9]{0,6}):([1-9][0-9]{0,6})/gu)) {
           if (match[1] === 'installed-publication-late-result' && !options.publicationRetirementLate) continue;
           if (frames.length < 8) frames.push({ file: match[1]! + '.ts', line: Number(match[2]), column: Number(match[3]) });
         }

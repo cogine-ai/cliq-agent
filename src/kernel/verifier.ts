@@ -1,4 +1,31 @@
 import type { ArtifactRef } from './types.js';
+import { normalizeBoundedText } from './identity.js';
+
+const nodeTestPrefix = ['--test', '--test-concurrency=1'] as const;
+
+/** These are the two installed Node checks. The model cannot supply loader
+ * flags, executable paths or environment values. */
+export function nodeTestArguments(filename: string): string[] {
+  if (normalizeBoundedText(filename, 1, 4096) !== filename || Buffer.byteLength(filename) >= 4090 ||
+      filename.startsWith('-') || filename.includes('\\') ||
+      filename.split('/').some(part => !part || part === '.' || part === '..' || part === '.git' || Buffer.byteLength(part) > 255))
+    throw new TypeError('Node check must be a canonical relative test path');
+  if (filename.length > 4 && filename.endsWith('.mjs')) return [...nodeTestPrefix, filename];
+  if (filename.length > 8 && filename.endsWith('.test.ts')) return [...nodeTestPrefix, '--import', 'tsx', filename];
+  throw new TypeError('Node check must select an .mjs or .test.ts file');
+}
+
+export function nodeTestProfile(argv: readonly { kind: string; value: string }[]): 'node' | 'tsx' | undefined {
+  const filename = argv.at(-1)?.value;
+  if (typeof filename !== 'string') return undefined;
+  try {
+    const expected = nodeTestArguments(filename);
+    if (expected.length === argv.length && expected.every((value, index) =>
+      argv[index]?.kind === 'non_secret_literal' && argv[index]?.value === value))
+      return expected.length === 3 ? 'node' : 'tsx';
+  } catch { /* The original admission/launch caller reports its fixed refusal. */ }
+  return undefined;
+}
 
 export type VerifierExecutableIdentityV1 =
   | { kind: 'guest_toolchain'; guestToolchainManifestRef: ArtifactRef; guestToolchainManifestDigest: string;
@@ -58,12 +85,14 @@ export type VerifierStopItem = {
 
 export type VerifierRepairModelContentV1 = {
   schemaVersion: 1; format: 'cliq-verifier-repair-model-content-v1'; verifierId: string; outcome: 'assertion_failed'; message: string; contentDigest: string;
+  check?: Readonly<{ path: string; reportedLines: readonly number[]; stdoutBytes: number }>;
 };
 
 export type VerifierRepairDiagnosticV1 = {
   schemaVersion: 1; format: 'cliq-verifier-repair-diagnostic-v1'; runId: string; candidateItemId: string; verifierPlanRef: ArtifactRef;
   verifierId: string; receiptRef: ArtifactRef; receiptDigest: string; stdoutRef: ArtifactRef; stderrRef: ArtifactRef;
-  redactionAlgorithm: 'cliq-verifier-repair-redaction-v1'; modelContentRef: ArtifactRef; modelContentDigest: string; diagnosticDigest: string;
+  redactionAlgorithm: 'cliq-verifier-repair-redaction-v1' | 'cliq-verifier-repair-location-v1';
+  modelContentRef: ArtifactRef; modelContentDigest: string; diagnosticDigest: string;
 };
 
 export type RepairDiagnosticEntryV1 = {

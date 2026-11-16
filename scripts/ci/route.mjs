@@ -75,6 +75,12 @@ export function routeEvent({ eventName, ref, event, cwd }) {
   if (eventName === 'workflow_dispatch' && event?.inputs?.qualification_group !== undefined &&
       event.inputs.qualification_group !== 'full') {
     const {qualification_group: group, expected_revision: expected, real_provider: funded} = event.inputs;
+    if (group === 'pr532' && (funded === 'true' || funded === 'false') && typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected)) {
+      try {
+        if (git(cwd, ['rev-parse', 'HEAD']).trim() === expected)
+          return selection(new Set(), 'explicit-pr532-preview-only', null);
+      } catch { /* Keep all checks when the source cannot be bound. */ }
+    }
     if (group === 'verifier' && funded === 'false' && typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected)) {
       try {
         if (git(cwd, ['rev-parse', 'HEAD']).trim() === expected)

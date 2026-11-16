@@ -1,5 +1,10 @@
 # Kernel delivery plan
 
+> **2026-11-16 delivery priority.** Demonstrate the fix from PR #532 through
+> the signed Linux kernel with a real model, the original check, disconnect and
+> reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
+> defines the active scope. Earlier entries below record their original evidence.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:
@@ -3690,3 +3695,26 @@ digest before timing is reported. QEMU Linux measures about 412 ms versus
 The free runner will measure the same comparison. All original qualification
 jobs and limits remain unchanged. No paid retry or PR is authorized by these
 partial results.
+
+Exact `7b710f096cbc99e851e9b039e564820d01d77450` free Linux run
+`43479030492` confirms complete 64 MiB native SHA ABBA observations of
+58.571/58.723 ms before and 48.324/48.233 ms after the fixed-round compiler
+hint, with identical full digests and both backend vector suites passing.
+The daily edit/check/repair/review/apply and signed Node campaigns pass.
+The maximum-image campaign still fails the original 90-second ordinary-tool
+window: one model and thirteen tools completed, with the fourteenth claimed
+and awaiting native readiness. Its first five verifier cases and terminal
+reconnect/restart pass; this is not complete qualification. Permission run
+`43478929922` passes initial READY but fails its first default-repair case's
+original 90-second window after three model POSTs. Original joins, secret
+scans and runner cleanup pass in both failures; no paid retry was dispatched.
+
+The follow-up preserves the three installed extractor owners and all their
+before/after complete-image, identity, description, cancellation and join
+checks, but uses the existing native-controller 1 ms polling interval instead
+of an immediate loop of synchronous metadata checks. Deterministic scheduling
+and cancellation regressions pass. An actual 256 MiB extractor component ABBA
+under x86 QEMU measures roughly half the CPU use and only a small elapsed-time
+improvement; it does not qualify native-runner performance or installed Run
+completion. No completed integrity result or extracted image is cached.
+The original installed deadlines and remaining qualification gaps stay open.

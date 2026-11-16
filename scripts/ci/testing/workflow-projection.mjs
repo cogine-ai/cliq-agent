@@ -5,8 +5,16 @@ import { createHash } from 'node:crypto';
 // it, so existing immutable campaign hashes still check the ORIGINAL job bodies.
 const routerJob = "  ci-route:\n    name: Select affected qualification groups\n    runs-on: ubuntu-22.04\n    timeout-minutes: 5\n    outputs:\n      typescript: ${{ steps.route.outputs.typescript }}\n      native: ${{ steps.route.outputs.native }}\n      credentials: ${{ steps.route.outputs.credentials }}\n      run: ${{ steps.route.outputs.run }}\n      verifier: ${{ steps.route.outputs.verifier }}\n      delivery: ${{ steps.route.outputs.delivery }}\n      upgrade: ${{ steps.route.outputs.upgrade }}\n      permission: ${{ steps.route.outputs.permission }}\n      full: ${{ steps.route.outputs.full }}\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n          fetch-depth: 0\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22.13.0\n      - name: Check routing and preserved qualification wiring\n        run: node --test scripts/ci/route.test.mjs\n      - name: Select immutable-source qualification scope\n        id: route\n        run: node scripts/ci/route.mjs\n";
 const triggers = '  workflow_dispatch:\n  merge_group:\n    types: [checks_requested]\n';
-export const providerInputs = "    inputs:\n      qualification_group:\n        description: Manual free-runner diagnosis only; full remains the release gate\n        type: choice\n        options: [full, verifier]\n        default: full\n      real_provider:\n        description: Run only the explicitly funded, real-provider journey\n        type: boolean\n        default: false\n      expected_revision:\n        description: Exact reviewed commit required for a targeted manual journey\n        type: string\n        default: ''\n";
+export const providerInputs = "    inputs:\n      qualification_group:\n        description: Manual free-runner diagnosis only; full remains the release gate\n        type: choice\n        options: [full, verifier, pr532]\n        default: full\n      real_provider:\n        description: Run only the explicitly funded, real-provider journey\n        type: boolean\n        default: false\n      expected_revision:\n        description: Exact reviewed commit required for a targeted manual journey\n        type: string\n        default: ''\n";
 const providerJob = "  real-provider:\n    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.qualification_group == 'full' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}\n    uses: ./.github/workflows/kernel-provider.yml\n    with:\n      expected_revision: ${{ inputs.expected_revision }}\n    secrets:\n      provider_key: ${{ secrets.CLIQ_PROVIDER_QUALIFICATION_KEY }}\n";
+const previewJob = funded => `  pr532-${funded ? 'provider' : 'controlled'}:
+    if: ${'\${{'} github.event_name == 'workflow_dispatch' && ${funded ? '' : '!'}inputs.real_provider && inputs.qualification_group == 'pr532' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    uses: ./.github/workflows/kernel-provider.yml
+    with:
+      expected_revision: ${'\${{'} inputs.expected_revision }}
+      pr532: true
+      funded: ${funded}
+${funded ? "    secrets:\n      provider_key: \${{ secrets.CLIQ_PROVIDER_QUALIFICATION_KEY }}\n" : ''}`;
 const foundation = {
   "installed-runtime-upgrade": "upgrade",
   "typescript": "typescript",
@@ -55,9 +63,10 @@ export function projectQualificationWorkflow(workflow, kind = 'foundation') {
     assert.equal(createHash('sha256').update(readCost[0]).digest('hex'), '70b7f47ebb22691d530451e394e0b90b4d81f215d593c17513e550120947eb95');
     workflow = replaceOnce(workflow, readCost[0], '');
     workflow = replaceOnce(workflow, '  workflow_dispatch:\n' + providerInputs, '  workflow_dispatch:\n');
+    for (const funded of [true, false]) workflow = replaceOnce(workflow, previewJob(funded) + '\n', '');
     workflow = replaceOnce(workflow, 'jobs:\n' + providerJob + '\n', 'jobs:\n');
     workflow = replaceOnce(workflow,
-      "  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}\n  cancel-in-progress: ${{ !inputs.real_provider }}\n",
+      "  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'pr532' && 'pr532' || inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}\n  cancel-in-progress: ${{ !inputs.real_provider }}\n",
       '  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}\n  cancel-in-progress: true\n');
   }
   const jobs = kind === 'foundation' ? foundation : permission;

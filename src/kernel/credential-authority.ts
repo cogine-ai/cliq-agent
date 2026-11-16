@@ -8,6 +8,7 @@ export type CredentialPurpose = 'model_endpoint' | 'dependency_registry' | 'mcp_
 export type EndpointRegistrationV1 = {
   schemaVersion: 1; format: 'cliq-endpoint-registration-v1'; endpointRegistrationId: string;
   registrationKind: 'bundled_default' | 'user'; ownerPrincipalId: string; purposes: CredentialPurpose[];
+  npmLockOrigin?: 'https://registry.npmjs.org';
   target: { scheme: 'https'; hostAscii: string; port: number; basePath: string; redirectPolicy: 'reject_all' };
   tls: { serverNameAscii: string; minimumVersion: 'TLSv1.3'; trustStoreRuntimeBundleRef: ArtifactRef;
     trustStoreRuntimeBundleManifestDigest: string; trustStoreEntryId: 'default_https_trust_store';
@@ -180,7 +181,7 @@ function basePath(value: unknown): void {
 /** Shape and embedded hash domains only; never proof of registration or a signed trust store. */
 export function decodeEndpointRegistration(value: unknown): EndpointRegistrationV1 {
   const object = closed(value, ['schemaVersion', 'format', 'endpointRegistrationId', 'registrationKind', 'ownerPrincipalId',
-    'purposes', 'target', 'tls', 'endpointIdentityDigest', 'tlsPolicyDigest', 'createdAt', 'registrationDigest']);
+    'purposes', 'target', 'tls', 'endpointIdentityDigest', 'tlsPolicyDigest', 'createdAt', 'registrationDigest'], ['npmLockOrigin']);
   if (object.format !== 'cliq-endpoint-registration-v1') throw new TypeError('endpoint registration format is invalid');
   text(object.endpointRegistrationId); text(object.ownerPrincipalId); time(object.createdAt);
   if (object.registrationKind !== 'bundled_default' && object.registrationKind !== 'user') throw new TypeError('endpoint registration kind is invalid');
@@ -188,6 +189,10 @@ export function decodeEndpointRegistration(value: unknown): EndpointRegistration
   const target = closed(object.target, ['scheme', 'hostAscii', 'port', 'basePath', 'redirectPolicy']);
   if (target.scheme !== 'https' || target.redirectPolicy !== 'reject_all') throw new TypeError('endpoint target policy is invalid');
   host(target.hostAscii); integer(target.port, 1, 65535); basePath(target.basePath);
+  if (Object.hasOwn(object, 'npmLockOrigin') && (object.npmLockOrigin !== 'https://registry.npmjs.org' ||
+      object.registrationKind !== 'user' || (object.purposes as unknown[]).length !== 1 ||
+      (object.purposes as unknown[])[0] !== 'dependency_registry' || target.hostAscii === 'registry.npmjs.org'))
+    throw new TypeError('npm lock origin needs an explicit public dependency mirror');
   const tls = closed(object.tls, ['serverNameAscii', 'minimumVersion', 'trustStoreRuntimeBundleRef', 'trustStoreRuntimeBundleManifestDigest',
     'trustStoreEntryId', 'trustStoreRef', 'trustStoreDigest', 'spkiSha256Pins']);
   if (tls.minimumVersion !== 'TLSv1.3' || tls.trustStoreEntryId !== 'default_https_trust_store') throw new TypeError('endpoint TLS policy is invalid');

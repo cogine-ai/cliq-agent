@@ -142,6 +142,19 @@ for (const policy of ['default', 'accept-edits', 'yolo']) test(`a checked ${poli
   } finally { await fixture.app.close(); }
 });
 
+test('the TypeScript check keeps the exact loader and separate execution approval', async () => {
+  const fixture = consumer();
+  const filename = 'src/model/providers/openai-compatible.test.ts';
+  try {
+    await executeClientAction(fixture.app, parseClientInvocation(['run', 'Fix it', '--check-node', filename, '--detach'], '/workspace', defaults));
+    const request = fixture.calls.find(call => call.method === 'run.submit')!.request;
+    assert.deepEqual(request.verifiers[0].argv.map((argument: {value: string}) => argument.value),
+      ['--test', '--test-concurrency=1', '--import', 'tsx', filename]);
+    assert.equal(request.verifiers[0].executionGrantId, undefined);
+    assert.equal(fixture.calls.some(call => call.method === 'run.approve'), false);
+  } finally { await fixture.app.close(); }
+});
+
 test('a refused or uncertain identity-grant response ends the action without admission or replacement', async () => {
   for (const uncertain of [false, true]) {
     const fixture = consumer({ 'authorization.create': async () => {

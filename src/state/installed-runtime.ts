@@ -18,6 +18,7 @@ import { signedKernelSchemaProfile, decodeSignedKernelSchema, schemaConversionPr
 import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
 import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
 import type { NativeBuiltinBashToolchain } from '../sandbox/guest-toolchain.js';
+import { waitForGuestToolchainReady } from '../sandbox/guest-toolchain-wait.js';
 import type { NativeBuiltinToolScriptImage, NativeDependencyNpmScriptImage, NativeDependencyNpmDataImage } from '../sandbox/linux-worker.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { constants, fstatSync, lstatSync, type BigIntStats } from 'node:fs';
@@ -25,7 +26,6 @@ import { lstat, mkdir, open, readdir, rename, type FileHandle } from 'node:fs/pr
 import { isMainThread, Worker } from 'node:worker_threads';
 import { Module } from 'node:module';
 import { isSea } from 'node:sea';
-import { setImmediate as yieldImmediate } from 'node:timers/promises';
 import { types as utilTypes } from 'node:util';
 
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -68,7 +68,7 @@ import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH, type Depen
 import { runInstalledCredentialAuthority, type HeldCredentialAuthorityLock } from './store.js';
 import type { NativeWorkerBinding, NativeWorkerImage, NativeSourceGitInspectorImage } from '../sandbox/linux-worker.js';
 import type { CredentialPlatformUser, NativeCredentialInspection, NativeCredentialPlatformBinding, NativeSecretServiceInput } from './credential-platform.js';
-import { GUEST_EXTRACTOR_RECIPE, type NativeGuestExtractorBinding, type NativeGuestToolchain, type NativeSourceGitToolchain } from '../sandbox/guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE, LINUX_TSX_COMPILER, type NativeGuestExtractorBinding, type NativeGuestToolchain, type NativeSourceGitToolchain } from '../sandbox/guest-toolchain.js';
 import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES } from '../kernel/skill.js';
 import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
 import { decodeGuestToolchainManifest, guestToolchainExecutables, guestToolchainRoots, validateGuestToolchainMetadata,
@@ -407,7 +407,7 @@ type InstalledRuntimeBinding = {
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   retainLocalInferenceRuntime(expectedBundleRef: string, signal?: AbortSignal): Promise<readonly PublishedArtifact[]>;
   retainMcpAdminRecipe(signal?: AbortSignal): Promise<void>;
-  startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeGuestToolchain>;
+  startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal; tsx?: boolean }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
   credentialScope<T>(operation: (token: HeldCredentialAuthorityLock) => Promise<T>, preparationSignal?: AbortSignal,
@@ -703,7 +703,7 @@ export function closeInstalledBuiltinBashToolchain(selected: HeldInstalledRuntim
 /** Private fixed extractor bridge. The original imported CAS image remains
  * descriptor-held; native begin owns its asynchronous copy/hash/seal and join. */
 export function startInstalledGuestToolchain(selected: HeldInstalledRuntime, toolchain: RetainedVerifierToolchain,
-  options: { signal?: AbortSignal } = {}): Promise<NativeGuestToolchain> {
+  options: { signal?: AbortSignal; tsx?: boolean } = {}): Promise<NativeGuestToolchain> {
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('guest extraction requires a genuine held installed selection');
   return binding.startGuestToolchain(toolchain, options);
@@ -3476,19 +3476,22 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 guestExtractor = native;
               }
               current();
-              const job = guestExtractor.begin(image.handle.fd, { imageDigest: manifest.guestImageDigest, imageByteCount: manifest.guestImageByteCount,
+              if (options.tsx && (typeof guestExtractor.beginTsxVerifier !== 'function' ||
+                  !manifest.verifiers.some(entry => canonicalSha256(entry) === canonicalSha256(LINUX_TSX_COMPILER))))
+                throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'the fixed signed TypeScript verifier compiler is unavailable');
+              const begin = options.tsx ? guestExtractor.beginTsxVerifier! : guestExtractor.begin;
+              const job = begin(image.handle.fd, { imageDigest: manifest.guestImageDigest, imageByteCount: manifest.guestImageByteCount,
                 architecture: 'x86_64', nodePath: manifest.node.canonicalGuestPath, nodeDigest: manifest.node.digest,
                 pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
               // Register immediately after native begin: even post-check failure
               // or Store shutdown must cancel and join this exact original job.
               guestJobs.add(job);
               try {
-                current();
-                while (!job.pollReady()) { current(); await yieldImmediate(); }
-                current();
+                await waitForGuestToolchainReady(() => job.pollReady(), current);
                 const description = job.describe();
                 if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
-                    description.nodeDigest !== manifest.node.digest || description.files.length < 1 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
+                    description.nodeDigest !== manifest.node.digest || description.files.length < 1 || description.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles ||
+                    description.files.some(file => file.path === LINUX_TSX_COMPILER.canonicalGuestPath && file.digest === LINUX_TSX_COMPILER.digest) !== (options.tsx === true))
                   mismatch('native guest extraction differs from the retained manifest');
                 await checkedRevalidate(signal); current(); return job;
               } catch (error) { await closeGuestToolchain(job); throw error; }
@@ -3538,9 +3541,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
               guestJobs.add(job);
               try {
-                current();
-                while (!job.pollReady()) { current(); await yieldImmediate(); }
-                current();
+                await waitForGuestToolchainReady(() => job.pollReady(), current);
                 const description = job.describe();
                 if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
                     description.nodeDigest !== manifest.node.digest || description.gitPath !== manifest.git.canonicalGuestPath ||
@@ -3600,9 +3601,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
                 pinnedExecutables: guestToolchainExecutables(manifest).map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest })) });
               guestJobs.add(job);
               try {
-                current();
-                while (!job.pollReady()) { current(); await yieldImmediate(); }
-                current();
+                await waitForGuestToolchainReady(() => job.pollReady(), current);
                 const description = job.describe();
                 if (description.imageDigest !== manifest.guestImageRef || description.nodePath !== manifest.node.canonicalGuestPath ||
                     description.nodeDigest !== manifest.node.digest || description.gitPath !== manifest.git.canonicalGuestPath ||

@@ -1201,21 +1201,26 @@ static bool verifier_string(struct cliq_verifier_config *config, const char *val
 static bool verifier_arguments(napi_env env, napi_value source, struct cliq_verifier_config *config) {
     napi_value array; uint32_t count; bool is_array = false;
     if (napi_get_named_property(env, source, "arguments", &array) != napi_ok ||
-        napi_is_array(env, array, &is_array) != napi_ok || !is_array || napi_get_array_length(env, array, &count) != napi_ok || count != 3 ||
+        napi_is_array(env, array, &is_array) != napi_ok || !is_array || napi_get_array_length(env, array, &count) != napi_ok || (count != 3 && count != 5) ||
         !verifier_string(config, config->executable, &config->arguments[0]) ||
         !verifier_string(config, "--no-addons", &config->arguments[1])) return false;
-    config->argument_count = 5;
+    bool tsx = count == 5;
+    config->argument_count = count + 2;
     for (uint32_t i = 0; i < count; i++) {
         napi_value argument; char value[CLIQ_VERIFIER_PATH_BYTES]; size_t bytes;
         if (napi_get_element(env, array, i, &argument) != napi_ok ||
             napi_get_value_string_utf8(env, argument, value, sizeof(value), &bytes) != napi_ok ||
             bytes == 0 || bytes >= sizeof(value) || strlen(value) != bytes ||
-            (i == 0 && strcmp(value, "--test") != 0) || (i == 1 && strcmp(value, "--test-concurrency=1") != 0)) return false;
-        if (i == 2) {
+            (i == 0 && strcmp(value, "--test") != 0) || (i == 1 && strcmp(value, "--test-concurrency=1") != 0) ||
+            (tsx && i == 2 && strcmp(value, "--import") != 0) ||
+            (tsx && i == 3 && strcmp(value, "tsx") != 0)) return false;
+        if (i + 1 == count) {
             char absolute[CLIQ_VERIFIER_PATH_BYTES];
+            const char *suffix = tsx ? ".test.ts" : ".mjs"; size_t suffix_bytes = strlen(suffix);
             int length = snprintf(absolute, sizeof(absolute), "/work/%s", value);
             if (length < 0 || (size_t)length >= sizeof(absolute) || !cliq_verifier_path(absolute) ||
-                value[0] == '-' || bytes < 5 || strcmp(value + bytes - 4, ".mjs") != 0) return false;
+                value[0] == '-' || (tsx && value[0] == '/') || bytes <= suffix_bytes ||
+                strcmp(value + bytes - suffix_bytes, suffix) != 0) return false;
         }
         if (!verifier_string(config, value, &config->arguments[i + 2])) return false;
     }
@@ -1226,6 +1231,8 @@ static bool verifier_environment(napi_env env, napi_value source, struct cliq_ve
     const char *fixed[] = { "LANG=C", "LC_ALL=C", "HOME=/home/cliq", "TMPDIR=/tmp", "PATH=/usr/bin" };
     for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
         if (!verifier_string(config, fixed[i], &config->environment[config->environment_count++])) return false;
+    if (config->argument_count == 7 && !verifier_string(config, "ESBUILD_BINARY_PATH=" CLIQ_VERIFIER_TSX_COMPILER,
+            &config->environment[config->environment_count++])) return false;
     napi_value array; uint32_t count; bool is_array = false;
     return napi_get_named_property(env, source, "environment", &array) == napi_ok &&
         napi_is_array(env, array, &is_array) == napi_ok && is_array && napi_get_array_length(env, array, &count) == napi_ok && count == 0;

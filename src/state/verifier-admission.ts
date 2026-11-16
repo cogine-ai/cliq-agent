@@ -3,7 +3,7 @@ import type { AuthorizationConsumptionReceiptV1, AuthorizationGrantV1 } from '..
 import type { VerifierRequest } from '../kernel/control-submit.js';
 import { digestOmitting, sha256Bytes } from '../kernel/identity.js';
 import type { RunAssemblyV1, RunSpec, VerifierSpec } from '../kernel/types.js';
-import type { VerifierCommandV1, VerifierEnvironmentV1 } from '../kernel/verifier.js';
+import { nodeTestProfile, type VerifierCommandV1, type VerifierEnvironmentV1 } from '../kernel/verifier.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import { readAuthorizationHistory, readVerifierExecutionAuthorizationHistory, type AuthorizationRuntime } from './authorization.js';
@@ -22,7 +22,7 @@ import { exactKeys, verifyRuntimeBundle, type RuntimeBundleManifest } from '../p
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readRun } from './rows.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS } from '../sandbox/guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE, LINUX_TSX_COMPILER, LINUX_VERIFIER_RESOURCE_MINIMUMS } from '../sandbox/guest-toolchain.js';
 import type { InstalledApplyDiagnosticStage } from './installed-run-diagnostics.js';
 
 const same = (left: unknown, right: unknown) => canonicalJsonBytes(left).equals(canonicalJsonBytes(right));
@@ -71,12 +71,7 @@ export function assertSupportedVerifierRequests(requests: readonly VerifierReque
         ...(request.retries === undefined ? [] : ['retries']), ...(request.outputLimitBytes === undefined ? [] : ['outputLimitBytes'])]) ||
         typeof request.required !== 'boolean') throw new TypeError('verifier request has unknown or missing fields');
     if (request.executable.kind !== 'toolchain' || request.executable.toolId !== 'node' ||
-        request.writableEphemeralPaths.length || Object.keys(request.env).length || request.argv.length !== 3 ||
-        request.argv[0]?.kind !== 'non_secret_literal' || request.argv[0].value !== '--test' ||
-        request.argv[1]?.kind !== 'non_secret_literal' || request.argv[1].value !== '--test-concurrency=1' ||
-        request.argv[2]?.kind !== 'non_secret_literal' || !request.argv[2].value.endsWith('.mjs') ||
-        request.argv[2].value.startsWith('-') || request.argv[2].value.includes('\\') ||
-        request.argv[2].value.split('/').some((part: string) => !part || part === '.' || part === '..' || part === '.git') ||
+        request.writableEphemeralPaths.length || Object.keys(request.env).length || !nodeTestProfile(request.argv) ||
         (request.cwd !== '.' && (request.cwd.includes('\\') || request.cwd.split('/').some((part: string) => !part || part === '.' || part === '..' || part === '.git'))))
       throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
     const timeout = request.timeoutMs ?? 600_000, retries = request.retries ?? 0, output = request.outputLimitBytes ?? 4_194_304;
@@ -159,7 +154,10 @@ export async function readVerifierRequestIdentities(driver: SqliteDriver, artifa
     if (selected.manifest.manifestDigest !== target.identity.manifestDigest || selected.manifest.node.logicalName !== target.identity.toolId ||
         selected.manifest.node.canonicalGuestPath !== target.identity.executionPath || selected.manifest.node.digest !== target.identity.executableDigest)
       throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
-    if (selected.manifest.node.canonicalGuestPath !== '/usr/bin/node') throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
+    if (selected.manifest.node.canonicalGuestPath !== '/usr/bin/node' ||
+        nodeTestProfile(request.argv) === 'tsx' &&
+        !selected.manifest.verifiers.some(entry => same(entry, LINUX_TSX_COMPILER)))
+      throw new VerifierAuthorizationError('UNSUPPORTED_EXECUTION_IDENTITY');
     if (historical && grant.state === 'consumed') {
       const receipt = decodeAuthorizationConsumptionReceipt(await readCanonicalArtifact(artifacts, grant.consumptionReceiptRef));
       if (!same(receipt.consumer, { kind: 'run_admission', runId: historical.runId, admissionIntentDigest: historical.admissionIntentDigest }) ||

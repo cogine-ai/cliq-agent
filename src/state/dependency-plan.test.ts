@@ -32,6 +32,25 @@ const read = (packageJson: unknown = manifest(), packageLock: unknown = lock(), 
   readNpmLockData({ packageJsonBytes: bytes(packageJson), packageLockBytes: bytes(packageLock), registryEndpoints: endpoints,
     maxPackages: 50_000, maxSingleFileBytes: 268_435_456, bindingGyp: { kind: 'absent' } });
 
+test('an explicit public npm mirror preserves the original lockfile, paths and integrity', () => {
+  const manifestBytes = bytes(manifest()), original = lock();
+  original.packages['node_modules/dep'].resolved = 'https://registry.npmjs.org/dep/-/dep-1.2.3.tgz';
+  const lockBytes = bytes(original);
+  const mirror: EndpointRegistrationV1 = { ...endpoint(), npmLockOrigin: 'https://registry.npmjs.org',
+    target: { ...endpoint().target, basePath: '/npm' } };
+  mirror.endpointIdentityDigest = canonicalSha256({ target: mirror.target, tlsPolicyDigest: mirror.tlsPolicyDigest });
+  mirror.registrationDigest = digestOmitting(mirror, 'registrationDigest');
+  const plan = readNpmLockData({ packageJsonBytes: manifestBytes, packageLockBytes: lockBytes, registryEndpoints: [mirror],
+    maxPackages: 50_000, maxSingleFileBytes: 268_435_456, bindingGyp: { kind: 'absent' } });
+  assert.equal(plan.lockfileRef, sha256Bytes(lockBytes));
+  assert.equal(plan.packages[0]!.endpointRegistrationRef, canonicalSha256(mirror));
+  assert.equal(plan.packages[0]!.canonicalPackagePath, '/dep/-/dep-1.2.3.tgz');
+  assert.equal(plan.packages[0]!.integrityDigest, sri.slice('sha512-'.length));
+  assert.throws(() => read(manifest(), original), /no unique frozen endpoint/u);
+  assert.throws(() => read(manifest(), lock(), [mirror]), /no unique frozen endpoint/u);
+  assert.throws(() => read(manifest(), original, [{ ...mirror, purposes: ['model_endpoint'] }]), /public dependency mirror/u);
+});
+
 test('Node dependency plan freezes exact original files and endpoint tuples without invoking npm', () => {
   const data = read(), policy = { schemaVersion: 1 as const, mode: 'locked_node' as const, allowedAdapters: ['npm-ci-v1' as const],
     registryEndpoints: [{ endpointRegistrationRef: canonicalSha256(endpoint()), endpointIdentityDigest: endpoint().endpointIdentityDigest,

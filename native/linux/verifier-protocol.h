@@ -12,6 +12,7 @@
 #define CLIQ_VERIFIER_MAX_ENV 128
 #define CLIQ_VERIFIER_STRING_BYTES 65536
 #define CLIQ_VERIFIER_PATH_BYTES 4096
+#define CLIQ_VERIFIER_TSX_COMPILER "/usr/bin/esbuild"
 
 enum cliq_verifier_termination {
     CLIQ_VERIFIER_PENDING = 0,
@@ -86,20 +87,26 @@ static inline bool cliq_verifier_config_valid(const struct cliq_verifier_config 
             !memchr(config->strings + at, '\0', config->string_bytes - at)) return false;
     }
     if (strcmp(config->strings + config->arguments[0], config->executable) != 0) return false;
+    bool tsx = config->argument_count == 7 &&
+        strcmp(config->strings + config->arguments[4], "--import") == 0 &&
+        strcmp(config->strings + config->arguments[5], "tsx") == 0;
     for (uint32_t i = 0; i < config->environment_count; i++) {
         uint32_t at = config->environment[i];
         if (at >= config->string_bytes || (at != 0 && config->strings[at - 1] != '\0') ||
             !memchr(config->strings + at, '\0', config->string_bytes - at) || !strchr(config->strings + at, '=')) return false;
     }
-    bool executable = false;
+    bool executable = false, compiler = false;
     for (uint32_t i = 0; i < config->file_count; i++) {
-        if (!cliq_verifier_path(config->files[i].path) || !cliq_verifier_mapping_path(config->files[i].path) || config->files[i].byte_count == 0 ||
+        if (!cliq_verifier_path(config->files[i].path)) return false;
+        bool compiler_path = strcmp(config->files[i].path, CLIQ_VERIFIER_TSX_COMPILER) == 0;
+        if (!(compiler_path ? tsx : cliq_verifier_mapping_path(config->files[i].path)) || config->files[i].byte_count == 0 ||
             config->files[i].byte_count > UINT64_C(268435456) ||
             strnlen(config->files[i].digest, 65) != 64) return false;
         for (uint32_t j = 0; j < i; j++) if (strcmp(config->files[i].path, config->files[j].path) == 0) return false;
         if (strcmp(config->files[i].path, config->executable) == 0) executable = true;
+        if (compiler_path) compiler = true;
     }
-    return executable;
+    return executable && compiler == tsx;
 }
 
 #endif

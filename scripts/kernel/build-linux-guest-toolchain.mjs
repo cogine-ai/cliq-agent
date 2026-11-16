@@ -9,9 +9,10 @@ import { guestImageLayout, GUEST_IMAGE_MAX_BYTES } from './guest-image-layout.mj
 // no release signature/qualification/Run authority is manufactured here.
 if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Guest toolchain build requires the qualified Linux x64 host');
 const [output, workerDirectory, nodeSource = process.execPath, ...extra] = process.argv.slice(2);
-if (!output || !workerDirectory || extra.length > 1 || extra.length === 1 && extra[0] !== '--qualification-max' ||
+if (!output || !workerDirectory || new Set(extra).size !== extra.length ||
+    extra.some(flag => flag !== '--qualification-max' && flag !== '--preview-tsx') ||
     ![output, workerDirectory, nodeSource].every(path.isAbsolute))
-  throw new Error('usage: build-linux-guest-toolchain.mjs NEW_ABSOLUTE_OUTPUT_DIRECTORY ABSOLUTE_BUILT_WORKER_DIRECTORY [ABSOLUTE_NODE] [--qualification-max]');
+  throw new Error('usage: build-linux-guest-toolchain.mjs NEW_ABSOLUTE_OUTPUT_DIRECTORY ABSOLUTE_BUILT_WORKER_DIRECTORY [ABSOLUTE_NODE] [--qualification-max] [--preview-tsx]');
 await mkdir(output, { mode: 0o700 });
 const staging = await mkdtemp(path.join(output, '.build-'));
 const tree = path.join(staging, 'tree');
@@ -64,6 +65,34 @@ async function executable(source, target, logicalName, version) {
   }
   return { logicalName, canonicalGuestPath: target, digest: identity.digest, version };
 }
+async function previewCompiler() {
+  // Exact @esbuild/linux-x64 from the v0.15.0 task's original package lock.
+  // Do not run an installer, package script, or a host executable to select it.
+  const response = await fetch('https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.27.7.tgz',
+    { redirect: 'error', signal: AbortSignal.timeout(60_000) });
+  if (!response.ok || !response.body) throw new Error('Unable to acquire the locked preview compiler');
+  const archive = path.join(staging, 'compiler.tgz');
+  const held = await open(archive, 'wx', 0o600), hash = createHash('sha512');
+  try {
+    let total = 0;
+    for await (const chunk of response.body) {
+      total += chunk.length;
+      if (total > 16 * 1024 * 1024) throw new Error('Locked preview compiler archive exceeds its bound');
+      hash.update(chunk); await held.writeFile(chunk);
+    }
+  } finally { await held.close(); }
+  if (hash.digest('base64') !== 'hzznmADPt+OmsYzw1EE33ccA+HPdIqiCRq7cQeL1Jlq2gb1+OyWBkMCrYGBJ+sxVzve2ZJEVeePbLM2iEIZSxA==')
+    throw new Error('Locked preview compiler archive differs from the original integrity');
+  const extracted = spawnSync('/usr/bin/tar', ['-xOzf', archive, 'package/bin/esbuild'],
+    { maxBuffer: 16 * 1024 * 1024, timeout: 10_000 });
+  if (extracted.error || extracted.status !== 0 ||
+      digest(extracted.stdout) !== 'c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b')
+    throw new Error('Locked preview compiler has unexpected executable bytes');
+  const source = path.join(staging, 'esbuild');
+  await writeFile(source, extracted.stdout, { flag: 'wx', mode: 0o500 });
+  const entry = await install(source, '/usr/bin/esbuild');
+  return { logicalName: 'esbuild', canonicalGuestPath: entry.path, digest: entry.digest, version: '0.27.7' };
+}
 try {
   const selectedNode = await protectedSource(nodeSource);
   const nodeVersion = command(selectedNode, ['--version']).trim();
@@ -80,11 +109,12 @@ try {
   const bashSource = await protectedSource('/bin/bash');
   const bash = await executable(bashSource, '/bin/bash', 'bash', digest(await readFile(bashSource)));
   const node = await executable(selectedNode, '/usr/bin/node', 'node', nodeVersion.slice(1));
+  const verifiers = extra.includes('--preview-tsx') ? [await previewCompiler()] : [];
   const files = [...copied.values()].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
   const totalBytes = files.reduce((sum, file) => sum + file.byteCount, 0);
   if (files.length > 32)
     throw new Error('Actual guest toolchain cannot fit the fixed image/file bound');
-  const imageLayout = guestImageLayout(totalBytes, extra.length ? 'qualification_max' : 'compact');
+  const imageLayout = guestImageLayout(totalBytes, extra.includes('--qualification-max') ? 'qualification_max' : 'compact');
   const { imageByteCount } = imageLayout;
   const filename = path.join(staging, 'guest-toolchain.ext4');
   const image = await open(filename, 'wx', 0o600);
@@ -107,7 +137,7 @@ try {
     guestImageRef: imageDigest, guestImageDigest: imageDigest, guestImageByteCount: imageByteCount,
     guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64', kernelAbi: 'linux-x86_64-v1',
     userspaceAbi: 'linux-x86_64-glibc-v1', worker, shell, git, node,
-    searchTools: [], verifiers: [], admittedExecutables: [bash], files, extractedFileBytes: totalBytes, imageLayout,
+    searchTools: [], verifiers, admittedExecutables: [bash], files, extractedFileBytes: totalBytes, imageLayout,
     scope: 'actual build bytes only; not release-signed, execution-qualified or a Run proof' };
   const metadataFile = path.join(staging, 'guest-toolchain-input.json');
   await writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx', mode: 0o400 });

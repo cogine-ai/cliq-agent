@@ -6,6 +6,56 @@
 **Implementation Status (2026-09-26, main `0f2fa146`):** Hidden M0/M1/M2 foundations, native StateOwner crash takeover, worker-loss fencing/quarantine primitives, and substantial WP02 typed continuation have landed. Supervisor/broker/verification/package integration and migration/rollback remain incomplete; the default CLI/TUI still uses the legacy runtime. See the [six-package design review](../kernel/2026-09-26-design-review.md) for current evidence and remaining boundaries. Kernel Cut has not passed.
 **Audience:** Core maintainers, implementers, reviewers, and integration authors
 
+## Approved preview delivery amendment — 2026-11-16
+
+The deliverable is one installed Linux workflow for one active Git repository
+task. Submit from the normal CLI with one real model and one approved check.
+The model works in the existing private workspace, uses the actual check's
+failure to repair the candidate, and produces an inspectable result. Close
+the client before completion, reconnect to the same Run, review the verified
+diff, and explicitly apply that exact result. Reuse the installed Supervisor,
+Run, worker, broker, verifier and Delivery paths.
+
+Use the real DeepSeek compatibility issue from PR #532. Start at `v0.15.0`
+(`9cce652c2a91d8484344e4794ae56576a915cc67`) with the PR's actual focused
+regression file from `961658fcf80116b6ef13e39cf39d901276a48c3c` and its locked
+project dependencies. An explicitly registered public npm mirror can serve the
+original lock URLs' packages. Require TLS 1.3, the selected mirror's pinned
+identity, no redirects, and the unchanged lock integrity for each archive.
+The focused Node/tsx check must fail on the original
+implementation and pass on the model's candidate. Supply the issue and check
+command without the reference implementation. A controlled provider can
+rehearse the installed transport and check lifecycle. The acceptance result
+requires a real model and the same project's real check.
+
+Give the model useful failure evidence through the existing authorized
+private tools where possible. If those are insufficient, expose only a bounded
+data projection of the exact failed check, with no credentials or new tool
+authority. The fixed `.test.ts` check uses locked npm dependencies and the
+pinned esbuild from the signed guest image. The model receives at most eight
+reported line numbers for the approved test file. The workspace stays read-only
+and non-executable. An infrastructure failure stays distinct from an assertion failure.
+Only the existing verifier receipt bound to the final immutable candidate can
+establish verified success. Workspace Trust still precedes config loading.
+Explicit tool permission, OS containment, credential and spend limits, current
+owner/release checks, genuine retirement and refusal to resend unknown effects
+remain required. Applying must refuse conflicting drift before writing.
+
+Retain the original checks and their outcomes for the existing qualification
+campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
+unrelated crash-cut matrices do not gate this one-task preview. Measure latency
+and interruptions on the actual task. A fixed campaign observation window or
+the number of file revalidations is not a preview product requirement. The
+original runtime safety deadlines still apply. Consolidate verification only
+where the same identity, freshness and failure behavior is demonstrated.
+
+Verify once through the installed entry and reuse targeted cancellation,
+restart/unknown-effect and drift-refusal coverage. Fix only blockers on this
+path. Run the repository build and full tests before pushing, then open one
+complete preview PR after the real-model workflow passes. This amendment
+takes precedence over the prior preview scope below. It leaves default cutover
+and its broader release claims pending.
+
 ## Approved delivery amendment — 2026-11-13
 
 The first release is an explicit Linux qualification preview of one repository

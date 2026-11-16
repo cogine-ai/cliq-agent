@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { digestOmitting } from '../kernel/identity.js';
 import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment, decodeVerifierRepairDiagnostic,
-  decodeVerifierRepairModelContent, decodeVerifierResultItem, decodeVerifierSpec, verifierRepairModelContent } from './verifier-artifacts.js';
+  decodeVerifierRepairModelContent, decodeVerifierResultItem, decodeVerifierSpec, verifierRepairModelContent, verifierReportedLocations } from './verifier-artifacts.js';
 
 const ref = (character: string) => character.repeat(64);
 const hash = <T extends Record<string, unknown>>(value: T, key: string) => ({ ...value, [key]: digestOmitting(value, key) });
@@ -14,6 +14,19 @@ function command() {
       toolId: 'node', executionPath: '/usr/bin/node', executableDigest: ref('c'), abiFingerprint: 'linux-x86_64-node-22' },
     argv: [{ kind: 'non_secret_literal', value: '--test' }, { kind: 'non_secret_literal', value: 'test.js' }], cwd: '.', commandDigest: '' }, 'commandDigest');
 }
+
+test('TypeScript repair exposes only numeric locations in the approved test file', () => {
+  const path = 'src/provider.test.ts';
+  const input = decodeVerifierCommand(hash({ ...command(),
+    argv: ['--test', '--test-concurrency=1', '--import', 'tsx', path].map(value => ({ kind: 'non_secret_literal', value })),
+  }, 'commandDigest'));
+  const stdout = Buffer.from('secret-looking-value assert failure\n' +
+    '      at TestContext.<anonymous> (/work/src/provider.test.ts:321:12)\n' +
+    '     unrelated text /work/src/provider.test.ts:92:1\n' +
+    '      at Other (/other/work/src/provider.test.ts:191:1)\n' +
+    '    at file:///work/src/provider.test.ts:379:12\n');
+  assert.deepEqual(verifierReportedLocations(input, stdout), { path, reportedLines: [321, 379], stdoutBytes: stdout.length });
+});
 
 test('verifier commands preserve direct argv and reject widened, secret or noncanonical executable input', () => {
   const valid = command();

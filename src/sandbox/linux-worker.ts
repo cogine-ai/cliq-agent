@@ -41,6 +41,7 @@ import { loadInstalledWorkerNative, sealInstalledWorkerImage, withInstalledWorke
 import { GUEST_EXTRACTOR_RECIPE, LINUX_VERIFIER_RESOURCE_MINIMUMS, type NativeGuestExtractorBinding, type NativeGuestToolchain,
   type NativeGuestExtractionInput, type NativeSourceGitToolchain, type NativeBuiltinBashToolchain } from './guest-toolchain.js';
 import { guestToolchainExecutables, type RetainedVerifierToolchain } from '../state/guest-toolchain.js';
+import { nodeTestProfile } from '../kernel/verifier.js';
 import { dependencyNpmInput } from './dependency-npm-data.js';
 import { NPM_DEPENDENCY_RECIPE, NPM_DEPENDENCY_SANDBOX_ENVIRONMENT, npmDependencyMounts } from './dependency-recipe.js';
 import type { DependencyBrokerBinding, NativeDependencyTransport } from '../state/dependency-broker-native.js';
@@ -732,8 +733,8 @@ export async function openInstalledLinuxWorkerLauncher(selected: HeldInstalledRu
     noteResources(boundary, subjects) { noteInstalledResourceBoundary(boundary, operation => withInstalledWorkerRoot(selected, anchor, operation), subjects); },
     loadNative: () => loadInstalledWorkerNative(selected, options.signal),
     image: entryId => sealInstalledWorkerImage(selected, entryId),
-    async guest(toolchain, signal) {
-      const job = await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}) });
+    async guest(toolchain, signal, tsx) {
+      const job = await startInstalledGuestToolchain(selected, toolchain, { ...(signal ? { signal } : {}), ...(tsx ? { tsx: true } : {}) });
       return Object.freeze({ job, close: () => closeInstalledGuestToolchain(selected, job) });
     },
     async preparing(toolchain, signal) {
@@ -1120,14 +1121,14 @@ function supportedRecipe(closure: WorkerLaunchClosure | BuiltinEditLaunchClosure
   }
 }
 
-function supportedVerifierRecipe(closure: VerifierLaunchClosure): void {
+function supportedVerifierRecipe(closure: VerifierLaunchClosure): 'node' | 'tsx' {
   const { spec, command, environment, toolchain } = closure;
   const executable = command.executable;
+  const profile = nodeTestProfile(command.argv);
   if (spec.purpose !== 'verifier' || executable.kind !== 'guest_toolchain' || spec.executable.kind !== 'guest_toolchain' ||
       executable.executionPath !== LINUX_VERIFIER_RECIPE.nodePath || executable.executableDigest !== toolchain.manifest.node.digest ||
       executable.guestToolchainManifestRef !== toolchain.manifestRef || executable.guestToolchainManifestDigest !== toolchain.manifest.manifestDigest ||
-      command.argv.length !== 3 || command.argv[0]?.value !== '--test' || command.argv[1]?.value !== '--test-concurrency=1' ||
-      !command.argv[2]?.value.endsWith('.mjs') || environment.variables.length !== 0 || environment.writableEphemeralPaths.length !== 0 ||
+      !profile || environment.variables.length !== 0 || environment.writableEphemeralPaths.length !== 0 ||
       canonicalSha256(spec.environment) !== canonicalSha256(LINUX_VERIFIER_RECIPE.environment) ||
       spec.runtime.launcher.executableId !== LINUX_VERIFIER_RECIPE.launcherId ||
       spec.resources.maxIpcFrameBytes !== LINUX_VERIFIER_RECIPE.maxIpcFrameBytes ||
@@ -1138,6 +1139,7 @@ function supportedVerifierRecipe(closure: VerifierLaunchClosure): void {
         ((mount.targetPath === '/home/cliq' && mount.purpose === 'home') || (mount.targetPath === '/tmp' && mount.purpose === 'tmp'))) ||
       new Set(spec.mounts.map(mount => mount.targetPath)).size !== 2)
     throw new LinuxExecutionIdentityError('verifier is outside the fixed signed read-only Node test recipe');
+  return profile;
 }
 
 function supportedBuiltinScriptRecipe(closure: BuiltinScriptLaunchClosure): void {
@@ -1610,7 +1612,8 @@ export async function openLinuxWorkerLauncher(options?: LinuxWorkerInstallation)
       if (primary) throw primary.error;
       return sealed!;
     },
-    async guest(toolchain, signal) {
+    async guest(toolchain, signal, tsx) {
+      if (tsx) throw new LinuxExecutionIdentityError('the TypeScript verifier requires the installed runtime');
       return startSignedGuest(toolchain, signal, false);
     },
     async preparing(toolchain, signal) {
@@ -1704,7 +1707,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
   withRoot(operation: (fd: number) => void): void;
   loadNative(recheck: () => void): Promise<NativeBinding>;
   image(entryId: string, binding: NativeBinding): Promise<NativeImage>;
-  guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal): Promise<HeldGuestPreparation>;
+  guest(toolchain: RetainedVerifierToolchain, signal?: AbortSignal, tsx?: boolean): Promise<HeldGuestPreparation>;
   builtinScript?(signal?: AbortSignal): Promise<NativeBuiltinToolScriptImage>;
   builtin?(toolchain: RetainedVerifierToolchain, bash: boolean, script: NativeBuiltinToolScriptImage, signal?: AbortSignal): Promise<HeldBuiltinToolRuntime>;
   dependency?(toolchain: RetainedVerifierToolchain, scripts: boolean, transport: NativeDependencyTransport,
@@ -2472,7 +2475,8 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                   async createVerifier(verifierClosure, options) {
                     if (this !== worker || !active) throw new KernelStorageError('LEASE_FENCED', 'verifier requires the actual next active parent worker');
                     controllerReceiver(); borrowed.assertHeld(); assertVerifierLaunchClosure(verifierClosure);
-                    same(verifierClosure.bundle, bundle, 'verifier bundle'); supportedVerifierRecipe(verifierClosure);
+                    same(verifierClosure.bundle, bundle, 'verifier bundle');
+                    const checkProfile = supportedVerifierRecipe(verifierClosure);
                     const verifierBackend = verifierClosure.plan.backend;
                     if (verifierBackend.kind !== 'linux' || verifierClosure.plan.parentContainmentRef !== canonicalSha256(containment) ||
                         verifierClosure.spec.parentWorkerContainmentRef !== canonicalSha256(containment) ||
@@ -2482,7 +2486,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                       mismatch('verifier does not select the exact actual parent, generation and fixed native recipe');
                     const signal = AbortSignal.any([installationAbort.signal, controllerAbort.signal, ...(options?.signal ? [options.signal] : [])]);
                     signal.throwIfAborted();
-                    const opening = source.guest(verifierClosure.toolchain, signal).then(guest => {
+                    const opening = source.guest(verifierClosure.toolchain, signal, checkProfile === 'tsx').then(guest => {
                       guests.add(guest); controllerGuests.add(guest); return guest;
                     });
                     guestOpenings.add(opening); controllerGuestOpenings.add(opening);

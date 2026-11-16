@@ -10,7 +10,7 @@ on:
       qualification_group:
         description: Manual free-runner diagnosis only; full remains the release gate
         type: choice
-        options: [full, verifier]
+        options: [full, verifier, pr532]
         default: full
       real_provider:
         description: Run only the explicitly funded, real-provider journey
@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}
+  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'pr532' && 'pr532' || inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}
   cancel-in-progress: ${{ !inputs.real_provider }}
 
 jobs:
@@ -36,6 +36,24 @@ jobs:
     uses: ./.github/workflows/kernel-provider.yml
     with:
       expected_revision: ${{ inputs.expected_revision }}
+    secrets:
+      provider_key: ${{ secrets.CLIQ_PROVIDER_QUALIFICATION_KEY }}
+
+  pr532-controlled:
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.real_provider && inputs.qualification_group == 'pr532' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    uses: ./.github/workflows/kernel-provider.yml
+    with:
+      expected_revision: ${{ inputs.expected_revision }}
+      pr532: true
+      funded: false
+
+  pr532-provider:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.qualification_group == 'pr532' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    uses: ./.github/workflows/kernel-provider.yml
+    with:
+      expected_revision: ${{ inputs.expected_revision }}
+      pr532: true
+      funded: true
     secrets:
       provider_key: ${{ secrets.CLIQ_PROVIDER_QUALIFICATION_KEY }}
 

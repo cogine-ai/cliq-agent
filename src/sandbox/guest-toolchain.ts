@@ -8,6 +8,10 @@ export const GUEST_EXTRACTOR_RECIPE = Object.freeze({
 
 /** Fixed Node test subset, not an automatic enlargement of caller limits. */
 export const LINUX_VERIFIER_RESOURCE_MINIMUMS = Object.freeze({ maxProcesses: 32 } as const);
+export const LINUX_TSX_COMPILER = Object.freeze({
+  logicalName: 'esbuild', canonicalGuestPath: '/usr/bin/esbuild', version: '0.27.7',
+  digest: 'c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b',
+} as const);
 
 export type NativeGuestExtractionInput = Readonly<{
   imageDigest: string;
@@ -56,6 +60,7 @@ export type NativeGuestExtractorBinding = Readonly<{
   /** Acquires its own descriptor synchronously; bounded copy/hash/seal and
    * parsing run inside this same cancellable, joinable native owner. */
   begin(imageFd: number, input: NativeGuestExtractionInput): NativeGuestToolchain;
+  beginTsxVerifier?(imageFd: number, input: NativeGuestExtractionInput): NativeGuestToolchain;
   /** Fixed Node + /usr/bin/git dual-root extraction, with the same bounds. */
   beginBuiltinBash?(imageFd: number, input: NativeGuestExtractionInput): NativeBuiltinBashToolchain;
   beginSourceGit?(imageFd: number, input: NativeGuestExtractionInput): NativeSourceGitToolchain;

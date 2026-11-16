@@ -49,6 +49,7 @@ case ${1:-} in
   --run-mcp-recovery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-recovery-campaign; shift ;;
   --run-mcp-status-user-replay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-status-user-replay-campaign; shift ;;
   --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
+  --run-pr532-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--pr532-campaign; shift ;;
   --run-local-inference-journey)
     [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
       printf 'local inference qualification requires its pinned offline input directory\n' >&2; exit 2;
@@ -64,6 +65,11 @@ case ${1:-} in
       printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
     }
     probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-daily-campaign; probe_provider_configuration=$2; shift 2 ;;
+  --run-provider-pr532-journey)
+    [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+      printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-pr532-campaign; probe_provider_configuration=$2; shift 2 ;;
   --run-delivery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-campaign; shift ;;
   --run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;
   --run-delivery-stop-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-stop-campaign; shift ;;
@@ -111,6 +117,9 @@ done
 [[ "$probe_run_driver_mode" != --local-inference-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the local inference scope requires the original non-delayed volume\n' >&2; exit 2;
 }
+[[ ( "$probe_run_driver_mode" != --pr532-campaign && "$probe_run_driver_mode" != --provider-pr532-campaign ) || "$probe_volume_mode" = loop ]] || {
+  printf 'the PR 532 preview requires the original non-delayed volume\n' >&2; exit 2;
+}
 [[ "$probe_run_driver_mode" != --daily-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the normal daily scope requires the original non-delayed volume\n' >&2; exit 2;
 }
@@ -124,7 +133,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-pr532-journey|--run-provider-pr532-journey PUBLIC_CONFIG|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   printf 'local model option: --run-local-inference-journey PINNED_INPUT_DIRECTORY ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
@@ -174,9 +183,9 @@ elif [[ "$probe_run_driver_mode" = --migration-campaign || "$probe_run_driver_mo
   readonly probe_run_driver="$probe_source_dir/qualify-installed-migration-journey.ts"
 elif [[ "$probe_run_driver_mode" = --mcp-recovery-campaign || "$probe_run_driver_mode" = --mcp-status-user-replay-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-recovery-journey.ts"
-elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign || "$probe_run_driver_mode" = --provider-pr532-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
-elif [[ "$probe_run_driver_mode" = --daily-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --daily-campaign || "$probe_run_driver_mode" = --pr532-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-daily-journey.ts"
 elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-local-inference-journey.ts"
@@ -1084,7 +1093,7 @@ elif [[ "$probe_campaign_kind" = run-journey ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
   elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_local_inference_inputs"
-  elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign ]]; then
+  elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign || "$probe_run_driver_mode" = --provider-pr532-campaign ]]; then
     # No key in argv/environment/config. The owner sends it only after this
     # original driver's fixed stdin-ready marker; all setup children are done.
     "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_provider_configuration"

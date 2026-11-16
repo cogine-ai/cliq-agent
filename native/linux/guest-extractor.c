@@ -25,6 +25,8 @@
 #define IMAGE_SEALS (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)
 #define NODE_PATH "/usr/bin/node"
 #define LOADER_PATH "/lib64/ld-linux-x86-64.so.2"
+#define TSX_COMPILER_PATH "/usr/bin/esbuild"
+#define TSX_COMPILER_SHA256 "c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b"
 #define CHUNK_BYTES 65536
 #define MAX_PHDRS 128
 #define MAX_DYNAMIC 4096
@@ -43,6 +45,7 @@ struct extraction {
     bool work_complete, env_closing, retired;
     atomic_bool cancelled, finished;
     bool unsafe; const char *error;
+    const struct pinned_file *tsx_compiler;
     int image_fd, source_fd; struct stat source_identity;
     uint64_t image_bytes, mapped_bytes, needed_read_bytes;
     uint32_t pinned_count; struct pinned_file pinned[CLIQ_GUEST_MAX_PINNED];
@@ -81,6 +84,7 @@ static bool mapped_path(struct extraction *job, const char *path) {
     if (!image_path(path)) return false;
     if ((job->held.source_recipe_version == 1 || job->held.builtin_recipe_version == 1) && !strcmp(path, "/usr/bin/git")) return true;
     if (job->held.builtin_recipe_version == 1 && !strcmp(path, "/bin/bash")) return true;
+    if (job->tsx_compiler && !strcmp(path, job->tsx_compiler->path)) return true;
     if (!strcmp(path, NODE_PATH) || !strcmp(path, LOADER_PATH)) return true;
     const char *roots[] = { "/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/" };
     for (size_t i = 0; i < 2; i++) {
@@ -285,11 +289,14 @@ static bool elf_dependencies(struct extraction *job, ext2_filsys fs, uint32_t in
         header.e_version != EV_CURRENT || header.e_machine != EM_X86_64 || (header.e_type != ET_EXEC && header.e_type != ET_DYN) ||
         header.e_ehsize != sizeof(header) || header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum || header.e_phnum > MAX_PHDRS ||
         !read_at(job, file->fd, file->byte_count, header.e_phoff, phdrs, header.e_phnum * sizeof(*phdrs))) return fail(job, "guest_elf_header");
-    Elf64_Phdr *dynamic = NULL; bool interpreter = false;
+    bool compiler = job->tsx_compiler && !strcmp(file->path, TSX_COMPILER_PATH);
+    Elf64_Phdr *dynamic = NULL; bool interpreter = false, executable_entry = false;
     for (size_t i = 0; i < header.e_phnum; i++) {
         Elf64_Phdr *ph = &phdrs[i];
         if (ph->p_offset > file->byte_count || ph->p_filesz > file->byte_count - ph->p_offset ||
             (ph->p_type == PT_LOAD && (ph->p_memsz < ph->p_filesz || ph->p_vaddr > UINT64_MAX - ph->p_memsz))) return fail(job, "guest_elf_segment");
+        if (ph->p_type == PT_LOAD && (ph->p_flags & PF_X) && !(ph->p_flags & PF_W) &&
+            header.e_entry >= ph->p_vaddr && header.e_entry - ph->p_vaddr < ph->p_filesz) executable_entry = true;
         if (ph->p_type == PT_INTERP) {
             char path[CLIQ_GUEST_PATH_BYTES];
             if (interpreter || ph->p_filesz < 2 || ph->p_filesz > sizeof(path) ||
@@ -301,6 +308,10 @@ static bool elf_dependencies(struct extraction *job, ext2_filsys fs, uint32_t in
         }
         if (ph->p_type == PT_DYNAMIC) { if (dynamic) return fail(job, "guest_elf_dynamic"); dynamic = ph; }
     }
+    /* The one signed compiler is static. Keep the dynamic closure mandatory
+     * for every other mapped executable and library. */
+    if (compiler) return (header.e_type == ET_EXEC && executable_entry && !dynamic && !interpreter) ||
+        fail(job, "guest_tsx_compiler_elf");
     if (index == 0 && !interpreter) return fail(job, "guest_node_interpreter");
     if (!dynamic || !dynamic->p_filesz || dynamic->p_filesz % sizeof(Elf64_Dyn) || dynamic->p_filesz / sizeof(Elf64_Dyn) > MAX_DYNAMIC)
         return fail(job, "guest_elf_dynamic");
@@ -387,6 +398,8 @@ static void execute(napi_env env, void *data) {
         valid = extract_file(job, fs, job->held.git_path, job->held.git_digest) == 1;
     if (valid && job->held.builtin_recipe_version == 1)
         valid = extract_file(job, fs, job->held.bash_path, job->held.bash_digest) == 2;
+    if (valid && job->tsx_compiler)
+        valid = extract_file(job, fs, job->tsx_compiler->path, job->tsx_compiler->digest) == 1;
     /* Newly discovered libraries extend this same bounded worklist; paths and
      * inodes are deduplicated, so cyclic ELF dependencies cannot grow it. */
     for (uint32_t i = 0; valid && i < job->held.file_count; i++) valid = active(job) && elf_dependencies(job, fs, i);
@@ -608,7 +621,12 @@ static napi_value begin_fixed(napi_env env, napi_callback_info info, unsigned in
     atomic_init(&job->held.ready, false); atomic_init(&job->held.revoked, false); atomic_init(&job->cancelled, false); atomic_init(&job->finished, false);
     for (size_t i = 0; i < CLIQ_GUEST_MAX_FILES; i++) job->held.files[i].fd = -1;
     bool valid = input(env, args[1], job);
-    if (valid && recipe != 0) {
+    if (valid && recipe == 3) {
+        for (uint32_t i = 0; i < job->pinned_count; i++)
+            if (!strcmp(job->pinned[i].path, TSX_COMPILER_PATH) &&
+                !strcmp(job->pinned[i].digest, TSX_COMPILER_SHA256)) job->tsx_compiler = &job->pinned[i];
+        valid = job->tsx_compiler != NULL;
+    } else if (valid && recipe != 0) {
         for (uint32_t i = 0; i < job->pinned_count; i++) if (strcmp(job->pinned[i].path, "/usr/bin/git") == 0) {
             memcpy(job->held.git_path, job->pinned[i].path, sizeof(job->held.git_path));
             memcpy(job->held.git_digest, job->pinned[i].digest, sizeof(job->held.git_digest));
@@ -658,6 +676,7 @@ static napi_value begin(napi_env env, napi_callback_info info) { return begin_fi
 static napi_value begin_source_git(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 1); }
 
 static napi_value begin_builtin_bash(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 2); }
+static napi_value begin_tsx_verifier(napi_env env, napi_callback_info info) { return begin_fixed(env, info, 3); }
 
 NAPI_MODULE_INIT() {
     napi_value version, function;
@@ -666,6 +685,8 @@ NAPI_MODULE_INIT() {
         napi_set_named_property(env, exports, "begin", function) != napi_ok ||
         napi_create_function(env, "beginSourceGit", NAPI_AUTO_LENGTH, begin_source_git, NULL, &function) != napi_ok ||
         napi_set_named_property(env, exports, "beginSourceGit", function) != napi_ok ||
+        napi_create_function(env, "beginTsxVerifier", NAPI_AUTO_LENGTH, begin_tsx_verifier, NULL, &function) != napi_ok ||
+        napi_set_named_property(env, exports, "beginTsxVerifier", function) != napi_ok ||
         napi_create_function(env, "beginBuiltinBash", NAPI_AUTO_LENGTH, begin_builtin_bash, NULL, &function) != napi_ok ||
         napi_set_named_property(env, exports, "beginBuiltinBash", function) != napi_ok) return NULL;
     return exports;

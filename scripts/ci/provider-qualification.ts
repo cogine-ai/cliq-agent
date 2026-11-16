@@ -12,11 +12,13 @@ import { decodeProviderJourneyConfiguration } from '../kernel/testing/provider-j
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const RUN_COST_CEILING_USD_MICROS = 5_000_000;
+const PR532_COST_CEILING_USD_MICROS = 15_000_000;
 
-export function providerSelection(now: Date) {
+export function providerSelection(now: Date, pr532 = false) {
   assert(Number.isFinite(now.getTime()));
   return decodeProviderJourneyConfiguration({
-    budgets: { childConcurrency: 1, childDepth: 0, costMicros: RUN_COST_CEILING_USD_MICROS, modelTokens: 20_000_000,
+    budgets: { childConcurrency: 1, childDepth: 0, costMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
+      modelTokens: pr532 ? 32_000_000 : 20_000_000,
       repairAttempts: 2, toolCalls: 100, wallTimeMs: 300_000 },
     definition: { provider: 'openai-compatible', model: 'deepseek-flash',
       claims: { contextLimitTokens: 32768, maxOutputTokens: 8192, nativeToolCalling: true, streaming: false, trustedUsageEvidence: false },
@@ -68,7 +70,7 @@ export async function runProviderProcess(command: string, args: readonly string[
       if (current === READY) {
         if (sent) { stop(); break; }
         sent = true; child.stdin.end(secret);
-      } else if (/^Installed daily journey phase [a-z_]+$/.test(current)) {
+      } else if (/^Installed daily journey phase [a-z0-9_]+$/.test(current)) {
         try { onPhase(current); } catch { stop(); break; }
       }
     }
@@ -95,6 +97,8 @@ export async function runProviderProcess(command: string, args: readonly string[
 async function main() {
   const secret = Buffer.from(process.env.CLIQ_PROVIDER_API_KEY ?? '');
   delete process.env.CLIQ_PROVIDER_API_KEY;
+  const pr532 = process.env.CLIQ_PROVIDER_PR532 === '1';
+  delete process.env.CLIQ_PROVIDER_PR532;
   try {
     assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
     assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
@@ -112,13 +116,14 @@ async function main() {
     // Fresh root-owned public bytes; fail rather than replace an existing name.
     const create = spawnSync('sudo', ['-n', 'python3', '-c',
       'import os,sys; fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o400); data=sys.stdin.buffer.read(65537); assert 0<len(data)<=65536; f=os.fdopen(fd,"wb"); f.write(data); f.flush(); os.fsync(f.fileno()); f.close()', configuration],
-    { input: canonicalJsonBytes(providerSelection(new Date())), timeout: 5000, maxBuffer: 65536 });
+    { input: canonicalJsonBytes(providerSelection(new Date(), pr532)), timeout: 5000, maxBuffer: 65536 });
     assert.equal(create.status, 0);
     const report = await runProviderProcess('sudo', ['-n', '/bin/bash', 'scripts/kernel/qualify-systemd-user.sh',
-      '--run-provider-daily-journey', configuration, process.execPath, output], secret, { ...process.env },
+      pr532 ? '--run-provider-pr532-journey' : '--run-provider-daily-journey', configuration, process.execPath, output], secret, { ...process.env },
     phase => process.stdout.write(phase + '\n'));
     await writeFile(path.join(root, 'cliq-provider-invocation.json'), JSON.stringify({ format: 'cliq-funded-provider-ci-v1', revision,
-      ...report, runCostCeilingUsdMicros: RUN_COST_CEILING_USD_MICROS, experimentCeilingCny: 235, automaticRetries: 0,
+      ...report, runCostCeilingUsdMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
+      experimentCeilingCny: pr532 ? 200 : 235, automaticRetries: 0,
       actualProviderBillingQualified: false }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     assert(report.passed);
   } finally { secret.fill(0); }

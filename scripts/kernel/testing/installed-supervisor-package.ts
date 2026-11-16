@@ -39,7 +39,7 @@ import { checkCanonicalBytes, validateBundle } from '../../../src/state/installe
 import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
 
 type LocalInferenceBuildInput = Omit<Parameters<typeof buildInstalledLocalInferencePackage>[0], 'fixture' | 'publisher'>;
-type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true; mcpStdio?: true; mcpRecovery?: true; localInference?: LocalInferenceBuildInput }>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; previewTsx?: true; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true; mcpStdio?: true; mcpRecovery?: true; localInference?: LocalInferenceBuildInput }>;
 import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
 import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
@@ -50,7 +50,7 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 async function buildInstalledSupervisorPackageCore(fixture: string,
   variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
   options: PackageBuildOptions = {}, diagnostics={phase:0}) {
-  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp' || key === 'mcpStdio' || key === 'mcpRecovery' || key === 'localInference'));
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'previewTsx' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp' || key === 'mcpStdio' || key === 'mcpRecovery' || key === 'localInference'));
   assert(!(modelFixture && options.providerModel), 'owned fixture and real provider definitions cannot be combined');
   const providerModel = options.providerModel === undefined ? undefined : providerModelDefinition(options.providerModel);
   if (providerModel) assert(variant === 'complete', 'real provider qualification requires the complete signed native package');
@@ -60,6 +60,8 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   // Publisher construction only: keep the original maximum-load qualifier
   // separate from the default official compact image. No runtime flag exists.
   assert(options.guestImageProfile === undefined || options.guestImageProfile === 'qualification_max');
+  if (options.previewTsx) assert(options.previewTsx === true && options.guestToolchain === 'node-test-v1' &&
+    options.npmDependencyArchive && !options.guestImageProfile && !options.source);
   if (options.guestImageProfile) assert(options.guestToolchain === 'node-test-v1');
   assert(options.publicationRetirementDiagnostics === undefined || options.publicationRetirementDiagnostics === true);
   assert(options.credentialPhaseDiagnostics === undefined || options.credentialPhaseDiagnostics === true);
@@ -258,7 +260,7 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
   if (options.guestToolchain) {
     const guestImageRoot = path.join(fixture, 'guest-image');
     const built = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-guest-toolchain.mjs'),
-      guestImageRoot, workerRoot, carrier, ...(options.guestImageProfile ? ['--qualification-max'] : [])],
+      guestImageRoot, workerRoot, carrier, ...(options.guestImageProfile ? ['--qualification-max'] : []), ...(options.previewTsx ? ['--preview-tsx'] : [])],
     { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
     assert.equal(built.error, undefined, 'actual pinned guest image construction did not join');
     assert.equal(built.status, 0, 'actual pinned guest image construction refused');
@@ -315,7 +317,9 @@ async function buildInstalledSupervisorPackageCore(fixture: string,
       executable: true, bytes: await readFile(path.join(credentialRoot, 'linux-credential-platform.node')) },
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
     { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
-      bytes: modelFixture ? Buffer.from(modelFixture.tls.caPem) : Buffer.from(rootCertificates.join('\n')) },
+      bytes: modelFixture && options.previewTsx
+        ? Buffer.concat([modelFixture.tls.caPem, Buffer.from('\n' + rootCertificates.join('\n'))])
+        : modelFixture ? Buffer.from(modelFixture.tls.caPem) : Buffer.from(rootCertificates.join('\n')) },
     { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
     ...modelEntries,
