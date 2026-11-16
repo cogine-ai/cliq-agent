@@ -902,7 +902,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   /** Tool completion and stop drain share the original physical worker's
    * quiescence/snapshot spine. A retained artifact cannot supply this owner. */
-  function checkpointRetirement(current: ActiveWorker, checkpointId: string, signal: AbortSignal) {
+  function checkpointRetirement(current: ActiveWorker, checkpointId: string, signal: AbortSignal,
+    onPhase?: (phase: RunRetirementPhase) => void) {
     if (current !== activeWorker || !worker || !generation || ownedLaunchId !== current.activated.launch.launchId) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint retirement lost its original physical worker owner');
     }
@@ -933,6 +934,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint continuation lost its original physical owner');
       }
       assertActiveStateOwner(driver, owner);
+      onPhase?.('history');
       const beforeSeal = await readRecoveryClosure(driver, artifacts, runId);
       signal.throwIfAborted();
       const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef);
@@ -947,6 +949,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         requireEqual(activeLaunch, retainedStage.launch, 'checkpoint continuation original launch stage');
         requireEqual(activeGeneration, retainedStage.generation, 'checkpoint continuation original generation stage');
       }
+      onPhase?.('native_retirement');
       revoking ??= beginGenerationRevocation(driver, owner, { launchId: activeLaunch.launchId,
         expectedLeaseVersion: activeLaunch.leaseVersion, expectedGenerationRowVersion: activeGeneration.rowVersion, quiesceId });
       death ??= await observeOriginalWorkerDeath(current);
@@ -954,6 +957,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       requireEqual(death.containment, currentWorker.containment, 'checkpoint original native containment');
       checkpointing ??= beginGenerationCheckpoint(driver, owner, { launchId: activeLaunch.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
         expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId });
+      onPhase?.('workspace_observation');
       observed ??= await currentGeneration.observe({ signal });
       inspector ??= await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
       retirementBody ??= deathBody(death, inspector);
@@ -1958,12 +1962,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const current = activeWorker, currentWorker = worker;
         // Fix the completed producer before the first quiescence or immutable
         // publication. This is not permission to request another model turn.
+        retirementPhase('history');
         const childSelection = await currentAgent.planFinalChildren({ expectedRunRevision }, signal);
         const candidate = childSelection.disposition === 'candidate'
           ? await currentAgent.beginFinalCandidate({ expectedRunRevision }, signal) : undefined;
         signal.throwIfAborted();
         const checkpointId = childSelection.disposition === 'child_final_required' ? childSelection.checkpointId : candidate!.checkpointId;
-        const retire = checkpointRetirement(current, checkpointId, signal);
+        const retire = checkpointRetirement(current, checkpointId, signal, retirementPhase);
         let proof: Awaited<ReturnType<typeof retire>> | undefined;
         operationPhase = 'received';
         receivedCompletion = { kind: 'final_turn', worker: currentWorker, activeWorker: current, finish: async () => {
@@ -1982,6 +1987,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
               throw new KernelStorageError('LEASE_FENCED', 'final turn no longer belongs to its original active worker');
             }
             try {
+              retirementPhase('retirement_commit');
               return candidate ? (await candidate.complete({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect })).run
                 : (await currentAgent.waitForFinalChildren({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect }, signal)).run;
             } catch (error) {
