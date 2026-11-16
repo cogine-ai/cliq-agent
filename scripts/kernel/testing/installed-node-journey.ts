@@ -1645,6 +1645,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         command: argv => dailyCommand(argv, argv[0] === 'run' ? 90_000 : 30_000),
         send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
+        dependencyFailure: value => { report.pr532DependencyFailure = value; },
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq, journal }) => {
           report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, waitingReason: run.waitingReason,

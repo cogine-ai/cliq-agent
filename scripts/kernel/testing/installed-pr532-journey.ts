@@ -13,6 +13,9 @@ import { decodeSourceManifest } from '../../../src/state/decoders.js';
 import { decodeVerifierCommand, decodeVerificationReceipt, verifierReportedLocations } from '../../../src/state/verifier-artifacts.js';
 import type { RunSpec } from '../../../src/kernel/types.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
+import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
+import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
+import { decodeDependencyProcessCapture } from '../../../src/state/dependency-capture.js';
 
 export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
 export const PR532_CHECK_SOURCE = '961658fcf80116b6ef13e39cf39d901276a48c3c';
@@ -66,6 +69,7 @@ export async function runInstalledPr532Journey(input: {
   authorizeGitSource(): Promise<{ sourceInspectionGrantId: string; ignoreReadGrantIds: string[] }>;
   verifyHost(expected: Buffer): Promise<void>;
   progress(cut: Result<'run.get'>): void;
+  dependencyFailure(value: Record<string, unknown>): void;
   mark(phase: string): void;
 }) {
   const read = async <M extends InstalledControlFeature>(request: InstalledControlRequestV1, method: M) => {
@@ -79,6 +83,38 @@ export async function runInstalledPr532Journey(input: {
   const object = async (ref: string) => {
     const bytes = await artifact(ref), data = parseJsonStrict(bytes.toString('utf8'));
     assert.deepEqual(canonicalJsonBytes(data), bytes); return data;
+  };
+  const retained = async (ref: string) => {
+    const bytes = await context.retained(ref); assert.equal(sha256Bytes(bytes), ref);
+    const data = parseJsonStrict(bytes.toString('utf8')); assert.deepEqual(canonicalJsonBytes(data), bytes);
+    return data;
+  };
+  const describeDependencyFailure = async (cut: Result<'run.get'>) => {
+    const entry = cut.journal.findLast(row => row.opKind === 'tool' && row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
+    if (!entry?.evidenceRef) return;
+    const source = cut.items.at(-1);
+    if (!source) return;
+    const failure = decodeDependencyFailureItem(await retained(source.payloadRef));
+    if (failure.runId !== entry.runId || failure.opId !== entry.opId || failure.attempt !== entry.attempt || failure.receiptRef !== entry.errorRef) return;
+    const elapsedMs = Date.parse(failure.createdAt) - Date.parse(cut.snapshot.run.createdAt);
+    const evidence = await retained(entry.evidenceRef);
+    if (failure.failureKind === 'acquisition_failed') {
+      const { closure, evidenceDigest, runId, opId, attempt } = decodeDependencyAcquisitionClosure(evidence);
+      assert.equal(runId, entry.runId); assert.equal(opId, entry.opId); assert.equal(attempt, entry.attempt);
+      assert.equal(evidenceDigest, entry.evidenceDigest);
+      const { connectionCount, requestCount, transferredBytes } = closure;
+      context.dependencyFailure({ kind: failure.failureKind, elapsedMs, connectionCount, requestCount, transferredBytes });
+    } else {
+      const capture = decodeDependencyProcessCapture(evidence);
+      assert.equal(capture.runId, entry.runId); assert.equal(capture.opId, entry.opId); assert.equal(capture.attempt, entry.attempt);
+      assert.equal(capture.captureDigest, entry.evidenceDigest);
+      const stderr = capture.stderrByteCount > 0 && capture.stderrByteCount <= 65_536
+        ? await context.retained(capture.stderrRef) : undefined;
+      const npmCode = stderr?.toString('utf8').match(/\bnpm (?:ERR!|error) code (EACCES|ENOSPC|ENOENT|ECONNRESET|EINTEGRITY|ENOTCACHED|EEXIST|EPERM)\b/u)?.[1];
+      context.dependencyFailure({ kind: failure.failureKind, elapsedMs, termination: capture.terminationReason,
+        durationMs: capture.durationMs, ...(capture.terminationReason === 'exit' ? { exitCode: capture.exitCode } : {}),
+        ...(capture.terminationReason === 'spawn_error' ? { nativeErrorCode: capture.nativeErrorCode } : {}), ...(npmCode ? { npmCode } : {}) });
+    }
   };
   const admitted = async <M extends 'run.submit' | 'run.apply'>(args: readonly string[], method: M) => {
     const { stdout } = await context.command(args);
@@ -99,11 +135,16 @@ export async function runInstalledPr532Journey(input: {
       context.progress(cut);
       const run = cut.snapshot.run;
       if (run.status === 'succeeded') return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
-      if ((run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {
-        const stopped = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, checkpointLimit: 1,
+      const dependencyFailed = cut.journal.some(row => row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
+      if (dependencyFailed || (run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {
+        const stopped = await read({ protocolVersion: 1, method: 'run.get', runId,
+          afterItemSeq: Math.max(0, cut.highWaterItemSeq - 8), itemLimit: 8, checkpointLimit: 1,
           afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
         context.progress(stopped);
+        try { await describeDependencyFailure(stopped); }
+        catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
       }
+      assert(!dependencyFailed, 'installed Run owns a failed dependency acquisition or npm process');
       assert(run.status === 'queued' || run.status === 'running', `installed Run stopped at ${run.status}/${run.nextStep}`);
       assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
       await delay(2000);
@@ -137,10 +178,6 @@ export async function runInstalledPr532Journey(input: {
   assert.equal(last.outcome, 'passed'); assert.equal(last.exitCode, 0);
   const diagnostic = verifierReportedLocations(command, await artifact(first.stdoutRef));
   assert(diagnostic?.reportedLines.length && !first.stdoutTruncated, 'original test reported no usable failure location');
-  const retained = async (ref: string) => {
-    const bytes = await context.retained(ref); assert.equal(sha256Bytes(bytes), ref);
-    return parseJsonStrict(bytes.toString('utf8'));
-  };
   const repairClaim = cut.journal.find(row => row.opKind === 'model' && row.phase === 'prepared' && row.seq > receiptRows[0]!.seq);
   assert(repairClaim && cut.journal.some(row => row.opId === repairClaim.opId && row.attempt === repairClaim.attempt && row.phase === 'completed'));
   const repairRequest = await retained(repairClaim.requestRef) as { promptProjectionRef: string };
