@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import type { CredentialSecretScanner } from './credential-secret-scan.js';
 import { decodeInstalledInstallerDiagnostics, type InstalledInstallerDiagnostic } from './installed-install-diagnostics.js';
 import { createEnrollPhaseObservation, createEnrollWorkObservation } from './installed-enroll-diagnostic.js';
+import { decodeHeadlessControlRecord } from '../../../src/control/v1.js';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
 
 export type InstalledDailyCommandDiagnostic = Readonly<{
   diagnosticOnly: true;
@@ -16,6 +18,7 @@ export type InstalledDailyCommandDiagnostic = Readonly<{
   stdoutBytes: number; stderrBytes: number;
   credentialPhases?: ReturnType<typeof createEnrollPhaseObservation>['result'];
   installedWork?: ReturnType<typeof createEnrollWorkObservation>['result'];
+  controlRefusal?: Readonly<{ method: string; code: string }>;
 }>;
 
 export class InstalledDailyCommandError extends Error {
@@ -39,12 +42,14 @@ export async function runInstalledDailyCommand(input: Readonly<{
   const credentialPhases = createEnrollPhaseObservation(), installedWork = createEnrollWorkObservation();
   let spawned = false, childJoined = false, inputWriteJoined = false, stdoutBytes = 0, stderrBytes = 0;
   let result: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  let controlRefusal: InstalledDailyCommandDiagnostic['controlRefusal'];
   const diagnostic = (reason: InstalledDailyCommandDiagnostic['reason']): InstalledDailyCommandDiagnostic => Object.freeze({
     diagnosticOnly: true, reason, code: result?.code ?? null, signal: result?.signal ?? null,
     elapsedMs: Math.floor(performance.now() - started), spawned, childJoined, inputWriteJoined,
     stdinJoined: pipesJoined[0]!, stdoutJoined: pipesJoined[1]!, stderrJoined: pipesJoined[2]!, stdoutBytes, stderrBytes,
     ...(credentialPhases.result.length ? { credentialPhases: credentialPhases.result } : {}),
-    ...(installedWork.result ? { installedWork: installedWork.result } : {}) });
+    ...(installedWork.result ? { installedWork: installedWork.result } : {}),
+    ...(controlRefusal ? { controlRefusal } : {}) });
   let out: ReturnType<typeof input.scanner.openStream> | undefined, err: ReturnType<typeof input.scanner.openStream>;
   try { out = input.scanner.openStream(); err = input.scanner.openStream(); }
   catch { out?.close(); throw new InstalledDailyCommandError(false, diagnostic('scan')); }
@@ -129,6 +134,17 @@ export async function runInstalledDailyCommand(input: Readonly<{
     finally { captured?.fill(0); }
   }
   if (failure || !joined || !result) {
+    if (reason === 'exit' && joined && outputValid && input.args.includes('--json') && stdoutBytes <= 65_536) {
+      const captured = Buffer.concat(stdout);
+      try {
+        for (const line of captured.toString('utf8').trimEnd().split('\n')) {
+          const record = decodeHeadlessControlRecord(parseJsonStrict(line));
+          if (record.type === 'response' && !record.response.ok && 'method' in record.response)
+            controlRefusal = { method: record.response.method, code: record.response.error.code };
+        }
+      } catch { controlRefusal = undefined; }
+      finally { captured.fill(0); }
+    }
     stdout.forEach(bytes => bytes.fill(0)); stderr.forEach(bytes => bytes.fill(0));
     throw new InstalledDailyCommandError(joined, diagnostic(reason ?? 'join'));
   }

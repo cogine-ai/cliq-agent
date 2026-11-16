@@ -55,7 +55,7 @@ export async function readPr532PublisherInputs() {
 type Result<M extends InstalledControlFeature> = Extract<InstalledControlResponseFor<M>, { ok: true }>['result'];
 
 export async function runInstalledPr532Journey(input: {
-  workspace: string; alias: string; budgets: RunSpec['budgets'];
+  workspace: string; sessionId: string; alias: string; budgets: RunSpec['budgets'];
   originalBytes: Buffer; testBytes: Buffer; lockBytes: Buffer;
 }, context: {
   command(args: readonly string[]): Promise<{ stdout: Buffer }>;
@@ -63,6 +63,7 @@ export async function runInstalledPr532Journey(input: {
   artifact(ref: string): Promise<Buffer>;
   retained(ref: string): Promise<Buffer>;
   reconnect(): Promise<void>;
+  authorizeGitSource(): Promise<{ sourceInspectionGrantId: string; ignoreReadGrantIds: string[] }>;
   verifyHost(expected: Buffer): Promise<void>;
   progress(cut: Result<'run.get'>): void;
   mark(phase: string): void;
@@ -102,12 +103,13 @@ export async function runInstalledPr532Journey(input: {
   };
 
   context.mark('pr532_submit');
+  const sourceConsent = await context.authorizeGitSource();
   const objective = 'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts. DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout. Keep behavior for other compatible endpoints. The first candidate should be the unchanged baseline: finish the first turn without an edit so the required original check runs. Use its failure locations to repair the implementation. Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.';
   const { modelTokens, costMicros, ...budgets } = input.budgets;
   const run = await admitted(['run', objective, '--workspace', input.workspace, '--model', input.alias, '--policy', 'yolo',
-    '--trust-workspace', '--check-node', PR532_CHECK, '--budget-tokens', String(modelTokens),
+    '--session', input.sessionId, '--trust-workspace', '--check-node', PR532_CHECK, '--budget-tokens', String(modelTokens),
     '--budget-usd', (costMicros / 1_000_000).toFixed(6), '--detach', '--json', '--options', JSON.stringify({
-      budgets, maxChangedPaths: 1, maxChangedBytes: 65_536,
+      ...sourceConsent, budgets, maxChangedPaths: 1, maxChangedBytes: 65_536,
       dependency: { mode: 'locked', registryEndpointIds: [PR532_REGISTRY_ID], credentialGrantIds: [], allowInstallScripts: false },
     })], 'run.submit');
   const runId = run.snapshot.run.id;
@@ -160,7 +162,9 @@ export async function runInstalledPr532Journey(input: {
   assert(reviewed.stdout.includes(answer.result.ref) && reviewed.stdout.includes(PR532_FILE));
 
   context.mark('pr532_apply');
-  const applied = await admitted(['apply', runId, '--result', answer.result.ref, '--detach', '--json'], 'run.apply');
+  const deliveryConsent = await context.authorizeGitSource();
+  const applied = await admitted(['apply', runId, '--result', answer.result.ref, '--detach', '--json', '--options',
+    JSON.stringify(deliveryConsent)], 'run.apply');
   const deliveryId = applied.snapshot.run.id;
   const delivery = await finish(deliveryId);
   assert.equal(delivery.snapshot.run.terminalReason, 'verified');

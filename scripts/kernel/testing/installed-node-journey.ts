@@ -1601,11 +1601,43 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       };
       git('init', '-q', '-b', 'main'); git('add', '--all'); git('-c', 'user.name=Cliq preview', '-c', 'user.email=preview@example.invalid',
         'commit', '-qm', 'Original source with unchanged regression check');
-      report.pr532Preview = await runInstalledPr532Journey({ workspace, alias: dailyAlias, originalBytes, testBytes, lockBytes,
+      // The disposable fixture owner explicitly trusts this one staged tree.
+      // Git and ignore-rule reads still require their separately minted grants.
+      const workspaceId = sha256Bytes(Buffer.from(workspace));
+      const trustDirectory = path.join(cliqHome, 'workspaces', workspaceId);
+      await mkdir(trustDirectory, { recursive: true, mode: 0o700 });
+      for (const directory of [path.dirname(trustDirectory), trustDirectory]) await chown(directory, ledger.uid, ledger.gid);
+      const trust = path.join(trustDirectory, 'trust.json');
+      await writeFile(trust, canonicalJsonBytes({ version: 1, workspaceId, workspaceRealPath: workspace,
+        decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 });
+      await chown(trust, ledger.uid, ledger.gid);
+      const { session } = (await send(request({ protocolVersion: 1, method: 'session.create', requestId: nextId(),
+        admissionKey: randomBytes(32).toString('base64url'), workspacePath: workspace }), 'session.create', 30_000)).snapshot;
+      const identity = parseJsonStrict((await readCas(session.workspaceIdentityRef)).toString('utf8')) as Record<string, unknown>;
+      assert(typeof identity.identityDigest === 'string' && typeof identity.repositoryIdentityRef === 'string');
+      const authorizeGitSource = async () => {
+        const target = { sessionId: session.id, expectedWorkspaceIdentityDigest: identity.identityDigest };
+        const authorize = async (decision: unknown, targetKind: 'source_git_inspection' | 'read_scope') => {
+          const { grant } = await send(request({ protocolVersion: 1, method: 'authorization.create', requestId: nextId(), decision }),
+            'authorization.create', 30_000);
+          assert.equal(grant.state, 'active'); assert.equal(grant.targetKind, targetKind); return grant.grantId as string;
+        };
+        const sourceInspectionGrantId = await authorize({ kind: 'source_git_inspection', purpose: 'source_inspection', target: {
+          ...target, scope: 'in_root_git_metadata_and_objects', recipe: 'cliq-source-git-inspection-v1',
+          retention: 'ephemeral_raw_reachable_only', resourceCeiling: DEFAULT_SANDBOX_RESOURCES } }, 'source_git_inspection');
+        const ignoreReadGrantIds = [];
+        for (const rule of ['.gitignore', '.git/info/exclude']) {
+          await lstat(path.join(workspace, rule));
+          ignoreReadGrantIds.push(await authorize({ kind: 'read_scope', purpose: 'source',
+            target: { ...target, path: rule, scope: 'entry' } }, 'read_scope'));
+        }
+        return { sourceInspectionGrantId, ignoreReadGrantIds };
+      };
+      report.pr532Preview = await runInstalledPr532Journey({ workspace, sessionId: session.id, alias: dailyAlias, originalBytes, testBytes, lockBytes,
         budgets: options.provider?.budgets ?? { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000,
           toolCalls: 24, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
         command: dailyCommand, send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
-        artifact: readPublicArtifact, retained: readCas,
+        artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq }) => {
           report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, highWaterJournalSeq, highWaterItemSeq };
