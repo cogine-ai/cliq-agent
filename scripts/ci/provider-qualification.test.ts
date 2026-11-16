@@ -24,7 +24,7 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   assert.equal(input.definition.validFrom, '2026-11-12T23:59:00.000Z');
   assert.equal(input.definition.validThrough, '2026-11-13T04:00:00.000Z');
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
-  assert.equal(pr532.budgets.wallTimeMs, 12 * 60_000);
+  assert.equal(pr532.budgets.wallTimeMs, 30 * 60_000);
   assert.equal(pr532.budgets.costMicros, 15_000_000);
 });
 

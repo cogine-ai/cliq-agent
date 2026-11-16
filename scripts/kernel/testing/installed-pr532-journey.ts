@@ -70,6 +70,7 @@ export async function runInstalledPr532Journey(input: {
   verifyHost(expected: Buffer): Promise<void>;
   progress(cut: Result<'run.get'>): void;
   dependencyFailure(value: Record<string, unknown>): void;
+  verifierObservation(value: Record<string, unknown>): void;
   mark(phase: string): void;
 }) {
   const read = async <M extends InstalledControlFeature>(request: InstalledControlRequestV1, method: M) => {
@@ -143,6 +144,17 @@ export async function runInstalledPr532Journey(input: {
         context.progress(stopped);
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
+        try {
+          const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);
+          if (entry?.receiptRef) {
+            const receipt = decodeVerificationReceipt(await retained(entry.receiptRef));
+            assert.equal(receipt.runId, entry.runId); assert.equal(receipt.attempt, entry.attempt);
+            const command = decodeVerifierCommand(await retained(receipt.commandRef));
+            assert.deepEqual(command.argv.map(arg => arg.value), nodeTestArguments(PR532_CHECK));
+            context.verifierObservation({ journalSeq: entry.seq, outcome: receipt.outcome, terminationReason: receipt.terminationReason,
+              ...(receipt.exitCode === undefined ? {} : { exitCode: receipt.exitCode }), durationMs: receipt.durationMs });
+          }
+        } catch { /* Missing diagnostic data keeps the original failure. */ }
       }
       assert(!dependencyFailed, 'installed Run owns a failed dependency acquisition or npm process');
       assert(run.status === 'queued' || run.status === 'running', `installed Run stopped at ${run.status}/${run.nextStep}`);

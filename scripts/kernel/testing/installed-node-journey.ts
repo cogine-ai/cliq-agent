@@ -1647,11 +1647,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
         dependencyFailure: value => { report.pr532DependencyFailure = value; },
+        verifierObservation: value => { report.pr532VerifierObservation = value; },
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq, journal }) => {
           report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, waitingReason: run.waitingReason,
             terminalReason: run.terminalReason, highWaterJournalSeq, highWaterItemSeq,
-            journal: journal.map(({ seq, opKind, phase }) => ({ seq, opKind, phase })) };
+            wallTimeMs: Date.parse(run.deadlineAt) - Date.parse(run.createdAt),
+            journal: journal.map(({ seq, opKind, phase, timestamp }) => ({ seq, opKind, phase,
+              elapsedMs: Date.parse(timestamp) - Date.parse(run.createdAt) })) };
         },
         verifyHost: async expected => {
           assert((await readFile(path.join(workspace, PR532_FILE))).equals(expected));

@@ -28,7 +28,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' && (inputs.funded || inputs.pr532) }}
     name: Installed model edit, check, review and apply
     runs-on: ubuntu-22.04
-    timeout-minutes: ${{ inputs.pr532 && 30 || 20 }}
+    timeout-minutes: ${{ inputs.pr532 && 65 || 20 }}
     steps:
       - uses: actions/checkout@v4
         with:
