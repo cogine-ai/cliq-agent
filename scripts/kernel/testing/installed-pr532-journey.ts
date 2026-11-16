@@ -21,7 +21,7 @@ export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
 export const PR532_CHECK_SOURCE = '961658fcf80116b6ef13e39cf39d901276a48c3c';
 export const PR532_FILE = 'src/model/providers/openai-compatible.ts';
 export const PR532_CHECK = 'src/model/providers/openai-compatible.test.ts';
-export const PR532_REGISTRY = 'mirrors.cloud.tencent.com';
+export const PR532_REGISTRY = 'mirrors.tencent.com';
 export const PR532_REGISTRY_BASE = '/npm';
 export const PR532_REGISTRY_ID = 'pr532-public-npm-registry';
 
