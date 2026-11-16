@@ -365,7 +365,8 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
     requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS.filter(key => !birthKeys.includes(key))], 'Journal(prepared)');
     if (birthKeys.length) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(prepared MCP original resource/dispatch closure)');
   } else if (phase === 'dispatch_claimed') {
-    const birthKeys = record.opKind === 'publish' || (record.opKind === 'mcp' || record.opKind === 'mcp-server') &&
+    const dependency = record.opKind === 'tool' && record.target === 'builtin:dependency-acquire';
+    const birthKeys = dependency || record.opKind === 'publish' || (record.opKind === 'mcp' || record.opKind === 'mcp-server') &&
       (has(record, 'evidenceRef') || has(record, 'evidenceDigest')) ? ['evidenceRef', 'evidenceDigest'] : [];
     rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, ...birthKeys], 'Journal(dispatch_claimed)');
     requireClaimIdentity(record);
@@ -375,6 +376,9 @@ export function decodeWireJournal(value: unknown): InvocationJournalEntry {
     requireAbsent(record, JOURNAL_TERMINAL_KEYS.filter(key => !birthKeys.includes(key)), 'Journal(dispatch_claimed)');
     if (record.opKind === 'publish' && (!has(record, 'evidenceRef') || !has(record, 'evidenceDigest')))
       invalid('publication dispatch requires its complete original arena birth evidence');
+    if (dependency && (!has(record, 'evidenceRef') || !has(record, 'grantRef') ||
+        !has(record, 'brokerFenceTokenDigest') || has(record, 'sandboxLaunchSpecRef') || record.replayClass !== 'workspace-rollback-retry'))
+      invalid('dependency dispatch requires its original broker evidence, fence and grant');
     if (birthKeys.length) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(dispatch claim original evidence)');
   } else if (phase === 'completed') {
     const birthKeys = record.opKind === 'publish' || (record.opKind === 'mcp' || record.opKind === 'mcp-server') &&

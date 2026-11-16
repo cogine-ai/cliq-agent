@@ -977,6 +977,11 @@ function commitInitialSettlement(
     if (terminal.phase === 'completed') {
       if (terminal.resultRef !== undefined) entry.resultRef = terminal.resultRef;
       if (terminal.receiptRef !== undefined) entry.receiptRef = terminal.receiptRef;
+      if (entry.opKind === 'tool' && entry.target === 'builtin:dependency-acquire') {
+        // The original broker evidence stays on its claim. The completed
+        // dependency's own positive evidence is its result and receipt.
+        delete entry.evidenceRef; delete entry.evidenceDigest;
+      }
       if (prepared!.opKind === 'publish') {
         if (!terminal.evidenceRef || !terminal.evidenceDigest || terminal.evidenceRef !== terminal.receiptRef)
           throw new KernelStorageError('INVALID_REQUEST', 'completed publication requires its actual identical terminal receipt and evidence');

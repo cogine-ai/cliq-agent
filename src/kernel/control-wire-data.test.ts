@@ -76,6 +76,21 @@ test('public history data preserves Session lineage and binds historical events 
   assert.deepEqual(decodeWireEvent(progress, snapshot), progress);
 });
 
+test('the exact dependency broker claim retains its original evidence in both Journal readers', () => {
+  const claim = { seq: 2, runId: 'run-1', opId: 'dependency', opKind: 'tool', attempt: 0, leaseEpoch: 1,
+    phase: 'dispatch_claimed', target: 'builtin:dependency-acquire', requestRef: ref, grantRef: ref,
+    replayClass: 'workspace-rollback-retry', budgetDelta: budget, timestamp: at, dispatchId: 'dispatch-1',
+    supervisorInstanceId: 'supervisor-1', stateOwnerEpoch: 1, brokerFenceTokenDigest: ref,
+    evidenceRef: ref, evidenceDigest: ref };
+  assert.deepEqual(decodeWireJournal(claim), claim);
+  assert.deepEqual(decodeInvocationJournalEntry(claim), claim);
+  const { evidenceRef: _ref, evidenceDigest: _digest, ...withoutEvidence } = claim;
+  const { brokerFenceTokenDigest: _broker, ...withoutFence } = claim;
+  for (const invalid of [withoutEvidence, withoutFence, { ...claim, target: 'ordinary-tool' },
+    { ...claim, sandboxLaunchSpecRef: ref }, { ...claim, replayClass: 'retry' }])
+    assert.throws(() => decodeWireJournal(invalid), TypeError);
+});
+
 test('one shared Journal decoder preserves closed phases and the storage error projection', () => {
   const prepared = { seq: 1, runId: 'run-1', opId: 'op-1', opKind: 'tool', attempt: 0, leaseEpoch: 1,
     phase: 'prepared', target: 'tool', requestRef: ref, replayClass: 'retry', budgetDelta: budget, timestamp: at };
