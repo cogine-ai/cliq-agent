@@ -64,6 +64,14 @@ export async function prepareInstalledDependencyAdmission(driver: SqliteDriver, 
     policy = decodeDependencyPolicy({ ...policy, installScriptsPolicy: 'exact_lockfile_grant', installScriptsGrantRef: original.artifact.ref });
     metadata.push(...original.metadata); receiptRefs.push(original.sourceConsumptionReceiptArtifact.ref);
   }
+  // The credential store and Run CAS are separate. Freeze the verified
+  // registrations with the policy so the candidate can read its exact inputs.
+  for (const { registration, expectedRegistrationArtifactRef } of data.registryRecords) {
+    signal?.throwIfAborted();
+    const endpoint = await artifacts.publishCanonical(registration, registration.format);
+    requireEqual(endpoint.ref, expectedRegistrationArtifactRef, 'dependency frozen registry artifact');
+    metadata.push(endpoint);
+  }
   const artifact = await artifacts.publishCanonical(policy, 'cliq-dependency-policy-v1'); metadata.push(artifact);
   const token: InstalledDependencyAdmission = Object.freeze({ [brand]: true as const });
   admissions.set(token, { driver, owner, request, source, principalId: input.principalId, runId, policyRef: artifact.ref, metadata, scripts, receiptRefs,
