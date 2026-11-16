@@ -91,12 +91,15 @@ export async function runInstalledPr532Journey(input: {
   };
   const finish = async (runId: string) => {
     const deadline = Date.now() + input.budgets.wallTimeMs;
+    let journalHighWater = 0;
     for (;;) {
-      const cut = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, journalLimit: 1, checkpointLimit: 1 }, 'run.get');
+      const cut = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1,
+        afterJournalSeq: Math.max(0, journalHighWater - 6), journalLimit: 8, checkpointLimit: 1 }, 'run.get');
+      journalHighWater = cut.highWaterJournalSeq;
       context.progress(cut);
       const run = cut.snapshot.run;
       if (run.status === 'succeeded') return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
-      if (run.status !== 'queued' && run.status !== 'running') {
+      if ((run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {
         const stopped = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1, checkpointLimit: 1,
           afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
         context.progress(stopped);

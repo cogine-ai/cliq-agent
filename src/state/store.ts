@@ -1913,7 +1913,8 @@ export class StateStore {
   }>();
   private readonly installedRunTasks = new Map<string, Promise<void>>();
   private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | BuiltinExecutionPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
-    'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_finalize' | 'terminal_retirement' |
+    'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_dependency' | 'drive_verifier_history' |
+    'drive_verifier_permission' | 'drive_verifier_execution' | 'drive_finalize' | 'terminal_retirement' |
     'drive_prior_read' | 'drive_worker_activate' | 'drive_model_prepare' | 'drive_broker_prepare' | 'drive_credential_prepare' |
     'drive_model_claim' | 'drive_model_release'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort: AbortController }>();
@@ -3309,8 +3310,10 @@ export class StateStore {
         if (dependencyFrontier && dependencyFrontier.kind === 'verify' && dependencyFrontier.phase === 'dependencies') {
           if (readRun(this.driver, runId).revision !== current.revision) continue;
           if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
+          this.installedRunPhases.set(runId, 'drive_dependency');
           await (await nativeExecution()).executeCurrentDependencies({ expectedRunRevision: current.revision }); continue;
         }
+        this.installedRunPhases.set(runId, 'drive_verifier_history');
         const progress = await readVerifierProgress(this.driver, reads, cut);
         if (readRun(this.driver, runId).revision !== current.revision || cut.run.revision !== current.revision) continue;
         const mutation = progress.entries.some(entry => entry.receipt?.outcome === 'source_mutation');
@@ -3336,12 +3339,14 @@ export class StateStore {
         const operation = cut.journal.filter(row => row.opId === opId), last = operation.at(-1);
         if (last && ['prepared', 'dispatch_claimed', 'unknown', 'abandoned'].includes(last.phase)) return;
         if (last?.phase === 'failed' && operation.some(row => row.attempt === last.attempt && row.phase === 'dispatch_claimed')) return;
+        this.installedRunPhases.set(runId, 'drive_verifier_permission');
         const permission = await agent.prepareVerifierPermission({ expectedRunRevision: current.revision }, readSignal);
         if (permission.disposition === 'policy_denied') {
           await agent.stopForVerifierPolicyDenial({ expectedRunRevision: permission.run.revision }); this.requestInstalledRunStop(runId); continue;
         }
         if (permission.disposition === 'waiting' || permission.disposition === 'skipped') continue;
         if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
+        this.installedRunPhases.set(runId, 'drive_verifier_execution');
         await (await nativeExecution()).executeCurrentVerifier({ expectedRunRevision: current.revision }); continue;
       }
       // Final result transactions never borrow launcher images or compete for
