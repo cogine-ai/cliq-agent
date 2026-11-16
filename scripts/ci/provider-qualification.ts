@@ -7,7 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalJsonBytes } from '../../src/kernel/canonical.js';
-import { decodeProviderJourneyConfiguration } from '../kernel/testing/provider-journey-input.js';
+import { decodeProviderJourneyConfiguration, PR532_RUN_WALL_TIME_MS } from '../kernel/testing/provider-journey-input.js';
 
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
@@ -19,7 +19,7 @@ export function providerSelection(now: Date, pr532 = false) {
   return decodeProviderJourneyConfiguration({
     budgets: { childConcurrency: 1, childDepth: 0, costMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
       modelTokens: pr532 ? 32_000_000 : 20_000_000,
-      repairAttempts: 2, toolCalls: 100, wallTimeMs: 300_000 },
+      repairAttempts: 2, toolCalls: 100, wallTimeMs: pr532 ? PR532_RUN_WALL_TIME_MS : 300_000 },
     definition: { provider: 'openai-compatible', model: 'deepseek-flash',
       claims: { contextLimitTokens: 32768, maxOutputTokens: 8192, nativeToolCalling: true, streaming: false, trustedUsageEvidence: false },
       prices: { cacheRead: 6000, cacheWrite: 0, input: 300000, output: 1200000 },
