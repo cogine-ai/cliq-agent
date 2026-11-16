@@ -1636,7 +1636,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       report.pr532Preview = await runInstalledPr532Journey({ workspace, sessionId: session.id, alias: dailyAlias, originalBytes, testBytes, lockBytes,
         budgets: options.provider?.budgets ?? { wallTimeMs: 300_000, modelTokens: 20_000_000, costMicros: 5_000_000,
           toolCalls: 24, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
-        command: dailyCommand, send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
+        command: argv => dailyCommand(argv, argv[0] === 'run' ? 90_000 : 30_000),
+        send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq }) => {
