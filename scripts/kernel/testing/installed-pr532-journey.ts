@@ -174,6 +174,7 @@ export async function runInstalledPr532Journey(input: {
       dependency: { mode: 'locked', registryEndpointIds: [PR532_REGISTRY_ID], credentialGrantIds: [], allowInstallScripts: false },
     })], 'run.submit');
   const runId = run.snapshot.run.id;
+  assert.equal(Date.parse(run.snapshot.run.deadlineAt) - Date.parse(run.snapshot.run.createdAt), input.budgets.wallTimeMs);
   context.mark('pr532_reconnect');
   await context.reconnect(); // Detached CLI child and its original pipes have already joined.
   context.mark('pr532_check_and_repair');
@@ -223,8 +224,9 @@ export async function runInstalledPr532Journey(input: {
   context.mark('pr532_apply');
   const deliveryConsent = await context.authorizeGitSource();
   const applied = await admitted(['apply', runId, '--result', answer.result.ref, '--detach', '--json', '--options',
-    JSON.stringify(deliveryConsent)], 'run.apply');
+    JSON.stringify({ ...deliveryConsent, budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } })], 'run.apply');
   const deliveryId = applied.snapshot.run.id;
+  assert.equal(Date.parse(applied.snapshot.run.deadlineAt) - Date.parse(applied.snapshot.run.createdAt), input.budgets.wallTimeMs);
   const delivery = await finish(deliveryId);
   assert.equal(delivery.snapshot.run.terminalReason, 'verified');
   const delivered = decodeRunResult(await object(delivery.snapshot.run.resultRef!));

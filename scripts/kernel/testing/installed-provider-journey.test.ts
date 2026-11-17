@@ -71,6 +71,38 @@ test('one explicit admission freezes the real-model budget and required original
   assert.equal(f.reconnects(), 0);
 });
 
+test('the original PR532 apply command carries the explicit admitted Delivery budget', async () => {
+  // Only the original argument construction runs. No response, Run, grant or
+  // installation is created by this closed-data regression.
+  const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
+  let applied: ts.VariableStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === 'applied')) {
+      assert.equal(applied, undefined); applied = node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(applied);
+  const budgets = { ...input.budgets, wallTimeMs: 3_600_000, toolCalls: 100 };
+  const consent = { sourceInspectionGrantId: 'inert-source-consent', ignoreReadGrantIds: ['inert-ignore-consent'] };
+  let observed: readonly string[] | undefined;
+  const context = vm.createContext({ input: { budgets }, deliveryConsent: consent,
+    runId: runSnapshot().run.id, answer: { result: { ref } },
+    admitted: async (argv: readonly string[], method: string) => {
+      assert.equal(observed, undefined); assert.equal(method, 'run.apply'); observed = argv;
+    } });
+  vm.runInContext(ts.transpileModule(`globalThis.invoke = async () => { ${applied.getText(parsed)} };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  await context.invoke(); assert(observed);
+  const invocation = parseClientInvocation(observed, '/unused');
+  assert.equal(invocation.kind, 'apply'); if (invocation.kind !== 'apply') throw new Error('apply expected');
+  assert.equal(canonicalSha256(invocation.options), canonicalSha256({ ...consent,
+    budgets: { wallTimeMs: budgets.wallTimeMs, toolCalls: budgets.toolCalls } }));
+  assert.equal(invocation.expectedRunResultRef, ref); assert(invocation.detach && invocation.json);
+});
+
 test('an authoritative admission refusal cannot become a replacement Run or an application', async () => {
   const f = fixture(() => ({ protocolVersion: 1, ok: false, method: 'run.submit',
     error: { schemaVersion: 1, code: 'MODEL_COST_UNKNOWN', retryable: false, messageCode: 'control.model_cost_unknown' } }));
