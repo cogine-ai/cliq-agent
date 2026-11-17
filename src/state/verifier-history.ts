@@ -179,11 +179,18 @@ export async function validateVerifierHistory(input: {
       throw new TypeError('repair diagnostic or fixed model projection differs from its original receipt');
     const checkpoints = input.checkpoints.filter(checkpoint => checkpoint.id === plan.checkpointId), checkpoint = checkpoints[0];
     const sourceCheckpoint = input.checkpoints.find(checkpoint => checkpoint.id === finalCandidateCheckpointId(run.id, progress.candidate.producingItemId));
+    // Dependency readiness can add a managed tree to the original candidate.
+    // The verified workspace is rooted by that candidate's own ready Checkpoint.
+    const ready = progress.dependency?.ready;
+    const workspaceCheckpoint = progress.dependency
+      ? ready && input.checkpoints.find(checkpoint => checkpoint.id === ready.readyCheckpointId)
+      : sourceCheckpoint;
     if (checkpoints.length !== 1 || !checkpoint || !sourceCheckpoint || checkpoint.schemaVersion !== 1 || checkpoint.runId !== run.id ||
+        !workspaceCheckpoint || workspaceCheckpoint.runId !== run.id || workspaceCheckpoint.createdAt > item.createdAt ||
         checkpoint.reason !== 'auto' || checkpoint.runItemSeq !== row.itemSeq || checkpoint.createdAt < item.createdAt ||
         checkpoint.createdAt >= run.deadlineAt || checkpoint.basedOnRunRevision < 1 || checkpoint.basedOnRunRevision >= run.revision ||
-        checkpoint.journalSeq > journal.length || checkpoint.journalSeq < sourceCheckpoint.journalSeq ||
-        checkpoint.workspaceStateRef !== sourceCheckpoint.workspaceStateRef)
+        checkpoint.journalSeq > journal.length || checkpoint.journalSeq < Math.max(sourceCheckpoint.journalSeq, workspaceCheckpoint.journalSeq) ||
+        checkpoint.workspaceStateRef !== workspaceCheckpoint.workspaceStateRef)
       throw new TypeError('repair history lacks its unique original same-source authorization Checkpoint');
     const atRepair = new Map<string, InvocationJournalEntry>();
     for (const entry of journal.slice(0, checkpoint.journalSeq)) atRepair.set(`${entry.opId}\0${entry.attempt}`, entry);
@@ -201,7 +208,8 @@ export async function validateVerifierHistory(input: {
       if (!entry.planEntry.required || entry.receipt?.outcome !== 'assertion_failed') continue;
       const terminal = entry.terminalJournal;
       const original = terminal && input.checkpoints.find(checkpoint => checkpoint.id === verifierCheckpointId(run.id, terminal.opId, terminal.attempt));
-      if (!terminal || !original || terminal.seq > checkpoint.journalSeq || terminal.timestamp > item.createdAt || original.createdAt > item.createdAt)
+      if (!terminal || !original || original.workspaceStateRef !== workspaceCheckpoint.workspaceStateRef ||
+          terminal.seq > checkpoint.journalSeq || terminal.timestamp > item.createdAt || original.createdAt > item.createdAt)
         throw new TypeError('repair assertion precedes its original complete receipt and retirement Checkpoint');
     }
     const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));

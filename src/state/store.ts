@@ -2905,11 +2905,11 @@ export class StateStore {
         run = readRun(this.driver, id);
         if (!['queued', 'running', 'waiting'].includes(run.status)) continue;
         if (agent.operation === 'agent' && run.parentRunId && readRun(this.driver, run.parentRunId).stopIntentRef) {
-          const stopped = await agent.stopFromParent({ expectedRunRevision: run.revision });
+          const stopped = await agent.stopFromParent({ expectedRunRevision: run.revision }, this.installedAgents.get(id)?.readAbort.signal);
           run = stopped.run; this.requestInstalledRunStop(id);
         }
         if (sampleCanonicalNow() >= run.deadlineAt && !run.stopIntentRef) {
-          run = (await agent.expireRun({ expectedRunRevision: run.revision })).run;
+          run = (await agent.expireRun({ expectedRunRevision: run.revision }, this.installedAgents.get(id)?.readAbort.signal)).run;
           this.requestInstalledRunStop(id);
         }
         if (!this.supportsInstalledRuns()) return;
@@ -3220,7 +3220,8 @@ export class StateStore {
         this.installedRunPhases.set(runId, 'drive_agent');
       }
       if (agent.operation === 'agent' && current.activeWorkerLaunchId === undefined &&
-          !this.driver.prepare("SELECT 1 FROM workspace_generations WHERE run_id=? AND phase NOT IN ('sealed','retired') LIMIT 1").get(runId)) {
+          !this.driver.prepare("SELECT 1 FROM workspace_generations WHERE run_id=? AND phase NOT IN ('sealed','retired') LIMIT 1").get(runId) &&
+          readInvocationJournal(this.driver, runId).some(entry => entry.opKind === 'mcp' && entry.phase === 'unknown')) {
         const cut = await readRecoveryClosure(this.driver, reads, runId);
         if ((await import('./worker-recovery.js')).hasOnlySettledMcpUnknowns(cut.journal)) {
           const unknown = cut.journal.filter(entry => entry.opKind === 'mcp' && entry.phase === 'unknown').at(-1)!;
@@ -3237,7 +3238,7 @@ export class StateStore {
         }
       }
       if (sampleCanonicalNow() >= current.deadlineAt && !current.stopIntentRef) {
-        current = (await agent.expireRun({ expectedRunRevision: current.revision })).run;
+        current = (await agent.expireRun({ expectedRunRevision: current.revision }, readSignal)).run;
         this.requestInstalledRunStop(runId);
       }
       if (current.nextStep === 'verify' && (current.cancelRequested || current.stopIntentRef)) {
@@ -3326,7 +3327,7 @@ export class StateStore {
         }
         if (assertion) {
           if (agent.operation !== 'agent') throw new KernelStorageError('RECOVERY_REQUIRED', 'delivery cannot authorize a model repair');
-          await agent.authorizeVerifierRepair({ expectedRunRevision: current.revision }); continue;
+          await agent.authorizeVerifierRepair({ expectedRunRevision: current.revision }, readSignal); continue;
         }
         // Empty and fully eligible plans need no worker. The result closure
         // accepts only its independently validated immutable receipts.

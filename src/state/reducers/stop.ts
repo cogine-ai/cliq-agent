@@ -66,9 +66,9 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   const result = (run: Run) => ({ run, checkpointId: stopCheckpointId(runId, run.stopIntentRef!) });
   const deadlineIntent = (createdAt: string): AgentStopIntent => ({ schemaVersion: 1, runId, createdAt, origin: 'deadline',
     targetStatus: 'failed', reason: 'budget_exhausted', deadlineAt: admitted.deadlineAt });
-  async function cut(revision: number, allowWorkerRecovery = false, allowUnstartedCandidate = false, fencing = false) {
+  async function cut(revision: number, allowWorkerRecovery = false, allowUnstartedCandidate = false, fencing = false, reads = artifacts) {
     if (!Number.isSafeInteger(revision) || revision < 1) throw new TypeError('invalid stop revision');
-    const selected = await readRecoveryClosure(driver, artifacts, runId);
+    const selected = await readRecoveryClosure(driver, reads, runId);
     const { run } = selected;
     if (run.revision !== revision) throw new KernelStorageError('REVISION_CONFLICT', 'stop Run revision changed');
     if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt) throw new TypeError('stop authority no longer belongs to this Run');
@@ -81,15 +81,15 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       // verifier progress and exact active/death-wait lifecycle. A stop only
       // adds a fence; terminal drain below still requires the original claim
       // and invocation/parent retirement, never a worker-free substitution.
-      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
+      const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef!);
       if (allowUnstartedCandidate && run.status === 'waiting' && run.waitingReason === 'approval' && frontier.kind === 'verify' && frontier.phase === 'dependencies') {
-        const original = await (await import('../dependency-script-approval.js')).readDependencyScriptWaitingRun(driver, artifacts, run);
+        const original = await (await import('../dependency-script-approval.js')).readDependencyScriptWaitingRun(driver, reads, run);
         requireEqual(frontier, original.frontier, 'Stop retains its original dependency consent frontier');
         return selected;
       }
       if (allowUnstartedCandidate && run.status === 'waiting' && run.waitingReason === 'approval' && frontier.kind === 'verify' && frontier.phase === 'verifiers') {
-        const original = await (await import('../verifier-permission-history.js')).readVerifierWaitingRun(driver, artifacts, run, spec);
-        requireEqual(frontier, await readCanonicalArtifact(artifacts, original.wait.frontierRef), 'Stop retains its exact verifier consent frontier');
+        const original = await (await import('../verifier-permission-history.js')).readVerifierWaitingRun(driver, reads, run, spec);
+        requireEqual(frontier, await readCanonicalArtifact(reads, original.wait.frontierRef), 'Stop retains its exact verifier consent frontier');
         return selected;
       }
       if (!allowUnstartedCandidate || !['queued', 'running', 'waiting'].includes(run.status) || frontier.schemaVersion !== 1 ||
@@ -99,7 +99,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         'resultSourceRef', 'verifierPlanRef', 'nextVerifierIndex', 'afterPass', ...(spec.dependencyPolicyRef ? ['dependencyPlanRef'] : [])]) &&
           (frontier.phase === 'verifiers' || frontier.phase === 'dependencies') &&
           frontier.afterPass === (spec.operation === 'agent' ? 'finalize' : 'delivery_approval')) {
-        const progress = await readVerifierProgress(driver, artifacts, selected, frontier.candidateItemId);
+        const progress = await readVerifierProgress(driver, reads, selected, frontier.candidateItemId);
         const dependencyPending = progress.dependency && !progress.dependency.ready;
         if (frontier.phase !== (dependencyPending ? 'dependencies' : 'verifiers') ||
             frontier.dependencyPlanRef !== progress.dependency?.planRef ||
@@ -112,7 +112,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           !exactKeys(frontier, ['schemaVersion', 'kind', 'operation', 'candidateItemId', 'resultSourceRef', 'verificationClosureRef',
             ...(spec.operation === 'delivery' ? ['deliveryTerminalProjectionEvidenceRef'] : [])]))
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'candidate stop requires its exact unstarted verification or consent-backed finalization');
-      const closure = decodeVerificationClosure(await readCanonicalArtifact(artifacts, frontier.verificationClosureRef));
+      const closure = decodeVerificationClosure(await readCanonicalArtifact(reads, frontier.verificationClosureRef));
       if (closure.runId !== run.id || closure.candidateItemId !== frontier.candidateItemId || closure.resultSourceRef !== frontier.resultSourceRef ||
           spec.operation === 'agent' && (closure.verification.kind !== 'local' || closure.verification.unverifiedConsentRef !== spec.unverifiedConsentRef) ||
           spec.operation === 'delivery' && closure.verification.kind === 'local' && closure.verification.outcome !== 'verified')
@@ -120,7 +120,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       return selected;
     }
     if (spec.operation === 'delivery') {
-      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, run.frontierRef!);
+      const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef!);
       if (!['queued', 'running', 'waiting'].includes(run.status) || run.nextStep !== 'delivery' || frontier.kind !== 'delivery' ||
           run.status === 'waiting' && !(run.waitingReason === 'approval' && frontier.phase === 'approval') &&
             !(allowWorkerRecovery && run.waitingReason === 'reconciliation'))
@@ -152,9 +152,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
   }
   async function commitDerivedStop(selected: Awaited<ReturnType<typeof cut>>, derive: (now: string) => Promise<{
     intent: AgentStopIntent; metadata?: PublishedArtifact[]; commit?: (connection: SqliteConnection, run: Run, committedAt: string) => void;
-  } | undefined>) {
-    const prior = selected.run.stopIntentRef ? await readAgentStop(driver, artifacts, selected) : undefined;
+  } | undefined>, reads = artifacts) {
+    const prior = selected.run.stopIntentRef ? await readAgentStop(driver, reads, selected) : undefined;
     for (let retry = 0; retry < 8; retry++) {
+      reads.assertReadActive();
       const now = sampleCanonicalNow();
       const proposal = await derive(now);
       if (!proposal) {
@@ -168,9 +169,10 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
         selected.latestCheckpoint.id, selected.run.revision, selected.journal.length), intent = wins ? recorded : prior!;
       // A losing parent observation is anchored by its own immutable Run
       // field. It never claims to have superseded the existing higher Stop.
-      const observation = observesParent ? await artifacts.publishCanonical(recorded, 'cliq-stop-intent-v1') : undefined;
-      const artifact = wins ? observation ?? await artifacts.publishCanonical(intent, 'cliq-stop-intent-v1') : undefined;
+      const observation = observesParent ? await reads.publishCanonical(recorded, 'cliq-stop-intent-v1') : undefined;
+      const artifact = wins ? observation ?? await reads.publishCanonical(intent, 'cliq-stop-intent-v1') : undefined;
       let time: ReturnType<typeof acceptTime> | undefined, updated: Run | undefined;
+      reads.assertReadActive();
       driver.transaction((connection) => {
         time = acceptTime(connection, now);
         if (!time.accepted) return;
@@ -292,24 +294,26 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
       }
       throw new KernelStorageError('REVISION_CONFLICT', 'cancellation cut kept changing');
     }),
-    stopFromParent: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+    stopFromParent: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('parent stop accepts only its original child revision');
-      const selected = await cut(input.expectedRunRevision, true, true, true);
-      const source = await readParentStopRevocation(driver, artifacts, runId);
+      const selected = await cut(input.expectedRunRevision, true, true, true, reads);
+      const source = await readParentStopRevocation(driver, reads, runId);
       return commitDerivedStop(selected, async now => ({ intent: {
         schemaVersion: 1, runId, createdAt: now, origin: 'parent_cancel', targetStatus: 'cancelled', reason: 'parent_cancelled',
         sourceRunId: source.parent.id, sourceStopIntentRef: source.sourceStopIntentRef },
-        commit: connection => source.assertUnchanged(connection) }));
+        commit: connection => source.assertUnchanged(connection) }), reads);
     }),
-    expireRun: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
+    expireRun: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision'])) throw new TypeError('unknown deadline stop field');
-      const selected = await cut(input.expectedRunRevision, true, true, true);
+      const selected = await cut(input.expectedRunRevision, true, true, true, reads);
       if (sampleCanonicalNow() < selected.run.deadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run deadline has not elapsed');
       return commitDerivedStop(selected, async (now) => {
         if (now < selected.run.deadlineAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'deadline clock regressed');
         return { intent: deadlineIntent(now) };
-      });
+      }, reads);
     }),
     stopForResourceFailure: stateOperation('INVALID_REQUEST', async (input: { expectedRunRevision: number }) => {
       input = immutableSnapshot(input);

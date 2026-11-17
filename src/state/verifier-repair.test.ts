@@ -5,6 +5,7 @@ import test from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { VerificationReceipt } from '../kernel/verifier.js';
+import { KernelStorageError } from './errors.js';
 import { decodeRepairDiagnosticItem, decodeVerifierRepairDiagnostic, decodeVerifierRepairModelContent } from './verifier-artifacts.js';
 import type { VerifierProgress } from './verifier-recovery.js';
 import { planVerifierRepair } from './verifier-repair.js';
@@ -59,6 +60,12 @@ test('the real repair owner refuses an ordinary model frontier without changing 
   const fixture = await createAgentFixture('repair-no-verifier-authority');
   try {
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const reason = new KernelStorageError('LEASE_FENCED', 'test Store is closing');
+    const signal = AbortSignal.abort(reason);
+    const revision = { expectedRunRevision: before.run.revision };
+    await assert.rejects(fixture.agent.authorizeVerifierRepair(revision, signal), error => error === reason);
+    await assert.rejects(fixture.agent.expireRun(revision, signal), error => error === reason);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     await assert.rejects(fixture.agent.authorizeVerifierRepair({ expectedRunRevision: before.run.revision }), { code: 'STATE_TRANSITION_INVALID' });
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     await assert.rejects(fixture.agent.authorizeVerifierRepair({ expectedRunRevision: before.run.revision, repairOrdinal: 1 } as never));

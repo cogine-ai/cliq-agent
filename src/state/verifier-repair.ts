@@ -72,12 +72,14 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
   authority: { run: Run; spec: RunSpec }) {
   const { run: admitted, spec } = authority, runId = admitted.id;
   return {
-    authorizeVerifierRepair: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number }) => {
+    authorizeVerifierRepair: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       input = immutableSnapshot(input);
       if (!exactKeys(input, ['expectedRunRevision']) || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
         throw new TypeError('repair requires one exact expected revision');
       assertActiveStateOwner(driver, owner);
-      const cut = await readRecoveryClosure(driver, artifacts, runId), { run } = cut;
+      const cut = await readRecoveryClosure(driver, reads, runId), { run } = cut;
       if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt ||
           canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('repair belongs to another Run authority');
       if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'repair revision changed');
@@ -85,7 +87,7 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
           run.waitingOnRef || run.cancelRequested || run.stopIntentRef || run.resultRef || run.terminalReason ||
           !isZeroBudget(run.budgetReserved) || spec.operation !== 'agent')
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'repair requires its unstopped lease-free root verifier frontier');
-      const progress = await readVerifierProgress(driver, artifacts, cut);
+      const progress = await readVerifierProgress(driver, reads, cut);
       const frontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: progress.candidate.itemId,
         resultSourceRef: progress.candidate.resultSourceRef, verifierPlanRef: progress.planRef,
         nextVerifierIndex: progress.nextVerifierIndex, afterPass: 'finalize' };
@@ -93,9 +95,9 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
         if (!progress.dependency?.ready) throw new TypeError('repair requires its original full dependency readiness');
         frontier.dependencyPlanRef = progress.dependency.planRef;
       }
-      requireEqual(await readCanonicalArtifact(artifacts, run.frontierRef), frontier, 'repair exact original verifier frontier');
-      const existingItems = await artifacts.mapReads(cut.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
-        item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef) }));
+      requireEqual(await readCanonicalArtifact(reads, run.frontierRef), frontier, 'repair exact original verifier frontier');
+      const existingItems = await reads.mapReads(cut.items, async row => ({ itemSeq: row.itemSeq, itemRef: row.payloadRef,
+        item: await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef) }));
       const latest = new Map<string, (typeof cut.journal)[number]>();
       for (const entry of cut.journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
       if ([...latest.values()].some(entry => !['completed', 'failed'].includes(entry.phase)) ||
@@ -107,8 +109,8 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
       assertBudgetWithin(run.budgetConsumed, run.budgetReserved, REPAIR_BUDGET, spec.budgets);
       assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
       const createdAt = sampleCanonicalNow(), plan = planVerifierRepair(progress, { runId, repairOrdinal: run.repairCount + 1, createdAt });
-      const context = decodeContextManifest(await readCanonicalArtifact(artifacts, cut.latestCheckpoint.contextManifestRef));
-      const graph = await prepareContinuationCommit(artifacts, { context, existingItems, items: [plan.item],
+      const context = decodeContextManifest(await readCanonicalArtifact(reads, cut.latestCheckpoint.contextManifestRef));
+      const graph = await prepareContinuationCommit(reads, { context, existingItems, items: [plan.item],
         frontier: { ...plan.frontier, contextItemSeq: context.throughItemSeq + 1 }, checkpointId: plan.checkpointId,
         workspaceStateRef: cut.latestCheckpoint.workspaceStateRef, artifacts: plan.plans });
       const itemRows = (connection: SqliteConnection | SqliteDriver) => connection.prepare(
@@ -118,6 +120,7 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
       const beforeItems = cut.items.map(({ itemId, itemSeq, payloadRef, createdAt }) => ({ itemId, itemSeq, payloadRef, createdAt }));
       const launches = readWorkerLaunchesForRun(driver, runId);
       let outcome: TimeFenceAdvance | undefined, updated: Run | undefined;
+      reads.assertReadActive();
       driver.transaction(connection => {
         assertActiveStateOwner(connection, owner);
         if (canonicalSha256(readRun(connection, runId)) !== canonicalSha256(run) ||

@@ -133,8 +133,9 @@ test('all six retained readers pass the original lazy callbacks to the bounded c
   for (const [file, lists] of expected) {
     const body = await readFile(new URL(`./${file}`, import.meta.url), 'utf8');
     const parsed = ts.createSourceFile(file, body, ts.ScriptTarget.Latest, true), calls: ts.CallExpression[] = [];
+    const catalog = file === 'verifier-repair.ts' ? 'reads' : 'artifacts';
     const visit = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'artifacts.mapReads') calls.push(node);
+      if (ts.isCallExpression(node) && node.expression.getText(parsed) === `${catalog}.mapReads`) calls.push(node);
       if (ts.isCallExpression(node)) assert.notEqual(node.expression.getText(parsed), 'Promise.all', `${file}: no fail-fast CAS group remains`);
       ts.forEachChild(node, visit);
     };
@@ -143,6 +144,10 @@ test('all six retained readers pass the original lazy callbacks to the bounded c
     for (const call of calls) {
       assert.equal(call.arguments.length, 2);
       assert(ts.isArrowFunction(call.arguments[1]!), `${file}: pass a callback, never already-started promises`);
+    }
+    if (file === 'verifier-repair.ts') {
+      assert.match(body, /const reads = readSignal \? artifacts\.withReadSignal\(readSignal\) : artifacts/u);
+      assert.match(calls[0]!.arguments[1]!.getText(parsed), /readCanonicalArtifact<ContinuationItem>\(reads, row\.payloadRef\)/u);
     }
     if (file === 'verifier-recovery.ts') {
       const skipRead = calls[1]!.arguments[1]!.getText(parsed);
