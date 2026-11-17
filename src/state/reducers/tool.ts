@@ -1160,7 +1160,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       throw new KernelStorageError('REVISION_CONFLICT', 'approval control cut kept changing');
     }),
     claimTool: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, readSignal?: AbortSignal,
-      mcpOwner?: McpNativeClaim) => {
+      mcpOwner?: McpNativeClaim, refreshBuiltinLease?: () => void) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
       input = { ...input };
@@ -1189,6 +1189,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
             binding.brokerFenceTokenDigest !== input.brokerFenceTokenDigest)
           throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP native owner differs from its sole original claim');
       } else if (mcpOwner) throw new KernelStorageError('INVALID_REQUEST', 'ordinary tool cannot borrow an MCP owner');
+      reads.assertReadActive();
+      refreshBuiltinLease?.();
       const execution = await builtinLaunch(selected, prepared, proof, input, reads);
       const planMetadata = execution && await reads.describe(execution.closure.spec.containmentPlanRef,
         'application/json', 'cliq-process-containment-plan-v1');
@@ -1234,7 +1236,7 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
       const dispatch = immutableSnapshot({ entry: claimed, request: proof.request, target: proof.target,
         ...compiled.projectInvocation({ callId: selected.call.callId, index: selected.call.index, toolName: selected.call.toolName, input: selected.call.value! }) });
       let consumed = false;
-      return Object.freeze({ ...dispatch,
+      return Object.freeze({ ...dispatch, ...(execution ? { launchClosure: execution.closure } : {}),
         /** Fresh synchronous release assertion for every fixed MCP setup,
          * effect and receipt-bound ping boundary under this one claim. */
         assertMcpRelease() {
@@ -1267,6 +1269,8 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
           const currentCut = await cut(input.expectedRunRevision, reads);
           const currentProof = await verifyGrant(prepared.grantRef!, reads);
           requireEqual(currentProof.request, expected.request, 'released current tool request');
+          reads.assertReadActive();
+          refreshBuiltinLease?.();
           const releasedExecution = await builtinLaunch(currentCut, prepared, currentProof, input, reads);
           reads.assertReadActive();
           let outcome: TimeFenceAdvance | undefined;

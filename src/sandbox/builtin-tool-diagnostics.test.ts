@@ -131,9 +131,7 @@ test('builtin stage wiring keeps the original claim, release, result and unknown
   const ordered = [
     ["builtinPhase('tool_claim_spec')", 'const sandboxLaunchSpecRef = await publishBuiltinRecipe('],
     ["builtinPhase('tool_claim')", 'const claimed = await currentAgent.claimTool('],
-    ["builtinPhase('tool_claim_data')", 'const call = await artifacts.readCanonical<'],
-    ["builtinPhase('tool_claim_live')", 'const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch,'],
-    ["builtinPhase(script ? 'tool_script_closure' : 'tool_edit_closure')", 'const launchClosure = script'],
+    ["builtinPhase('tool_claim_live')", 'const launchClosure = claimed.launchClosure'],
     ["builtinPhase('tool_native_parent')", 'await currentWorker.createInvocation(launchClosure, onBuiltinPhase ? builtinPhase : undefined)'],
     ["builtinPhase('tool_process_observe')", 'await invocation.observeProcess()'],
     ["builtinPhase('tool_release')", 'await claimed.release(invocation)'],
@@ -144,6 +142,10 @@ test('builtin stage wiring keeps the original claim, release, result and unknown
     ["builtinPhase('tool_error_unknown')", 'await markInvocationUnknown(']
   ];
   for (const [note, operation] of ordered) assert(body.indexOf(note!) >= 0 && body.indexOf(note!) < body.indexOf(operation!), note);
+  const verifiedClaim = body.indexOf('const launchClosure = claimed.launchClosure');
+  assert(body.indexOf("builtinPhase('tool_claim')") < verifiedClaim);
+  assert(verifiedClaim < body.indexOf("builtinPhase('tool_native_parent')"));
+  assert.match(body.slice(body.indexOf("builtinPhase('tool_claim_live')"), verifiedClaim), /refreshBuiltinLease\(\)/u);
   const resultAt = body.indexOf('const result = await invocation.result()'), captureAt = body.indexOf("const captured = typeof result === 'string'"),
     observedAt = body.indexOf("builtinPhase('tool_capture')");
   assert(resultAt < captureAt && captureAt < observedAt);

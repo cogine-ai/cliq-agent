@@ -23,7 +23,8 @@ import { isJoinedCasPublicationFailure } from './cas.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { openInstalledPreparingGit, type InstalledPreparingGit, type PreparingGitCompletion } from '../sandbox/preparation-git.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readBuiltinScriptLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
+import { decodeSandboxProfile, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure,
+  decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
@@ -1619,6 +1620,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     retained.activated = { ...retained.activated, launch: renewed };
     return 'renewed';
   }
+  function refreshInvocationLease(current: ActiveWorker, currentWorker: LinuxBlockedWorker) {
+    if (activeWorker !== current || worker !== currentWorker)
+      throw new KernelStorageError('LEASE_FENCED', 'invocation phase lost its original physical parent');
+    const result = renewOwnedWorkerLease(true);
+    if (result === 'inactive' || result === 'expired')
+      throw new KernelStorageError('LEASE_FENCED', 'invocation phase lost its original live parent lease');
+  }
   const execution: RunExecution = Object.freeze({
     hasPendingOperation: () => pending !== undefined,
     reconcilePublication: value => runPublicationReconciliation(value),
@@ -2216,13 +2224,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const currentWorker = worker, run = readRun(driver, runId);
         // Refresh only between phases, when no verifier reader holds a
         // WorkerLaunch cut. The held worker and original lease still decide.
-        const refreshVerifierLease = () => {
-          if (activeWorker !== current || worker !== currentWorker)
-            throw new KernelStorageError('LEASE_FENCED', 'verifier phase lost its original physical parent');
-          const result = renewOwnedWorkerLease(true);
-          if (result === 'inactive' || result === 'expired')
-            throw new KernelStorageError('LEASE_FENCED', 'verifier phase lost its original live parent lease');
-        };
+        const refreshVerifierLease = () => refreshInvocationLease(current, currentWorker);
         const prepared = await continuation.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, signal);
         if (prepared.disposition !== 'prepared') {
           const waiting = await preparePermission(prepared.run.revision);
@@ -2357,6 +2359,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           return sealed.run;
         }
         builtinPhase('tool_prepare');
+        if (retained && projection.kind === 'tool' &&
+            (projection.execution.kind === 'builtin' || projection.execution.kind === 'builtin_script'))
+          refreshInvocationLease(activeWorker!, worker!);
         let prepared = await currentAgent.prepareTool({ expectedRunRevision: selected.run.revision, leaseEpoch: selected.run.leaseEpoch }, signal);
         if (prepared.disposition === 'retry_pending' || prepared.disposition === 'retry_terminal_required' || prepared.disposition === 'result_committed') return prepared.run;
         if (prepared.disposition === 'retirement_required') {
@@ -2654,31 +2659,29 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         }
         builtinPhase('tool_claim_spec');
         if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
+        const refreshBuiltinLease = () => refreshInvocationLease(current, currentWorker);
+        refreshBuiltinLease();
         const sandboxLaunchSpecRef = await publishBuiltinRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         // The permanent claim precedes even blocked invocation process creation.
         signal.throwIfAborted();
+        refreshBuiltinLease();
         builtinPhase('tool_claim');
         const claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
-          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
+          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal, undefined, refreshBuiltinLease);
         claimedTool = claimed;
         operationPhase = 'claimed';
-        builtinPhase('tool_claim_data');
-        const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
-        const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
         builtinPhase('tool_claim_live');
-        const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
-        const closureInput = { ...live, prepared: prepared.entry, request: claimed.request, target: claimed.target,
-          call, grant, dispatchId, sandboxLaunchSpecRef };
+        refreshBuiltinLease();
+        const launchClosure = claimed.launchClosure;
+        if (!launchClosure) throw new KernelStorageError('RECOVERY_REQUIRED', 'builtin claim lost its exact verified launch');
+        const { call } = launchClosure;
         const script = claimed.target.execution.kind === 'builtin_script';
-        builtinPhase(script ? 'tool_script_closure' : 'tool_edit_closure');
-        const launchClosure = script
-          ? await readBuiltinScriptLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput, bootstrap!.releaseKeys, signal)
-          : await readBuiltinEditLaunchClosure(reads, assertActiveStateOwner(driver, owner), closureInput);
         builtinPhase('tool_native_parent');
         const invocation = await currentWorker.createInvocation(launchClosure, onBuiltinPhase ? builtinPhase : undefined);
         builtinPhase('tool_process_observe');
         await invocation.observeProcess();
         signal.throwIfAborted();
+        refreshBuiltinLease();
         builtinPhase('tool_release');
         await claimed.release(invocation);
         toolReleased = script;
