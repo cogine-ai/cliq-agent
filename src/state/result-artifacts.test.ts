@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { decodeDependencyReadyItem, type DependencyReadyItem } from '../kernel/dependency.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { InheritedVerificationProvenanceV1, VerificationClosureV1 } from '../kernel/result.js';
 import { decodeInheritedVerificationProvenance, decodeRunResult, decodeVerificationClosure } from './result-artifacts.js';
@@ -49,6 +50,27 @@ test('verification closure rejects contradictory status, nonpassed required evid
   if (noConsent.verification.kind !== 'local') assert.fail();
   delete noConsent.verification.unverifiedConsentRef; noConsent.closureDigest = digestOmitting(noConsent, 'closureDigest');
   assert.throws(() => decodeVerificationClosure(noConsent));
+});
+
+test('reused dependencies bind their acquired ready item without a new claim', () => {
+  const value = closure();
+  const ready: DependencyReadyItem = { schemaVersion: 1, kind: 'dependency_ready', origin: 'reused_acquired',
+    runId: value.runId, itemId: 'reused', planRef: canonicalSha256('plan'), readyCheckpointId: 'ready',
+    installedTreeDigest: canonicalSha256('managed tree'), acquiredReadyItemRef: canonicalSha256('first ready'), createdAt: value.createdAt };
+  assert.deepEqual({ ...decodeDependencyReadyItem(ready) }, ready);
+  assert.throws(() => decodeDependencyReadyItem({ ...ready, opId: 'another claim' }));
+  assert.throws(() => decodeDependencyReadyItem({ ...ready, acquiredReadyItemRef: undefined }));
+  let coercions = 0;
+  assert.throws(() => decodeDependencyReadyItem({ ...ready, origin: { toString() { coercions++; return 'reused_acquired'; } } }));
+  assert.equal(coercions, 0);
+  value.dependency = { kind: 'ready', origin: ready.origin, dependencyPolicyRef: canonicalSha256('dependency policy'),
+    dependencyPlanRef: ready.planRef, dependencyReadyItemId: ready.itemId, readyCheckpointId: ready.readyCheckpointId,
+    acquiredReadyItemRef: ready.acquiredReadyItemRef };
+  value.closureDigest = digestOmitting(value, 'closureDigest');
+  assert.deepEqual(decodeVerificationClosure(value), value);
+  const invalid = { ...value, dependency: { ...value.dependency, completedJournalSeq: 1 } };
+  invalid.closureDigest = digestOmitting(invalid, 'closureDigest');
+  assert.throws(() => decodeVerificationClosure(invalid));
 });
 
 test('advisory skip is a closed nonreceipt disposition and never satisfies a required gate', () => {

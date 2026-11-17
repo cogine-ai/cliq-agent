@@ -1208,7 +1208,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             ...(controllerRetirement ? { controllerRetirement } : {}), ...(reservation ? { reservation } : {}),
             brokerQuiescence: observeInstalledBrokerQuiescence(executionStore, runId) });
         } else if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
-          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          if (closed && activeWorker) await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, activeWorker.activated, activeWorker.closure);
+          else await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
         } else if (ownedLaunchId !== undefined && run.status === 'queued') {
           // Join the original spawner first. A new controller can only inspect
           // the exact witness; it cannot release the old activation channel.

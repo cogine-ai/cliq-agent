@@ -7,7 +7,7 @@ export { CONTROL_FRAME_BYTES, CONTROL_METHODS_V1, INSTALLED_CONTROL_FEATURES, CO
 export type { InstalledControlFeature, InstalledControlMethod, InstalledControlRequestV1,
   InstalledControlResponseFor, InstalledControlResultFor, HeadlessControlRequestV3, HeadlessControlResponseV3, HeadlessRunEventV3, HeadlessControlRecordV3 } from '../kernel/control-wire.js';
 
-export const CONTROL_V1_SOURCE_DIGEST = "4a909da971a74cb0520d26f6c1baee84032bf364a86c5755fc7333114b5aaed1";
+export const CONTROL_V1_SOURCE_DIGEST = "653b6932b946b60dc09b8973e23ad333491326aa7d5800469d40e693e9f22785";
 export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   entry: "src/kernel/control-wire.ts",
   scope: "static_local_typescript_dependency_closure_including_types",
@@ -27,7 +27,7 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/delivery-invocation.ts": "6a0fe0225ce62aa11aa3ddbed7d8e4e58f2fcf2034291aaf46af846fa2016263",
   "src/kernel/delivery.ts": "0a83da75cc71220fea91e85fc2e5722faafb59364b41a37b8bbd295dba490734",
   "src/kernel/dependency-script-approval.ts": "04ac826a5ff6394e14540ddd78d3c9db11e840a527d17c2d6ad8be420eacefda",
-  "src/kernel/dependency.ts": "2db7d01a4ac9af5e60c470cdd8736228cdc43241fbb204cf5290d1efa6605822",
+  "src/kernel/dependency.ts": "1093fb130b39285fd76638d7f57830282bb65b004ea14b00bd8c0d0aee0e0234",
   "src/kernel/execution.ts": "13363cd30b8905a3a0624b708fecf933ef75596dd62a331b83c5f209c1c08149",
   "src/kernel/identity.ts": "3cb63214f293bdbe6ce909746e608529d838dae92d6b8f512d4bdff492cad6de",
   "src/kernel/json.ts": "f6644f711556489fda53dbb11969e5b20f5d34c01e37fbfeeea3294dc7bdc6a2",
@@ -40,7 +40,7 @@ export const CONTROL_V1_SOURCE_MANIFEST = Object.freeze({
   "src/kernel/migration-control-wire.ts": "6187ccd0ccb19edaf29f729a3a4ab2351cb319132279307f0bb94ed7835598c9",
   "src/kernel/publication.ts": "c0190e639d19743c4e1cdf59441c74241f7fe423d2f912db1e27841f007c652a",
   "src/kernel/reconciliation.ts": "721c8e2794acc6cca952a52b5950c8ff5a5e089d3f46f2aa8f3e41169d665a20",
-  "src/kernel/result.ts": "2e48569470fe652fcf4842241043573b676496063cf11c3b8dfdd9b32611cfe6",
+  "src/kernel/result.ts": "ac67b02d2b45eaf2c2049924ea8831679f9919eff0a5fa1382d592886fb3d197",
   "src/kernel/session-context-pages.ts": "1c6dbbf8a899642301962970cca72d8c3711dd8a166f19822efbd4243bde9403",
   "src/kernel/session-continuity.ts": "5258a3d406dc1de3a5de2efd131d5aa6a4f1910c3a0f68b39e7bc1cdeb054cf5",
   "src/kernel/skill.ts": "5706a937be8edfed33cea9ea5e7a189ec348937da373246d6b293042ddf847e0",

@@ -9,6 +9,7 @@ import type { ArtifactCatalog } from './artifacts.js';
 import { readRetainedDependencyCandidate } from './dependency-candidate.js';
 import { planDependencyInvocation, dependencyOperationId } from './dependency-invocation-plan.js';
 import { readAcquiredDependencyReady, readFailedDependencyResult } from './dependency-retirement.js';
+import { readReusedDependencyReady, reusedDependencyItemId } from './dependency-reuse.js';
 import { readDependencyScriptsTemplateHistoryData } from './dependency-script-history.js';
 import { finalCandidateCheckpointId } from './final-candidate-plan.js';
 import { decodeFinalCandidateItem } from './result-artifacts.js';
@@ -44,6 +45,7 @@ export async function readDependencyHistory(driver: SqliteDriver, artifacts: Art
     return new Map<string, DependencyProgress>();
   }
   const result = new Map<string, DependencyProgress>(), consumed = new Set<string>(), consumedReady = new Set<string>(), consumedFailure = new Set<string>();
+  const acquiredByRef = new Map<string, Awaited<ReturnType<typeof readAcquiredDependencyReady>>>();
   for (const row of cut.items) {
     const raw = await readCanonicalArtifact<{ kind: string }>(artifacts, row.payloadRef);
     if (raw.kind !== 'final_candidate') continue;
@@ -75,15 +77,20 @@ export async function readDependencyHistory(driver: SqliteDriver, artifacts: Art
     const progress: DependencyProgress = { planRef, dependencyPolicyRef: cut.runSpec.dependencyPolicyRef, initialFrontier }; result.set(candidate.itemId, progress);
     const ownOpId = dependencyOperationId(cut.run.id, candidate.itemId, planRef);
     const inheritedId = (await import('./dependency-inherited.js')).inheritedDependencyItemId(cut.run.id, candidate.itemId, planRef);
-    const ready = readyItems.filter(item => item.planRef === planRef && (item.origin === 'acquired' ? item.opId === ownOpId : item.itemId === inheritedId)),
+    const reusedId = reusedDependencyItemId(cut.run.id, candidate.itemId, planRef);
+    const ready = readyItems.filter(item => item.planRef === planRef && (item.origin === 'acquired' ? item.opId === ownOpId :
+      item.itemId === (item.origin === 'reused_acquired' ? reusedId : inheritedId))),
       failures = failureItems.filter(item => item.planRef === planRef && item.opId === ownOpId);
     for (const item of ready) consumedReady.add(item.itemId); for (const item of failures) consumedFailure.add(item.itemId);
     if (failures.length > 1 || ready.length && failures.length) throw new TypeError('dependency candidate has conflicting terminal outcomes');
     if (ready.length > 1) throw new TypeError('dependency candidate acquired multiple ready outcomes');
     if (!entry) {
-      if (failures.length || ready.some(item => item.origin !== 'inherited_parent_ready')) throw new TypeError('dependency result has no original acquisition');
+      if (failures.length || ready.some(item => item.origin === 'acquired')) throw new TypeError('dependency result has no original acquisition');
       if (ready[0]?.origin === 'inherited_parent_ready') {
         const checked = await (await import('./dependency-inherited.js')).readInheritedDependencyReady(driver, artifacts, cut, ready[0]); progress.ready = checked.item;
+      } else if (ready[0]?.origin === 'reused_acquired') {
+        const checked = await readReusedDependencyReady(driver, artifacts, source, ready[0], acquiredByRef.get(ready[0].acquiredReadyItemRef));
+        progress.ready = checked.item;
       }
       source.assertUnchanged(driver); continue;
     }
@@ -124,6 +131,7 @@ export async function readDependencyHistory(driver: SqliteDriver, artifacts: Art
     if (rows.at(-1)?.phase === 'completed') {
       if (ready.length !== 1 || ready[0]!.origin !== 'acquired') throw new TypeError('dependency completion lacks its original ready Checkpoint');
       const checked = await readAcquiredDependencyReady(driver, artifacts, cut, ready[0]);
+      acquiredByRef.set(canonicalSha256(checked.item), checked);
       progress.ready = checked.item; progress.completedJournalSeq = rows.at(-1)!.seq;
     } else if (rows.at(-1)?.phase === 'failed') {
       if (failures.length !== 1 || ready.length) throw new TypeError('dependency known failure lacks its original real post-effect Checkpoint');
@@ -149,6 +157,7 @@ export function dependencyVerificationProjection(progress?: DependencyProgress):
     dependencyReadyItemId: ready.itemId, readyCheckpointId: ready.readyCheckpointId };
   if (ready.origin === 'inherited_parent_ready') return { ...core, origin: 'inherited_parent_ready', parentRunId: ready.parentRunId,
     parentReadyItemRef: ready.parentReadyItemRef, childAdmissionRequestRef: ready.childAdmissionRequestRef };
+  if (ready.origin === 'reused_acquired') return { ...core, origin: 'reused_acquired', acquiredReadyItemRef: ready.acquiredReadyItemRef };
   if (!progress.completedJournalSeq) throw new TypeError('acquired readiness lost its original completed Journal');
   return { ...core, origin: 'acquired', acquisitionOpId: ready.opId, acquisitionAttempt: ready.attempt, completedJournalSeq: progress.completedJournalSeq };
 }

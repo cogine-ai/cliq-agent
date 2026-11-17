@@ -81,6 +81,7 @@ export type DependencyReadyItem = {
   readyCheckpointId: string; installedTreeDigest: string; createdAt: string;
 } & (
   | { origin: 'acquired'; opId: string; attempt: number; packageCacheManifestRef: ArtifactRef }
+  | { origin: 'reused_acquired'; acquiredReadyItemRef: ArtifactRef }
   | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; parentReadyCheckpointId: string;
       parentReadyWorkspaceStateRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef;
       childPreparation: { workerLaunchId: string; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef } }
@@ -277,15 +278,22 @@ export const dependencyRegistryTargetsDigest = (policy: Pick<DependencyPolicy, '
 export function decodeDependencyReadyItem(value: unknown): DependencyReadyItem {
   const common = ['schemaVersion', 'kind', 'itemId', 'runId', 'planRef', 'readyCheckpointId', 'installedTreeDigest', 'createdAt', 'origin'];
   const header = object(value, common, ['opId', 'attempt', 'packageCacheManifestRef', 'parentRunId', 'parentReadyItemRef',
-    'parentReadyCheckpointId', 'parentReadyWorkspaceStateRef', 'childAdmissionRequestRef', 'childPreparation']);
-  const data = object(header, [...common, ...(header.origin === 'acquired' ? ['opId', 'attempt', 'packageCacheManifestRef'] :
-    ['parentRunId', 'parentReadyItemRef', 'parentReadyCheckpointId', 'parentReadyWorkspaceStateRef', 'childAdmissionRequestRef', 'childPreparation'])]);
+    'parentReadyCheckpointId', 'parentReadyWorkspaceStateRef', 'childAdmissionRequestRef', 'childPreparation', 'acquiredReadyItemRef']);
+  const originFields = {
+    acquired: ['opId', 'attempt', 'packageCacheManifestRef'],
+    reused_acquired: ['acquiredReadyItemRef'],
+    inherited_parent_ready: ['parentRunId', 'parentReadyItemRef', 'parentReadyCheckpointId', 'parentReadyWorkspaceStateRef', 'childAdmissionRequestRef', 'childPreparation'],
+  };
+  if (typeof header.origin !== 'string' || !Object.hasOwn(originFields, header.origin)) fail();
+  const data = object(header, [...common, ...originFields[header.origin as keyof typeof originFields]]);
   if (data.schemaVersion !== 1 || data.kind !== 'dependency_ready') fail();
   for (const key of ['itemId', 'runId', 'readyCheckpointId']) text(data[key]);
   for (const key of ['planRef', 'installedTreeDigest']) ref(data[key]);
   text(data.createdAt); parseCanonicalTime(data.createdAt);
   if (data.origin === 'acquired') {
     text(data.opId); integer(data.attempt, 0, 4); ref(data.packageCacheManifestRef);
+  } else if (data.origin === 'reused_acquired') {
+    ref(data.acquiredReadyItemRef);
   } else if (data.origin === 'inherited_parent_ready') {
     text(data.parentRunId); text(data.parentReadyCheckpointId);
     if (data.parentRunId === data.runId) fail();

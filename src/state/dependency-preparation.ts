@@ -35,6 +35,9 @@ export async function selectDependencyBeforeWorker(driver: SqliteDriver, artifac
     const run = await (await import('./dependency-inherited.js')).commitInheritedCandidateReady(driver, signal ? artifacts.withReadSignal(signal) : artifacts, owner, source.run.id, source.run.revision);
     return Object.freeze({ disposition: 'ready' as const, run });
   }
+  const reused = await (await import('./dependency-reuse.js')).commitReusedDependencyReady(driver,
+    signal ? artifacts.withReadSignal(signal) : artifacts, owner, source);
+  if (reused) return Object.freeze({ disposition: 'ready' as const, run: reused });
   if (source.plan.allowInstallScripts) {
     const selected = await prepareDependencyScriptApproval(driver, artifacts, owner, { bundle: source.bundle, releaseKeys }, input, signal);
     if (selected.disposition !== 'authorized') return selected;

@@ -63,11 +63,11 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
       snapshot.generationIdentityDigest !== generation.generationIdentityDigest || snapshot.observedAt < observedAt) {
     throw new TypeError('post-effect snapshot differs from its result, generation or workspace closure');
   }
-  for (const entry of entries.entries) if (entry.kind === 'file') {
-    // Exhaustion verifies the exact size, retained inode and content hash. Do
-    // not retain a full workspace file merely to validate a ready Checkpoint.
-    for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* bounded verification */ }
-  }
+  // Each original file is still verified and joined, with a bounded read
+  // group and the existing discard path for large files.
+  await artifacts.mapReads(entries.entries, async entry => {
+    if (entry.kind === 'file') await artifacts.verifyChunks(entry.blobRef, entry.size);
+  });
   if (state.privateGitStateRef) await artifacts.readBytes(state.privateGitStateRef);
   const death = await readCanonicalArtifact<DeathEvidence>(artifacts, snapshot.quiescenceEvidenceRef);
   if (!exactKeys(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',

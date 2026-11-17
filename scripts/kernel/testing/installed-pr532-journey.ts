@@ -180,6 +180,7 @@ export async function runInstalledPr532Journey(input: {
   const cut = await finish(runId);
   assert(cut.snapshot.run.repairCount > 0);
   assert.equal(cut.nextJournalSeq, cut.highWaterJournalSeq);
+  assert.equal(cut.journal.filter(row => row.target === 'builtin:dependency-acquire' && row.phase === 'dispatch_claimed').length, 1);
   const receiptRows = cut.journal.filter(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef !== undefined);
   assert(receiptRows.length >= 2 && receiptRows[0]!.seq < receiptRows.at(-1)!.seq);
   const first = decodeVerificationReceipt(await object(receiptRows[0]!.receiptRef!));
@@ -209,6 +210,7 @@ export async function runInstalledPr532Journey(input: {
   assert(result.verificationReceiptRefs.includes(receiptRows.at(-1)!.receiptRef!));
   const closure = decodeVerificationClosure(await object(result.verificationClosureRef));
   assert(closure.verification.kind === 'local' && closure.verification.outcome === 'verified');
+  assert(closure.dependency.kind === 'ready' && closure.dependency.origin === 'reused_acquired');
   const diff = decodeWorkspaceDiff(await object(result.diffRef));
   assert.equal(diff.operations.length, 1);
   const change = diff.operations[0]!;

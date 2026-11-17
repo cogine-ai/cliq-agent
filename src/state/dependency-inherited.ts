@@ -10,11 +10,13 @@ import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './c
 import { readChildAdmission, type ChildAdmissionData } from './child-admission.js';
 import { planContinuationCommit } from './continuation-commit.js';
 import { decodeRunSpec, decodeWorkspaceEntries, decodeWorkspaceState } from './decoders.js';
-import { readCurrentDependencyCandidate } from './dependency-candidate.js';
+import { readCurrentDependencyCandidate, readRetainedDependencyCandidate } from './dependency-candidate.js';
 import { readDependencyHistory, type DependencyHistoryCut } from './dependency-history.js';
 import { readAcquiredDependencyReady, dependencyInstalledTreeDigest } from './dependency-retirement.js';
 import { readDerivedDependencyScriptSourceConditions, sameDependencyReadyInputs } from './dependency-script-source.js';
 import { readDependencyPlanForProjectedSource } from './dependency-plan.js';
+import { finalCandidateCheckpointId } from './final-candidate-plan.js';
+import { decodeFinalCandidateItem } from './result-artifacts.js';
 import { KernelStorageError } from './errors.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -59,12 +61,29 @@ export async function readParentDependencyReadyAtCheckpoint(driver: SqliteDriver
   if (!cut.runSpec.dependencyPolicyRef || checkpoint.runId !== cut.run.id || checkpoint.runItemSeq > cut.items.length)
     invalid('child dependency has no original parent ready Checkpoint');
   const history = await readDependencyHistory(driver, artifacts, cut);
-  const eligible = [...history.values()].flatMap(progress => progress.ready ? [progress.ready] : [])
-    .filter(item => cut.items.find(row => row.itemId === item.itemId)?.itemSeq! <= checkpoint.runItemSeq);
-  const ready = eligible.at(-1);
-  if (!ready) invalid('child dependency cannot acquire or execute instead of inheriting a true parent ready result');
+  const eligible = [...history.entries()].flatMap(([candidateId, progress]) => progress.ready ? [{ candidateId, ready: progress.ready }] : [])
+    .filter(({ ready }) => cut.items.find(row => row.itemId === ready.itemId)?.itemSeq! <= checkpoint.runItemSeq);
+  const selectedReady = eligible.at(-1);
+  if (!selectedReady) invalid('child dependency cannot acquire or execute instead of inheriting a true parent ready result');
+  const { ready, candidateId } = selectedReady;
   const checked = ready.origin === 'acquired' ? await readAcquiredDependencyReady(driver, artifacts, cut, ready)
-    : await readInheritedDependencyReady(driver, artifacts, cut, ready);
+    : ready.origin === 'reused_acquired' ? await (async () => {
+      // The full history above already verified the reused item's actual
+      // acquisition and candidate seal. Retain this candidate's current SQL cut.
+      const row = cut.items.find(row => row.itemId === candidateId);
+      if (!row) invalid('reused parent ready has no original candidate item');
+      const candidate = decodeFinalCandidateItem(await readCanonicalArtifact(artifacts, row.payloadRef));
+      const source = await readRetainedDependencyCandidate(driver, artifacts, cut.run.id, {
+        candidateItemId: candidateId, sourceCheckpointId: finalCandidateCheckpointId(cut.run.id, candidate.producingItemId),
+        dependencyPlanRef: ready.planRef, resultSourceRef: candidate.resultSourceRef, releaseKeys: artifacts.releaseTrustRoots() });
+      requireEqual(source.run, cut.run, 'reused parent ready exact Run cut');
+      const checkpoint = readCheckpoint(driver, ready.readyCheckpointId);
+      if (checkpoint.workspaceStateRef !== source.originalCheckpoint.workspaceStateRef ||
+          checkpoint.runItemSeq !== source.originalCheckpoint.runItemSeq + 1 || checkpoint.journalSeq !== source.originalCheckpoint.journalSeq ||
+          checkpoint.runId !== source.run.id || checkpoint.createdAt !== ready.createdAt)
+        invalid('reused parent ready Checkpoint no longer binds its original candidate');
+      return { source, checkpoint, assertUnchanged: source.assertUnchanged };
+    })() : await readInheritedDependencyReady(driver, artifacts, cut, ready);
   const material = await fullManagedBytes(artifacts, checkpoint.workspaceStateRef);
   if (material.treeDigest !== ready.installedTreeDigest) invalid('parent dependency tree drifted after its original sealed ready result');
   const projected = await planChildForkSource(artifacts, cut.runSpec, checkpoint.workspaceStateRef);

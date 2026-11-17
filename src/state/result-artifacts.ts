@@ -155,15 +155,16 @@ export function decodeVerificationClosure(value: unknown): VerificationClosureV1
   try { parseCanonicalTime(text(closure.createdAt)); } catch { mismatch('verification closure time is invalid'); }
   const dependencyHeader = closed(closure.dependency, ['kind'], ['origin', 'dependencyPolicyRef', 'dependencyPlanRef', 'dependencyReadyItemId',
     'readyCheckpointId', 'acquisitionOpId', 'acquisitionAttempt', 'completedJournalSeq', 'parentRunId', 'parentReadyItemRef', 'childAdmissionRequestRef',
-    'sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef']);
+    'sourceRunId', 'sourceRunResultRef', 'sourceVerificationClosureRef', 'inheritedProvenanceRef', 'acquiredReadyItemRef']);
   const dependencyKind = dependencyHeader.kind;
   if (dependencyKind === 'ready') {
     const origin = dependencyHeader.origin;
     const dependency = closed(closure.dependency, ['kind', 'origin', 'dependencyPolicyRef', 'dependencyPlanRef', 'dependencyReadyItemId',
       'readyCheckpointId', ...(origin === 'acquired' ? ['acquisitionOpId', 'acquisitionAttempt', 'completedJournalSeq'] :
-        ['parentRunId', 'parentReadyItemRef', 'childAdmissionRequestRef'])]);
+        origin === 'reused_acquired' ? ['acquiredReadyItemRef'] : ['parentRunId', 'parentReadyItemRef', 'childAdmissionRequestRef'])]);
     ref(dependency.dependencyPolicyRef); ref(dependency.dependencyPlanRef); text(dependency.dependencyReadyItemId); text(dependency.readyCheckpointId);
     if (origin === 'acquired') { text(dependency.acquisitionOpId); integer(dependency.acquisitionAttempt); integer(dependency.completedJournalSeq, 1); }
+    else if (origin === 'reused_acquired') ref(dependency.acquiredReadyItemRef);
     else if (origin === 'inherited_parent_ready') {
       if (text(dependency.parentRunId) === closure.runId) mismatch('dependency cannot inherit itself');
       ref(dependency.parentReadyItemRef); ref(dependency.childAdmissionRequestRef);

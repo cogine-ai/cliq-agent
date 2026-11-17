@@ -90,6 +90,7 @@ export type VerificationClosureV1 = {
     dependencyReadyItemId: string; readyCheckpointId: string;
   } & (
     | { origin: 'acquired'; acquisitionOpId: string; acquisitionAttempt: number; completedJournalSeq: number }
+    | { origin: 'reused_acquired'; acquiredReadyItemRef: ArtifactRef }
     | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef }
   ));
   verification: {

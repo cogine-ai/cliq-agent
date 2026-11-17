@@ -41,6 +41,16 @@ Explicit tool permission, OS containment, credential and spend limits, current
 owner/release checks, genuine retirement and refusal to resend unknown effects
 remain required. Applying must refuse conflicting drift before writing.
 
+A root repair candidate can reuse already installed dependencies from the same
+Run when install scripts were disabled, the exact package plan and execution
+inputs match, and the current candidate's original native seal proves that the
+complete managed tree is unchanged. Record the original acquired-ready item in
+the new candidate's readiness Checkpoint and revalidate both seals on recovery.
+The verifier still runs again against the new candidate. If a draining
+execution fails and still owns an activated worker, use the same checked
+shutdown fence as for an idle owned worker, then join the real resources.
+An already received process result stays in custody through settlement.
+
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
 unrelated crash-cut matrices do not gate this one-task preview. Measure latency
