@@ -236,10 +236,11 @@ export async function openInstalledControlTransport(selected: HeldInstalledRunti
     const frame = Buffer.alloc(4); frame.writeUInt32BE(bytes.length);
     exchangeFailureBoundary = undefined;
     let timer: ReturnType<typeof setTimeout> | undefined, nextProgress = 1, responseDeadline = 0;
+    const responseTimeoutMs = request.method === 'run.apply' ? 300_000 : 30_000;
     const awaitFrame = () => {
       clearTimeout(timer);
-      responseDeadline = performance.now() + 30_000;
-      timer = setTimeout(responseTimedOut, 30_000);
+      responseDeadline = performance.now() + responseTimeoutMs;
+      timer = setTimeout(responseTimedOut, responseTimeoutMs);
     };
     const progress = request.method === 'state.migrate' || request.method === 'state.rollback'
       ? { accept(value: unknown) { decodeInstalledMigrationProgress(value, request, nextProgress++); awaitFrame(); },

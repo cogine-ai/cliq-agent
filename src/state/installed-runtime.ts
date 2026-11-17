@@ -1003,8 +1003,8 @@ class Scope {
     return pending;
   }
   async assertDirectory(directory: Directory): Promise<void> {
-    const held = await directory.handle.stat({ bigint: true });
-    const named = await lstat(directory.parent ? childPath(directory.parent, directory.name) : '/', { bigint: true });
+    const [held, named] = await joinResourceOperations([directory.handle.stat({ bigint: true }),
+      lstat(directory.parent ? childPath(directory.parent, directory.name) : '/', { bigint: true })] as const);
     checkDirectory(held, directory.private); checkDirectory(named, directory.private);
     if (!sameDirectory(directory.info, held) || !sameDirectory(held, named)) mismatch('installed runtime directory changed');
   }
@@ -1214,8 +1214,8 @@ async function withHeldMigrationTailArtifacts<T>(native: NativeStateOwner, gate:
 
 async function assertFile(file: InstalledFile): Promise<void> {
   healthy();
-  const held = await file.handle.stat({ bigint: true });
-  const named = await lstat(childPath(file.parent, file.name), { bigint: true });
+  const [held, named] = await joinResourceOperations([file.handle.stat({ bigint: true }),
+    lstat(childPath(file.parent, file.name), { bigint: true })] as const);
   if (!sameFile(file.info, held) || !sameFile(held, named)) mismatch('installed runtime held file or its independent path changed');
 }
 async function* chunks(file: InstalledFile, signal?: AbortSignal): AsyncGenerator<Buffer> {

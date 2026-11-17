@@ -57,6 +57,16 @@ lifetime. Stop cancels and joins those reads, then fences the original claim.
 The actual execution and received-result lifetime remains owned by its original
 producer, and the synchronous native release still follows the complete gate.
 
+The explicit `run.apply` client waits at most five minutes for its original
+admission response, including complete verified-source history and live source
+capture. The preview command fixture allows five minutes and thirty seconds
+for that command's authentication, response and actual pipe joins. This is a
+bounded extension of the former thirty-second apply-response wait under the
+approved task-limit extension. Qualify five-second authenticated readiness,
+two-second service stop and thirty-second native HTTP independently. Original
+authorization expiry and fresh final-transaction checks continue to decide
+whether the application can be admitted.
+
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
 unrelated crash-cut matrices do not gate this one-task preview. Measure latency

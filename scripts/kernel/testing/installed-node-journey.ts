@@ -394,11 +394,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   const dailyAlias = options.provider ? 'deepseek' : 'owned-daily';
   const dailyCommand = async (argv: readonly string[], timeout = 30_000, input?: Buffer) => {
     assert(dailyJourney && [30_000, 60_000, 90_000].includes(timeout) && ['setup', 'models', 'run', 'result', 'apply'].includes(argv[0]!));
+    const fullApply = pr532 !== undefined && argv[0] === 'apply';
+    if (fullApply) timeout = 330_000;
     let result: Awaited<ReturnType<typeof runInstalledDailyCommand>>;
     try {
       result = await runInstalledDailyCommand({ executable: '/usr/sbin/runuser',
         args: [...prefix, path.join(recipe.packageRoot, 'supervisor'), ...argv], env: environment, cwd: ledger.home,
-        ...(input === undefined ? {} : { input }), deadlineMs: timeout, scanner });
+        ...(input === undefined ? {} : { input }), deadlineMs: timeout, scanner,
+        ...(fullApply ? { fixtureScope: 'installed_apply' as const } : {}) });
     } catch (error) {
       if (error instanceof InstalledDailyCommandError) report.normalCliCommandFailure ??= { command: argv[0],
         ...error.diagnostic, launcherAndPipesJoined: error.launcherAndPipesJoined, descendantRetirement: error.descendantRetirement };

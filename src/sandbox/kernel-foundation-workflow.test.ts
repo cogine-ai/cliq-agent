@@ -275,7 +275,8 @@ test('normal daily coverage uses the signed command path and original joined fix
   assert.match(driver, /report\.normalCliCommands\.map\([\s\S]*?\['setup', 'models', 'run', 'result', 'apply'\]/u);
   assert(/const dailyCommand = async[^\n]+\n\s*assert\(dailyJourney && \[30_000, 60_000, 90_000\]\.includes\(timeout\) && \['setup', 'models', 'run', 'result', 'apply'\]\.includes\(argv\[0\]!\)\)/u.test(driver),
     'the normal commands keep the original distinct command budgets and closed command names');
-  assert.match(driver, /await runInstalledDailyCommand\(\{ executable: '\/usr\/sbin\/runuser',[\s\S]*?path\.join\(recipe\.packageRoot, 'supervisor'\), \.\.\.argv[\s\S]*?deadlineMs: timeout, scanner \}/u);
+  assert.match(driver, /const fullApply = pr532 !== undefined && argv\[0\] === 'apply';\n\s*if \(fullApply\) timeout = 330_000;/u);
+  assert.match(driver, /await runInstalledDailyCommand\(\{ executable: '\/usr\/sbin\/runuser',[\s\S]*?path\.join\(recipe\.packageRoot, 'supervisor'\), \.\.\.argv[\s\S]*?deadlineMs: timeout, scanner,\n\s*\.\.\.\(fullApply \? \{ fixtureScope: 'installed_apply' as const \} : \{\}\) \}/u);
   const command = await readFile(new URL('../../scripts/kernel/testing/installed-daily-command.ts', import.meta.url), 'utf8');
   assert.match(command, /Promise\.all\(\[closed, written, streamsClosed\]\)/u);
   const joined = command.indexOf('Promise.all([closed, streamsClosed, written.catch(() => {})])');

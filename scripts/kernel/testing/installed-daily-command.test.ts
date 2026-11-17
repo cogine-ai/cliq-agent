@@ -22,15 +22,16 @@ test('ordinary command success requires actual child, complete input and all ori
   } finally { scan.close(); }
 });
 
-test('the delayed bootstrap fixture admits three minutes and preserves the ordinary ceiling', async () => {
+for (const [fixtureScope, deadlineMs] of [['installed_delayed_bootstrap', 180_000], ['installed_apply', 330_000]] as const)
+test(`${fixtureScope} uses its explicit finite command ceiling`, async () => {
   const scan = scanner();
   const command = { executable: process.execPath, args: ['--version'], cwd: tmpdir(), env: {}, scanner: scan };
   try {
-    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs: 180_000 }), { code: 'ERR_ASSERTION' });
-    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs: 180_001, fixtureScope: 'installed_delayed_bootstrap' }),
+    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs }), { code: 'ERR_ASSERTION' });
+    await assert.rejects(runInstalledDailyCommand({ ...command, deadlineMs: deadlineMs + 1, fixtureScope }),
       { code: 'ERR_ASSERTION' });
     assert.equal(scan.stats().streamsOpened, 0);
-    const result = await runInstalledDailyCommand({ ...command, deadlineMs: 180_000, fixtureScope: 'installed_delayed_bootstrap' });
+    const result = await runInstalledDailyCommand({ ...command, deadlineMs, fixtureScope });
     assert.equal(result.stdout.toString().trim(), process.version);
     assert.equal(scan.stats().streamsClosed, 2);
   } finally { scan.close(); }

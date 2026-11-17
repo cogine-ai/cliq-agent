@@ -32,10 +32,10 @@ export class InstalledDailyCommandError extends Error {
 export async function runInstalledDailyCommand(input: Readonly<{
   executable: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv;
   input?: Buffer; deadlineMs: number; scanner: CredentialSecretScanner;
-  fixtureScope?: 'installed_local_setup' | 'installed_local_model' | 'installed_delayed_bootstrap';
+  fixtureScope?: 'installed_local_setup' | 'installed_local_model' | 'installed_delayed_bootstrap' | 'installed_apply';
   installerDiagnostics?: (rows: readonly InstalledInstallerDiagnostic[]) => void;
 }>) {
-  const ceiling = { installed_local_setup: 180_000, installed_local_model: 360_000, installed_delayed_bootstrap: 180_000 };
+  const ceiling = { installed_local_setup: 180_000, installed_local_model: 360_000, installed_delayed_bootstrap: 180_000, installed_apply: 330_000 };
   const maximum = input.fixtureScope ? ceiling[input.fixtureScope] : 90_000;
   assert(Number.isSafeInteger(input.deadlineMs) && input.deadlineMs > 0 && input.deadlineMs <= maximum);
   const started = performance.now(), pipesJoined = [false, false, false];
