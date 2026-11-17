@@ -19,7 +19,7 @@ import { openSqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { loadVerifierPolicy, planVerifierRequest } from './verifier-policy.js';
-import { readVerifierProgress, type VerifierRecoveryCut } from './verifier-recovery.js';
+import { readVerifiedDependencyForLaunch, readVerifierProgress, type VerifierRecoveryCut } from './verifier-recovery.js';
 
 test('retained delivery verification selects its exact proof-carrying delivery frontier and rejects an agent candidate', async () => {
   const fixture = await createAgentFixture('delivery-verifier-frontier', undefined, { mode: 'plan' });
@@ -45,6 +45,8 @@ test('retained delivery verification selects its exact proof-carrying delivery f
       runSpec, workspaceGenerations: original.workspaceGenerations, items: [row], journal: [] };
     const progress = await readVerifierProgress(driver, artifacts, cut);
     assert.equal(progress.candidate.operation, 'delivery'); assert.equal(progress.complete, true); assert.deepEqual(progress.entries, []);
+    assert.throws(() => readVerifiedDependencyForLaunch({ ...progress }, driver, artifacts, cut.run, candidate.itemId, planArtifact.ref),
+      /own validated dependency read/);
     await assert.rejects(readVerifierProgress(driver, artifacts, { ...cut, runSpec: original.runSpec }), /candidate.*operation/);
   } finally { driver.close(); await disposeFixture(fixture); }
 });

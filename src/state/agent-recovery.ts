@@ -24,7 +24,7 @@ import { readModelGrantData } from './model-grant.js';
 import { decodeAdmittedContext, decodeContextManifest, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
 import type { SqliteDriver } from './sqlite-driver.js';
-import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
+import { readVerifierProgressByCandidate, type VerifierProgress } from './verifier-recovery.js';
 import { validateVerifierHistory } from './verifier-history.js';
 import { validateDeliveryRecovery } from './delivery-recovery.js';
 import { assertDeliveryReadData, type DeliveryReadData } from './delivery-read-data.js';
@@ -56,6 +56,7 @@ type AgentRecoveryInput = {
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   principalId: string; workspaceIdentityRef: string;
+  onVerifierProgress?: (progress: ReadonlyMap<string, VerifierProgress>) => void;
 };
 export async function validateAgentRecovery(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
   const { repairAttempts } = await validateAgentRecoveryData(input, onPhase);
@@ -371,13 +372,11 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
     await (await import('./dependency-script-approval.js')).validateDependencyScriptApprovalHistory(input.driver, artifacts, { run, items });
   }
   phase('candidate');
-  const verifierProgressByCandidate = new Map<string, VerifierProgress>();
-  for (const row of input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate')) {
-    if (!input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
-    verifierProgressByCandidate.set(row.itemId, await readVerifierProgress(input.driver, artifacts, {
-      run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
-    }, row.itemId));
-  }
+  const candidateIds = input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate').map(row => row.itemId);
+  if (candidateIds.length && !input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
+  const verifierProgressByCandidate = input.driver ? await readVerifierProgressByCandidate(input.driver, artifacts, {
+    run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
+  }, candidateIds) : new Map<string, VerifierProgress>();
   await validateFinalCandidateRecovery({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
     checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate, deliveryMerges });
   phase('verifier');
@@ -397,5 +396,6 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));
+  input.onVerifierProgress?.(verifierProgressByCandidate);
   return { repairAttempts, decodedItems: items, verifierProgressByCandidate };
 }

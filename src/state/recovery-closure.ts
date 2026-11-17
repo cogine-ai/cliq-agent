@@ -635,6 +635,20 @@ export async function readRecoveryClosure(
   return result.cut;
 }
 
+/** One fresh recovery walk, including the current verifier projection it
+ * already validated. No caller-supplied projection can replace that walk. */
+export async function readVerifierRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string) {
+  let verifierProgress: ReadonlyMap<string, import('./verifier-recovery.js').VerifierProgress> | undefined;
+  const result = await readRecoveryProjection(driver, artifacts, runId, undefined, undefined, false, progress => { verifierProgress = progress; });
+  try {
+    const candidateId = result.cut.run.nextStep === 'verify'
+      ? await (await import('./verifier-recovery.js')).readCurrentVerifierCandidate(artifacts, result.cut) : undefined;
+    const progress = candidateId ? verifierProgress?.get(candidateId) : undefined;
+    artifacts.assertReadActive();
+    return { cut: result.cut, progress };
+  } finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
+}
+
 /** Internal completion reader. It opens the same full fresh recovery entry;
  * only its actual completed data family can supply the terminal basis. */
 export async function readResultRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string,
@@ -681,7 +695,8 @@ async function readRecoveryProjection(
   runId: string,
   onPhase?: (phase: RecoveryClosurePhase) => void,
   preparationCleanup?: WorkerPreparationCleanupContext,
-  resultBasisRequested = false
+  resultBasisRequested = false,
+  onVerifierProgress?: (progress: ReadonlyMap<string, import('./verifier-recovery.js').VerifierProgress>) => void
 ): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix; agent?: AgentResultReadData;
   basis?: Awaited<ReturnType<typeof readResultBasis>> }> {
   const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
@@ -838,6 +853,7 @@ async function readRecoveryProjection(
         const input = { driver, artifacts, run, spec: runSpec, items, journal,
           principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
           checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
+          onVerifierProgress,
           context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
         let history: { repairAttempts: number };
         if (delivery) {

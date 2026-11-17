@@ -15,7 +15,7 @@ import { sampleCanonicalNow } from './canonical-time.js';
 import { planContinuationCommit } from './continuation-commit.js';
 import { decodeContextManifest, decodeSourceManifest, decodeWorkspaceEntries } from './decoders.js';
 import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
 import { prepareCandidateSource } from './result-source.js';
 import { readCheckpoint, readRun } from './rows.js';
@@ -24,7 +24,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { prepareToolCheckpoint, type NativeWorkerRetirement } from './tool-checkpoint.js';
 import { decodeVerificationReceipt, decodeVerifierStopEvidence, decodeVerifierStopItem } from './verifier-artifacts.js';
-import { readVerifierProgress, verifierCheckpointId, verifierResultItemId, type VerifierRetirementV1 } from './verifier-recovery.js';
+import { verifierCheckpointId, verifierResultItemId, type VerifierRetirementV1 } from './verifier-recovery.js';
 import { prepareValidatedInvocationSettlement } from './reducers/invocation.js';
 
 const VERIFIER_BUDGET = Object.freeze({ modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 });
@@ -45,11 +45,11 @@ export async function beginVerifierCompletion(driver: SqliteDriver, artifacts: A
   const identity = immutableSnapshot({ expectedRunRevision: input.expectedRunRevision, opId: input.opId, attempt: input.attempt });
   input = { ...identity, result: input.result };
   const { run: admitted, spec, assembly } = authority, runId = admitted.id;
-  const selected = await readRecoveryClosure(driver, artifacts, runId), { run } = selected;
-  if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt ||
+  const { cut: selected, progress } = await readVerifierRecoveryClosure(driver, artifacts, runId), { run } = selected;
+  if (!progress || run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt ||
       run.revision !== input.expectedRunRevision || run.status !== 'running' || run.nextStep !== 'verify' || !run.frontierRef || !run.activeWorkerLaunchId)
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier completion lost its original active parent cut');
-  const progress = await readVerifierProgress(driver, artifacts, selected), current = progress.entries[progress.nextVerifierIndex];
+  const current = progress.entries[progress.nextVerifierIndex];
   const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'verify' }>>(artifacts, run.frontierRef);
   const entries = readInvocationAttempt(driver, runId, input.opId, input.attempt);
   const prepared = entries[0], claim = entries[1];

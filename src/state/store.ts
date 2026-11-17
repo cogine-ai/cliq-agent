@@ -144,7 +144,7 @@ import {
   type RecordWorkspaceGenerationPreactivatedInput,
   type RegisterWorkspaceGenerationInput
 } from './reducers/workspace-transition.js';
-import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readVerifierProgress } from './verifier-recovery.js';
 import { verifierOperationId } from './verifier-policy.js';
 import type { RunResultPhase } from './run-result.js';
@@ -3294,7 +3294,7 @@ export class StateStore {
       }
       if (current.nextStep === 'verify') {
         this.installedRunPhases.set(runId, 'drive_verify');
-        const cut = await readRecoveryClosure(this.driver, reads, runId);
+        const { cut, progress } = await readVerifierRecoveryClosure(this.driver, reads, runId);
         let noOpDelivery = false;
         if (agent.operation === 'delivery') {
           const { readDeliveryVerificationMode } = await import('./run-result-recovery.js');
@@ -3315,7 +3315,7 @@ export class StateStore {
           await (await nativeExecution()).executeCurrentDependencies({ expectedRunRevision: current.revision }); continue;
         }
         this.installedRunPhases.set(runId, 'drive_verifier_history');
-        const progress = await readVerifierProgress(this.driver, reads, cut);
+        if (!progress) throw new KernelStorageError('RECOVERY_REQUIRED', 'verifier has no original validated history');
         if (readRun(this.driver, runId).revision !== current.revision || cut.run.revision !== current.revision) continue;
         const mutation = progress.entries.some(entry => entry.receipt?.outcome === 'source_mutation');
         const assertion = progress.entries.some(entry => entry.planEntry.required && entry.receipt?.outcome === 'assertion_failed');

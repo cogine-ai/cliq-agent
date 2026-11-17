@@ -23,7 +23,7 @@ import { isJoinedCasPublicationFailure } from './cas.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { openInstalledPreparingGit, type InstalledPreparingGit, type PreparingGitCompletion } from '../sandbox/preparation-git.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readBuiltinScriptLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, readVerifierLaunchClosure, type WorkerLaunchClosure } from './execution-closure.js';
+import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readBuiltinScriptLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
@@ -32,7 +32,7 @@ import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe
 import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
-import { readDeliveryPublicationClosure, readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
 import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -65,7 +65,6 @@ import { readInvocationAttempt, readInvocationJournal, nextJournalSequence } fro
 import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation,
   assertWorkerPreparationRelease } from './worker-preparation.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
-import { readVerifierProgress } from './verifier-recovery.js';
 import { decodeGuestToolchainManifest, guestToolchainRoots, readRetainedVerifierToolchain } from './guest-toolchain.js';
 import { decodeVerifierCommand } from './verifier-artifacts.js';
 import { validateVerifierStoppedHistory } from './verifier-stop-history.js';
@@ -2204,10 +2203,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const work = (async () => {
         signal.throwIfAborted();
         const waiting = await preparePermission(expectedRunRevision); if (waiting) return waiting;
-        const selected = await readRecoveryClosure(driver, reads, runId);
+        const { cut: selected, progress } = await readVerifierRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
-        const progress = await readVerifierProgress(driver, reads, selected);
-        if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' || progress.complete ||
+        if (!progress || selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' || progress.complete ||
             selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt)
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its exact unstopped pending candidate');
         const queued = selected.run.status === 'queued' && !selected.run.activeWorkerLaunchId;
@@ -2240,15 +2238,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         signal.throwIfAborted();
         refreshVerifierLease();
         const claimed = await continuation.claimVerifier({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch,
-          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal);
+          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal, refreshVerifierLease);
         claimedVerifier = claimed; operationPhase = 'claimed';
         refreshVerifierLease();
-        const grant = await artifacts.readCanonical<import('../kernel/verifier-invocation.js').VerifierOperationGrantV1>(claimed.entry.grantRef!);
-        const evidence = claimed.evidence;
-        const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, prepared.run.leaseEpoch, sampleCanonicalNow());
-        const closure = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
-          request: claimed.request, target: claimed.target, grant, evidence, dispatchId, sandboxLaunchSpecRef }, bootstrap!.releaseKeys, signal, driver);
-        const invocation = await currentWorker.createVerifier(closure, { signal });
+        const invocation = await currentWorker.createVerifier(claimed.closure, { signal });
         signal.throwIfAborted();
         refreshVerifierLease();
         await claimed.release(invocation); verifierReleased = true;

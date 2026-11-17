@@ -24,7 +24,7 @@ import { decodeContextManifest, decodeWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
 import { readVerifierLaunchClosure } from './execution-closure.js';
 import { prepareContinuationCommit } from './continuation-commit.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
 import { readCheckpoint, readRun, readSession, readSessionPrincipalId, ZERO_BUDGET } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
@@ -32,7 +32,7 @@ import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js
 import { assertDeliveryModelFreeCut } from './run-model-free.js';
 import { decodeVerifierCommand, decodeVerifierEnvironment } from './verifier-artifacts.js';
 import { loadVerifierPolicy, planVerifierRequest } from './verifier-policy.js';
-import { readVerifierProgress, verifierCheckpointId } from './verifier-recovery.js';
+import { verifierCheckpointId } from './verifier-recovery.js';
 import { readDeliveryVerificationMode } from './run-result-recovery.js';
 import { appendRunStateEvent, assertLiveDispatchState, claimValidatedInvocation, prepareValidatedInvocation, requireHealthyFence, settleValidatedInvocation,
   type ClaimInvocationDispatchInput } from './reducers/invocation.js';
@@ -51,12 +51,11 @@ export function assertLocalDeliveryVerifierSelection(mode: { kind: 'local' | 'in
 export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   authority: { run: Run; spec: RunSpec; assembly: RunAssemblyV1; releaseKeys?: readonly ReleaseTrustKey[] }, reobserve?: NativeWorkerRetirement) {
   const { run: admitted, spec, assembly } = authority, runId = admitted.id;
-  async function cut(expected?: number, signal?: AbortSignal) {
-    const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
+  async function cut(expected?: number, signal?: AbortSignal, reads = signal ? artifacts.withReadSignal(signal) : artifacts) {
     signal?.throwIfAborted();
     assertActiveStateOwner(driver, owner);
     if (!authority.releaseKeys) throw new KernelStorageError('RECOVERY_REQUIRED', 'verifier authority requires retained trusted release roots');
-    const selected = await readRecoveryClosure(driver, reads, runId), { run } = selected;
+    const { cut: selected, progress } = await readVerifierRecoveryClosure(driver, reads, runId), { run } = selected;
     if (spec.operation === 'delivery') {
       assertDeliveryModelFreeCut(selected);
       // Scheduler routing is not a release gate. Preparation and permanent
@@ -69,8 +68,7 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
     if (run.nextStep !== 'verify' || !run.frontierRef)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its root Run frontier');
     const frontier = await readCanonicalArtifact<RunFrontier>(reads, run.frontierRef);
-    const progress = await readVerifierProgress(driver, reads, selected);
-    if (frontier.kind !== 'verify' || frontier.phase !== 'verifiers' ||
+    if (!progress || frontier.kind !== 'verify' || frontier.phase !== 'verifiers' ||
         frontier.afterPass !== (spec.operation === 'agent' ? 'finalize' : 'delivery_approval') ||
         frontier.nextVerifierIndex !== progress.nextVerifierIndex || frontier.verifierPlanRef !== progress.planRef || progress.complete)
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier has no current frozen pending entry');
@@ -351,18 +349,21 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
           metadata: [closure], validate(connection, run) { assertCut(connection, selected, run); }
         }));
     }),
-    claimVerifier: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, signal?: AbortSignal) => {
+    claimVerifier: stateOperation('RECOVERY_REQUIRED', async (input: Omit<ClaimInvocationDispatchInput, 'runId'>, signal?: AbortSignal,
+      refreshParentLease?: () => void) => {
       const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
       input = immutableSnapshot(input);
-      const selected = await cut(input.expectedRunRevision, signal), prepared = readHighestPreparedAttempt(driver, runId, input.opId);
+      const selected = await cut(input.expectedRunRevision, signal, reads), prepared = readHighestPreparedAttempt(driver, runId, input.opId);
       if (!prepared?.grantRef || prepared.opKind !== 'verifier' || prepared.attempt !== input.attempt || input.opId !== selected.request.opId ||
           prepared.requestRef !== canonicalSha256(selected.request) || !input.sandboxLaunchSpecRef || input.brokerFenceTokenDigest !== undefined)
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier claim does not select its exact prepared launch');
       const proof = await grantFor(selected, prepared.grantRef, reads);
+      signal?.throwIfAborted();
+      refreshParentLease?.();
       const live = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
       const closure = await readVerifierLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...live, prepared,
         request: selected.request, target: selected.target, ...proof, dispatchId: input.dispatchId,
-        sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, authority.releaseKeys!, signal, driver);
+        sandboxLaunchSpecRef: input.sandboxLaunchSpecRef }, authority.releaseKeys!, signal, driver, selected.progress);
       const planMetadata = await reads.describe(closure.spec.containmentPlanRef, 'application/json', 'cliq-process-containment-plan-v1');
       const uses = (connection: SqliteConnection) => readInvocationJournal(connection, runId)
         .filter(row => row.opId === input.opId && row.phase === 'dispatch_claimed').length;
@@ -376,15 +377,17 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
         insertArtifactMetadata(connection, planMetadata, now);
       });
       let consumed = false;
-      return Object.freeze({ entry: immutableSnapshot(claimed), request: selected.request, target: selected.target, evidence: proof.evidence,
+      return Object.freeze({ entry: immutableSnapshot(claimed), closure,
         release: stateOperation('RECOVERY_REQUIRED', async (target: unknown) => {
           if (consumed) throw new KernelStorageError('LEASE_FENCED', 'verifier release was already consumed');
           consumed = true;
-          const released = await cut(input.expectedRunRevision, signal), currentProof = await grantFor(released, prepared.grantRef!);
+          const released = await cut(input.expectedRunRevision, signal, reads), currentProof = await grantFor(released, prepared.grantRef!, reads);
+          signal?.throwIfAborted();
+          refreshParentLease?.();
           const active = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
-          const checked = await readVerifierLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...active, prepared,
+          const checked = await readVerifierLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...active, prepared,
             request: released.request, target: released.target, ...currentProof, dispatchId: input.dispatchId,
-            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, signal, driver);
+            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, signal, driver, released.progress);
           signal?.throwIfAborted();
           let outcome: TimeFenceAdvance | undefined;
           driver.transaction(connection => {

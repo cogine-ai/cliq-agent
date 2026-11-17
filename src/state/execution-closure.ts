@@ -676,7 +676,8 @@ export type VerifierLaunchClosureInput = {
  * entrance to this brand. It observes no native process and supplies no death
  * evidence; the physical launcher must still claim/release this exact attempt. */
 export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
-  input: VerifierLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal, driver?: SqliteDriver) {
+  input: VerifierLaunchClosureInput, releaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal, driver?: SqliteDriver,
+  verifiedProgress?: import('./verifier-recovery.js').VerifierProgress) {
   signal?.throwIfAborted(); input = immutableSnapshot(input);
   const { run, launch, generation: row, prepared, request, target, grant, evidence } = input;
   if (run.status !== 'running' || run.nextStep !== 'verify' || run.stopIntentRef !== undefined || run.cancelRequested || run.activeWorkerLaunchId !== launch.launchId ||
@@ -706,12 +707,18 @@ export async function readVerifierLaunchClosure(artifacts: ArtifactCatalog, owne
   if (runSpec.dependencyPolicyRef !== undefined) {
     if (!driver || !verifierPlan.dependencyPlanRef || frontier.dependencyPlanRef !== verifierPlan.dependencyPlanRef)
       mismatch('verifier dependency requires its full actual SQLite/ready history');
-    const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, run.id);
-    equal(cut.run, run, 'verifier exact current dependency Run cut');
-    const progress = (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(frontier.candidateItemId);
-    if (!progress?.ready || progress.planRef !== verifierPlan.dependencyPlanRef || progress.ready.createdAt >= run.deadlineAt)
-      mismatch('verifier cannot overtake the original complete dependency readiness');
-    const checkpoint = (await import('./rows.js')).readCheckpoint(driver, progress.ready.readyCheckpointId);
+    let checkpointId: string;
+    if (verifiedProgress) checkpointId = (await import('./verifier-recovery.js')).readVerifiedDependencyForLaunch(
+      verifiedProgress, driver, artifacts, run, frontier.candidateItemId, verifierPlan.dependencyPlanRef);
+    else {
+      const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, run.id);
+      equal(cut.run, run, 'verifier exact current dependency Run cut');
+      const progress = (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(frontier.candidateItemId);
+      if (!progress?.ready || progress.planRef !== verifierPlan.dependencyPlanRef || progress.ready.createdAt >= run.deadlineAt)
+        mismatch('verifier cannot overtake the original complete dependency readiness');
+      checkpointId = progress.ready.readyCheckpointId;
+    }
+    const checkpoint = (await import('./rows.js')).readCheckpoint(driver, checkpointId);
     literal(generation.sourceWorkspaceStateRef, checkpoint.workspaceStateRef, 'verifier original fully sealed dependency material');
     equal(readRun(driver, run.id), run, 'verifier unchanged dependency release cut');
   } else if (verifierPlan.dependencyPlanRef !== undefined || frontier.dependencyPlanRef !== undefined)

@@ -13,7 +13,7 @@ import { decodeContextManifest } from './decoders.js';
 import { KernelStorageError, stateOperation } from './errors.js';
 import { assertRetiredGenerationCut } from './generation-retirement.js';
 import { addBudget, assertBudgetWithin, isZeroBudget } from './invariants.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
 import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
@@ -21,7 +21,7 @@ import { readCheckpoint, readRun } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { decodeRepairDiagnosticItem, decodeVerifierRepairDiagnostic, verifierRepairModelContent } from './verifier-artifacts.js';
-import { readVerifierProgress, type VerifierProgress } from './verifier-recovery.js';
+import type { VerifierProgress } from './verifier-recovery.js';
 import { appendRunStateEvent, requireHealthyFence } from './reducers/invocation.js';
 
 /** Pure, deterministic audit-to-model projection. This graph is data, never
@@ -79,7 +79,7 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
       if (!exactKeys(input, ['expectedRunRevision']) || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
         throw new TypeError('repair requires one exact expected revision');
       assertActiveStateOwner(driver, owner);
-      const cut = await readRecoveryClosure(driver, reads, runId), { run } = cut;
+      const { cut, progress } = await readVerifierRecoveryClosure(driver, reads, runId), { run } = cut;
       if (run.specRef !== admitted.specRef || run.createdAt !== admitted.createdAt || run.deadlineAt !== admitted.deadlineAt ||
           canonicalSha256(cut.runSpec) !== canonicalSha256(spec)) throw new TypeError('repair belongs to another Run authority');
       if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'repair revision changed');
@@ -87,7 +87,7 @@ export function loadVerifierRepair(driver: SqliteDriver, artifacts: ArtifactCata
           run.waitingOnRef || run.cancelRequested || run.stopIntentRef || run.resultRef || run.terminalReason ||
           !isZeroBudget(run.budgetReserved) || spec.operation !== 'agent')
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'repair requires its unstopped lease-free root verifier frontier');
-      const progress = await readVerifierProgress(driver, reads, cut);
+      if (!progress) throw new TypeError('repair requires its original verifier progress');
       const frontier: RunFrontier = { schemaVersion: 1, kind: 'verify', phase: 'verifiers', candidateItemId: progress.candidate.itemId,
         resultSourceRef: progress.candidate.resultSourceRef, verifierPlanRef: progress.planRef,
         nextVerifierIndex: progress.nextVerifierIndex, afterPass: 'finalize' };

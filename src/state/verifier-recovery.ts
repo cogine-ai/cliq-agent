@@ -55,6 +55,23 @@ export type VerifierProgress = {
 };
 export type VerifierRecoveryCut = Pick<RecoveryClosureV1, 'run' | 'runSpec' | 'items' | 'journal' | 'workspaceGenerations'>;
 
+const verifiedDependencyCuts = new WeakMap<VerifierProgress, {
+  driver: SqliteDriver; artifacts: ArtifactCatalog; runDigest: string; candidateId: string; planRef: string;
+  checkpointId: string; readyAt: string;
+}>();
+
+/** Reuse only the just-validated dependency history in the same preparation
+ * or release read. A structural progress object supplies no validation. */
+export function readVerifiedDependencyForLaunch(progress: VerifierProgress, driver: SqliteDriver, artifacts: ArtifactCatalog,
+  run: VerifierRecoveryCut['run'], candidateId: string, planRef: string) {
+  artifacts.assertReadActive();
+  const verified = verifiedDependencyCuts.get(progress);
+  if (!verified || verified.driver !== driver || verified.artifacts !== artifacts || verified.runDigest !== canonicalSha256(run) ||
+      verified.candidateId !== candidateId || verified.planRef !== planRef || verified.readyAt >= run.deadlineAt)
+    throw new TypeError('verifier launch requires its own validated dependency read');
+  return verified.checkpointId;
+}
+
 export async function readCurrentVerifierCandidate(artifacts: ArtifactCatalog, cut: VerifierRecoveryCut): Promise<string> {
   if (cut.run.frontierRef) {
     const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, cut.run.frontierRef);
@@ -139,6 +156,26 @@ export async function readVerifierRetirement(driver: SqliteDriver, artifacts: Ar
 export async function readVerifierProgress(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
   candidateItemId?: string): Promise<VerifierProgress> {
   const selectedId = candidateItemId ?? await readCurrentVerifierCandidate(artifacts, cut);
+  const dependencies = cut.runSpec.dependencyPolicyRef
+    ? await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut) : undefined;
+  return readCandidateVerifierProgress(driver, artifacts, cut, selectedId, dependencies?.get(selectedId));
+}
+
+/** Verify the dependency history once for all candidates in this recovery
+ * traversal. Each verifier still reads its own complete invocation history. */
+export async function readVerifierProgressByCandidate(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
+  candidateIds: readonly string[]): Promise<ReadonlyMap<string, VerifierProgress>> {
+  const result = new Map<string, VerifierProgress>();
+  if (!candidateIds.length) return result;
+  const dependencies = cut.runSpec.dependencyPolicyRef
+    ? await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut) : undefined;
+  for (const selectedId of candidateIds)
+    result.set(selectedId, await readCandidateVerifierProgress(driver, artifacts, cut, selectedId, dependencies?.get(selectedId)));
+  return result;
+}
+
+async function readCandidateVerifierProgress(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
+  selectedId: string, dependency: VerifierProgress['dependency']): Promise<VerifierProgress> {
   const candidates = cut.items.filter(row => row.itemId === selectedId);
   if (candidates.length !== 1) throw new TypeError('verifier progress has no unique owned candidate');
   const candidate = decodeFinalCandidateItem(await readCanonicalArtifact(artifacts, candidates[0]!.payloadRef));
@@ -154,7 +191,6 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   const session = readSession(driver, cut.run.sessionId);
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, session.workspaceIdentityRef));
   const principalId = readSessionPrincipalId(driver, session.id);
-  const dependency = cut.runSpec.dependencyPolicyRef ? (await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut)).get(selectedId) : undefined;
   if (cut.runSpec.dependencyPolicyRef && !dependency) throw new TypeError('verifier lacks its independently read complete dependency history');
   const skipRows = driver.prepare("SELECT item_id,payload_ref FROM items WHERE run_id=? AND kind='verifier_skip' ORDER BY item_seq")
     .all<{ item_id: string; payload_ref: string }>(cut.run.id);
@@ -329,6 +365,9 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
   }
   const nextVerifierIndex = entries.findIndex(entry => entry.disposition?.kind !== 'advisory_skipped' && (!entry.receipt || entry.receipt.outcome === 'infra_failed' &&
     cut.journal.filter(row => row.opId === entry.terminalJournal?.opId && row.phase === 'dispatch_claimed').length < entry.planEntry.maxAttempts));
-  return { candidate, planRef, plan, spec, entries, nextVerifierIndex: nextVerifierIndex < 0 ? entries.length : nextVerifierIndex,
+  const progress: VerifierProgress = { candidate, planRef, plan, spec, entries, nextVerifierIndex: nextVerifierIndex < 0 ? entries.length : nextVerifierIndex,
     complete: nextVerifierIndex < 0 && (!dependency || !!dependency.ready), ...(dependency ? { dependency } : {}) };
+  if (dependency?.ready) verifiedDependencyCuts.set(progress, { driver, artifacts, runDigest: canonicalSha256(cut.run),
+    candidateId: selectedId, planRef: dependency.planRef, checkpointId: dependency.ready.readyCheckpointId, readyAt: dependency.ready.createdAt });
+  return progress;
 }
