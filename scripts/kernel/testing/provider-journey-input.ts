@@ -12,9 +12,9 @@ import { providerModelDefinition, type InstalledProviderModelDefinition } from '
 
 export type ProviderJourneyConfiguration = Readonly<{ definition: InstalledProviderModelDefinition; budgets: RunSpec['budgets'] }>;
 
-// Includes the original dependency acquisition for both the baseline and
-// repaired candidate. Each native request and worker keeps its own limit.
-export const PR532_RUN_WALL_TIME_MS = 30 * 60_000;
+// Includes dependency acquisition, model-directed tools and both original
+// checks. Each native request and worker has its own independent limit.
+export const PR532_RUN_WALL_TIME_MS = 60 * 60_000;
 
 export function decodeProviderJourneyConfiguration(value: unknown): ProviderJourneyConfiguration {
   assert(value && typeof value === 'object' && !Array.isArray(value) && exactKeys(value, ['definition', 'budgets']),

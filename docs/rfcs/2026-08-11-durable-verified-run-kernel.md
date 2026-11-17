@@ -67,6 +67,13 @@ two-second service stop and thirty-second native HTTP independently. Original
 authorization expiry and fresh final-transaction checks continue to decide
 whether the application can be admitted.
 
+The full-project PR #532 experiment supplies an explicit sixty-minute wall
+budget to each admitted Run under the approved task-limit extension. Its
+hosted job is bounded to 135 minutes, covering the agent Run, application
+admission, Delivery Run and cleanup. The acceptance still requires the original
+failed assertion, model repair, passing recheck, reviewed result and exact
+application. Record observed durations independently of these task budgets.
+
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
 unrelated crash-cut matrices do not gate this one-task preview. Measure latency
