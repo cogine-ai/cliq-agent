@@ -5398,6 +5398,14 @@ or persistence leaves closure incomplete and retains the StateOwner/failure.
 The original two-second stop standard is unchanged; waiting until the
 thirty-second probe deadline is not an implementation of bounded shutdown.
 
+After revocation and join of invocation producers during Supervisor shutdown,
+the still-owning execution installs the ordinary worker-death fence from its
+verified activation and a fresh, exact Run, launch, generation and Journal
+cut. It rehashes the original frontier and activation roots and joins the
+actual worker and its resources before releasing StateOwner. The wait conveys
+unresolved recovery. Full retained-history validation is required before any
+inspection or continuation on that wait.
+
 For worker recovery this closure preserves the original wait, fixed generation
 anchor, Checkpoint, invocation outcomes and all accounting. The original
 automatic probe remains counted. For ordinal `n<8`, the next due time is

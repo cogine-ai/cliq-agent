@@ -2,8 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { addCanonicalDuration, digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
 import type { ReconciliationProbeCancellationClosureV1 } from '../../kernel/reconciliation.js';
-import type { ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1, Run, SupervisorInspectorIdentityV1,
-  WorkerDeathWait, WorkerRecoveryEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
+import type { BoundWorkerLaunch, ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1,
+  RecoveryClosureV1, Run, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
+  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
@@ -12,7 +13,7 @@ import { observeRetainedRunWorkspace, readRetainedWorkspaceObservation } from '.
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
-import { readRetainedWorkerLaunchClosure } from '../execution-closure.js';
+import { assertWorkerLaunchClosure, readRetainedWorkerLaunchClosure, type WorkerLaunchClosure } from '../execution-closure.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { nextJournalSequence, readInvocationJournal } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun, updateWorkerLaunch } from '../repositories/worker-launches.js';
@@ -216,8 +217,56 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
   }
   assertActiveStateOwner(driver, owner);
   const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  return commitWorkerRecoveryFence(driver, artifacts, owner, input.expectedRunRevision, cut);
+});
+
+/** The closing execution still owns the verified activation. Install the
+ * same unresolved fence without reopening unrelated history inside Stop2.
+ * The successor must complete that history walk before observing or resuming. */
+export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', async (
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  original: Readonly<{ run: Run; launch: BoundWorkerLaunch }>, closure: WorkerLaunchClosure
+): Promise<Run> => {
+  assertWorkerLaunchClosure(closure);
+  const active = assertActiveStateOwner(driver, owner);
+  const cut = driver.readSnapshot(connection => {
+    const run = readRun(connection, original.run.id);
+    const workerLaunches = readWorkerLaunchesForRun(connection, run.id, true);
+    const launch = workerLaunches[0];
+    if (workerLaunches.length !== 1 || launch?.phase !== 'activated' || run.status !== 'running' || !run.frontierRef ||
+        run.activeWorkerLaunchId !== original.launch.launchId || run.specRef !== original.run.specRef ||
+        run.createdAt !== original.run.createdAt || run.deadlineAt !== original.run.deadlineAt ||
+        run.leaseEpoch !== original.run.leaseEpoch || launch.launchId !== original.launch.launchId ||
+        launch.supervisorInstanceId !== active.supervisorInstanceId || launch.leaseEpoch !== run.leaseEpoch ||
+        !launch.workerIdentityDigest || !launch.processContainmentRef ||
+        launch.workerIdentityDigest !== original.launch.workerIdentityDigest || launch.processContainmentRef !== original.launch.processContainmentRef ||
+        launch.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef || launch.containmentPlanRef !== closure.containmentPlanRef ||
+        launch.workspaceGenerationRef !== closure.workspaceGenerationRef || launch.spawnNonceDigest !== original.launch.spawnNonceDigest ||
+        launch.activationNonceDigest !== original.launch.activationNonceDigest || closure.spec.owner.workerLaunchId !== launch.launchId ||
+        closure.spec.owner.runId !== run.id || closure.spec.owner.intendedLeaseEpoch !== run.leaseEpoch ||
+        canonicalSha256(closure.runSpec) !== run.specRef)
+      throw new KernelStorageError('LEASE_FENCED', 'shutdown worker fence requires its original owned activation');
+    const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
+    if ((generation.phase !== 'active' && generation.phase !== 'revoking' && generation.phase !== 'checkpointing') ||
+        generation.runId !== run.id || generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== launch.leaseEpoch ||
+        generation.phase !== launch.generationWriteState || generation.quiesceId !== launch.quiesceId ||
+        generation.generationIdentityDigest !== closure.generation.identityDigest || generation.generationId !== closure.generation.generationId ||
+        generation.sourceCheckpointId !== closure.generation.sourceCheckpointId ||
+        generation.sourceWorkspaceStateRef !== closure.generation.sourceWorkspaceStateRef ||
+        generation.sourceWorkspaceStateDigest !== closure.generation.sourceWorkspaceStateDigest)
+      throw new KernelStorageError('LEASE_FENCED', 'shutdown worker fence requires its original pointer-bound generation');
+    return { run, workerLaunches, workspaceGenerations: [generation], journal: readInvocationJournal(connection, run.id),
+      refs: [run.frontierRef, launch.workerIdentityDigest, launch.processContainmentRef, launch.sandboxLaunchSpecRef,
+        launch.containmentPlanRef, launch.workspaceGenerationRef] };
+  });
+  await artifacts.mapReads(cut.refs, ref => artifacts.verifyBytes(ref));
+  return commitWorkerRecoveryFence(driver, artifacts, owner, cut.run.revision, cut);
+});
+
+async function commitWorkerRecoveryFence(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  expectedRunRevision: number, cut: Pick<RecoveryClosureV1, 'run' | 'workerLaunches' | 'workspaceGenerations' | 'journal'>): Promise<Run> {
   const { run } = cut;
-  if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery Run revision changed');
+  if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery Run revision changed');
   const launch = cut.workerLaunches.find(launch => launch.launchId === run.activeWorkerLaunchId);
   const generation = cut.workspaceGenerations.find(generation => generation.generationRef === launch?.workspaceGenerationRef);
   if (run.status !== 'running' || !run.frontierRef || !launch || !generation || cut.workerLaunches.length !== 1 ||
@@ -269,7 +318,7 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
   });
   requireHealthyFence(outcome);
   return immutableSnapshot(updated);
-});
+}
 
 /** Internal owning reducer. A control client cannot supply proof, a path or a tree observation. */
 export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (

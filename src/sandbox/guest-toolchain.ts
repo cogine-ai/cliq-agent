@@ -9,7 +9,7 @@ export const GUEST_EXTRACTOR_RECIPE = Object.freeze({
 /** Fixed Node test subset, not an automatic enlargement of caller limits. */
 export const LINUX_VERIFIER_RESOURCE_MINIMUMS = Object.freeze({ maxProcesses: 32 } as const);
 export const LINUX_TSX_COMPILER = Object.freeze({
-  logicalName: 'esbuild', canonicalGuestPath: '/usr/bin/esbuild', version: '0.27.7',
+  logicalName: 'esbuild', canonicalGuestPath: '/usr/bin/cliq-esbuild', version: '0.27.7',
   digest: 'c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b',
 } as const);
 

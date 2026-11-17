@@ -25,7 +25,7 @@
 #define IMAGE_SEALS (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)
 #define NODE_PATH "/usr/bin/node"
 #define LOADER_PATH "/lib64/ld-linux-x86-64.so.2"
-#define TSX_COMPILER_PATH "/usr/bin/esbuild"
+#define TSX_COMPILER_PATH "/usr/bin/cliq-esbuild"
 #define TSX_COMPILER_SHA256 "c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b"
 #define CHUNK_BYTES 65536
 #define MAX_PHDRS 128

@@ -12,7 +12,7 @@
 #define CLIQ_VERIFIER_MAX_ENV 128
 #define CLIQ_VERIFIER_STRING_BYTES 65536
 #define CLIQ_VERIFIER_PATH_BYTES 4096
-#define CLIQ_VERIFIER_TSX_COMPILER "/usr/bin/esbuild"
+#define CLIQ_VERIFIER_TSX_COMPILER "/usr/bin/cliq-esbuild"
 
 enum cliq_verifier_termination {
     CLIQ_VERIFIER_PENDING = 0,

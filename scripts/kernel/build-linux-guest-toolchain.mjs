@@ -90,7 +90,8 @@ async function previewCompiler() {
     throw new Error('Locked preview compiler has unexpected executable bytes');
   const source = path.join(staging, 'esbuild');
   await writeFile(source, extracted.stdout, { flag: 'wx', mode: 0o500 });
-  const entry = await install(source, '/usr/bin/esbuild');
+  // The locked esbuild JS loader deliberately ignores ESBUILD_BINARY_PATH=/usr/bin/esbuild.
+  const entry = await install(source, '/usr/bin/cliq-esbuild');
   return { logicalName: 'esbuild', canonicalGuestPath: entry.path, digest: entry.digest, version: '0.27.7' };
 }
 try {

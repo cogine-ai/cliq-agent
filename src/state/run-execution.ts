@@ -27,7 +27,8 @@ import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readBuiltinScriptLa
 import { loadAgentRun } from './reducers/agent.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
-import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe } from './reducers/worker-recovery.js';
+import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe,
+  fenceOwnedWorkerOnShutdown } from './reducers/worker-recovery.js';
 import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
@@ -3187,7 +3188,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           if (run.activeWorkerLaunchId !== ownedLaunchId) {
             throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its retained worker\'s durable owner');
           }
-          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, activeWorker.activated, activeWorker.closure);
         } catch (error) { cleanupFailure ??= error; }
         try {
           if (!worker) throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its original physical worker');

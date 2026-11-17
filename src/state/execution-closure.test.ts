@@ -15,6 +15,7 @@ import { createQueuedFixture, prepareFixtureGeneration, disposeFixture, digest, 
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { batch, prepareTool } from './testing/tool-calls.js';
 import { publishFixtureEditLaunch, publishFixtureWorkerLaunch } from './testing/worker-launch.js';
+import { fenceOwnedWorkerOnShutdown } from './reducers/worker-recovery.js';
 
 function retainedOwner(stateRoot: string) {
   const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
@@ -47,6 +48,8 @@ test('worker reservation rejects a canonical launch closed over another Run with
     const execution = await readWorkerLaunchClosure(store.artifacts, retainedOwner(fixture.stateRoot), { ...launch.input, run: store.getRun(runId) });
     assert.throws(() => assertWorkerLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
     assert.doesNotThrow(() => assertWorkerLaunchClosure(execution));
+    await assert.rejects(fenceOwnedWorkerOnShutdown(undefined as never, store.artifacts, undefined as never, undefined as never,
+      structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
     assert.throws(() => assertVerifierLaunchClosure(execution), { code: 'ARTIFACT_MISMATCH' }, 'a worker closure is not verifier execution authority');
     assert.throws(() => assertVerifierLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
   } finally { await disposeFixture(fixture); }
