@@ -82,6 +82,15 @@ the number of file revalidations is not a preview product requirement. The
 original runtime safety deadlines still apply. Consolidate verification only
 where the same identity, freshness and failure behavior is demonstrated.
 
+A fixed readonly installed-service observation performs complete byte
+revalidation at entry to and exit from the same held-runtime borrow. Its native
+current-user and fixed-unit inspections still check the original held selection
+on every call, and profile descriptors are reread, checked and joined before
+returning. These observations consolidate the former additional intermediate
+full-image read. Setup and mutating manager capabilities retain the complete
+pre-operation read. Record the actual count in readiness diagnostics instead of
+assuming the former sixteen reads remain on this connection path.
+
 Verify once through the installed entry and reuse targeted cancellation,
 restart/unknown-effect and drift-refusal coverage. Fix only blockers on this
 path. Run the repository build and full tests before pushing, then open one

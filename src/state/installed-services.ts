@@ -224,7 +224,10 @@ async function withProfiles<T, P extends NativeCredentialPlatformBinding | Insta
         if (!present[0]) await scope.create(directory, profiles.keeper);
         if (!present[1]) await scope.create(directory, profiles.supervisor);
       }
-      await installed.revalidate();
+      // A readonly observation stays inside this borrow's full-byte entry and
+      // exit checks; each native call also checks the held selection. Mutating
+      // capabilities retain their additional check before any manager action.
+      if (create || !('inspect' in platform)) await installed.revalidate();
       const result = await operation({ platform, user, profiles, scope, directory,
         directoryPath: path.join(user.home, '.config/systemd/user'), stateRoot: root.canonicalAbsolutePath });
       await scope.assertHeld(); await installed.revalidate(); return result;
