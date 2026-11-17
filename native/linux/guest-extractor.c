@@ -9,6 +9,7 @@
 
 #if defined(__linux__)
 #include "guest-toolchain.h"
+#include "verifier-protocol.h"
 #include "worker-sha256.h"
 #include <elf.h>
 #include <errno.h>
@@ -25,7 +26,6 @@
 #define IMAGE_SEALS (F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL)
 #define NODE_PATH "/usr/bin/node"
 #define LOADER_PATH "/lib64/ld-linux-x86-64.so.2"
-#define TSX_COMPILER_PATH "/usr/bin/cliq-esbuild"
 #define TSX_COMPILER_SHA256 "c638273fcf95573ca74af586677800b4dd874c55f8f945adb54316d6902ba14b"
 #define CHUNK_BYTES 65536
 #define MAX_PHDRS 128
@@ -289,7 +289,7 @@ static bool elf_dependencies(struct extraction *job, ext2_filsys fs, uint32_t in
         header.e_version != EV_CURRENT || header.e_machine != EM_X86_64 || (header.e_type != ET_EXEC && header.e_type != ET_DYN) ||
         header.e_ehsize != sizeof(header) || header.e_phentsize != sizeof(Elf64_Phdr) || !header.e_phnum || header.e_phnum > MAX_PHDRS ||
         !read_at(job, file->fd, file->byte_count, header.e_phoff, phdrs, header.e_phnum * sizeof(*phdrs))) return fail(job, "guest_elf_header");
-    bool compiler = job->tsx_compiler && !strcmp(file->path, TSX_COMPILER_PATH);
+    bool compiler = job->tsx_compiler && !strcmp(file->path, CLIQ_VERIFIER_TSX_COMPILER);
     Elf64_Phdr *dynamic = NULL; bool interpreter = false, executable_entry = false;
     for (size_t i = 0; i < header.e_phnum; i++) {
         Elf64_Phdr *ph = &phdrs[i];
@@ -623,7 +623,7 @@ static napi_value begin_fixed(napi_env env, napi_callback_info info, unsigned in
     bool valid = input(env, args[1], job);
     if (valid && recipe == 3) {
         for (uint32_t i = 0; i < job->pinned_count; i++)
-            if (!strcmp(job->pinned[i].path, TSX_COMPILER_PATH) &&
+            if (!strcmp(job->pinned[i].path, CLIQ_VERIFIER_TSX_COMPILER) &&
                 !strcmp(job->pinned[i].digest, TSX_COMPILER_SHA256)) job->tsx_compiler = &job->pinned[i];
         valid = job->tsx_compiler != NULL;
     } else if (valid && recipe != 0) {
