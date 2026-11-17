@@ -375,8 +375,8 @@ test('the driver publication-prefix read cancels and joins its actual CAS close 
     }) as typeof fs.open;
     const driver = fixture.store as unknown as { readInstalledPublicationCut(runId: string): Promise<unknown> };
     reading = driver.readInstalledPublicationCut(fixture.runId);
-    cancelled = assert.rejects(reading, error => error instanceof KernelStorageError && error.code === 'RECOVERY_REQUIRED' &&
-      error.cause instanceof KernelStorageError && error.cause.code === 'LEASE_FENCED');
+    cancelled = assert.rejects(reading, error => error instanceof KernelStorageError && error.code === 'LEASE_FENCED' &&
+      error.cause === undefined);
     await actualCloseReached;
     let closed = false;
     closing = fixture.store.close().then(() => { closed = true; });
