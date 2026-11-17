@@ -234,5 +234,6 @@ export async function runInstalledPr532Journey(input: {
   await context.verifyHost(fixed);
   return { runId, deliveryId, resultRef: answer.result.ref, originalExitCode: first.exitCode,
     repairedExitCode: last.exitCode, failureLines: diagnostic.reportedLines, modelCostMicros: cut.snapshot.run.budgetConsumed.costMicros,
-    testDigest: sha256Bytes(input.testBytes), lockDigest: sha256Bytes(input.lockBytes), appliedFileDigest: change.after.blobRef };
+    testDigest: sha256Bytes(input.testBytes), lockDigest: sha256Bytes(input.lockBytes), appliedFileDigest: change.after.blobRef,
+    appliedFileUtf8: new TextDecoder('utf-8', { fatal: true }).decode(fixed), reviewOutputUtf8: reviewed.stdout.toString('utf8') };
 }

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
-import { digestOmitting } from '../../../src/kernel/identity.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import { runSnapshot, sessionSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
@@ -101,6 +101,27 @@ test('the original PR532 apply command carries the explicit admitted Delivery bu
   assert.equal(canonicalSha256(invocation.options), canonicalSha256({ ...consent,
     budgets: { wallTimeMs: budgets.wallTimeMs, toolCalls: budgets.toolCalls } }));
   assert.equal(invocation.expectedRunResultRef, ref); assert(invocation.detach && invocation.json);
+});
+
+test('the PR532 report retains the exact applied bytes and original review output for inspection', () => {
+  // Execute the original data projection only, with inert result identifiers.
+  const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
+  const journey = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'runInstalledPr532Journey');
+  assert(journey && ts.isFunctionDeclaration(journey) && journey.body);
+  const result = journey.body.statements.findLast(ts.isReturnStatement); assert(result);
+  const fixed = Buffer.from('export const answer = "修复";\n'), review = Buffer.from('original reviewed diff\n');
+  const appliedDigest = sha256Bytes(fixed);
+  const context = vm.createContext({ runId: 'inert-run', deliveryId: 'inert-delivery', answer: { result: { ref } },
+    first: { exitCode: 1 }, last: { exitCode: 0 }, diagnostic: { reportedLines: [12] },
+    cut: { snapshot: { run: { budgetConsumed: { costMicros: 1 } } } }, sha256Bytes,
+    input: { testBytes: Buffer.from('original check'), lockBytes: Buffer.from('original lock') },
+    change: { after: { blobRef: appliedDigest } }, fixed, reviewed: { stdout: review }, TextDecoder });
+  vm.runInContext(ts.transpileModule(`globalThis.project = () => { ${result.getText(parsed)} };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
+  const report = context.project();
+  assert(Buffer.from(report.appliedFileUtf8).equals(fixed)); assert.equal(report.appliedFileDigest, appliedDigest);
+  assert.equal(report.reviewOutputUtf8, review.toString('utf8'));
 });
 
 test('an authoritative admission refusal cannot become a replacement Run or an application', async () => {
