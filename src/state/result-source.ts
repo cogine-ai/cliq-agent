@@ -29,7 +29,8 @@ type CandidateSourceGraph = {
   source: SourceManifest; sourceRef: string; diff: WorkspaceDiffV1; diffRef: string; metadata: PublishedArtifact[];
 };
 type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
-export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'> & Partial<SourceProjectionReader>;
+export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'> &
+  Partial<SourceProjectionReader & Pick<ArtifactCatalog, 'mapReads'>>;
 function completeReader(value: CandidateSourceReader): value is SourceProjectionReader {
   return typeof value.readBoundedBytes === 'function' && typeof value.withReadSignal === 'function' && typeof value.assertReadActive === 'function';
 }
@@ -116,9 +117,15 @@ async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSp
   }
   // Exhaustion rehashes every complete object with bounded memory. Identical
   // base/current blobs are read once and never copied back into CAS.
-  for (const [ref, byteLength] of files) {
+  const verifyFile = async ([ref, byteLength]: readonly [string, number]) => {
     signal?.throwIfAborted();
     for await (const _chunk of artifacts.readChunks(ref, byteLength)) { signal?.throwIfAborted(); }
+  };
+  const members = [...files];
+  if (artifacts.mapReads) await artifacts.mapReads(members, verifyFile);
+  else for (const member of members) await verifyFile(member);
+  // Retain deterministic metadata order after every real reader has joined.
+  for (const [ref, byteLength] of members) {
     remember({ ref, byteLength, mediaType: 'application/octet-stream', schemaKind: 'cliq-workspace-file-v1' });
   }
   const selected = currentEntries.entries.filter(entry => selectedByFrozenSource ? selectedByFrozenSource(entry) : !excluded(entry.path));

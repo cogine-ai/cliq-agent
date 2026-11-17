@@ -531,8 +531,21 @@ test('a frozen subtree exclude stays outside result and diff without hiding a sa
     assert.equal(projected.source.manifestDigest, graph.candidate.sourceDigest);
     const excluded = values.find(entry => entry.path === 'cache/hidden');
     assert.ok(excluded?.kind === 'file');
-    const abort = new AbortController(), reason = new Error('abort actual verifier projection file read');
     const original = fixture.store.artifacts.readChunks.bind(fixture.store.artifacts);
+    let activeReads = 0, maximumReads = 0, joinedReads = 0;
+    const parallel = t.mock.method(fixture.store.artifacts, 'readChunks', async function* (ref: string, expectedByteCount: number) {
+      activeReads++; maximumReads = Math.max(maximumReads, activeReads);
+      try { for await (const chunk of original(ref, expectedByteCount)) yield chunk; }
+      finally { activeReads--; joinedReads++; }
+    });
+    try {
+      assert.equal((await readCandidateSource(fixture.store.artifacts, graph.cut.runSpec,
+        graph.cut.latestCheckpoint.workspaceStateRef)).sourceRef, graph.candidate.resultSourceRef);
+      assert(maximumReads > 1 && maximumReads <= 4);
+      assert.equal(activeReads, 0);
+      assert(joinedReads >= 3, 'selected and excluded files are all completely verified and joined');
+    } finally { parallel.mock.restore(); }
+    const abort = new AbortController(), reason = new Error('abort actual verifier projection file read');
     let observed = 0, joined = false;
     const reader = t.mock.method(fixture.store.artifacts, 'readChunks', async function* (ref: string, expectedByteCount: number) {
       try {

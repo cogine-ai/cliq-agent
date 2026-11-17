@@ -378,17 +378,19 @@ export async function loadVerifierContinuation(driver: SqliteDriver, artifacts: 
       });
       let consumed = false;
       return Object.freeze({ entry: immutableSnapshot(claimed), closure,
-        release: stateOperation('RECOVERY_REQUIRED', async (target: unknown) => {
+        release: stateOperation('RECOVERY_REQUIRED', async (target: unknown, releaseSignal?: AbortSignal) => {
           if (consumed) throw new KernelStorageError('LEASE_FENCED', 'verifier release was already consumed');
           consumed = true;
-          const released = await cut(input.expectedRunRevision, signal, reads), currentProof = await grantFor(released, prepared.grantRef!, reads);
-          signal?.throwIfAborted();
+          const lifetime = releaseSignal && signal ? AbortSignal.any([signal, releaseSignal]) : releaseSignal ?? signal;
+          const releaseReads = lifetime ? reads.withReadSignal(lifetime) : reads;
+          const released = await cut(input.expectedRunRevision, lifetime, releaseReads), currentProof = await grantFor(released, prepared.grantRef!, releaseReads);
+          releaseReads.assertReadActive();
           refreshParentLease?.();
           const active = assertLiveDispatchState(driver, owner, runId, input.expectedRunRevision, input.leaseEpoch, sampleCanonicalNow());
-          const checked = await readVerifierLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...active, prepared,
+          const checked = await readVerifierLaunchClosure(releaseReads, assertActiveStateOwner(driver, owner), { ...active, prepared,
             request: released.request, target: released.target, ...currentProof, dispatchId: input.dispatchId,
-            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, signal, driver, released.progress);
-          signal?.throwIfAborted();
+            sandboxLaunchSpecRef: input.sandboxLaunchSpecRef! }, authority.releaseKeys!, lifetime, driver, released.progress);
+          releaseReads.assertReadActive();
           let outcome: TimeFenceAdvance | undefined;
           driver.transaction(connection => {
             assertActiveStateOwner(connection, owner); const now = sampleCanonicalNow();

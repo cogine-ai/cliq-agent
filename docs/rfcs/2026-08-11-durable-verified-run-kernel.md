@@ -50,6 +50,12 @@ The verifier still runs again against the new candidate. If a draining
 execution fails and still owns an activated worker, use the same checked
 shutdown fence as for an idle owned worker, then join the real resources.
 An already received process result stays in custody through settlement.
+Independent candidate file reads may use the existing four-reader group, with
+every issued read joined and deterministic metadata order retained. A claimed
+verifier's final read-only release validation has a separately cancellable
+lifetime. Stop cancels and joins those reads, then fences the original claim.
+The actual execution and received-result lifetime remains owned by its original
+producer, and the synchronous native release still follows the complete gate.
 
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and

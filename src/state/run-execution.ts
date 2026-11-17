@@ -550,6 +550,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   let pending: Promise<Run> | undefined, closed = false, cleanupFailure: unknown;
   let operationAbort: AbortController | undefined, revoking: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let verifierReleaseReadAbort: AbortController | undefined;
   // Preflight reads do not own productive retirement, but still belong to this
   // genuine execution scope before an operation/probe can be registered.
   const preflightAbort = new AbortController(), preflightReads = artifacts.withReadSignal(preflightAbort.signal);
@@ -657,6 +658,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     if (revoking) return revoking;
     closed = true;
     preflightAbort.abort(new KernelStorageError('LEASE_FENCED', 'execution read-only preflight is closing'));
+    verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are closing'));
     revokePublications();
     publicationProjectionAbort?.abort(new KernelStorageError('LEASE_FENCED', 'publication read-only projection scope is closing'));
     if ((pending || receivedCompletion) && worker && activeWorker && (operationPhase === 'claimed' || operationPhase === 'received')) {
@@ -1681,6 +1683,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const current = readRun(driver, runId);
       assertActiveStateOwner(driver, owner);
       if (!current.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'productive revocation requires the committed StopIntent');
+      verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are stopped'));
       revokePublications();
       if (mcpStatusProbe) { mcpStatusProbe.task.cancel(); return mcpStatusProbe.task.close(); }
       if (mcpStatusRecovery) { mcpStatusRecovery.cancel(); return mcpStatusRecovery.close(); }
@@ -2247,7 +2250,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const invocation = await currentWorker.createVerifier(claimed.closure, { signal });
         signal.throwIfAborted();
         refreshVerifierLease();
-        await claimed.release(invocation); verifierReleased = true;
+        const releaseReads = new AbortController(); verifierReleaseReadAbort = releaseReads;
+        if (closed || isClosing()) releaseReads.abort(new KernelStorageError('LEASE_FENCED', 'verifier release is closing'));
+        try { await claimed.release(invocation, releaseReads.signal); verifierReleased = true; }
+        finally { if (verifierReleaseReadAbort === releaseReads) verifierReleaseReadAbort = undefined; }
         const result = await invocation.result();
         verifierReleased = false; operationPhase = 'received';
         // Register before any post-result await. Closing can revoke the
