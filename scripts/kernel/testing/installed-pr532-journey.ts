@@ -135,7 +135,10 @@ export async function runInstalledPr532Journey(input: {
       journalHighWater = cut.highWaterJournalSeq;
       context.progress(cut);
       const run = cut.snapshot.run;
-      if (run.status === 'succeeded') return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
+      if (run.status === 'succeeded') {
+        assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
+        return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
+      }
       const dependencyFailed = cut.journal.some(row => row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
       if (dependencyFailed || (run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {
         const stopped = await read({ protocolVersion: 1, method: 'run.get', runId,
@@ -159,7 +162,9 @@ export async function runInstalledPr532Journey(input: {
       assert(!dependencyFailed, 'installed Run owns a failed dependency acquisition or npm process');
       assert(run.status === 'queued' || run.status === 'running', `installed Run stopped at ${run.status}/${run.nextStep}`);
       assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
-      await delay(2000);
+      // One full sixty-minute Run fits within the original 1024-frame client
+      // lifetime. A separate Delivery uses a genuinely reauthenticated client.
+      await delay(Math.min(5000, Math.max(0, deadline - Date.now())));
     }
   };
 
@@ -227,6 +232,7 @@ export async function runInstalledPr532Journey(input: {
     JSON.stringify({ ...deliveryConsent, budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } })], 'run.apply');
   const deliveryId = applied.snapshot.run.id;
   assert.equal(Date.parse(applied.snapshot.run.deadlineAt) - Date.parse(applied.snapshot.run.createdAt), input.budgets.wallTimeMs);
+  await context.reconnect();
   const delivery = await finish(deliveryId);
   assert.equal(delivery.snapshot.run.terminalReason, 'verified');
   const delivered = decodeRunResult(await object(delivery.snapshot.run.resultRef!));

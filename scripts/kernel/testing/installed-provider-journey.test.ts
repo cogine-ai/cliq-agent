@@ -124,6 +124,33 @@ test('the PR532 report retains the exact applied bytes and original review outpu
   assert.equal(report.reviewOutputUtf8, review.toString('utf8'));
 });
 
+test('PR532 observation stays within the original client frame budget through a full Run and rejects late success', async () => {
+  const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
+  let finish: ts.VariableStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === 'finish')) finish = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(finish);
+  for (const late of [false, true]) {
+    let now = 0, frames = 1;
+    const wallTimeMs = 3_600_000;
+    const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert,
+      context: { progress() {} }, read: async () => {
+        assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
+        if (late) now = wallTimeMs + 1;
+        return { snapshot: { run: { status: now >= wallTimeMs - 5000 ? 'succeeded' : 'running' } },
+          journal: [], highWaterJournalSeq: 0, highWaterItemSeq: 0 };
+      }, delay: async (milliseconds: number) => { now += milliseconds; } });
+    vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
+    if (late) await assert.rejects(context.finish('inert-run'), /preview observation deadline/);
+    else { await context.finish('inert-run'); assert(frames < 1024); }
+  }
+});
+
 test('an authoritative admission refusal cannot become a replacement Run or an application', async () => {
   const f = fixture(() => ({ protocolVersion: 1, ok: false, method: 'run.submit',
     error: { schemaVersion: 1, code: 'MODEL_COST_UNKNOWN', retryable: false, messageCode: 'control.model_cost_unknown' } }));

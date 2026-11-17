@@ -1,6 +1,7 @@
 import { readChildAdmission } from './child-admission.js';
 import { decodeDerivedChildUnverifiedConsent } from '../kernel/child-verifier.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { assertPublicationLeaseReadRows } from './publication-lease-read.js';
 import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import type { InheritedVerificationProvenanceV1, RunResult, VerificationClosureV1 } from '../kernel/result.js';
 import type { ContinuationItem, RecoveryClosureV1, Run, RunFrontier, SessionRunTerminalItem } from '../kernel/types.js';
@@ -41,7 +42,7 @@ function assertDeliveryReadCut(driver: SqliteConnection | SqliteDriver, cut: Rec
   requireEqual(readRun(driver, cut.run.id), cut.run, 'delivery verification exact owning Run cut');
   requireEqual(readCheckpoint(driver, cut.run.latestCheckpointId), cut.latestCheckpoint, 'delivery verification exact ready Checkpoint');
   requireEqual(readInvocationJournal(driver, cut.run.id), cut.journal, 'delivery verification exact owning Journal cut');
-  requireEqual(readWorkerLaunchesForRun(driver, cut.run.id).filter(launch => launch.phase !== 'retired'), cut.workerLaunches,
+  assertPublicationLeaseReadRows(driver, cut.run.id, readWorkerLaunchesForRun(driver, cut.run.id).filter(launch => launch.phase !== 'retired'), cut.workerLaunches,
     'delivery verification exact current worker cut');
   requireEqual(readWorkspaceGenerationsForRun(driver, cut.run.id), cut.workspaceGenerations, 'delivery verification exact generation cut');
   if (driver.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id=? OR child_run_id=? LIMIT 1').get(cut.run.id, cut.run.id) ||

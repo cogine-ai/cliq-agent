@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { setImmediate } from 'node:timers/promises';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { publicationLeaseSnapshotDigest } from './publication-lease-read.js';
 import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import { decodeDeliveryCaptureTopology, decodeDeliveryPlan, type DeliveryCaptureTopologyV1, type DeliveryPlan,
   type PublicationDirectoryIdentityV1 } from '../kernel/publication.js';
@@ -208,7 +209,7 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
   if (worker.runId !== runId || !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1)
     throw new TypeError('publication preflight requires its exact Run and revision');
   assertActiveStateOwner(driver, owner); signal?.throwIfAborted();
-  const before = driver.readSnapshot(connection => publicationCut(connection, runId)), beforeDigest = canonicalSha256(before);
+  const before = driver.readSnapshot(connection => publicationCut(connection, runId)), beforeDigest = publicationLeaseSnapshotDigest(driver, before);
   if (before.run.revision !== input.expectedRunRevision)
     throw new KernelStorageError('REVISION_CONFLICT', 'publication preflight revision changed');
   let physical: PhysicalInspection | undefined;
@@ -256,7 +257,7 @@ export async function preparePublicationPreflight(driver: SqliteDriver, artifact
     const sourceDigest = canonicalSha256({ run: source.run, session: sessionIdentity(source.session), principalId: before.principalId });
     const assertCut = (connection: SqliteConnection = driver) => {
       assertActiveStateOwner(connection, owner);
-      if (canonicalSha256(publicationCut(connection, runId)) !== beforeDigest ||
+      if (publicationLeaseSnapshotDigest(connection, publicationCut(connection, runId)) !== beforeDigest ||
           canonicalSha256({ run: readRun(connection, source.run.id), session: sessionIdentity(readSession(connection, source.session.id)),
             principalId: readSessionPrincipalId(connection, source.session.id) }) !== sourceDigest ||
           connection.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id=? OR child_run_id=? LIMIT 1').get(runId, runId) ||

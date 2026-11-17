@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { setImmediate as yieldToLoop } from 'node:timers/promises';
 import { planCanonicalArtifact, type PlannedArtifact } from '../kernel/artifact-plan.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { publicationLeaseSnapshotDigest } from './publication-lease-read.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import { decodeDeliveryCaptureTopology, decodePublicationActualPreimage, decodePublicationLateObservationItem, decodePublicationPathProgressItem, decodePublicationPreparationClosure, decodePublicationProof,
   publicationArenaId, publicationDirectoryIdentityDigest, type PublicationAbortOperation, type PublicationActualPreimageV1, type PublicationArenaBirthV1,
@@ -287,13 +288,13 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
   preparationPhase('publication_prepare_grant');
   const derived = derivePublicationGrant({ context: { ...authorization.context, frontierRef: cut.run.frontierRef },
     parent: authorization.grant, parentRef: authorization.grantRef, decision: authorization.decision, sequence: 'forward', operationIndex: index, issuedAt });
-  const snapshot = sqlCut(driver, cut.run.id, authorization.verified.admission.source.run.id), fingerprint = canonicalSha256(snapshot);
+  const snapshot = sqlCut(driver, cut.run.id, authorization.verified.admission.source.run.id), fingerprint = publicationLeaseSnapshotDigest(driver, snapshot);
   preparationPhase('publication_prepare_cut');
   await assertPublicationReadCut(driver, reads, cut);
   const assertCut = (connection: SqliteConnection) => {
     assertSqliteConnectionOwnedBy(driver, connection);
     assertActiveStateOwner(connection, owner);
-    if (canonicalSha256(sqlCut(connection, cut.run.id, authorization.verified.admission.source.run.id)) !== fingerprint)
+    if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, cut.run.id, authorization.verified.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication original source, Run, worker or prefix cut changed');
     assertDeliveryPublicationExecution(driver, owner, input.execution, worker, input.task, connection); root.assertHeld(); input.signal?.throwIfAborted();
   };
@@ -310,10 +311,10 @@ export async function preparePublicationInvocation(driver: SqliteDriver, artifac
     assertCut(connection); requireEqual(run, cut.run, 'publication preparation exact Run');
     if (attempt !== 0 || now < issuedAt || now >= derived.grant.expiresAt) throw new KernelStorageError('LEASE_FENCED', 'publication child grant is no longer fresh');
   } });
-  const preparedFingerprint = canonicalSha256(sqlCut(driver, cut.run.id, authorization.verified.admission.source.run.id));
+  const preparedFingerprint = publicationLeaseSnapshotDigest(driver, sqlCut(driver, cut.run.id, authorization.verified.admission.source.run.id));
   const assertPreparedCut = (connection: SqliteConnection) => {
     assertActiveStateOwner(connection, owner);
-    if (canonicalSha256(sqlCut(connection, cut.run.id, authorization.verified.admission.source.run.id)) !== preparedFingerprint)
+    if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, cut.run.id, authorization.verified.admission.source.run.id)) !== preparedFingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication original prepared cut changed');
   };
   const held: Binding = { mode: 'forward', driver, artifacts, reads, owner, execution: input.execution, task: input.task, worker, root, signal: input.signal,
@@ -379,14 +380,14 @@ export async function preparePublicationMaintenance(driver: SqliteDriver, artifa
     requireEqual(actualFrontier, frontier, 'maintenance current exact abort frontier');
   else requireEqual(actualFrontier, { ...authorization.frontier, phase: 'publish', nextPathOperationIndex: prefix.forward.length },
     'maintenance original settled forward-to-abort cut');
-  const fingerprint = canonicalSha256(sqlCut(driver, cut.run.id, prefix.admission.source.run.id));
+  const fingerprint = publicationLeaseSnapshotDigest(driver, sqlCut(driver, cut.run.id, prefix.admission.source.run.id));
   const assertCut = (connection: SqliteConnection) => {
     assertSqliteConnectionOwnedBy(driver, connection);
     assertActiveStateOwner(connection, owner);
     const actual = assertDeliveryPublicationMaintenanceExecution(driver, owner, input.execution, input.task, artifacts, connection);
     if (actual.workspaceRoot !== root || actual.runId !== cut.run.id) throw new TypeError('maintenance changed its owning task');
     signal.throwIfAborted(); root.assertHeld();
-    if (canonicalSha256(sqlCut(connection, cut.run.id, prefix.admission.source.run.id)) !== fingerprint)
+    if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, cut.run.id, prefix.admission.source.run.id)) !== fingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'maintenance original source, Stop, Session or publication cut changed');
   };
   const profile = decodeSandboxProfile(await readCanonicalArtifact(reads, cut.runSpec.sandboxProfileRef));
@@ -517,10 +518,10 @@ export async function preparePublicationMaintenance(driver: SqliteDriver, artifa
   });
   requireHealthyFence(outcome);
   if (!prepared || !preparedRun) invalid('maintenance preparation did not commit');
-  const preparedFingerprint = canonicalSha256(sqlCut(driver, cut.run.id, prefix.admission.source.run.id));
+  const preparedFingerprint = publicationLeaseSnapshotDigest(driver, sqlCut(driver, cut.run.id, prefix.admission.source.run.id));
   const assertPreparedCut = (connection: SqliteConnection) => {
     assertActiveStateOwner(connection, owner);
-    if (canonicalSha256(sqlCut(connection, cut.run.id, prefix.admission.source.run.id)) !== preparedFingerprint)
+    if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, cut.run.id, prefix.admission.source.run.id)) !== preparedFingerprint)
       throw new KernelStorageError('REVISION_CONFLICT', 'maintenance original prepared cut changed');
   };
   const held: Binding = { mode: 'abort', driver, artifacts, reads, owner, execution: input.execution, task: input.task, root, signal,
@@ -629,7 +630,8 @@ export function claimPublicationInvocation(driver: SqliteDriver, owner: StateOwn
         const { revision: _revision, updatedAt: _updatedAt, cancelRequested: _cancel, stopIntentRef: _stop, ...run } = snapshot.run;
         return { ...snapshot, run };
       };
-      requireEqual(stable(current), stable(previous), 'maintenance original prepared cut except its validated monotonic Stop');
+      requireEqual(publicationLeaseSnapshotDigest(driver, stable(current)), publicationLeaseSnapshotDigest(driver, stable(previous)),
+        'maintenance original prepared cut except its validated monotonic Stop');
       if (!cut.run.stopIntentRef || cut.run.revision <= held.run.revision || cut.run.updatedAt < held.run.updatedAt ||
           held.run.cancelRequested && !cut.run.cancelRequested || cut.run.stopIntentRef === held.run.stopIntentRef &&
             cut.run.cancelRequested === held.run.cancelRequested)
@@ -638,10 +640,10 @@ export function claimPublicationInvocation(driver: SqliteDriver, owner: StateOwn
       const stop = await readAgentStop(driver, held.reads, cut);
       await assertPublicationReadCut(driver, held.reads, cut); assertCurrent(held);
       held.run = immutableSnapshot(cut.run); held.observedStop = stop; held.preparedSnapshot = current;
-      const fingerprint = canonicalSha256(current);
+      const fingerprint = publicationLeaseSnapshotDigest(driver, current);
       held.assertCut = connection => {
         assertActiveStateOwner(connection, owner);
-        if (canonicalSha256(sqlCut(connection, held.run.id, prefix.admission.source.run.id)) !== fingerprint)
+        if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, held.run.id, prefix.admission.source.run.id)) !== fingerprint)
           throw new KernelStorageError('REVISION_CONFLICT', 'maintenance upgraded Stop cut changed');
       };
     }
@@ -1009,10 +1011,10 @@ async function persistProgress(held: Binding) {
       checkpointId: publicationProgressCheckpointId(held.run.id, held.prepared.opId, 0), workspaceStateRef: cut.latestCheckpoint.workspaceStateRef }) };
   }
   const graph = await held.progress.graph.publish(); held.progress.metadata = graph.metadata;
-  const current = await completionCut(held), snapshot = canonicalSha256(sqlCut(held.driver, held.run.id, held.authorization.verified.admission.source.run.id));
+  const current = await completionCut(held), snapshot = publicationLeaseSnapshotDigest(held.driver, sqlCut(held.driver, held.run.id, held.authorization.verified.admission.source.run.id));
   const assertCut = (connection: SqliteConnection) => {
     assertActiveStateOwner(connection, held.owner);
-    if (canonicalSha256(sqlCut(connection, held.run.id, held.authorization.verified.admission.source.run.id)) !== snapshot)
+    if (publicationLeaseSnapshotDigest(connection, sqlCut(connection, held.run.id, held.authorization.verified.admission.source.run.id)) !== snapshot)
       throw new KernelStorageError('REVISION_CONFLICT', 'publication progress current Stop or original dispatch cut changed');
   };
   let outcome: TimeFenceAdvance | undefined, committedRun: Run | undefined;

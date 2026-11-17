@@ -12,6 +12,8 @@ import {
   openReadOnlySqliteDriver,
   iterateNodeSqliteStatement,
   isRolledBackSqliteTransactionFailure,
+  sqliteConnectionBelongsTo,
+  assertSqliteConnectionOwnedBy,
   type SqliteConnection,
   type SqliteDriver,
   type SqliteStatement
@@ -294,6 +296,10 @@ test('read snapshots forbid writes and setting escapes, then restore the writer 
     let escapedStatement!: SqliteStatement;
     driver.readSnapshot(connection => {
       escapedConnection = connection;
+      assert(sqliteConnectionBelongsTo(driver, connection));
+      assert(!sqliteConnectionBelongsTo(driver, {} as never));
+      assert(!sqliteConnectionBelongsTo(undefined as never, undefined as never));
+      assertSqliteConnectionOwnedBy(driver, connection);
       escapedStatement = connection.prepare('SELECT count(*) AS n FROM records');
       assert.throws(() => driver.prepare('SELECT 1'), /outer SQLite connection is unavailable/);
       assert.throws(() => driver.transaction(() => undefined), /outer SQLite connection is unavailable/);
@@ -307,6 +313,8 @@ test('read snapshots forbid writes and setting escapes, then restore the writer 
       assert.equal(connection.prepare("SELECT 'PRAGMA query_only=OFF' AS value").get<{ value: string }>()!.value, 'PRAGMA query_only=OFF');
     });
     assert.throws(() => escapedConnection.prepare('SELECT 1'), /scope is no longer active/);
+    assert(!sqliteConnectionBelongsTo(driver, escapedConnection), 'retired scopes cannot borrow their former issuer');
+    assert.throws(() => assertSqliteConnectionOwnedBy(driver, escapedConnection), /genuine active issuing driver/);
     assert.throws(() => escapedStatement.all(), /scope is no longer active/);
     const abort = new Error('abort read cut');
     assert.throws(() => driver.readSnapshot(() => { throw abort; }), error => error === abort);

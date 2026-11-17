@@ -3,8 +3,47 @@
 // This test creates no task, native receipt, Run or recovery authority.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { Script } from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
+import { ResourceRetirementError } from './errors.js';
+
+test('shutdown cancels the original failure recovery read before using the checked owned-worker fence', async () => {
+  // Original failure-branch ordering only, with inert callbacks. No worker,
+  // native death, Run or StateOwner evidence is manufactured here.
+  const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+  let selected: ts.IfStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === 'ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId') {
+      assert.equal(selected, undefined); selected = node;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(selected);
+  for (const mode of ['shutdown', 'ordinary_failure', 'unjoined_failure', 'replaced_worker'] as const) {
+    const events: string[] = [], preflightAbort = new AbortController(), reads = {};
+    const cancelled = new Error('inert shutdown'), failure = mode === 'unjoined_failure'
+      ? new ResourceRetirementError('inert original read did not join', new Error('inert close failure')) : new Error('inert ordinary failure');
+    const original = { activated: {}, closure: {} };
+    const context = { closed: false, activeWorker: original, driver: {}, artifacts: {}, owner: {}, runId: 'inert-run',
+      run: { revision: 1 }, preflightAbort, preflightReads: reads, isClosing: () => context.closed,
+      beginWorkerRecovery: async (_driver: unknown, catalog: unknown) => {
+        events.push('recover'); assert.equal(catalog, reads, 'failure recovery requires the shutdown-cancellable read catalog');
+        if (mode !== 'ordinary_failure') { context.closed = true; preflightAbort.abort(cancelled); }
+        if (mode === 'replaced_worker') context.activeWorker = { activated: {}, closure: {} };
+        events.push('read_joined'); throw mode === 'shutdown' || mode === 'replaced_worker' ? cancelled : failure;
+      }, fenceOwnedWorkerOnShutdown: async (_driver: unknown, _catalog: unknown, _owner: unknown, activated: unknown, closure: unknown) => {
+        assert.equal(activated, original.activated); assert.equal(closure, original.closure); events.push('fence');
+      }, recover: undefined as undefined | (() => Promise<void>) };
+    new Script(ts.transpileModule(`globalThis.recover = async () => ${selected.thenStatement.getText(parsed)};`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
+    if (mode === 'shutdown') await context.recover!();
+    else await assert.rejects(context.recover!(), error => error === (mode === 'replaced_worker' ? cancelled : failure));
+    assert.deepEqual(events, ['recover', 'read_joined', ...(mode === 'shutdown' ? ['fence'] : [])]);
+  }
+  const store = await readFile(new URL('./store.ts', import.meta.url), 'utf8');
+  assert(store.includes('await beginWorkerRecovery(this.driver, this.artifacts.withReadSignal(readAbort.signal), this.owner,'));
+});
 
 test('worker probe closure preserves a completed result but cannot advance through retained cleanup uncertainty', async () => {
   const source = await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8');

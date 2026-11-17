@@ -74,8 +74,8 @@ const ZERO_BUDGET: BudgetUsage = {
   repairAttempts: 0
 };
 
-function recoveryFailure(message: string, cause?: unknown): never {
-  if (cause instanceof ResourceRetirementError) throw cause;
+function recoveryFailure(message: string, cause?: unknown, artifacts?: ArtifactCatalog): never {
+  if (cause instanceof ResourceRetirementError || artifacts?.isReadCancellation(cause)) throw cause;
   throw new KernelStorageError('RECOVERY_REQUIRED', message, { cause });
 }
 
@@ -110,7 +110,7 @@ async function requireRecoveryArtifacts(
       try {
         await artifacts.verifyBytes(ref);
       } catch (error) {
-        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error);
+        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error, artifacts);
       }
     }
   );
@@ -742,7 +742,7 @@ async function readRecoveryProjection(
   try {
     await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
       generations: workspaceGenerations }, preparationCleanup);
-  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
+  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error, artifacts); }
   phase('spec');
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
@@ -804,7 +804,7 @@ async function readRecoveryProjection(
       await readAssemblySkills(artifacts, decodeRetainedRunAssembly(assemblyData), {
         workspaceIdentityRef: databaseCut.workspaceIdentityRef, ownerPrincipalId: databaseCut.principalId
       });
-    } catch (error) { recoveryFailure('Run skill closure is not its complete original immutable source', error); }
+    } catch (error) { recoveryFailure('Run skill closure is not its complete original immutable source', error, artifacts); }
   }
   phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
@@ -839,7 +839,7 @@ async function readRecoveryProjection(
       if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('generation retirement requires its typed historical runtime');
       for (const generation of workspaceGenerations) generationProofs.push(generation.phase === 'retired'
         ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
-    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
+    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error, artifacts); }
   } else generationProofs.push(...workspaceGenerations);
   await validateGenerationArtifacts(artifacts, generationProofs, frozenSource);
   const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
@@ -878,7 +878,7 @@ async function readRecoveryProjection(
             run, spec: runSpec, assembly, journal, childAllocations, principalId: databaseCut.principalId });
         }
       } catch (error) {
-        recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
+        recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error, artifacts);
       }
     }
     const childBudgets = childAllocationBudgetFacts(run.id, childAllocations);
@@ -904,7 +904,7 @@ async function readRecoveryProjection(
             throw new TypeError('retired sealed worker has no matching sealed generation');
           }
         } catch (error) {
-          recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error);
+          recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error, artifacts);
         }
       }
     }
@@ -919,7 +919,7 @@ async function readRecoveryProjection(
         await validateRetainedWorkerQuarantines(artifacts,{...databaseCut,workspaceGenerations:generationProofs},driver);
       }else await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver);
     }
-    catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
+    catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error, artifacts); }
     await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
 
     phase('terminal');
@@ -940,7 +940,7 @@ async function readRecoveryProjection(
       else await validateRunResultRecovery(driver, artifacts, closure);
       if (delivery) await delivery.prefix();
     }
-    catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
+    catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error, artifacts); }
     // Only the completion reader asks for this ordinary result data. Other
     // recovery entries may legally precede their first Delivery candidate.
     const basis = resultBasisRequested && delivery ? await readResultBasisInDeliveryEpoch(driver, artifacts, closure, delivery) : undefined;

@@ -1,4 +1,5 @@
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { assertPublicationLeaseReadRows } from './publication-lease-read.js';
 import { identityHash, parseCanonicalTime } from '../kernel/identity.js';
 import { decodeDeliveryCaptureTopology, decodePublicationArenaBirth, decodePublicationDirectoryPreimage, decodePublicationPathProgressItem, decodePublicationPreparationClosure,
   decodePublicationLateObservationItem, decodePublicationPathResultItem, decodePublicationProof, publicationDirectoryIdentityDigest, publicationLocationKey,
@@ -58,7 +59,7 @@ export async function assertPublicationReadCut(driver: SqliteDriver, artifacts: 
     .all<{ item_id: string; item_seq: bigint; payload_ref: string; created_at: string }>(cut.run.id);
   requireEqual(rows.map(row => ({ schemaVersion: 1, itemId: row.item_id, itemSeq: Number(row.item_seq), payloadRef: row.payload_ref,
     payloadDigest: row.payload_ref, createdAt: row.created_at })), cut.items, 'publication exact item cut');
-  requireEqual(readWorkerLaunchesForRun(driver, cut.run.id).filter(row => row.phase !== 'retired'), cut.workerLaunches,
+  assertPublicationLeaseReadRows(driver, cut.run.id, readWorkerLaunchesForRun(driver, cut.run.id).filter(row => row.phase !== 'retired'), cut.workerLaunches,
     'publication exact current WorkerLaunch cut');
   requireEqual(readWorkspaceGenerationsForRun(driver, cut.run.id), cut.workspaceGenerations, 'publication exact generation cut');
   if (cut.childAllocations.length || driver.prepare('SELECT 1 FROM child_allocations WHERE parent_run_id=? OR child_run_id=? LIMIT 1')

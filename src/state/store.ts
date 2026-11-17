@@ -2921,7 +2921,9 @@ export class StateStore {
           if (renewed === 'expired') {
             run = readRun(this.driver, id);
             if (run.status === 'running' && run.activeWorkerLaunchId) {
-              await beginWorkerRecovery(this.driver, this.artifacts, this.owner, { runId: id, expectedRunRevision: run.revision });
+              const readAbort = this.installedAgents.get(id)?.readAbort;
+              if (!readAbort) throw new KernelStorageError('RECOVERY_REQUIRED', 'installed lease maintenance lost its original read lifetime');
+              await beginWorkerRecovery(this.driver, this.artifacts.withReadSignal(readAbort.signal), this.owner, { runId: id, expectedRunRevision: run.revision });
               await this.modelTransports.get(id)?.close();
             }
           }

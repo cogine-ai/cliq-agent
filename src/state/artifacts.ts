@@ -62,6 +62,11 @@ export class ArtifactCatalog {
     this.readSignal?.throwIfAborted();
   }
 
+  /** Exact original cancellation identity. Every issued I/O still joins. */
+  isReadCancellation(error: unknown): boolean {
+    return this.readSignal?.aborted === true && error === this.readSignal.reason;
+  }
+
   /** One lazy, fixed-width read group, not a global I/O or descriptor budget.
    * Stop dispatch on failure/cancellation, but join every issued operation so
    * a later resource-retirement failure still reaches the original owner. */
@@ -237,7 +242,7 @@ export class ArtifactCatalog {
       const value = JSON.parse(bytes.toString('utf8')) as T;
       this.readSignal?.throwIfAborted(); return value;
     } catch (cause) {
-      if (this.readSignal?.aborted && cause === this.readSignal.reason) throw cause;
+      if (this.isReadCancellation(cause)) throw cause;
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} is not JSON`);
     }
   }

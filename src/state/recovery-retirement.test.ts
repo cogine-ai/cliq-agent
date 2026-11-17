@@ -5,9 +5,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { KERNEL_CAS_DIRECTORY } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { AgentModelTurn, ToolCallInputV1 } from '../protocol/agent-ir.js';
-import { ResourceRetirementError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { openSqliteDriver } from './sqlite-driver.js';
+import { readRecoveryClosure } from './recovery-closure.js';
 import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
 import { openStateStore, type StateStoreRuntimeAuthority } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
@@ -15,6 +17,47 @@ import { createQueuedFixture, disposeFixture, makePrivateDir } from './testing/f
 import { ownerAt } from './testing/state-owner-process.js';
 import { batch } from './testing/tool-calls.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+
+for (const closeFails of [false, true]) test(`nested recovery cancellation joins its real CAS read and preserves ${closeFails ? 'retirement failure' : 'the original reason'}`, async () => {
+  const fixture = await createAgentFixture('nested-recovery-cancellation');
+  const originalOpen = fs.open, abort = new AbortController();
+  const reason = new KernelStorageError('LEASE_FENCED', 'original recovery read is closing');
+  const failure = new Error('uncertainty after the actual close');
+  let entered!: () => void, release!: () => void, inHistory = false, settled = false;
+  const closing = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  let driver: ReturnType<typeof openSqliteDriver> | undefined, reading: Promise<unknown> | undefined;
+  try {
+    // Retained offline model data selects the real nested history reader.
+    // No tool, native worker or physical execution evidence is produced.
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const filename = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.latestCheckpoint.contextManifestRef);
+    driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (inHistory && args[0] === filename) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close(); abort.abort(reason); entered(); await held;
+          if (closeFails) throw failure;
+        };
+      }
+      return handle;
+    }) as typeof fs.open;
+    reading = readRecoveryClosure(driver, fixture.store.artifacts.withReadSignal(abort.signal), fixture.runId,
+      phase => { if (phase === 'history') inHistory = true; });
+    void reading.then(() => { settled = true; }, () => { settled = true; });
+    await closing; await nextTurn();
+    assert.equal(settled, false, 'cancellation cannot discard an issued close');
+    release();
+    await assert.rejects(reading, error => closeFails
+      ? error instanceof ResourceRetirementError && error.cause === failure : error === reason);
+    assert(inHistory); fs.open = originalOpen; driver.close(); driver = undefined;
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally {
+    release(); await reading?.catch(() => {}); fs.open = originalOpen; driver?.close(); await disposeFixture(fixture);
+  }
+});
 
 for (const operation of ['recovery read'] as const) {
   test(`a failed ${operation} joins every real CAS handle and retains any retirement failure`, async () => {

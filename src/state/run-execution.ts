@@ -35,6 +35,7 @@ import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
 import { readDeliveryPublicationClosure, readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
+import { beginPublicationLeaseReads, type PublicationLeaseReads } from './publication-lease-read.js';
 import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
@@ -559,6 +560,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
   let activeWorker: ActiveWorker | undefined;
+  let publicationLeaseReads: PublicationLeaseReads | undefined;
   let stopJoin: Promise<void> | undefined;
   let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
   let verifierReleased = false;
@@ -733,6 +735,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       generation = undefined; controller = undefined; reservation = undefined;
     }
     const retainedPublicationRetirement = publicationRetirement;
+    publicationLeaseReads?.close(); publicationLeaseReads = undefined;
     worker = undefined; ownedLaunchId = undefined; activeWorker = undefined; publicationRetirement = undefined;
     // Original controller revokes and joins preparation before the tree or
     // reservation can close. Claimed native inputs deliberately reject early
@@ -1211,7 +1214,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             brokerQuiescence: observeInstalledBrokerQuiescence(executionStore, runId) });
         } else if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
           if (closed && activeWorker) await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, activeWorker.activated, activeWorker.closure);
-          else await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          else {
+            const recovering = activeWorker;
+            try { await beginWorkerRecovery(driver, preflightReads, owner, { runId, expectedRunRevision: run.revision }); }
+            catch (recoveryError) {
+              if (!closed || !recovering || activeWorker !== recovering || !preflightAbort.signal.aborted ||
+                  recoveryError !== preflightAbort.signal.reason) throw recoveryError;
+              // The original read has joined. The still-owned activation can
+              // now install the same unresolved shutdown fence before join.
+              await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, recovering.activated, recovering.closure);
+            }
+          }
         } else if (ownedLaunchId !== undefined && run.status === 'queued') {
           // Join the original spawner first. A new controller can only inspect
           // the exact witness; it cannot release the old activation channel.
@@ -1620,6 +1633,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
       runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
       newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
+    publicationLeaseReads?.record(launch, renewed);
     retained.activated = { ...retained.activated, launch: renewed };
     return 'renewed';
   }
@@ -1708,8 +1722,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // I/O. Native activation, revocation and Checkpoint still fence renewal.
       const acquiringDependencies = dependencyOwner !== undefined && operationPhase === 'claimed' &&
         receivedCompletion?.kind === 'dependency_acquisition';
-      if (pending && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
-          receivedCompletion && !acquiringDependencies) return 'inactive';
+      const maintainingPublication = publicationLeaseReads !== undefined && (operationPhase === 'preparing' || operationPhase === 'claimed');
+      if (pending && !maintainingPublication && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
+          receivedCompletion && !maintainingPublication && !acquiringDependencies) return 'inactive';
       return renewOwnedWorkerLease();
     },
     assertCurrentModelWorker: value => {
@@ -1907,6 +1922,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
               reobserveRetirement });
           } });
         assertCurrentWorker(identity, 'delivery', task);
+        publicationLeaseReads ??= beginPublicationLeaseReads(driver, owner, execution, identity, task);
         publicationPhase('publication_prepare');
         const original = await publication.preparePublicationInvocation(driver, artifacts, owner, {
           execution, task, worker: identity, workspaceRoot: roots.workspaceRoot,

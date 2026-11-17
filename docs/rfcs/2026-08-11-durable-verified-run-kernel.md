@@ -91,6 +91,15 @@ full-image read. Setup and mutating manager capabilities retain the complete
 pre-operation read. Record the actual count in readiness diagnostics instead of
 assuming the former sixteen reads remain on this connection path.
 
+An original publication holder renews its live worker during complete
+preparation and claim reads. Read comparisons may recognize only the exact
+rows returned by that holder's actual same-owner renewals, with unchanged
+non-lease fields and current SQL equal to the latest recorded row. Recovery
+snapshots retain their actual rows. Revoking/checkpointing leaves this renewal
+equivalence. Final release still requires the current unexpired lease, original
+grant, owner and Stop checks. Shutdown cancels and joins failure-recovery reads
+before installing the checked original-holder fence and joining real resources.
+
 Verify once through the installed entry and reuse targeted cancellation,
 restart/unknown-effect and drift-refusal coverage. Fix only blockers on this
 path. Run the repository build and full tests before pushing, then open one

@@ -154,11 +154,17 @@ export async function backupOriginalSqliteToKernelArchive(driver: SqliteDriver, 
 const rolledBackTransactionFailures = new WeakMap<SqliteDriver, WeakSet<Error>>();
 const connectionIssuers = new WeakMap<SqliteConnection, { driver: SqliteDriver; assertUsable?(): void }>();
 
+/** Issuer identity only. Scope usability and all authority remain separate. */
+export function sqliteConnectionBelongsTo(driver: SqliteDriver, connection: SqliteConnection): boolean {
+  const issuer = connectionIssuers.get(connection);
+  return issuer !== undefined && issuer.driver === driver && connectionIssuers.get(driver)?.driver === driver;
+}
+
 /** Internal SQL friend: a structural, foreign or expired connection cannot
  * replace this driver's genuine current scope. This grants no Run authority. */
 export function assertSqliteConnectionOwnedBy(driver: SqliteDriver, connection: SqliteConnection): void {
   const issuer = connectionIssuers.get(connection);
-  if (!issuer || issuer.driver !== driver || connectionIssuers.get(driver)?.driver !== driver)
+  if (!issuer || !sqliteConnectionBelongsTo(driver, connection))
     throw new TypeError('SQLite connection requires its genuine active issuing driver');
   issuer.assertUsable?.();
 }
