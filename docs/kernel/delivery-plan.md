@@ -118,6 +118,35 @@ history failure still awaits reproduction. The production source is identical
 to the complete passing 4109-test local run, with 4077 passed and 32 platform
 skips. The corrected private fixture is checked separately.
 
+The [corrected free reproduction](https://github.com/cogine-ai/cliq-agent/actions/runs/44302445688)
+at `c3674a24fd98ca0fc65861b67aa3085d0b3e2e37` reproduces the stall after the
+original assertion failure and the first two native reads. Journal 18 is fully
+settled; the next model request is absent. The original refusal is now
+`drive_prior_recovery_history_candidate / RECOVERY_REQUIRED`. Both services
+stop and all writers join. The history reader compares current worker SQL rows
+across asynchronous reads; its existing recorded-renewal scope covers only
+publication. A retained agent read worker can receive an original-owner renewal
+while that candidate graph is read.
+
+The same comparison scope now also binds to the genuine activated agent
+execution's held worker. It records only actual returned SQL renewals, checks
+complete immutable fields and current latest rows, and closes with the worker
+or failed producer. Fresh release and expiry checks, original renewal eligibility
+and received-result custody still apply. Existing inert comparison/lifecycle
+regressions pass. The same native two-batch reproduction will validate the
+installed change. Its result remains pending.
+
+For a later real-model trial, retain the first job's full CNY 111 reserve.
+The second job's authenticated final observed cut charges 2,378,175 conservative
+USD micros, with zero reserved. Its original driver has already refused progress;
+all original services and writers subsequently join. Reserve one additional full
+792,725-micro request above that observed amount for a conservative CNY 24
+booking. The next trial uses a lowered USD 8 ceiling, booked at CNY 60. The
+prospective cumulative reserve is CNY 195 under the approved CNY 200 total;
+actual invoice reconciliation remains open. Restore the original 32M token
+allowance, since the lower cost ceiling already binds before that token limit.
+The same free installed reproduction must pass before this later real trial.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { ResourceRetirementError } from './errors.js';
 
-test('failed publication stops renewing before recovery while an original retryable result retains its lease reads', async () => {
+test('failed worker producers close lease reads before recovery while original retryable results retain them', async () => {
   // Execute the original lifecycle decisions only. The callbacks below carry
   // no Run, lease, StateOwner, native worker, result or recovery authority.
   const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'),
@@ -30,12 +30,13 @@ test('failed publication stops renewing before recovery while an original retrya
   const callback = caught.arguments[0]; assert(callback && ts.isArrowFunction(callback) && ts.isBlock(callback.body));
   const recovery = callback.body.statements.findIndex(ts.isTryStatement); assert(recovery >= 0);
   const beforeRecovery = callback.body.statements.slice(0, recovery).map(node => node.getText(parsed)).join('\n');
-  for (const retryable of [false, true]) {
+  for (const role of ['publication', 'agent']) for (const retryable of [false, true]) {
     let renewals = 0, closes = 0;
     const original = new Error('inert original refusal'), activeWorker = {}, leaseReads = { close() { closes++; } };
     const context = { ResourceRetirementError, operationFailure: undefined, retainedCompletion: false,
-      receivedCompletion: retryable ? { kind: 'publication', worker: undefined, activeWorker } : undefined,
-      worker: undefined, activeWorker, publicationLeaseReads: leaseReads as typeof leaseReads | undefined,
+      receivedCompletion: retryable ? { kind: role === 'publication' ? 'publication' : 'tool', worker: undefined, activeWorker } : undefined,
+      worker: undefined, activeWorker, publicationLeaseReads: role === 'publication' ? leaseReads : undefined,
+      agentLeaseReads: role === 'agent' ? leaseReads : undefined,
       operationPhase: retryable ? 'claimed' : 'preparing', pending: {}, cleanupFailure: undefined,
       dependencyOwner: undefined, verifierReleased: false, toolReleased: false,
       isJoinedCasPublicationFailure: () => retryable, isRolledBackSqliteTransactionFailure: () => false,
@@ -45,13 +46,14 @@ test('failed publication stops renewing before recovery while an original retrya
     new Script(ts.transpileModule(`globalThis.reject = async error => { ${beforeRecovery} };\n` +
       `globalThis.renew = () => ${renewal.getText(parsed)};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
-    assert.equal(context.renew!(), 'renewed');
+    assert.equal(context.renew!(), role === 'publication' ? 'renewed' : 'inactive');
     if (retryable) await assert.rejects(context.reject!(original), error => error === original);
     else await context.reject!(original);
     assert.equal(closes, retryable ? 0 : 1);
-    assert.equal(context.publicationLeaseReads, retryable ? leaseReads : undefined);
-    assert.equal(context.renew!(), retryable ? 'renewed' : 'inactive');
-    assert.equal(renewals, retryable ? 2 : 1);
+    assert.equal(context.publicationLeaseReads, role === 'publication' && retryable ? leaseReads : undefined);
+    assert.equal(context.agentLeaseReads, role === 'agent' && retryable ? leaseReads : undefined);
+    assert.equal(context.renew!(), role === 'publication' && retryable ? 'renewed' : 'inactive');
+    assert.equal(renewals, role === 'publication' ? retryable ? 2 : 1 : 0);
   }
 });
 

@@ -81,11 +81,11 @@ admission, Delivery Run and cleanup. The acceptance still requires the original
 failed assertion, model repair, passing recheck, reviewed result and exact
 application. Record observed durations independently of these task budgets.
 
-The real DeepSeek experiment selects the documented1M context. Its explicit
-reservation-token budget is64M. The next run has a12USD cost ceiling, with
-111CNY reserved for the first15USD job and89CNY for the next job under the
-approved200CNY total. Full-request pricing ceilings and native1MiB request
-bound still apply.
+The real DeepSeek experiment selects the documented 1M context. Explicit
+finite token and USD cost budgets must fit the owner's approved CNY 200 total,
+including prior unresolved reservations. Record each trial's ceilings and
+reconciliation in the delivery plan. Full-request pricing ceilings and the
+native 1 MiB request bound still apply.
 The objective asks for an immediate first model turn with plain text and no
 tools or edits, then uses the genuine baseline failure for exploration/repair.
 Failure reports retain the original decoded Stop subtype and current budget
@@ -138,9 +138,11 @@ full-image read. Setup and mutating manager capabilities retain the complete
 pre-operation read. Record the actual count in readiness diagnostics instead of
 assuming the former sixteen reads remain on this connection path.
 
-An original publication holder renews its live worker during complete
-preparation and claim reads. Read comparisons may recognize only the exact
-rows returned by that holder's actual same-owner renewals, with unchanged
+An original activated agent worker or publication holder records its actual
+same-owner renewals for complete history reads. The agent scope requires the
+genuine execution, held native resources, active generation and unexpired lease.
+Only the publication task retains its existing in-flight renewal eligibility.
+Read comparisons may recognize only the exact recorded rows, with unchanged
 non-lease fields and current SQL equal to the latest recorded row. This
 comparison includes the nested locked-dependency candidate reader. Recovery
 snapshots retain their actual rows. Revoking/checkpointing leaves this renewal

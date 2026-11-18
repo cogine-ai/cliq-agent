@@ -6,7 +6,7 @@ import { requireEqual } from '../policy/runtime-authority.js';
 import { KernelStorageError } from './errors.js';
 import { readRequiredWorkerLaunch } from './repositories/worker-launches.js';
 import { readRun } from './rows.js';
-import { assertDeliveryPublicationExecution, type DeliveryPublicationTask, type RunExecutionWorkerIdentity } from './run-execution.js';
+import { assertAgentLeaseReadExecution, assertDeliveryPublicationExecution, type DeliveryPublicationTask, type RunExecutionWorkerIdentity } from './run-execution.js';
 import { assertSqliteConnectionOwnedBy, sqliteConnectionBelongsTo, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 
@@ -48,7 +48,7 @@ export function publicationLeaseSnapshotDigest(connection: SqliteConnection,
   return canonicalSha256({ ...snapshot, launches: projected(connection, snapshot.run.id, snapshot.launches) });
 }
 
-export type PublicationLeaseReads = Readonly<{ record(previous: BoundWorkerLaunch, renewed: BoundWorkerLaunch): void; close(): void }>;
+export type WorkerLeaseReads = Readonly<{ record(previous: BoundWorkerLaunch, renewed: BoundWorkerLaunch): void; close(): void }>;
 
 /** Data checks only. The caller separately requires its genuine holder,
  * original StateOwner and the exact row returned by the real SQL renewal. */
@@ -65,8 +65,17 @@ export function validatePublicationLeaseRenewal(previous: BoundWorkerLaunch, ren
 /** Issued by the genuine publication holder. Only actual SQL renewals enter
  * this bounded-lifetime read equivalence; release still uses the latest row. */
 export function beginPublicationLeaseReads(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
-  worker: RunExecutionWorkerIdentity, task: DeliveryPublicationTask): PublicationLeaseReads {
+  worker: RunExecutionWorkerIdentity, task: DeliveryPublicationTask): WorkerLeaseReads {
   assertDeliveryPublicationExecution(driver, owner, execution, worker, task);
+  return beginWorkerLeaseReads(driver, owner, worker);
+}
+
+/** The original activated agent worker owns its history-read equivalence. */
+export function beginAgentLeaseReads(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown): WorkerLeaseReads {
+  return beginWorkerLeaseReads(driver, owner, assertAgentLeaseReadExecution(driver, owner, execution));
+}
+
+function beginWorkerLeaseReads(driver: SqliteDriver, owner: StateOwnerContext, worker: RunExecutionWorkerIdentity): WorkerLeaseReads {
   const initial = readRequiredWorkerLaunch(driver, worker.launchId);
   if (initial.phase !== 'activated' || initial.generationWriteState !== 'active')
     throw new KernelStorageError('LEASE_FENCED', 'publication lease reads require the original active launch');
@@ -75,7 +84,7 @@ export function beginPublicationLeaseReads(driver: SqliteDriver, owner: StateOwn
   const rows = new Map([[initial.leaseVersion, canonicalSha256(initial)]]);
   const binding: Binding = { driver, owner, leases: { initial: immutableSnapshot(initial), latest: immutableSnapshot(initial), rows } };
   active.set(driver, binding); holders.set(worker.runId, active);
-  const scope: PublicationLeaseReads = Object.freeze({
+  const scope: WorkerLeaseReads = Object.freeze({
     record(this: unknown, previous: BoundWorkerLaunch, renewed: BoundWorkerLaunch) {
       if (this !== scope || active.get(driver) !== binding) throw new TypeError('publication lease reader is closed or foreign');
       assertActiveStateOwner(driver, binding.owner);

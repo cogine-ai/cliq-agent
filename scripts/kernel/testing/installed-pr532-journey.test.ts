@@ -38,15 +38,15 @@ test('PR532 admission asks for the original check before exploration and retains
   const unused = async (): Promise<never> => { throw new Error('unexpected fixture operation'); };
   await assert.rejects(runInstalledPr532Journey({ workspace: '/inert/project', sessionId: 'inert-session', alias: 'inert-model',
     originalBytes: Buffer.alloc(0), testBytes: Buffer.alloc(0), lockBytes: Buffer.alloc(0),
-    budgets: { wallTimeMs: 3600000, modelTokens: 64000000, costMicros: 12000000, toolCalls: 100,
+    budgets: { wallTimeMs: 3600000, modelTokens: 32000000, costMicros: 8000000, toolCalls: 100,
       repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
     command: async args => {
       calls++;
       assert.equal(args[0], 'run');
       assert(args[1]!.includes('first model turn immediately with plain text, no tool calls and no edits'));
       assert.equal(args[args.indexOf('--check-node') + 1], PR532_CHECK);
-      assert.equal(args[args.indexOf('--budget-tokens') + 1], '64000000');
-      assert.equal(args[args.indexOf('--budget-usd') + 1], '12.000000');
+      assert.equal(args[args.indexOf('--budget-tokens') + 1], '32000000');
+      assert.equal(args[args.indexOf('--budget-usd') + 1], '8.000000');
       throw captured;
     },
     authorizeGitSource: async () => ({ sourceInspectionGrantId: 'inert-grant', ignoreReadGrantIds: [] }),

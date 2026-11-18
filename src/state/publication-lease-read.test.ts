@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import type { BoundWorkerLaunch, Run } from '../kernel/types.js';
-import { beginPublicationLeaseReads, projectRecordedPublicationLeases, validatePublicationLeaseRenewal } from './publication-lease-read.js';
+import { beginAgentLeaseReads, beginPublicationLeaseReads, projectRecordedPublicationLeases, validatePublicationLeaseRenewal } from './publication-lease-read.js';
 
 // Plain comparison data only. These snapshots create no worker, lease,
 // StateOwner, execution permission or native observation.
@@ -44,4 +44,10 @@ test('matching caller rows cannot register publication lease equivalence without
   const worker = Object.defineProperty({}, 'runId', { get() { throw new Error('untrusted worker getter'); } });
   assert.throws(() => beginPublicationLeaseReads(undefined as never, undefined as never, {}, worker as never, {} as never),
     /genuine same-owner in-flight execution task/);
+});
+
+test('agent history cannot register lease equivalence with a caller execution or identity getter', () => {
+  const execution = Object.defineProperty({}, 'readWorker', { get() { throw new Error('untrusted worker getter'); } });
+  for (const value of [execution, new Proxy(execution, { get() { throw new Error('untrusted execution access'); } }), null])
+    assert.throws(() => beginAgentLeaseReads(undefined as never, undefined as never, value), /genuine same-owner execution/);
 });

@@ -12,13 +12,13 @@ import { decodeProviderJourneyConfiguration, PR532_RUN_WALL_TIME_MS } from '../k
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const RUN_COST_CEILING_USD_MICROS = 5_000_000;
-const PR532_COST_CEILING_USD_MICROS = 12_000_000;
+const PR532_COST_CEILING_USD_MICROS = 8_000_000;
 
 export function providerSelection(now: Date, pr532 = false) {
   assert(Number.isFinite(now.getTime()));
   return decodeProviderJourneyConfiguration({
     budgets: { childConcurrency: 1, childDepth: 0, costMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
-      modelTokens: pr532 ? 64_000_000 : 20_000_000,
+      modelTokens: pr532 ? 32_000_000 : 20_000_000,
       repairAttempts: 2, toolCalls: 100, wallTimeMs: pr532 ? PR532_RUN_WALL_TIME_MS : 300_000 },
     definition: { provider: 'openai-compatible', model: 'deepseek-flash',
       claims: { contextLimitTokens: 1_000_000, maxOutputTokens: 8192, nativeToolCalling: true, streaming: false, trustedUsageEvidence: false },

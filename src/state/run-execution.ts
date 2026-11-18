@@ -36,7 +36,7 @@ import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
 import { readDeliveryPublicationClosure, readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
-import { beginPublicationLeaseReads, type PublicationLeaseReads } from './publication-lease-read.js';
+import { beginAgentLeaseReads, beginPublicationLeaseReads, type WorkerLeaseReads } from './publication-lease-read.js';
 import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
@@ -126,6 +126,16 @@ export type RunExecution = Readonly<{
   recoverWorker(input: { expectedRunRevision: number }): Promise<Run>;
 }>;
 const deliveryExecutions = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext; runId: string }>();
+const agentExecutions = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext;
+  readWorker(): RunExecutionWorkerIdentity }>();
+
+/** Read equivalence requires this original execution's live native worker. */
+export function assertAgentLeaseReadExecution(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown): RunExecutionWorkerIdentity {
+  const held = execution !== null && typeof execution === 'object' ? agentExecutions.get(execution) : undefined;
+  if (!held || held.driver !== driver || held.owner !== owner)
+    throw new TypeError('agent lease reads require the genuine same-owner execution');
+  return held.readWorker();
+}
 const publicationTaskBrand: unique symbol = Symbol('DeliveryPublicationTask');
 export type DeliveryPublicationTask = Readonly<{ readonly [publicationTaskBrand]: true }>;
 const noOpTaskBrand: unique symbol = Symbol('DeliveryNoOpTask');
@@ -561,7 +571,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
   let activeWorker: ActiveWorker | undefined;
-  let publicationLeaseReads: PublicationLeaseReads | undefined;
+  let publicationLeaseReads: WorkerLeaseReads | undefined;
+  let agentLeaseReads: WorkerLeaseReads | undefined;
   let stopJoin: Promise<void> | undefined;
   let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
   let verifierReleased = false;
@@ -737,6 +748,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
     const retainedPublicationRetirement = publicationRetirement;
     publicationLeaseReads?.close(); publicationLeaseReads = undefined;
+    agentLeaseReads?.close(); agentLeaseReads = undefined;
     worker = undefined; ownedLaunchId = undefined; activeWorker = undefined; publicationRetirement = undefined;
     // Original controller revokes and joins preparation before the tree or
     // reservation can close. Claimed native inputs deliberately reject early
@@ -905,6 +917,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     await worker.activateCommitted(activated.launch);
     signal.throwIfAborted();
     activeWorker = { authority, recipe, reserved, activated, processContainmentRef, closure };
+    if (continuation.operation === 'agent') agentLeaseReads = beginAgentLeaseReads(driver, owner, execution);
     return activeWorker;
   }
   /** Tool completion and stop drain share the original physical worker's
@@ -1196,6 +1209,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // before the reader captures the exact lease row that its reducing fence
       // must still match.
       publicationLeaseReads?.close(); publicationLeaseReads = undefined;
+      agentLeaseReads?.close(); agentLeaseReads = undefined;
       if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
       let retiringPreparation = false;
       try {
@@ -1611,14 +1625,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     });
     return ownOperation(work, abort, true);
   }
-  function renewOwnedWorkerLease(refreshAtBoundary = false): ReturnType<RunExecution['renewCurrentWorkerLease']> {
-    if (!activeWorker || !worker || !generation || !controller || !reservation || closed || isClosing()) return 'inactive';
+  function readOwnedWorkerLease() {
+    if (!activeWorker || !worker || !generation || !controller || !reservation || closed || isClosing()) return;
     if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
     if (pending && dependencyOwner) assertDependencyLeaseMaintenance(driver, owner, dependencyOwner);
     const retained = activeWorker, run = readRun(driver, runId);
-    if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
+    if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return;
     const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
-    if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return 'inactive';
+    if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return;
     if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
         launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
         launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
@@ -1627,6 +1641,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     reservation.assertHeld();
     worker.assertHeld();
     assertActiveStateOwner(driver, owner);
+    return { retained, run, launch };
+  }
+  function renewOwnedWorkerLease(refreshAtBoundary = false): ReturnType<RunExecution['renewCurrentWorkerLease']> {
+    const owned = readOwnedWorkerLease();
+    if (!owned) return 'inactive';
+    const { retained, run, launch } = owned;
     const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
     if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
     const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
@@ -1639,6 +1659,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
       newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
     publicationLeaseReads?.record(launch, renewed);
+    agentLeaseReads?.record(launch, renewed);
     retained.activated = { ...retained.activated, launch: renewed };
     return 'renewed';
   }
@@ -3196,6 +3217,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
   });
   if (continuation.operation === 'delivery') deliveryExecutions.set(execution, { driver, owner, runId });
+  else agentExecutions.set(execution, { driver, owner, readWorker() {
+    const owned = readOwnedWorkerLease();
+    if (!owned) throw new KernelStorageError('LEASE_FENCED', 'agent history lost its original active worker');
+    const { retained, run, launch } = owned;
+    const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, sampleCanonicalNow());
+    requireEqual(live.launch, launch, 'agent history current original launch');
+    requireEqual(live.generation, retained.activated.generation, 'agent history original active generation');
+    return Object.freeze({ runId, leaseEpoch: run.leaseEpoch, launchId: launch.launchId,
+      generationRef: retained.authority.generationRef, workerIdentityDigest: launch.workerIdentityDigest! });
+  } });
   return { execution, closeWorkerRecoveryProbe: input => closeProbe(input), beginClose, close() {
     if (closing) return closing;
     const revoked = beginClose();
