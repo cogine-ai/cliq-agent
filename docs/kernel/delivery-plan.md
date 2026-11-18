@@ -295,6 +295,25 @@ checks and all completion/stop/scan assertions. It creates no new production
 behavior. This tests failed-tool continuation across generations; whether it
 explains the original failure remains unknown. No new paid trial has started.
 
+A proposed next-trial reservation uses the fifth job's entire frozen USD12 Run
+ceiling, which bounds at most fifteen full 792,725-micro model exchanges.
+Preparation reserves before claim; sent/UNKNOWN calls consume the full amount,
+and a refund requires original native no-release proof. One irreversible native
+exchange belongs to each exact claim. This lifetime bound includes any
+unobserved release and does not rely on graceful Stop2 or the five observed
+requests. With the original 8192 serialized-output bound and the previously
+audited full input/cache components, fifteen potential requests reserve
+ceil(15 × USD0.330696 × CNY7.4/USD) = CNY37. Earlier four reservations remain
+CNY82, making CNY119 before a new job. Actual invoices remain unreconciled.
+This is a source-based documented-contract bound and awaits independent review.
+
+The private next-trial selector lowers its native ceiling to USD10, retaining
+its full CNY74 prospective reservation. CNY119 + 74 = 193 fits the authorized
+CNY200. It permits twelve original full native reservations. The signed
+393216-output accounting, UNKNOWN charges, security and acceptance remain
+unchanged. This preparation starts no paid request and supplies no evidence
+that the fifth job's failure has been repaired. Free diagnosis is still running.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:
