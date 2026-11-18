@@ -358,6 +358,12 @@ mounting a volume or providing native authority. The original-size Linux repeat
 checks the driver repair on its fixed source while the complete4GiB task
 rehearsal runs on its own fixed source. Both physical results are pending.
 
+The initial4GiB dispatch waits in the old global controlled concurrency group.
+Controlled rehearsals now group by their fixed Git ref so the two independent
+free-runner fixtures can execute together. Funded jobs use the global `funded`
+group with cancellation disabled. A source-backed expression test checks both
+ref cases and the shared funded group. This changes scheduling only.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

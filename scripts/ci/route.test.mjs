@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { groups, routeEvent, routePaths } from './route.mjs';
 import { projectQualificationWorkflow, providerInputs } from './testing/workflow-projection.mjs';
@@ -12,6 +13,20 @@ import { projectQualificationWorkflow, providerInputs } from './testing/workflow
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const all = Object.fromEntries(groups.map(group => [group, true]));
 function chosen(result) { return groups.filter(group => result.groups[group]); }
+
+test('provider concurrency serializes every funded ref and independently schedules controlled refs', () => {
+  const source = readFileSync(path.join(root, '.github/workflows/kernel-provider.yml'), 'utf8');
+  const expression = source.match(/^  group: cliq-provider-qualification-\$\{\{ (.+) \}\}$/mu)?.[1];
+  assert.equal(expression, "inputs.funded && 'funded' || github.ref");
+  assert.match(source, /^  cancel-in-progress: false$/mu);
+  const group = (funded, ref) => vm.runInNewContext(expression, { inputs: { funded }, github: { ref } });
+  const first = 'refs/heads/validation/cliq-pr532', second = 'refs/heads/validation/cliq-pr532-volume';
+  assert.equal(group(true, first), 'funded');
+  assert.equal(group(true, second), 'funded');
+  assert.equal(group(false, first), first);
+  assert.equal(group(false, second), second);
+  assert.notEqual(group(false, first), group(false, second));
+});
 
 test('ordinary documentation selects no expensive jobs and reports its limited scope', () => {
   const result = routePaths(['README.md', 'docs/kernel/delivery-plan.md', 'docs/a file.md']);

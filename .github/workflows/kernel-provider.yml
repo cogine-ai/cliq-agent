@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cliq-provider-qualification-${{ inputs.funded && 'funded' || 'controlled' }}
+  group: cliq-provider-qualification-${{ inputs.funded && 'funded' || github.ref }}
   cancel-in-progress: false
 
 jobs:
