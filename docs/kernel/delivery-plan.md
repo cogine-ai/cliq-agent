@@ -28,6 +28,18 @@ comparing every other SQL field. Failed producers also end productive renewal
 before the reducing recovery fence captures its row. Retryable original results
 retain their scope. Local regressions pass; installed validation remains open.
 
+The [following free run](https://github.com/cogine-ai/cliq-agent/actions/runs/44231312340)
+at `c9ad10aa5248e7fb821fef15571e93fb33efac20` reaches
+`complete_retained_secret_corpus`, after the complete task and original resource
+join assertions. Its final scan refuses at 4096 streams while reading the
+1004th artifact row, with only 5612834 bytes scanned. The complete report stays
+suppressed and the run remains unqualified. The scanner now keeps a continuous
+logical stream per copied database, preserving every value and cross-cell
+overlap under the unchanged cumulative stream/byte limits and independent
+row/cell/file/entry/time guards. Real copied-SQLite regressions cover more than
+4096 values, a final secret, cross-cell secret detection and original limit
+refusals. Complete installed validation remains required before the funded run.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

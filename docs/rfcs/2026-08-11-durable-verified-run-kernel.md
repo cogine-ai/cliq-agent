@@ -81,6 +81,18 @@ original process and invocation independently. This tuple supplies no completion
 resource join, successful stop or recovery authority. Keep the original stop
 deadline and exit-summary checks.
 
+The final secret corpus uses one cumulative scanner with its original
+4096-stream and 512-MiB limits and sixty-second corpus deadline. A copied
+SQLite database has one continuous logical byte stream for every schema name,
+schema SQL and TEXT/BLOB value, in the real query order. Retain overlap across
+cells, including empty cells, and refuse cross-cell secret matches too. Raw
+files and separate databases keep independent streams. This replaces the
+former per-cell stream allocation. Preserve the independent 8192-row,
+65536-cell and 128-MiB logical guards, full raw-file/CAS/client-data coverage,
+identity/stability checks and all resource joins. Do not skip, deduplicate,
+truncate or reset any scanned bytes or counters. Scanner exhaustion continues
+to refuse qualification and suppress the unqualified report body.
+
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
 unrelated crash-cut matrices do not gate this one-task preview. Measure latency

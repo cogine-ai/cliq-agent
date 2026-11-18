@@ -91,8 +91,12 @@ Both final units must really stop within the original2s bound. The owned keyring
 HTTPS connections, clients and all original child pipes join before the retained
 corpus is scanned. The new explicit scope has one scanner across both Runs,
 all commands, report and complete kernel/authority/CAS corpus:4096 independent
-streams,512MiB and the existing60s corpus deadline. No empty stream is skipped,
-no independent values are merged/deduplicated, and no counters reset. Original
+streams,512MiB and the existing60s corpus deadline. Each copied database has
+one continuous logical stream containing every schema name, schema SQL and
+TEXT/BLOB cell, retaining overlap across cells. Raw files and separate databases
+keep independent streams. This also rejects cross-cell matches. The separate
+8192-row/65536-cell/128MiB logical bounds remain intact. No value is skipped or
+deduplicated and no counters reset. Original
 READY5s, request30s, enrollment60s and terminal90s limits remain unchanged.
 
 ## Closed report and gaps

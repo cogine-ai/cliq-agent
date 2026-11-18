@@ -39,13 +39,84 @@ async function copyFixture(work: (filename: string) => Promise<void>, leaf: 'aut
   finally { await rm(directory, { recursive: true, force: true }); }
 }
 
+
+test('one copied database continuously scans every logical value beyond 4096 cells and detects the last secret', async () => {
+  await copyFixture(async filename => {
+    const value = 'ordinary database value', input = secret();
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE items(value TEXT) STRICT; BEGIN');
+      const insert = database.prepare('INSERT INTO items VALUES (?)');
+      for (let index = 0; index < 5000; index++) insert.run(value);
+      database.exec('COMMIT');
+    });
+    const before = await readFile(filename);
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      const result = scanCopiedCredentialDatabase(filename, scanner);
+      assert.deepEqual(result, { logicalRowsScanned: 5000, logicalValuesScanned: 5002,
+        logicalBytesScanned: Buffer.byteLength('itemsCREATE TABLE items(value TEXT) STRICT') + 5000 * Buffer.byteLength(value) });
+      assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
+      assert.equal(scanner.stats().bytesScanned, result.logicalBytesScanned);
+      assert.deepEqual(await readFile(filename), before);
+    } finally { scanner.close(); }
+    const writer = new DatabaseSync(filename);
+    try { writer.prepare('INSERT INTO items VALUES (?)').run(input.toString('utf8')); } finally { writer.close(); }
+    const withSecret = await readFile(filename);
+    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      assert.throws(() => scanCopiedCredentialDatabase(filename, detecting), { code: 'SECRET_DETECTED' });
+      assert.equal(detecting.stats().matched, true); assert.equal(detecting.stats().streamsOpened, 1);
+      assert.equal(detecting.stats().streamsClosed, 1); assert.deepEqual(await readFile(filename), withSecret);
+      assert.equal(detecting.stats().retainedNeedleBytes, 0); assert.equal(detecting.stats().retainedTailBytes, 0);
+    } finally { detecting.close(); input.fill(0); }
+  });
+});
+
+
+test('continuous copied-database scanning rejects a secret split across separate cells', async () => {
+  await copyFixture(async filename => {
+    const input = secret(), middle = Math.floor(input.length / 2);
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE items(value BLOB) STRICT');
+      const insert = database.prepare('INSERT INTO items VALUES (?)');
+      insert.run(input.subarray(0, middle)); insert.run(input.subarray(middle));
+    });
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), { code: 'SECRET_DETECTED' });
+      assert.equal(scanner.stats().matched, true); assert.equal(scanner.stats().streamsClosed, 1);
+    } finally { scanner.close(); input.fill(0); }
+  });
+});
+
+for (const bound of ['rows', 'cells'] as const)
+  test(`continuous copied-database scanning retains the original ${bound} bound`, async () => {
+    await copyFixture(async filename => {
+      const columns = bound === 'cells' ? 8 : 1, rows = bound === 'rows' ? 8193 : 8192;
+      await createDatabase(filename, database => {
+        database.exec(`CREATE TABLE items(${Array.from({ length: columns }, (_, index) => `value${index} TEXT`).join(',')}) STRICT; BEGIN`);
+        const insert = database.prepare(`INSERT INTO items VALUES (${Array.from({ length: columns }, () => '?').join(',')})`);
+        for (let index = 0; index < rows; index++) insert.run(...Array.from({ length: columns }, () => 'ordinary bytes'));
+        database.exec('COMMIT');
+      });
+      const before = await readFile(filename);
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+      try {
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), CredentialSecretCorpusError);
+        assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
+        assert.equal(scanner.stats().limitExceeded, false, 'the original corpus bound refuses before scanner exhaustion');
+        assert.deepEqual(await readFile(filename), before);
+      } finally { scanner.close(); }
+    });
+  });
+
 function failureProgress(error: unknown): unknown {
   const read = (corpus as unknown as { readCredentialSecretCorpusScanProgress?: (error: unknown) => unknown }).readCredentialSecretCorpusScanProgress;
   assert.equal(typeof read, 'function', 'the actual error owns a fixed diagnostic accessor');
   return read!(error);
 }
 
-for (const [maxStreams, before] of [[8, 3], [4096, 675]] as const)
+for (const maxStreams of [8, 4096] as const)
   test(`real copied SQLite keeps its original ${maxStreams}-stream refusal and partial observed counters`, async () => {
     await copyFixture(async filename => {
       const value = 'ordinary diagnostic bytes';
@@ -59,16 +130,15 @@ for (const [maxStreams, before] of [[8, 3], [4096, 675]] as const)
       let observed: unknown;
       const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams }, error => { observed = error; });
       try {
-        for (let index = 0; index < before; index++) scanner.openStream().close();
+        for (let index = 0; index < maxStreams; index++) scanner.openStream().close();
         let original: unknown;
         assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
           original = error; assert.equal(error, observed); assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED'); return true;
         });
-        const rows = maxStreams - before - 1;
         const progress = failureProgress(original);
         assert.deepEqual(progress, { diagnosticOnly: true, source: { kind: 'database_logical', database: 'authority',
-          tableBucket: 'items', part: 'cell', logicalRowsObserved: rows, logicalValuesAttempted: rows + 2,
-          logicalBytesObserved: Buffer.byteLength('items') + Buffer.byteLength('CREATE TABLE items(value TEXT) STRICT') + rows * Buffer.byteLength(value) } });
+          tableBucket: 'items', part: 'table_name', logicalRowsObserved: 0, logicalValuesAttempted: 1,
+          logicalBytesObserved: Buffer.byteLength('items') } });
         assert.equal(Object.isFrozen(progress), true); assert.equal(Object.isFrozen((progress as { source: object }).source), true);
         assert.equal(scanner.stats().streamsOpened, maxStreams); assert.equal(scanner.stats().streamsClosed, maxStreams);
         assert.equal(scanner.stats().closed, true); assert.equal(scanner.stats().limitExceeded, true);
@@ -102,14 +172,15 @@ for (const [table, bucket] of [...kernelTableBuckets, ['private_unknown_table', 
         database.exec(`CREATE TABLE ${table}(value TEXT) STRICT; INSERT INTO ${table} VALUES ('ordinary bytes')`);
       });
       let observed: unknown;
-      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 1024 * 1024, maxStreams: 2 }, error => { observed = error; });
+      const schemaBytes = Buffer.byteLength(table) + Buffer.byteLength(`CREATE TABLE ${table}(value TEXT) STRICT`);
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: schemaBytes, maxStreams: 2 }, error => { observed = error; });
       try {
         let original: unknown;
         assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => { original = error;
           assert.equal(error, observed); return (error as { code?: unknown }).code === 'LIMIT_EXCEEDED'; });
         const progress = failureProgress(original) as { source: { database: string; tableBucket: string; part: string } };
         assert.equal(progress.source.database, 'kernel'); assert.equal(progress.source.tableBucket, bucket); assert.equal(progress.source.part, 'cell');
-        assert.equal(scanner.stats().streamsOpened, 2); assert.equal(scanner.stats().streamsClosed, 2);
+        assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
         assert(!JSON.stringify(progress).includes(filename)); if (bucket === 'other') assert(!JSON.stringify(progress).includes(table));
       } finally { scanner.close(); }
     }, 'kernel.sqlite3');
@@ -175,11 +246,12 @@ test('a real copied SQLite stream-limit refusal retains its first corpus failure
       observations.push(scanner.stats());
     });
     try {
+      for (let index = 0; index < 4096; index++) scanner.openStream().close();
       const originalCounts = scanner.stats();
       const beforeCorpus = Object.freeze({ streamsOpened: originalCounts.streamsOpened, bytesScanned: originalCounts.bytesScanned });
       stage = 'corpus';
-      // The schema name/SQL plus 4095 actual independent values exceed the
-      // unchanged total 4096-stream budget, not the row, byte or file guards.
+      // A database cannot open its logical stream after the same cumulative
+      // scanner has exhausted the original 4096-stream budget.
       assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
         assert.equal(error, observed, 'the caller receives the exact observed original scanner error');
         assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED', 'the original stream guard still refuses');
@@ -192,7 +264,7 @@ test('a real copied SQLite stream-limit refusal retains its first corpus failure
       stage = 'report';
       assert.throws(() => scanner.openStream(), { code: 'CLOSED' });
       assert.equal(firstFailureStage, 'corpus', 'later report masking cannot replace the first corpus failure');
-      assert.deepEqual(beforeCorpus, { streamsOpened: 0, bytesScanned: 0 });
+      assert.deepEqual(beforeCorpus, { streamsOpened: 4096, bytesScanned: 0 });
       const stats = scanner.stats();
       assert.equal(stats.streamsOpened, 4096, 'all original independent streams remain counted');
       assert.equal(stats.streamsClosed, 4096, 'all original independent streams close');
@@ -573,9 +645,9 @@ for (const part of ['entry_name', 'file_bytes'] as const)
       await writeFile(filename, payload, { flag: 'wx', mode: 0o400 });
       let observed: unknown;
       const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, error => { observed = error; });
-      // Each existing fixture database has one raw-file stream and its three
-      // original schema/value streams. No stream is omitted or joined to another.
-      for (let index = 0; index < (part === 'entry_name' ? 4088 : 4087); index++) scanner.openStream().close();
+      // Each database has its original raw-file stream and one complete
+      // continuous logical stream. Both retain the same cumulative budget.
+      for (let index = 0; index < (part === 'entry_name' ? 4092 : 4091); index++) scanner.openStream().close();
       const active = new Set<object>(), actualOpen = fs.open; let opened = 0;
       t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
         const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle); opened++;

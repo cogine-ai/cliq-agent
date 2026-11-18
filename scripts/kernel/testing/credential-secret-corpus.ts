@@ -89,9 +89,13 @@ function scanValue(scanner: CredentialSecretScanner, bytes: Uint8Array): void {
 
 /** Read-only default-engine diagnostics of a caller-owned COPY. Reading
  * logical values additionally catches a secret split across SQLite pages.
+ * Each database owns one continuous logical stream, including schema and every
+ * TEXT/BLOB value, with overlap retained across cells. This conservatively
+ * rejects cross-cell matches too. Original row/cell/byte bounds remain separate.
  * Nothing here accepts a retained object as proof or rehashes secret bytes. */
 export function scanCopiedCredentialDatabase(filename: string, scanner: CredentialSecretScanner) {
   let database: DatabaseSync | undefined;
+  let logicalStream: ReturnType<CredentialSecretScanner['openStream']> | undefined;
   let stage: DatabaseFailureStage = 'open';
   let logicalRowsScanned = 0, logicalValuesScanned = 0, logicalBytesScanned = 0;
   let bucket: TableBucket = 'other', part: 'table_name' | 'table_sql' | 'cell' = 'table_name';
@@ -117,7 +121,9 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
       try {
         check(bytes.length <= sqliteLimit && ++logicalValuesScanned <= cellLimit);
         logicalBytesScanned += bytes.length; check(logicalBytesScanned <= 128 * 1024 * 1024);
-        scanValue(scanner, bytes);
+        logicalStream ??= scanner.openStream();
+        for (let offset = 0; offset < bytes.length; offset += chunkBytes)
+          logicalStream.scan(bytes.subarray(offset, offset + chunkBytes));
       } finally { bytes.fill(0); }
     };
     for (const table of tables) {
@@ -166,7 +172,7 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
         ? sqliteClasses[engineCode & 255] ?? 'sqlite_error' : 'sqlite_error'
       : code === 'ERR_OUT_OF_RANGE' ? 'out_of_range' : error instanceof TypeError ? 'type_error' : 'other';
     throw new CredentialSecretCorpusError(Object.freeze({ database: path.basename(filename) === 'kernel.sqlite3' ? 'kernel' : 'authority', stage, errorClass }));
-  } finally { try { database?.close(); } catch { refused(); } }
+  } finally { logicalStream?.close(); try { database?.close(); } catch { refused(); } }
 }
 
 export type CredentialSecretCorpusInput = Readonly<{ stateRoot: string; uid: number;
