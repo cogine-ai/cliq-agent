@@ -173,7 +173,9 @@ test('installed verifier uses its own free bounded manager journey without weake
   assert.match(consumer, /buildInstalledNpmDataAsset\(npmDependencyArchive\)/u);
   assert.match(consumer, /await runInstalledNodeJourney\(filename, 'verifier', npmDependencyArchive \? \{ npmDependencyArchive \} : \{\}\)/u);
   const driver = await readFile(new URL('../../scripts/kernel/testing/installed-node-journey.ts', import.meta.url), 'utf8');
-  assert.match(driver, /maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096/u);
+  assert.match(driver, /const secretScanLimits = \{ maxBytes: 512 \* 1024 \* 1024, maxStreams: 4096 \};/u);
+  assert.match(driver, /if \(options\.pr532\) secretScanLimits\.maxStreams = 8192;/u);
+  assert.match(driver, /createCredentialSecretScanner\(\[secret, password\], secretScanLimits,/u);
   assert.match(driver, /'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'/u);
   const parsed = ts.createSourceFile('installed-node-journey.ts', driver, ts.ScriptTarget.Latest, true);
   const scans: ts.CallExpression[] = [];
@@ -186,7 +188,7 @@ test('installed verifier uses its own free bounded manager journey without weake
   const options = scan.arguments[0]!; assert(ts.isObjectLiteralExpression(options));
   assert.deepEqual(options.properties.slice(0, 4).map(property => property.getText(parsed)),
     ['stateRoot: recipe.stateRoot', 'uid: ledger.uid', 'evidenceDirs: []', 'scanner']);
-  assert.equal(options.properties.length, 5);
+  assert.equal(options.properties.length, 6);
   const extra = options.properties[4]!; assert(ts.isSpreadAssignment(extra));
   let selection = extra.expression;
   while (ts.isParenthesizedExpression(selection)) selection = selection.expression;
@@ -194,6 +196,15 @@ test('installed verifier uses its own free bounded manager journey without weake
   assert(ts.isObjectLiteralExpression(selection.whenTrue) && ts.isObjectLiteralExpression(selection.whenFalse));
   assert.deepEqual(selection.whenTrue.properties.map(property => property.getText(parsed)), ['scanInstalledClientData: true as const']);
   assert.equal(selection.whenFalse.properties.length, 0, 'the existing verifier mode keeps its original scan options');
+
+  const project = options.properties[5]!; assert(ts.isSpreadAssignment(project));
+  let projectSelection = project.expression;
+  while (ts.isParenthesizedExpression(projectSelection)) projectSelection = projectSelection.expression;
+  assert(ts.isConditionalExpression(projectSelection)); assert.equal(projectSelection.condition.getText(parsed), 'options.pr532');
+  assert(ts.isObjectLiteralExpression(projectSelection.whenTrue) && ts.isObjectLiteralExpression(projectSelection.whenFalse));
+  assert.deepEqual(projectSelection.whenTrue.properties.map(property => property.getText(parsed)), ["profile: 'whole_project_v1' as const"]);
+  assert.equal(projectSelection.whenFalse.properties.length, 0);
+
   assert(driver.includes('assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);'));
   assert(driver.includes('if (dailyJourney) assert.equal(report.secretCorpus.installedClientDataScanned, true);'));
   assert.match(driver, /stopped\.TimeoutStopUSec, '2s'/u);

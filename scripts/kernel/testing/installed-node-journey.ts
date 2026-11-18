@@ -333,7 +333,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
   let beforeCorpus: CredentialSecretScanFailureDiagnostic['beforeCorpus'] = null, corpusScanFailureCode: CredentialSecretScanCode | null = null;
   let secretCorpusScanProgress: CredentialSecretCorpusScanProgress | undefined;
-  const scanner = createCredentialSecretScanner([secret, password], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, () => {
+  const secretScanLimits = { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 };
+  if (options.pr532) secretScanLimits.maxStreams = 8192;
+  const scanner = createCredentialSecretScanner([secret, password], secretScanLimits, () => {
     firstFailureStage ??= scanStage;
   });
   const scanBytes = (bytes: Uint8Array) => { const stream = scanner.openStream(); try { stream.scan(bytes); } finally { stream.close(); } };
@@ -1078,7 +1080,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
       guestImageByteCount: signed.guestToolchain.manifest.guestImageByteCount,
       installedLayout: 'single_cas_streams_v1', manifestSchemaVersion: 2, completeImageCopiesVerified: true,
       actualReadOnlyImageCopies: imageCopies.length, totalImageCopyBytes: imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount,
-      imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096,
+      imageCopiesInCompleteSecretWriterCorpus: 1, unchangedCorpusByteLimit: 512 * 1024 * 1024,
+      ...(options.pr532 ? { wholeProjectCorpusStreamLimit: 8192 } : { unchangedCorpusStreamLimit: 4096 }),
       ...(signed.guestToolchain.imageLayout.kind === 'compact' ? { guestImageLayout: signed.guestToolchain.imageLayout } : {}) };
     if (options.npmDependencyArchive || pr532) {
       const data = signed.bundle.entries.filter(entry => entry.entryId === NPM_DATA_RECIPE.entryId);
@@ -3112,7 +3115,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         beforeCorpus = Object.freeze({ streamsOpened: before.streamsOpened, bytesScanned: before.bytesScanned });
         scanStage = 'corpus';
         report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner,
-          ...(dailyJourney ? { scanInstalledClientData: true as const } : {}) });
+          ...(dailyJourney ? { scanInstalledClientData: true as const } : {}),
+          ...(options.pr532 ? { profile: 'whole_project_v1' as const } : {}) });
         assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);
         if (dailyJourney) assert.equal(report.secretCorpus.installedClientDataScanned, true);
         if (options.publicationRetirementStop) {

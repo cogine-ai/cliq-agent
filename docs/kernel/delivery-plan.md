@@ -40,6 +40,19 @@ row/cell/file/entry/time guards. Real copied-SQLite regressions cover more than
 4096 values, a final secret, cross-cell secret detection and original limit
 refusals. Complete installed validation remains required before the funded run.
 
+The [whole-task rehearsal](https://github.com/cogine-ai/cliq-agent/actions/runs/44246979916)
+at `2aa4d6a27292513037e77112370b9009a944167d` completes the original assertion
+failure, repair, passing check, actual reconnect, reviewed one-file result and
+exact application. Both original services stop successfully and all writers
+join. The scan then refuses the 1025th CAS entry under the small-state fixture's
+1024-entry guard. The report remains unqualified. The complete-project campaign
+now records a fixed `whole_project_v1` diagnostic capacity of 4096 entries per
+directory, 4096 files and 8192 cumulative streams; the same512MiB/60s, complete
+byte coverage, secret detection, identity and join requirements apply. Original
+small-state capacity and refusal regressions remain. New real-Linux tests scan
+1100 actual CAS files, detect a secret in the last file and refuse beyond the
+new4096-entry boundary. A complete scanned rehearsal still precedes funding.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

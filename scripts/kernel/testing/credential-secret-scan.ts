@@ -53,7 +53,7 @@ export function copyCredentialSecretScanFailureDiagnostic(input: unknown): Crede
   if (value.beforeCorpus!.value !== null) {
     const before = fields(value.beforeCorpus!.value, ['streamsOpened', 'bytesScanned']);
     const streams: unknown = before.streamsOpened!.value, bytes: unknown = before.bytesScanned!.value;
-    if (typeof streams !== 'number' || !Number.isSafeInteger(streams) || streams < 0 || streams > 4096 ||
+    if (typeof streams !== 'number' || !Number.isSafeInteger(streams) || streams < 0 || streams > 8192 ||
         typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0 || bytes > 512 * 1024 * 1024) invalid();
     beforeCorpus = Object.freeze({ streamsOpened: streams, bytesScanned: bytes });
   }

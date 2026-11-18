@@ -176,7 +176,7 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
 }
 
 export type CredentialSecretCorpusInput = Readonly<{ stateRoot: string; uid: number;
-  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner; scanInstalledClientData?: true }>;
+  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner; scanInstalledClientData?: true; profile?: 'whole_project_v1' }>;
 
 /** Invoke after all fixture credential writers and Supervisor/keeper have
  * positively joined. Linux /proc descriptor paths pin every ancestor without
@@ -191,13 +191,14 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   const stats: Stats = { filesScanned: 0, fileBytesScanned: 0, sqliteDatabasesScanned: 0,
     logicalRowsScanned: 0, logicalValuesScanned: 0, logicalBytesScanned: 0, evidenceDirectoriesScanned: 0 };
   const deadline = performance.now() + 60000;
+  const maxEntries = input.profile === 'whole_project_v1' ? 4096 : entryLimit;
+  const maxFiles = input.profile === 'whole_project_v1' ? 4096 : 2048;
   let stage: CorpusFailureStage = 'input', inventoryEntriesObserved = 0;
   let scanSource: ScanSource | undefined;
   const diagnostic = (errorClass: CorpusFailureClass): CredentialSecretCorpusFailure => Object.freeze({ stage, errorClass, ...stats, inventoryEntriesObserved });
   const fail = (errorClass: CorpusFailureClass): never => { throw new CredentialSecretCorpusError(undefined, diagnostic(errorClass)); };
   const bounded = () => {
     if (performance.now() >= deadline) fail('deadline_exceeded');
-    if (stats.filesScanned > 2048) fail('file_limit_exceeded');
   };
   const descriptorPath = (directory: Directory, leaf = '') => path.join(`/proc/self/fd/${directory.handle.fd}`, leaf);
   const current = async (directory: Directory, exact = false) => {
@@ -227,7 +228,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     // Streaming enumeration is bounded; readdir would allocate all entries.
     const opened = await opendir(descriptorPath(directory));
     try { for (;;) { const entry = await opened.read(); if (!entry) break; inventoryEntriesObserved = entries.length + 1;
-      if (entries.length >= entryLimit) fail('entry_limit_exceeded'); entries.push(entry.name); } }
+      if (entries.length >= maxEntries) fail('entry_limit_exceeded'); entries.push(entry.name); } }
     finally { await opened.close(); }
     await current(directory, true); return entries.sort();
   };
@@ -243,6 +244,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     check(before.isFile() && !before.isSymbolicLink() && before.uid === BigInt(input.uid) &&
       options.mode.includes(before.mode & 0o7777n) && (options.links ?? [1n]).includes(before.nlink) &&
       before.size >= 0n && before.size <= BigInt(options.limit));
+    if (stats.filesScanned >= maxFiles) fail('file_limit_exceeded');
     const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const chunk = Buffer.alloc(chunkBytes);
     let stream: ReturnType<CredentialSecretScanner['openStream']> | undefined;
@@ -267,6 +269,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   try {
     check(process.platform === 'linux' && Number.isSafeInteger(input.uid) && input.uid > 0);
     check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/(?:probe\/credential-state|\.cliq\/kernel-v1)$/u.test(input.stateRoot));
+    check(input.profile === undefined || input.profile === 'whole_project_v1');
     check(input.scanInstalledClientData === undefined || input.scanInstalledClientData === true);
     if (input.scanInstalledClientData) check(input.stateRoot.endsWith('/home/.cliq/kernel-v1'));
     check(Array.isArray(input.evidenceDirs) && input.evidenceDirs.length <= 16 && new Set(input.evidenceDirs).size === input.evidenceDirs.length);
@@ -400,6 +403,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     for (const directory of directories) await current(directory);
     for (const directory of clientDirectories) await current(directory, true);
     return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats,
+      ...(input.profile ? { profile: input.profile, maxEntriesPerDirectory: maxEntries, maxFiles } : {}),
       ...(input.scanInstalledClientData ? { installedClientDataScanned: true as const } : {}) });
   } catch (error) {
     if (error instanceof CredentialSecretScanError) {

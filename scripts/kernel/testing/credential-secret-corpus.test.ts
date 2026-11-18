@@ -674,16 +674,48 @@ for (const part of ['entry_name', 'file_bytes'] as const)
     });
   });
 
-test('actual Linux over-breadth corpus reports the unchanged 1024-entry guard before reading or omitting any CAS object', linux, async () => {
+test('actual Linux whole-project corpus scans all 1100 CAS files and detects the last object secret', linux, async () => {
   await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
-    for (let index = 0; index < 1025; index++)
+    const count = 1100, input = secret(), payload = Buffer.from('ordinary retained project object');
+    for (let index = 0; index < count; index++)
+      await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), payload, { flag: 'wx', mode: 0o400 });
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+    try {
+      for (const invalid of [false, true, 'unbounded', 8192])
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+          profile: invalid as 'whole_project_v1' }), CredentialSecretCorpusError);
+      assert.equal(scanner.stats().streamsOpened, 0); assert.equal(scanner.stats().bytesScanned, 0);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+        profile: 'whole_project_v1' });
+      assert.equal(result.filesScanned, count + 2); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.qualified, true); assert.equal(scanner.stats().matched, false);
+      assert.equal(result.profile, 'whole_project_v1'); assert.equal(result.maxEntriesPerDirectory, 4096); assert.equal(result.maxFiles, 4096);
+      assert.equal(scanner.stats().streamsOpened, 4 + count * 2); assert.equal(scanner.stats().streamsClosed, 4 + count * 2);
+    } finally { scanner.close(); }
+    const last = path.join(cas, (count - 1).toString(16).padStart(64, '0'));
+    await chmod(last, 0o600); await writeFile(last, input); await chmod(last, 0o400);
+    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: detecting,
+        profile: 'whole_project_v1' }), { code: 'SECRET_DETECTED' });
+      const stats = detecting.stats(); assert.equal(stats.matched, true); assert.equal(stats.streamsOpened, stats.streamsClosed);
+      assert.equal(stats.retainedNeedleBytes, 0); assert.equal(stats.retainedTailBytes, 0);
+      assert.deepEqual(await readFile(last), input);
+    } finally { detecting.close(); input.fill(0); }
+  });
+});
+
+for (const [profile, boundary] of [[undefined, 1024], ['whole_project_v1', 4096]] as const)
+  test(`actual Linux ${profile ?? 'original'} corpus refuses inventory beyond its fixed ${boundary}-entry guard`, linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+    for (let index = 0; index <= boundary; index++)
       await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), '', { flag: 'wx', mode: 0o400 });
     const scanner = createCredentialSecretScanner([secret()], limits);
     try {
-      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }), error => {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, ...(profile ? { profile } : {}) }), error => {
         assert(error instanceof CredentialSecretCorpusError);
         assert.equal(error.corpusFailure?.stage, 'cas_inventory'); assert.equal(error.corpusFailure.errorClass, 'entry_limit_exceeded');
-        assert.equal(error.corpusFailure.inventoryEntriesObserved, 1025); assert.equal(error.corpusFailure.filesScanned, 2);
+        assert.equal(error.corpusFailure.inventoryEntriesObserved, boundary + 1); assert.equal(error.corpusFailure.filesScanned, 2);
         assert.equal(error.corpusFailure.sqliteDatabasesScanned, 2); assert.equal(error.corpusFailure.logicalRowsScanned, 2);
         assert.equal(error.corpusFailure.evidenceDirectoriesScanned, 0); assert(!JSON.stringify(error).includes(stateRoot));
         assert.equal(Object.hasOwn(error, 'cause'), false); return true;

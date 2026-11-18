@@ -143,6 +143,12 @@ test('closed failure data handles runtime, corpus, report and unavailable withou
   }
 });
 
+test('fixed scan failure counts include the whole-project scanner capacity', () => {
+  const result = copyCredentialSecretScanFailureDiagnostic({ diagnosticOnly: true, firstFailureStage: 'corpus',
+    beforeCorpus: { streamsOpened: 8192, bytesScanned: 512 * 1024 * 1024 }, corpusScanFailureCode: 'LIMIT_EXCEEDED' });
+  assert.deepEqual(result.beforeCorpus, { streamsOpened: 8192, bytesScanned: 512 * 1024 * 1024 });
+});
+
 test('failure projection refuses malicious objects without invoking getters, Proxy traps or toJSON', () => {
   const valid = () => ({ diagnosticOnly: true, firstFailureStage: 'runtime', beforeCorpus: null, corpusScanFailureCode: null });
   let invoked = 0;
@@ -171,7 +177,7 @@ test('failure projection refuses malicious objects without invoking getters, Pro
     for (const bad of [-1, 1.5, NaN, Infinity, true, '1', null, Number.MAX_SAFE_INTEGER + 1])
       invalid.push({ ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 0, [key]: bad } });
   }
-  invalid.push({ ...valid(), beforeCorpus: { streamsOpened: 4097, bytesScanned: 0 } },
+  invalid.push({ ...valid(), beforeCorpus: { streamsOpened: 8193, bytesScanned: 0 } },
     { ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 512 * 1024 * 1024 + 1 } },
     { ...valid(), beforeCorpus: { streamsOpened: 0, bytesScanned: 0, raw: 'private raw text' } });
   for (const value of invalid) {

@@ -81,8 +81,14 @@ original process and invocation independently. This tuple supplies no completion
 resource join, successful stop or recovery authority. Keep the original stop
 deadline and exit-summary checks.
 
-The final secret corpus uses one cumulative scanner with its original
-4096-stream and 512-MiB limits and sixty-second corpus deadline. A copied
+The final secret corpus uses one cumulative scanner with a 512-MiB limit
+and sixty-second corpus deadline. Small-state campaigns retain their
+4096-stream, 1024-entry-per-directory and 2048-file capacity. The complete
+PR #532 project campaign uses the fixed `whole_project_v1` diagnostic profile
+with 8192 cumulative streams, 4096 entries per directory and 4096 files. This
+explicitly expands diagnostic work capacity for the larger real project; the
+selected capacity is retained in the report. All bytes remain in one scan,
+with the same detection, ownership, identity, stability and join checks. A copied
 SQLite database has one continuous logical byte stream for every schema name,
 schema SQL and TEXT/BLOB value, in the real query order. Retain overlap across
 cells, including empty cells, and refuse cross-cell secret matches too. Raw
