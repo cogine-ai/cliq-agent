@@ -1,5 +1,6 @@
 import { isBuiltinExecutionPhase, type BuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
 import { noteInstalledBuiltinWorkPhase } from './installed-work-diagnostics.js';
+import { beginInstalledSchedulerDiagnostic } from './installed-run-diagnostics.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { canonicalSha256 } from '../kernel/canonical.js';
@@ -1923,10 +1924,19 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           } });
         assertCurrentWorker(identity, 'delivery', task);
         publicationLeaseReads ??= beginPublicationLeaseReads(driver, owner, execution, identity, task);
+        const preparationDiagnosis = beginInstalledSchedulerDiagnostic('publication_preparation');
+        preparationDiagnosis?.phase('publication_prepare');
         publicationPhase('publication_prepare');
         const original = await publication.preparePublicationInvocation(driver, artifacts, owner, {
           execution, task, worker: identity, workspaceRoot: roots.workspaceRoot,
-          expectedRunRevision: readRun(driver, runId).revision, signal }, publicationPhase);
+          expectedRunRevision: readRun(driver, runId).revision, signal }, phase => {
+          publicationPhase(phase); preparationDiagnosis?.phase(phase);
+        }).catch(error => {
+          // Preserve the original refusal before failure retirement can wait
+          // for resources. This observation supplies no result or join proof.
+          preparationDiagnosis?.failure(error, closed || isClosing());
+          throw error;
+        });
         publicationOwners.add(original);
         // The preparation can finish after Stop. Register its original owner
         // before inspecting the signal, so all close paths retain its join.

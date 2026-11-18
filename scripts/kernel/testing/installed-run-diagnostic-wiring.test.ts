@@ -1,3 +1,4 @@
+import './installed-publication-failure.test.js';
 import './installed-resource-kernel.test.js';
 import './installed-resource-wire.test.js';
 import './installed-resource-builder.test.js';
@@ -298,7 +299,7 @@ test('publication preparation diagnosis preserves the closed authority input and
   assert(!gate.includes('onPreparationPhase'), 'an observer is not an accepted authority field');
   assert(body.indexOf('assertDeliveryPublicationExecution(') < body.indexOf("preparationPhase('publication_prepare_read')"));
   const execution = await readFile(new URL('../../../src/state/run-execution.ts', import.meta.url), 'utf8');
-  assert.match(execution, /expectedRunRevision: readRun\(driver, runId\)\.revision, signal \}, publicationPhase\);/u);
+  assert.match(execution, /expectedRunRevision: readRun\(driver, runId\)\.revision, signal \}, phase => \{\s*publicationPhase\(phase\); preparationDiagnosis\?\.phase\(phase\);/u);
 });
 
 test('the actual preparation observer contains a throwing sink without adding awaits, clocks or error replacement', async () => {
@@ -574,7 +575,7 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const body = journey.slice(originalThrow, joined);
   assert.match(body, /finally \{[\s\S]*storeFailureDiagnostics && \(primary \|\| originalStopFailed\)/u);
   assert.match(body, /String\(storeFailureBinding.pid\) === before\[0\]!.MainPID &&\s*storeFailureBinding.invocationId === before\[0\]!.InvocationID/u);
-  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)'"));
+  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)'"));
   assert(body.includes('timeout: 5000, killSignal: \'SIGKILL\', maxBuffer: 256 * 1024'));
   assert(body.includes('scanBytes(log.stdout); scanBytes(log.stderr);'));
   assert(body.includes("source: 'actual_absent_original_supervisor_journal'"));

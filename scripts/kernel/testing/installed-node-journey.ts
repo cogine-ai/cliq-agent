@@ -79,7 +79,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -3011,8 +3011,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
                   mcpJourney
-                    ? '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:|CLIQ_MCP_ADMIN_LIFECYCLE_V1:)'
-                    : '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
+                    ? '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:|CLIQ_MCP_ADMIN_LIFECYCLE_V1:)'
+                    : '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
                   `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
                   `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
@@ -3026,6 +3026,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 const stopPhase = readInstalledStoreStopPhaseJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                const publicationFailure = readInstalledPublicationFailureJournal(text,
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                if (sameStoppedLifetime && publicationFailure) report.publicationPreparationFailure = { diagnosticOnly: true,
+                  source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true, originalInvocationBound: true,
+                  originalPidObservedAbsent: true, ...publicationFailure };
                 assert(Date.now() < logBy, 'actual publication-stage journal exceeded five seconds'); assertRetained();
                 if (mcpJourney) try {
                   const lifecycle = readInstalledMcpAdminJournal(text,

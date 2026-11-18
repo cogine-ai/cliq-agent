@@ -5,6 +5,18 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+The [latest free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44196702356)
+at `972b5956a1fb084316cce454176a1c00e885659b` reaches the original failed
+assertion, repair, passing original check, single-file result review and actual
+application admission. Delivery then stalls during publication preparation with
+no permanent publication claim. Its last recovery read rejects after 68 seconds,
+and the original Supervisor misses the two-second stop boundary. The abnormal
+exit loses the buffered preparation refusal. A bounded early diagnostic now
+retains that original phase and classification before failure retirement.
+Its ordinary-child SIGKILL regression reproduces the missing record and passes
+after the fix on macOS and Linux. Complete application remains unverified. This
+round has made no funded request and has opened no PR.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

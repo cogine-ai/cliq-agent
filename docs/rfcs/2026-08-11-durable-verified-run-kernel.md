@@ -74,6 +74,13 @@ admission, Delivery Run and cleanup. The acceptance still requires the original
 failed assertion, model repair, passing recheck, reviewed result and exact
 application. Record observed durations independently of these task budgets.
 
+When original publication preparation rejects, preserve its fixed phase and
+error classification before starting failure retirement. The trusted test image
+may emit one bounded diagnostic tuple before exit. The reader must bind the
+original process and invocation independently. This tuple supplies no completion,
+resource join, successful stop or recovery authority. Keep the original stop
+deadline and exit-summary checks.
+
 Retain the original checks and their outcomes for the existing qualification
 campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
 unrelated crash-cut matrices do not gate this one-task preview. Measure latency
