@@ -815,7 +815,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         for await (const value of incoming) { size += value.length; assert(size <= 1048576); chunks.push(Buffer.from(value)); }
         const bytes = Buffer.concat(chunks); scanBytes(bytes); assert.equal(Number(incoming.headers['content-length']), bytes.length);
         const body = parseJsonStrict(bytes.toString('utf8')) as Record<string, any>;
-        assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, 4096);
+        assert.equal(body.model, model); assert.equal(body.stream, false); assert.equal(body.max_tokens, pr532 ? 8192 : 4096);
         assert(expectedToolNames, 'the exact signed tool manifest must precede any provider request');
         if (pr532) {
           assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
@@ -1002,8 +1002,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     ownedModelFixture = { provider: 'openai-compatible', model,
       target: { hostAscii: '127.0.0.1', port: address.port, basePath: '/v1' },
       tls: { serverNameAscii: 'installed-verifier-fixture.invalid', caPem: cert, spkiSha256Pins: [pin] },
-      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: pr532 ? 1_000_000 : 32768, maxOutputTokens: 4096 },
-      requestTokenCeiling: { inputTokens: pr532 ? 1_000_000 : 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: pr532 ? 1_000_000 : 32768, maxOutputTokens: pr532 ? 8192 : 4096 },
+      requestTokenCeiling: { inputTokens: pr532 ? 1_000_000 : 32768, outputTokens: pr532 ? 8192 : 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
       validFrom: new Date(Date.now() - 60000).toISOString(),
       validThrough: new Date(Date.now() + (mcpStatusUserReplay ? 3 : 2) * 60 * 60 * 1000).toISOString() };
     }

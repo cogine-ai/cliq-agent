@@ -105,6 +105,19 @@ exact application, complete scan and original service joins. Its signed
 complete-project fixture selects the same 1M context capacity. The original
 project, check and lock bytes stay fixed. No new real-model trial has started.
 
+The [first two-batch free reproduction](https://github.com/cogine-ai/cliq-agent/actions/runs/44300610585)
+at `2201b3a7d70efa330a8434e07186de3c6d768981` refuses admission at
+`submit_assembly_material / INVALID_REQUEST`. The controlled catalog's new 1M
+context retained its old 4096-output declaration, below the existing 8192-token
+compaction summary cap. A regression executes that original configuration and
+reproduces 4096 versus 8192. The PR #532 controlled catalog, request ceiling and
+owned-server assertion now select 8192, matching the real-provider profile.
+Other controlled scenarios retain their existing 32768/4096 declaration. Both
+original services stop and all writers join in the failed attempt. The intended
+history failure still awaits reproduction. The production source is identical
+to the complete passing 4109-test local run, with 4077 passed and 32 platform
+skips. The corrected private fixture is checked separately.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

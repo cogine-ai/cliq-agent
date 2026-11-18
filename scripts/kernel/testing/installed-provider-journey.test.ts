@@ -124,6 +124,30 @@ test('the PR532 report retains the exact applied bytes and original review outpu
   assert.equal(report.reviewOutputUtf8, review.toString('utf8'));
 });
 
+test('the controlled PR532 model covers the existing compaction output and full request reservation', () => {
+  const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
+  let assignment: ts.BinaryExpression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isBinaryExpression(node) && node.left.getText(parsed) === 'ownedModelFixture' && ts.isObjectLiteralExpression(node.right))
+      assignment = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(assignment);
+  const context = vm.createContext({ Date, model: 'inert-model', address: { port: 1 }, cert: Buffer.from('inert certificate'),
+    pin: 'inert-pin', mcpStatusUserReplay: false, ownedModelFixture: undefined });
+  const code = ts.transpileModule(assignment.getText(parsed), { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText;
+  for (const pr532 of [false, true]) {
+    context.pr532 = pr532; vm.runInContext(code, context);
+    const selected = context.ownedModelFixture;
+    assert.equal(selected.claims.contextLimitTokens, pr532 ? 1_000_000 : 32768);
+    assert.equal(selected.claims.maxOutputTokens, pr532 ? 8192 : 4096);
+    assert(selected.claims.maxOutputTokens >= Math.min(8192, Math.floor(selected.claims.contextLimitTokens / 8)));
+    assert(selected.requestTokenCeiling.inputTokens >= selected.claims.contextLimitTokens);
+    assert(selected.requestTokenCeiling.outputTokens >= selected.claims.maxOutputTokens);
+  }
+});
+
 test('the controlled PR532 journey reads both original files in two batches before its one repair', () => {
   const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
