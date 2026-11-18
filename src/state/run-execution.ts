@@ -1192,6 +1192,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         retainedCompletion = true;
         throw error;
       }
+      // The failed producer is entering recovery. End its productive heartbeat
+      // before the reader captures the exact lease row that its reducing fence
+      // must still match.
+      publicationLeaseReads?.close(); publicationLeaseReads = undefined;
       if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
       let retiringPreparation = false;
       try {

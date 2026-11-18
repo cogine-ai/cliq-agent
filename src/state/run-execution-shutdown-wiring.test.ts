@@ -8,6 +8,53 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { ResourceRetirementError } from './errors.js';
 
+test('failed publication stops renewing before recovery while an original retryable result retains its lease reads', async () => {
+  // Execute the original lifecycle decisions only. The callbacks below carry
+  // no Run, lease, StateOwner, native worker, result or recovery authority.
+  const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest, true);
+  let operation: ts.FunctionDeclaration | undefined, renewal: ts.Block | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'ownOperation') operation = node;
+    if (ts.isPropertyAssignment(node) && node.name.getText(parsed) === 'renewCurrentWorkerLease' &&
+        ts.isArrowFunction(node.initializer) && ts.isBlock(node.initializer.body)) renewal = node.initializer.body;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(operation?.body && renewal);
+  const rejection = operation.body.statements[2];
+  assert(rejection && ts.isVariableStatement(rejection));
+  const initializer = rejection.declarationList.declarations[0]?.initializer;
+  assert(initializer && ts.isCallExpression(initializer) && ts.isPropertyAccessExpression(initializer.expression));
+  const caught = initializer.expression.expression;
+  assert(ts.isCallExpression(caught));
+  const callback = caught.arguments[0]; assert(callback && ts.isArrowFunction(callback) && ts.isBlock(callback.body));
+  const recovery = callback.body.statements.findIndex(ts.isTryStatement); assert(recovery >= 0);
+  const beforeRecovery = callback.body.statements.slice(0, recovery).map(node => node.getText(parsed)).join('\n');
+  for (const retryable of [false, true]) {
+    let renewals = 0, closes = 0;
+    const original = new Error('inert original refusal'), activeWorker = {}, leaseReads = { close() { closes++; } };
+    const context = { ResourceRetirementError, operationFailure: undefined, retainedCompletion: false,
+      receivedCompletion: retryable ? { kind: 'publication', worker: undefined, activeWorker } : undefined,
+      worker: undefined, activeWorker, publicationLeaseReads: leaseReads as typeof leaseReads | undefined,
+      operationPhase: retryable ? 'claimed' : 'preparing', pending: {}, cleanupFailure: undefined,
+      dependencyOwner: undefined, verifierReleased: false, toolReleased: false,
+      isJoinedCasPublicationFailure: () => retryable, isRolledBackSqliteTransactionFailure: () => false,
+      isPublicationStopRevisionConflict: () => false, driver: {},
+      renewOwnedWorkerLease() { renewals++; return 'renewed'; },
+      reject: undefined as undefined | ((error: unknown) => Promise<void>), renew: undefined as undefined | (() => string) };
+    new Script(ts.transpileModule(`globalThis.reject = async error => { ${beforeRecovery} };\n` +
+      `globalThis.renew = () => ${renewal.getText(parsed)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
+    assert.equal(context.renew!(), 'renewed');
+    if (retryable) await assert.rejects(context.reject!(original), error => error === original);
+    else await context.reject!(original);
+    assert.equal(closes, retryable ? 0 : 1);
+    assert.equal(context.publicationLeaseReads, retryable ? leaseReads : undefined);
+    assert.equal(context.renew!(), retryable ? 'renewed' : 'inactive');
+    assert.equal(renewals, retryable ? 2 : 1);
+  }
+});
+
 test('shutdown cancels the original failure recovery read before using the checked owned-worker fence', async () => {
   // Original failure-branch ordering only, with inert callbacks. No worker,
   // native death, Run or StateOwner evidence is manufactured here.

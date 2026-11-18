@@ -103,7 +103,10 @@ preparation and claim reads. Read comparisons may recognize only the exact
 rows returned by that holder's actual same-owner renewals, with unchanged
 non-lease fields and current SQL equal to the latest recorded row. Recovery
 snapshots retain their actual rows. Revoking/checkpointing leaves this renewal
-equivalence. Final release still requires the current unexpired lease, original
+equivalence. A failed producer ends its productive renewal scope before the
+recovery reader captures the exact row for its reducing fence. A retryable
+original completion keeps its own scope and custody. Final release still
+requires the current unexpired lease, original
 grant, owner and Stop checks. Shutdown cancels and joins failure-recovery reads
 before installing the checked original-holder fence and joining real resources.
 
