@@ -1,14 +1,41 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
-import { sha256Bytes } from '../../../src/kernel/identity.js';
-import { pr532StopDiagnostic, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
+import { canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
+import type { ToolResultItem, ToolResultPayloadV1 } from '../../../src/kernel/types.js';
+import { pr532StopDiagnostic, pr532ToolDiagnostic, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
 
 // Inert retained data projected through the original production decoder.
 const run = runSnapshot().run;
 const contextStop = { schemaVersion: 1, runId: run.id, createdAt: at, origin: 'runtime', targetStatus: 'failed',
   reason: 'runtime_failed', runtimeSubtype: 'context_window_exhausted', contextManifestRef: ref,
   nextPromptTokens: 25000, triggerThresholdTokens: 16384, hardPromptTokens: 24576, protectedTokens: 16000, sourceInputTokenCap: 8192 };
+
+test('PR532 result diagnosis retains only a bound tool name, outcome and fixed failure code', () => {
+  const payload: ToolResultPayloadV1 = { schemaVersion: 1, format: 'cliq-tool-result-payload-v1', runId: run.id,
+    batchItemId: 'inert-batch', callId: 'inert-call', index: 0, toolName: 'edit', modelContentRef: ref,
+    modelContentDigest: ref, outcome: 'error', code: 'TOOL_EXECUTION_FAILED', diagnosticRef: ref, diagnosticDigest: ref,
+    payloadDigest: '' };
+  payload.payloadDigest = digestOmitting(payload, 'payloadDigest');
+  const item: ToolResultItem = { schemaVersion: 1, kind: 'tool_result', itemId: 'inert-item', runId: run.id,
+    batchItemId: payload.batchItemId, callId: payload.callId, index: 0, outcome: 'error',
+    resultRef: canonicalSha256(payload), createdAt: at };
+  assert.deepEqual(pr532ToolDiagnostic(item, payload), { toolName: 'edit', outcome: 'error', code: 'TOOL_EXECUTION_FAILED' });
+  const executed: ToolResultPayloadV1 = { schemaVersion: 1, format: payload.format, runId: run.id,
+    batchItemId: payload.batchItemId, callId: payload.callId, index: 0, toolName: 'edit', modelContentRef: ref,
+    modelContentDigest: ref, outcome: 'executed', source: 'invocation', opId: 'inert-op', attempt: 0,
+    journalResultRef: ref, journalResultDigest: ref, payloadDigest: '' };
+  executed.payloadDigest = digestOmitting(executed, 'payloadDigest');
+  assert.deepEqual(pr532ToolDiagnostic({ ...item, outcome: 'executed', resultRef: canonicalSha256(executed) }, executed),
+    { toolName: 'edit', outcome: 'executed' });
+  for (const changed of [{ ...payload, runId: 'foreign' }, { ...payload, toolName: 'untrusted-model-text' },
+    { ...payload, code: 'untrusted-model-text' }]) {
+    changed.payloadDigest = digestOmitting(changed, 'payloadDigest');
+    assert.throws(() => pr532ToolDiagnostic({ ...item, resultRef: canonicalSha256(changed) }, changed as ToolResultPayloadV1));
+  }
+  assert.throws(() => pr532ToolDiagnostic(item, { ...payload, modelContentRef: 'changed' }));
+});
 
 test('PR532 failure diagnosis preserves the closed context cause and original numeric limits', () => {
   assert.deepEqual(pr532StopDiagnostic(run, contextStop), { diagnosticOnly: true, origin: 'runtime', reason: 'runtime_failed',
@@ -41,7 +68,7 @@ test('PR532 admission asks for the original check before exploration and retains
   const unused = async (): Promise<never> => { throw new Error('unexpected fixture operation'); };
   await assert.rejects(runInstalledPr532Journey({ workspace: '/inert/project', sessionId: 'inert-session', alias: 'inert-model',
     originalBytes, testBytes, lockBytes: Buffer.alloc(0),
-    budgets: { wallTimeMs: 3600000, modelTokens: 32000000, costMicros: 3500000, toolCalls: 100,
+    budgets: { wallTimeMs: 3600000, modelTokens: 32000000, costMicros: 12000000, toolCalls: 100,
       repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
     command: async args => {
       calls++;
@@ -54,12 +81,12 @@ test('PR532 admission asks for the original check before exploration and retains
       ] });
       assert.equal(args[args.indexOf('--check-node') + 1], PR532_CHECK);
       assert.equal(args[args.indexOf('--budget-tokens') + 1], '32000000');
-      assert.equal(args[args.indexOf('--budget-usd') + 1], '3.500000');
+      assert.equal(args[args.indexOf('--budget-usd') + 1], '12.000000');
       throw captured;
     },
     authorizeGitSource: async () => ({ sourceInspectionGrantId: 'inert-grant', ignoreReadGrantIds: [] }),
     send: unused, artifact: unused, retained: unused, reconnect: unused, verifyHost: unused,
-    progress: () => {}, dependencyFailure: () => {}, verifierObservation: () => {}, runtimeFailure: () => {}, mark: () => {},
+    progress: () => {}, dependencyFailure: () => {}, verifierObservation: () => {}, runtimeFailure: () => {}, toolActivity: () => {}, mark: () => {},
   }), error => error === captured);
   assert.equal(calls, 1);
 });

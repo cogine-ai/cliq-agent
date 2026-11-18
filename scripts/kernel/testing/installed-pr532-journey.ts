@@ -2,16 +2,17 @@ import assert from 'node:assert/strict';
 import { rootCertificates, connect } from 'node:tls';
 import { X509Certificate } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { decodeHeadlessControlRecord, decodeInstalledControlResponse,
   type InstalledControlFeature, type InstalledControlRequestV1, type InstalledControlResponseFor } from '../../../src/control/v1.js';
-import { sha256Bytes } from '../../../src/kernel/identity.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { nodeTestArguments } from '../../../src/kernel/verifier.js';
 import { decodeRunResult, decodeVerificationClosure, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { decodeSourceManifest } from '../../../src/state/decoders.js';
 import { decodeVerifierCommand, decodeVerificationReceipt, verifierReportedLocations } from '../../../src/state/verifier-artifacts.js';
-import type { Run, RunSpec } from '../../../src/kernel/types.js';
+import type { ContinuationItem, Run, RunSpec, ToolResultItem, ToolResultPayloadV1 } from '../../../src/kernel/types.js';
+import { INSTALLED_TOOL_NAMES } from '../../../src/tools/installed-contracts.js';
 import { decodeAgentStop } from '../../../src/runtime/stop.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
@@ -25,6 +26,26 @@ export const PR532_CHECK = 'src/model/providers/openai-compatible.test.ts';
 export const PR532_REGISTRY = 'mirrors.tencent.com';
 export const PR532_REGISTRY_BASE = '/npm';
 export const PR532_REGISTRY_ID = 'pr532-public-npm-registry';
+
+/** Fixed diagnostic data from the exact retained result. No arguments, file
+ * contents, model text or execution authority enter this projection. */
+export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPayloadV1) {
+  assert.equal(item.schemaVersion, 1); assert.equal(payload.schemaVersion, 1);
+  assert.equal(item.kind, 'tool_result');
+  assert.equal(canonicalSha256(payload), item.resultRef);
+  assert.equal(payload.payloadDigest, digestOmitting(payload, 'payloadDigest'));
+  assert.equal(payload.format, 'cliq-tool-result-payload-v1');
+  for (const key of ['runId', 'batchItemId', 'callId', 'index', 'outcome'] as const) assert.equal(payload[key], item[key]);
+  const toolName = INSTALLED_TOOL_NAMES.find(name => name === payload.toolName);
+  assert(toolName);
+  assert(['executed', 'denied', 'error', 'batch_not_executed', 'cancelled'].includes(payload.outcome));
+  if (payload.outcome !== 'error') return { toolName, outcome: payload.outcome };
+  const code = ['TOOL_NOT_FOUND', 'TOOL_INPUT_INVALID', 'TOOL_AUTHORITY_UNAVAILABLE',
+    'TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED', 'TOOL_RESULT_UNAVAILABLE',
+  ].find(code => code === payload.code);
+  assert(code);
+  return { toolName, outcome: payload.outcome, code };
+}
 
 /** Pure projection of the original decoded Stop into bounded diagnostic data. */
 export function pr532StopDiagnostic(run: Run, value: unknown) {
@@ -86,6 +107,7 @@ export async function runInstalledPr532Journey(input: {
   dependencyFailure(value: Record<string, unknown>): void;
   verifierObservation(value: Record<string, unknown>): void;
   runtimeFailure(value: Record<string, unknown>): void;
+  toolActivity(value: Record<string, unknown>): void;
   mark(phase: string): void;
 }) {
   const read = async <M extends InstalledControlFeature>(request: InstalledControlRequestV1, method: M) => {
@@ -166,6 +188,18 @@ export async function runInstalledPr532Journey(input: {
         } catch { /* Optional diagnosis preserves the original task failure. */ }
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
+        try {
+          const results = [];
+          for (const row of stopped.items) {
+            const item = await retained(row.payloadRef) as ContinuationItem;
+            assert.equal(item.runId, runId); assert.equal(item.itemId, row.itemId);
+            if (item.kind !== 'tool_result') continue;
+            const payload = await retained(item.resultRef) as ToolResultPayloadV1;
+            results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload) });
+          }
+          context.toolActivity({ diagnosticOnly: true, tailOnly: true,
+            throughItemSeq: stopped.highWaterItemSeq, results });
+        } catch { /* Missing result diagnosis preserves the original task failure. */ }
         try {
           const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);
           if (entry?.receiptRef) {

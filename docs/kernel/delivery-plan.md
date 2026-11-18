@@ -201,6 +201,49 @@ CNY 26, giving CNY 198 within the authorized CNY 200 total. It permits four
 full-request reservations. Actual invoice reconciliation remains open. The
 original signed pricing bounds, cost guard and unknown-effect rules remain.
 
+The [fourth real attempt](https://github.com/cogine-ai/cliq-agent/actions/runs/44354681175)
+at `e43be3a7970886314bcb52a2e5ee00705bf76036` uses the exact original file
+context. It terminates at the original cost guard after four model requests,
+six private native tools and one repair. Journal 36 records 3,170,900 consumed
+USD micros and zero reserved. No scheduler refusal occurs before Stop. Both
+original services exit successfully, all writers join, cleanup has zero errors,
+and the temporary secret was deleted with absence verified. The real repaired
+check, review, application and complete corpus remain unqualified. The retained
+report lacks tool names and outcomes, so it cannot establish whether those
+operations were reads, successful edits or failed edits.
+
+The optional failure diagnostic now projects only declared tool names, outcomes
+and fixed error codes from the last eight committed items. It binds each original
+item to the complete canonical result digest and Run/batch/call/index/outcome.
+It carries no source, arguments or model prose. Missing/mismatched diagnosis
+keeps the original workflow failure. This diagnostic remains unexercised in the
+real terminal cut; local data regressions verify its projection separately.
+
+A subsequent independent audit narrows the completed trials' financial upper
+bound using their original outbound request limits. Across all four exact
+revisions, normal output is capped at 8192 and compaction at 4096 or 8192. The
+shared builder explicitly serializes `max_tokens`; original reproduction,
+body-digest/length, permanent-claim and single-exchange checks bind those limits
+to every released request. DeepSeek's documented generated-completion bound
+and reasoning-token breakdown support including thinking within this cap. This
+is a source-based inference under the provider's documented contract. Actual
+invoice reconciliation remains open. The fixed recipe selects text and function
+tools. [Chat API contract](https://api-docs.deepseek.com/api/create-chat-completion/)
+
+Keep the full 1,048,576 input and independent cache components and the same peak
+prices. For the completed requests, output8192 gives independently rounded
+314,573 + 9,831 + 6,292 = 330,696 USD micros per request. The retained counts
+15/4/10/4 therefore bound their CNY reservations at 37/10/25/10, rounded upward
+per trial at 7.4/USD, totaling CNY 82. This corrects the broader historical
+external reservation. Native Run accounting applies the full signed
+393,216-output ceiling and 792,725-micro charges, including unknown effects.
+[Peak prices](https://api-docs.deepseek.com/quick_start/pricing/)
+
+The next single trial has a USD 12 ceiling, retaining its full CNY 89 prospective
+reservation. CNY 82 + 89 = 171 fits the authorized CNY 200 total. The original
+native cost guard permits fifteen full requests within this ceiling. The exact
+source/test context and fixed terminal tool diagnosis accompany that trial.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

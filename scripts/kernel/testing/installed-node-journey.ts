@@ -1661,6 +1661,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         dependencyFailure: value => { report.pr532DependencyFailure = value; },
         verifierObservation: value => { report.pr532VerifierObservation = value; },
         runtimeFailure: value => { report.pr532RuntimeFailure = value; },
+        toolActivity: value => { report.pr532ToolActivity = value; },
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq, journal }) => {
           report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, waitingReason: run.waitingReason,

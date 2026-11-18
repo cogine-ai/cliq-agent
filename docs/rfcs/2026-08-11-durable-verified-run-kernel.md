@@ -92,7 +92,10 @@ native 1 MiB request bound still apply.
 The objective asks for an immediate first model turn with plain text and no
 tools or edits, then uses the genuine baseline failure for exploration/repair.
 Failure reports retain the original decoded Stop subtype and current budget
-counters. Missing historical diagnostics remain unknown. DeepSeek publishes
+counters. An optional tail projection of the last eight committed items keeps
+only declared tool names, outcomes and fixed failure codes, bound to the exact
+retained result. Raw arguments, source contents and model text remain withheld.
+Missing historical diagnostics remain unknown. DeepSeek publishes
 its current context and pricing in its [official model table](https://api-docs.deepseek.com/quick_start/pricing/).
 
 When original publication preparation rejects, preserve its fixed phase and
