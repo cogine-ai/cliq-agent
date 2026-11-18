@@ -260,8 +260,7 @@ private edits, a read between their distinct generations, both original
 two-file read batches, the original failed check and final repaired check,
 reconnect, review, exact application and complete scan. Its intermediate edit
 adds only a comment; the final edit uses that actual intermediate source.
-All seven requests/connections remain exact assertions. This reproduction
-has yet to execute.
+All seven requests/connections remain exact assertions.
 
 The diagnostic batch retains successful tool observations during normal bounded
 item polling, before any later query can fail. It adds no extra poll frame and
@@ -275,6 +274,26 @@ outside the Stop2 measurement, with its observed directory identity. These data
 provide neither native quota nor resource-join proof. Snapshot competition,
 expensive multi-generation work and fixture capacity remain hypotheses until
 the free reproduction distinguishes them.
+
+The [two-edit free reproduction](https://github.com/cogine-ai/cliq-agent/actions/runs/44379251233)
+at `7630aeef8395be5ad5e04158a075dc1962913ad7` qualifies completely. All seven
+POST/TCP/TLS exchanges, both genuine edits and the intervening read complete.
+The original check fails at its four original locations and passes after the
+repair. Reconnect, reviewed one-file result and exact application pass. Both
+original services exit successfully under Stop2, all writers/daemon join and
+outer cleanup has zero errors. The complete corpus covers 4,492 files,
+249,619,680 file bytes, both databases and actual client data. Its detector scans
+256,011,595 bytes across 147 closed streams with zero matches, limit violations
+or retained needle/tail bytes. Submission to complete takes about 89 minutes,
+including 41 minutes checking/repairing and 47 minutes applying.
+
+This does not reproduce the fifth real attempt's refusal or shutdown failure.
+The next free case adds one genuinely rejected edit before the successful edit
+in the same model batch, then requires that exact error result in the next
+model request. It keeps the seven exchanges, both successful edits, original
+checks and all completion/stop/scan assertions. It creates no new production
+behavior. This tests failed-tool continuation across generations; whether it
+explains the original failure remains unknown. No new paid trial has started.
 
 ## Goal and baseline
 

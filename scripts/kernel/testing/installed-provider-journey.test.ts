@@ -172,7 +172,7 @@ test('the controlled PR532 model covers the existing compaction output and full 
   }
 });
 
-test('the controlled PR532 journey reads across two original private edit generations before its final check', () => {
+test('the controlled PR532 journey continues a rejected edit in the same batch before reading and repairing its generations', () => {
   const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
   let branch: ts.IfStatement | undefined;
@@ -191,7 +191,11 @@ test('the controlled PR532 journey reads across two original private edit genera
     outgoing: { writeHead() {}, end(bytes: Buffer) { replies.push(JSON.parse(bytes.toString())); } } });
   vm.runInContext(ts.transpileModule(`globalThis.reply = () => { ${branch.getText(parsed)} };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
-  for (let index = 0; index < 7; index++) context.reply();
+  for (let index = 0; index < 7; index++) {
+    if (index === 4) context.body.messages.push({ role: 'tool', tool_call_id: 'pr532-preview-rejected-edit',
+      content: JSON.stringify({ code: 'TOOL_EXECUTION_FAILED' }) });
+    context.reply();
+  }
   assert.equal(replies[0].choices[0].finish_reason, 'stop');
   assert.equal(replies[6].choices[0].finish_reason, 'stop');
   for (const reply of replies.slice(1, 3)) {
@@ -201,8 +205,12 @@ test('the controlled PR532 journey reads across two original private edit genera
     for (const call of calls) { assert(!observed.has(call.id)); observed.add(call.id); }
   }
   const edited = replies[3].choices[0].message.tool_calls;
-  assert.equal(edited.length, 1); assert.equal(edited[0].function.name, 'edit');
-  const firstEdit = JSON.parse(edited[0].function.arguments);
+  assert.equal(edited.length, 2); assert(edited.every((call: any) => call.function.name === 'edit'));
+  assert.equal(edited[0].id, 'pr532-preview-rejected-edit');
+  const rejectedEdit = JSON.parse(edited[0].function.arguments);
+  assert.equal(rejectedEdit.path, 'original.ts');
+  assert(!'inert-base'.includes(rejectedEdit.old_text));
+  const firstEdit = JSON.parse(edited[1].function.arguments);
   assert.equal(firstEdit.old_text, 'inert-base');
   assert.equal(firstEdit.new_text, '// Controlled intermediate edit.\ninert-base');
   const afterEdit = replies[4].choices[0].message.tool_calls;
@@ -210,6 +218,9 @@ test('the controlled PR532 journey reads across two original private edit genera
   assert.equal(JSON.parse(afterEdit[0].function.arguments).path, 'original.ts');
   const finalEdit = JSON.parse(replies[5].choices[0].message.tool_calls[0].function.arguments);
   assert.equal(finalEdit.old_text, firstEdit.new_text); assert.equal(finalEdit.new_text, 'inert-reference');
+  assert.throws(() => context.reply());
+  context.postCount = 4;
+  context.body.messages.pop();
   assert.throws(() => context.reply());
 });
 

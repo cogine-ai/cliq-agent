@@ -826,6 +826,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             entry.content.includes('Verifier "node-tests" failed an assertion (exit 1)') &&
             entry.content.includes(JSON.stringify(PR532_CHECK)) && entry.content.includes('"lines":[')),
           'the model request must carry the original check failure locations');
+          if (ordinal >= 5) {
+            const failures = body.messages.filter((entry: any) => entry.role === 'tool' &&
+              entry.tool_call_id === 'pr532-preview-rejected-edit');
+            assert.equal(failures.length, 1);
+            assert.equal(failures[0].content, JSON.stringify({ code: 'TOOL_EXECUTION_FAILED' }));
+          }
           const calls: Record<string, unknown>[] = [];
           if (ordinal === 2 || ordinal === 3) {
             calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
@@ -836,6 +842,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           if (edit) {
             const original = readGitBlob(PR532_BASE, PR532_FILE).toString('utf8');
             const intermediate = '// Controlled intermediate edit.\n' + original;
+            if (ordinal === 4) {
+              const absent = 'CLIQ_CONTROLLED_MISSING_EDIT_SPAN_V1';
+              assert(!original.includes(absent));
+              calls.push({ id: 'pr532-preview-rejected-edit', type: 'function', function: { name: 'edit',
+                arguments: JSON.stringify({ path: PR532_FILE, old_text: absent, new_text: 'unused controlled replacement' }) } });
+            }
             calls.push({ id: `pr532-preview-edit-${ordinal}`, type: 'function', function: { name: 'edit', arguments: JSON.stringify({
               path: PR532_FILE, old_text: ordinal === 4 ? original : intermediate,
               new_text: ordinal === 4 ? intermediate : readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } });
