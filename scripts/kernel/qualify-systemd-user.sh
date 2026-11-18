@@ -313,20 +313,22 @@ probe_ledger_valid() {
 probe_run_volume() {
   "$probe_node" --input-type=module - "$1" "$probe_fixture" "$probe_fixture_identity" \
     "$probe_home" "$probe_volume_image" "$probe_volume_original" "$probe_volume_mounted" \
-    "$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" "$probe_volume_mode" <<'NODE'
+    "$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" "$probe_volume_mode" "$probe_run_driver_mode" <<'NODE'
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { constants, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync,
   openSync, readFileSync, readdirSync, statfsSync, writeFileSync } from 'node:fs';
-const [action, fixture, fixtureIdentity, home, image, originalFile, mountedFile, uidText, gidText, reportFile, volumeMode] = process.argv.slice(2);
+const [action, fixture, fixtureIdentity, home, image, originalFile, mountedFile, uidText, gidText, reportFile, volumeMode, campaign] = process.argv.slice(2);
 assert.equal(process.geteuid(), 0);
 assert.match(fixture, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+$/u);
 assert.equal(home, `${fixture}/home`); assert.equal(image, `${fixture}/run-home.ext4`);
 assert.equal(originalFile, `${fixture}/run-home-original.json`); assert.equal(mountedFile, `${fixture}/run-home-mounted.json`);
-const uid = Number(uidText), gid = Number(gidText), ceiling = 1024 ** 3;
+const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign'].includes(campaign);
+const uid = Number(uidText), gid = Number(gidText), ceiling = (wholeProject ? 4 : 1) * 1024 ** 3;
 assert(Number.isSafeInteger(uid) && uid > 0 && uid === gid);
 assert(['loop', 'delay-50ms'].includes(volumeMode));
+assert(!wholeProject || volumeMode === 'loop');
 const chainFile = `${fixture}/run-home-device.json`, handoffFile = `${fixture}/run-home-handoff.json`;
 const delayName = `cliq-probe-${fixture.split('.').at(-1)}-delay`;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -572,6 +574,7 @@ if (action === 'initialize') {
     else writeFrozen(mountedFile, current);
     if (action === 'capture') writeFrozen(reportFile, { diagnosticOnly: true, dedicatedBoundedExt4: true,
       before: value.beforeFilesystem, mounted: current.filesystem, hardCapacityCeilingBytes: ceiling,
+      capacityProfile: wholeProject ? 'pr532_full_project_v1' : 'original_v1',
       nativeGenerationQuotaVerified: false, nativeWorkerVerified: false,
       ...(value.delay ? { storageDelay: { kind: 'dm-delay', readMs: 50, writeMs: 50, flushMs: 50, scope: 'complete-home' } } : {}) });
     else process.stdout.write('mounted\n');

@@ -341,6 +341,23 @@ SQLite defect; the unchanged-capacity installed Linux read/Stop2 reproduction
 must still validate the repair. The fifth real job's identical cause remains
 unproven. [SQLite transaction-state contract](https://www.sqlite.org/c3ref/get_autocommit.html)
 
+A separate `pr532_full_project_v1` fixture profile now selects a fixed4GiB
+owned test volume for the controlled and real-provider whole-project journeys.
+The original profile selects1GiB for the other volume campaigns, including delayed
+storage. The observed zero ordinary-user capacity motivates this explicit
+workload allocation. Runtime recipes, file/source limits, original project and
+check bytes, READY5, Stop2 and HTTP30 govern the new profile's assertions.
+Its report names the profile and real hard capacity, with
+`nativeGenerationQuotaVerified: false`. The original1GiB failures retain their
+failed qualification status.
+
+All18 volume-guard data tests pass, including full-project bounds, oversized
+volumes, image substitution, delayed-profile refusal and original-profile
+capacity refusals. They exercise the root harness's exact program without
+mounting a volume or providing native authority. The original-size Linux repeat
+checks the driver repair on its fixed source while the complete4GiB task
+rehearsal runs on its own fixed source. Both physical results are pending.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

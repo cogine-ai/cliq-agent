@@ -90,6 +90,13 @@ admission, Delivery Run and cleanup. The acceptance still requires the original
 failed assertion, model repair, passing recheck, reviewed result and exact
 application. Record observed durations independently of these task budgets.
 
+The whole-project rehearsal selects the fixed `pr532_full_project_v1` owned
+4GiB test-volume profile, which records its actual hard capacity and
+`nativeGenerationQuotaVerified: false`. Other installed Run-volume campaigns use their
+original1GiB profile. The original source/check, per-file/source limits, native
+recipes, READY5, Stop2 and HTTP30 govern qualification. Preserve the failed
+original-size reports separately from the new profile's physical evidence.
+
 The real DeepSeek experiment selects the documented 1M context. Explicit
 finite token and USD cost budgets must fit the owner's approved CNY 200 total,
 including prior unresolved reservations. Record each trial's ceilings and

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const shell = readFileSync(new URL('../qualify-systemd-user.sh', import.meta.url), 'utf8');
-const marker = '"$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" "$probe_volume_mode" <<\'NODE\'\n';
+const marker = '"$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" "$probe_volume_mode" "$probe_run_driver_mode" <<\'NODE\'\n';
 const start = shell.indexOf(marker); assert(start >= 0);
 const source = shell.slice(start + marker.length, shell.indexOf('\nNODE\n}', start))
   .replace(/^import[\s\S]*?from 'node:assert\/strict';\n/u, '')
@@ -30,16 +30,19 @@ const homeIdentity = { device: '1', inode: '2', uid, gid: uid, mode: 0o700 };
 const imageIdentity = { device: '1', inode: '3', uid: 0, gid: 0, mode: 0o600, size: String(size), links: 1 };
 
 function setup(overrides = {}) {
+  const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign'].includes(overrides.campaign);
+  const selectedSize = wholeProject ? 4 * size : size;
+  const selectedImage = { ...imageIdentity, size: String(selectedSize) };
   const files = new Map([[originalFile, { uid: 0, gid: 0, mode: 0o444, links: 1,
-    text: JSON.stringify({ home: homeIdentity, image: imageIdentity, filesystemUuid,
+    text: JSON.stringify({ home: homeIdentity, image: selectedImage, filesystemUuid,
       ...(overrides.volumeMode === 'delay-50ms' ? { delay: { name: delayName, uuid: delayUuid, delayMs: 50 } } : {}),
       beforeFilesystem: { filesystemType: 0xef53, totalBytes: 100 * size } }) }]]);
   const state = { mounted: true, id: '100', source: '/dev/loop17', device: '7:17', root: '/',
     type: 'ext4', options: 'rw,nosuid,nodev,relatime', homeUid: uid, homeGid: uid, homeMode: 0o700,
     mountedDevice: '1809', mountedInode: '2', backingFile: image, autoclear: '1', offset: '0', sizeLimit: '0',
     loopInode: 40n, loopRdev: 1809n, loopBlockDevice: true, loopSymlink: false,
-    filesystemType: 0xef53n, blocks: BigInt(size / 4096), bsize: 4096n,
-    image: { ...imageIdentity }, nestedMount: false,
+    filesystemType: 0xef53n, blocks: BigInt(selectedSize / 4096), bsize: 4096n,
+    image: { ...selectedImage }, nestedMount: false,
     delayPresent: overrides.volumeMode === 'delay-50ms', delayName, delayUuid,
     dmDevice: '253:9', dmInode: 50n, dmRdev: 64777n, dmBlockDevice: true, dmSymlink: false,
     dmSuspended: '0', dmReadonly: '0', dmSectors: String(size / 512), dmHolders: [], dmSlaves: ['loop17'],
@@ -166,7 +169,8 @@ function setup(overrides = {}) {
     let stdout = '';
     vm.runInNewContext(code, { ...api, assert: vmAssert, Buffer,
       process: { geteuid: () => 0, argv: ['node', '-', action, fixture, '1:1:0', home, image, originalFile, mountedFile,
-        String(uid), String(uid), output, overrides.volumeMode ?? 'loop'], stdout: { write(text) { stdout += text; } } } }, { timeout: 1000 });
+        String(uid), String(uid), output, overrides.volumeMode ?? 'loop', overrides.campaign ?? '--campaign'],
+        stdout: { write(text) { stdout += text; } } } }, { timeout: 1000 });
     return stdout;
   }
   return { state, files, commands, commandOptions, run };
@@ -212,6 +216,25 @@ test('current exact bounded ext4 fixture captures, revalidates and retires only 
   context.state.mounted = false;
   assert.throws(() => context.run('unmounted'), /AssertionError/u);
   context.state.backingFile = undefined; context.run('unmounted');
+});
+
+test('only complete-project campaigns select the fixed 4 GiB volume and retain its strict identity and capacity guards', () => {
+  for (const campaign of ['--pr532-campaign', '--provider-pr532-campaign']) {
+    const context = setup({ campaign }); context.run('capture');
+    const report = JSON.parse(context.files.get(output).text);
+    assert.equal(report.hardCapacityCeilingBytes, 4 * size);
+    assert.equal(report.capacityProfile, 'pr532_full_project_v1');
+    assert.equal(report.nativeGenerationQuotaVerified, false);
+    assert.equal(context.run('retire-cut'), 'mounted\n');
+    assert.throws(() => setup({ campaign, blocks: BigInt(4 * size / 4096 + 1) }).run('capture'));
+    assert.throws(() => setup({ campaign, image: imageIdentity }).run('capture'));
+    assert.throws(() => setup({ campaign, volumeMode: 'delay-50ms' }).run('capture'));
+  }
+  for (const campaign of ['--daily-campaign', '--verifier-campaign', '--unknown-campaign']) {
+    const context = setup({ campaign }); context.run('capture');
+    assert.equal(JSON.parse(context.files.get(output).text).hardCapacityCeilingBytes, size);
+    assert.throws(() => setup({ campaign, blocks: BigInt(size / 4096 + 1) }).run('capture'));
+  }
 });
 
 test('mount, loop, image, quota or nested-mount substitutions refuse before privileged unmount', () => {
