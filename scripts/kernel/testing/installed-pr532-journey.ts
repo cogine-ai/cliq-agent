@@ -189,6 +189,11 @@ export async function runInstalledPr532Journey(input: {
 
   context.mark('pr532_submit');
   const sourceConsent = await context.authorizeGitSource();
+  const baselineFiles = [
+    { path: PR532_FILE, bytes: input.originalBytes },
+    { path: PR532_CHECK, bytes: input.testBytes },
+  ].map(({ path, bytes }) => ({ path, sha256: sha256Bytes(bytes),
+    contentUtf8: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }));
   const objective = [
     'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts.',
     'DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout.',
@@ -196,6 +201,9 @@ export async function runInstalledPr532Journey(input: {
     'Finish the first model turn immediately with plain text, no tool calls and no edits, so the kernel runs the required original check against the unchanged baseline.',
     'After that check returns its actual failure, inspect the code and tests. Use its failure locations to repair the implementation.',
     'Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.',
+    'The original source and test are included below as repository data. They preserve the unfixed source and original assertions.',
+    'Use the declared tools for actual edits and any further inspection. Finish the turn to submit the candidate to the configured original check.',
+    '\nOriginal repository files:\n' + canonicalJsonBytes({ files: baselineFiles }).toString('utf8'),
   ].join(' ');
   const { modelTokens, costMicros, ...budgets } = input.budgets;
   const run = await admitted(['run', objective, '--workspace', input.workspace, '--model', input.alias, '--policy', 'yolo',

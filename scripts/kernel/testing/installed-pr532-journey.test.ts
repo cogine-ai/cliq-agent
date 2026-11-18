@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
-import { pr532StopDiagnostic, runInstalledPr532Journey, PR532_CHECK } from './installed-pr532-journey.js';
+import { sha256Bytes } from '../../../src/kernel/identity.js';
+import { pr532StopDiagnostic, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
 
 // Inert retained data projected through the original production decoder.
 const run = runSnapshot().run;
@@ -35,18 +36,25 @@ test('PR532 failure diagnosis refuses a foreign Run, unknown fields and invented
 test('PR532 admission asks for the original check before exploration and retains its exact check and spend bounds', async () => {
   const captured = new Error('inert command capture');
   let calls = 0;
+  const originalBytes = Buffer.from('original unfixed source\n');
+  const testBytes = Buffer.from('original assertion\n');
   const unused = async (): Promise<never> => { throw new Error('unexpected fixture operation'); };
   await assert.rejects(runInstalledPr532Journey({ workspace: '/inert/project', sessionId: 'inert-session', alias: 'inert-model',
-    originalBytes: Buffer.alloc(0), testBytes: Buffer.alloc(0), lockBytes: Buffer.alloc(0),
-    budgets: { wallTimeMs: 3600000, modelTokens: 32000000, costMicros: 8000000, toolCalls: 100,
+    originalBytes, testBytes, lockBytes: Buffer.alloc(0),
+    budgets: { wallTimeMs: 3600000, modelTokens: 32000000, costMicros: 3500000, toolCalls: 100,
       repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
     command: async args => {
       calls++;
       assert.equal(args[0], 'run');
       assert(args[1]!.includes('first model turn immediately with plain text, no tool calls and no edits'));
+      const context = JSON.parse(args[1]!.split('\nOriginal repository files:\n')[1]!);
+      assert.deepEqual(context, { files: [
+        { path: PR532_FILE, sha256: sha256Bytes(originalBytes), contentUtf8: originalBytes.toString('utf8') },
+        { path: PR532_CHECK, sha256: sha256Bytes(testBytes), contentUtf8: testBytes.toString('utf8') },
+      ] });
       assert.equal(args[args.indexOf('--check-node') + 1], PR532_CHECK);
       assert.equal(args[args.indexOf('--budget-tokens') + 1], '32000000');
-      assert.equal(args[args.indexOf('--budget-usd') + 1], '8.000000');
+      assert.equal(args[args.indexOf('--budget-usd') + 1], '3.500000');
       throw captured;
     },
     authorizeGitSource: async () => ({ sourceInspectionGrantId: 'inert-grant', ignoreReadGrantIds: [] }),

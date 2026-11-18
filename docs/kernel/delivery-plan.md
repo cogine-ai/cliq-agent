@@ -5,7 +5,7 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
-The [latest free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44196702356)
+The [first retained free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44196702356)
 at `972b5956a1fb084316cce454176a1c00e885659b` reaches the original failed
 assertion, repair, passing original check, single-file result review and actual
 application admission. Delivery then stalls during publication preparation with
@@ -133,8 +133,8 @@ execution's held worker. It records only actual returned SQL renewals, checks
 complete immutable fields and current latest rows, and closes with the worker
 or failed producer. Fresh release and expiry checks, original renewal eligibility
 and received-result custody still apply. Existing inert comparison/lifecycle
-regressions pass. The same native two-batch reproduction will validate the
-installed change. Its result remains pending.
+regressions pass. The same native two-batch reproduction validates the installed
+change below.
 
 For a later real-model trial, retain the first job's full CNY 111 reserve.
 The second job's authenticated final observed cut charges 2,378,175 conservative
@@ -146,6 +146,60 @@ prospective cumulative reserve is CNY 195 under the approved CNY 200 total;
 actual invoice reconciliation remains open. Restore the original 32M token
 allowance, since the lower cost ceiling already binds before that token limit.
 The same free installed reproduction must pass before this later real trial.
+
+The [same-source free reproduction](https://github.com/cogine-ai/cliq-agent/actions/runs/44320787667)
+at `1d2b05f90ebb1925f47e8878057c1c210a680ae9` qualifies completely. All five
+fixed requests and both two-file native read batches complete. The original
+check fails, the repaired candidate passes the same check, the client reconnects,
+and the one-file result is reviewed and applied exactly. Both original services
+stop successfully and all writers join. The complete `whole_project_v2` corpus
+scans 4,424 files and 247,803,904 file bytes, both databases and actual client data.
+The cumulative detector covers 254,089,723 bytes across 94 closed streams, with
+zero matches, limit violations or retained secret/tail bytes. Cleanup has zero
+errors. Submission to complete takes about 102 minutes, including roughly 41
+minutes checking/repairing and 58 minutes applying. This measured latency remains
+a substantial preview limitation.
+
+The [third real-model attempt](https://github.com/cogine-ai/cliq-agent/actions/runs/44341831350)
+uses that exact source and an explicit USD 8 ceiling. It progresses through ten
+model requests and fifteen private native tool operations, with one repair
+following the original check, then terminates with `budget_exhausted`. Its authenticated Journal 81 cut
+records 7,927,250 consumed USD micros, zero reserved, one repair and seventeen
+total tool calls. No pre-stop scheduler refusal is observed. Both original units
+exit successfully, all writers join and cleanup has zero errors. The temporary
+Actions secret was deleted after matching its owned timestamp, and absence was
+verified. Repaired verification, result review, application and the complete
+corpus remain unqualified for this real attempt.
+
+The task's next input carries the exact unfixed source and original test as
+ordinary repository-data context with their hashes. These are the same bytes
+already used to assemble the fixture. The reference solution stays withheld.
+The first original check, private-tool edits, unchanged test/lock and all result,
+application and resource checks remain required. This avoids requiring separate
+file-discovery turns for the two files the caller already selected. Its effect
+on real-model completion remains unverified. The third trial's cost ceiling
+permits only ten full-request reservations, even though the model's normal
+output cap is 8192 tokens. Full signed pricing ceilings and conservative
+settlement remain.
+
+An independent audit of the first trial's exact historical code and retained
+terminal Journal 51 cut bounds it by fifteen billable model requests. Its two
+retained completed tools require at least six distinct non-model journal rows.
+Every released model requires preparation and claim, and settlement adds a
+third row. The single sequential model frontier permits at most one unsettled
+model, so `6 + 3M - 1 <= 51` implies `M <= 15`. The terminal cut, zero driver
+tasks and subsequent complete resource joins prohibit later productive claims.
+Native release still requires its permanent claim and refuses resends. This
+bound includes failed or ambiguous billable requests and uses no un-attributed
+tool counters or provider-reported usage.
+
+At the original 792,725-micro whole-request bound and CNY 7.4/USD, reserve
+ceil(CNY 87.992475) = CNY 88 for the first trial. Retain CNY 24 for the second
+and the third trial's full CNY 60 ceiling. Their cumulative conservative reserve
+is CNY 172. The next single trial lowers its ceiling to USD 3.50, booked at
+CNY 26, giving CNY 198 within the authorized CNY 200 total. It permits four
+full-request reservations. Actual invoice reconciliation remains open. The
+original signed pricing bounds, cost guard and unknown-effect rules remain.
 
 ## Goal and baseline
 

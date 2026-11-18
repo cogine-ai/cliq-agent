@@ -12,7 +12,7 @@ import { decodeProviderJourneyConfiguration, PR532_RUN_WALL_TIME_MS } from '../k
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const RUN_COST_CEILING_USD_MICROS = 5_000_000;
-const PR532_COST_CEILING_USD_MICROS = 8_000_000;
+const PR532_COST_CEILING_USD_MICROS = 3_500_000;
 
 export function providerSelection(now: Date, pr532 = false) {
   assert(Number.isFinite(now.getTime()));

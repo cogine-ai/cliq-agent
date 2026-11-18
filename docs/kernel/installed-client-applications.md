@@ -106,7 +106,7 @@ Model aliases retain only model/endpoint/credential identifiers. Preferences
 grant neither Workspace Trust nor a tool permission. A new workspace requires
 its retained Trust decision, an interactive decision or an explicit
 `--trust-workspace`; a retained denial is not overridden. The canonical trusted
-workspace is passed to Session capture. The fixed `--check-node <relative.mjs>`
+workspace is passed to Session capture. The fixed `--check-node <relative.mjs|relative.test.ts>`
 preset obtains only a real verifier identity-read grant and uses the original
 read-only guest Node recipe. In `default` and `accept-edits`, each exact
 candidate waits for its independent execution approval unless its admission
@@ -345,8 +345,8 @@ the experiment never manufactures a failed candidate to force another paid
 request. Zero observed repairs is not evidence of real-provider repair coverage.
 The owned-HTTPS daily fixture retains its exact four replies and one repair.
 
-The current public experiment selects a 32,768-token local context and an
-8,192-token normal output cap; compaction uses at most 4,096 output tokens.
+The current public experiment selects a 1,000,000-token context and an
+8,192-token normal output and compaction cap.
 Its signed provider-wide input/output ceiling is 1,048,576 + 393,216 =
 1,441,792 tokens per request. At the selected peak rates, with cache charged as
 an additional independent upper component, each reservation is 792,725 USD

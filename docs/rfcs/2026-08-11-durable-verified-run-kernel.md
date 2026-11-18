@@ -23,8 +23,11 @@ project dependencies. An explicitly registered public npm mirror can serve the
 original lock URLs' packages. Require TLS 1.3, the selected mirror's pinned
 identity, no redirects, and the unchanged lock integrity for each archive.
 The focused Node/tsx check must fail on the original
-implementation and pass on the model's candidate. Supply the issue and check
-command without the reference implementation. A controlled provider can
+implementation and pass on the model's candidate. Supply the issue, check
+command and exact original source/test as repository-data context, including
+their byte hashes. Keep the reference implementation withheld. The original
+check still runs before any model edit, and actual edits use the private tools.
+A controlled provider can
 rehearse the installed transport and check lifecycle. The acceptance result
 requires a real model and the same project's real check.
 
