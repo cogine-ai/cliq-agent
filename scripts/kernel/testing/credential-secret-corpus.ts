@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { REQUEST_ID_PATTERN } from '../../../src/kernel/identity.js';
 import { iterateNodeSqliteStatement } from '../../../src/state/sqlite-driver.js';
-import { CredentialSecretScanError, type CredentialSecretScanner } from './credential-secret-scan.js';
+import { CredentialSecretScanError, type CredentialSecretScanner, type CredentialSecretScanStream } from './credential-secret-scan.js';
 
 const chunkBytes = 64 * 1024, sqliteLimit = 16 * 1024 * 1024, fileLimit = 512 * 1024 * 1024;
 const entryLimit = 1024, rowLimit = 8192, cellLimit = 65536;
@@ -176,7 +176,7 @@ export function scanCopiedCredentialDatabase(filename: string, scanner: Credenti
 }
 
 export type CredentialSecretCorpusInput = Readonly<{ stateRoot: string; uid: number;
-  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner; scanInstalledClientData?: true; profile?: 'whole_project_v1' }>;
+  evidenceDirs: readonly string[]; scanner: CredentialSecretScanner; scanInstalledClientData?: true; profile?: 'whole_project_v2' }>;
 
 /** Invoke after all fixture credential writers and Supervisor/keeper have
  * positively joined. Linux /proc descriptor paths pin every ancestor without
@@ -191,8 +191,8 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
   const stats: Stats = { filesScanned: 0, fileBytesScanned: 0, sqliteDatabasesScanned: 0,
     logicalRowsScanned: 0, logicalValuesScanned: 0, logicalBytesScanned: 0, evidenceDirectoriesScanned: 0 };
   const deadline = performance.now() + 60000;
-  const maxEntries = input.profile === 'whole_project_v1' ? 4096 : entryLimit;
-  const maxFiles = input.profile === 'whole_project_v1' ? 4096 : 2048;
+  const maxEntries = input.profile === 'whole_project_v2' ? 16384 : entryLimit;
+  const maxFiles = input.profile === 'whole_project_v2' ? 16384 : 2048;
   let stage: CorpusFailureStage = 'input', inventoryEntriesObserved = 0;
   let scanSource: ScanSource | undefined;
   const diagnostic = (errorClass: CorpusFailureClass): CredentialSecretCorpusFailure => Object.freeze({ stage, errorClass, ...stats, inventoryEntriesObserved });
@@ -233,7 +233,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     await current(directory, true); return entries.sort();
   };
   const file = async (directory: Directory, leaf: string, options: { mode: readonly bigint[]; links?: readonly bigint[];
-    limit: number; optional?: boolean; copy?: boolean }) => {
+    limit: number; optional?: boolean; copy?: boolean; scan?: CredentialSecretScanStream }) => {
     bounded(); await current(directory);
     const filename = descriptorPath(directory, leaf);
     let before: BigIntStats;
@@ -247,11 +247,11 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     if (stats.filesScanned >= maxFiles) fail('file_limit_exceeded');
     const handle = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const chunk = Buffer.alloc(chunkBytes);
-    let stream: ReturnType<CredentialSecretScanner['openStream']> | undefined;
+    let stream: CredentialSecretScanStream | undefined;
     let copied: Buffer | undefined;
     try {
       check(identity(await handle.stat({ bigint: true })) === identity(before));
-      stream = input.scanner.openStream();
+      stream = options.scan ?? input.scanner.openStream();
       if (options.copy) copied = Buffer.alloc(Number(before.size));
       let offset = 0;
       while (offset < Number(before.size)) {
@@ -263,13 +263,17 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
       check(identity(await handle.stat({ bigint: true })) === identity(before) && identity(await lstat(filename, { bigint: true })) === identity(before));
       await current(directory, true); stats.filesScanned++; observedFiles.push({ directory, leaf, info: before }); return copied ?? Buffer.alloc(0);
     } catch (error) { copied?.fill(0); throw error; }
-    finally { chunk.fill(0); stream?.close(); await handle.close(); }
+    finally {
+      chunk.fill(0);
+      if (!options.scan) stream?.close();
+      await handle.close();
+    }
   };
   let snapshot: string | undefined;
   try {
     check(process.platform === 'linux' && Number.isSafeInteger(input.uid) && input.uid > 0);
     check(/^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+\/home\/(?:probe\/credential-state|\.cliq\/kernel-v1)$/u.test(input.stateRoot));
-    check(input.profile === undefined || input.profile === 'whole_project_v1');
+    check(input.profile === undefined || input.profile === 'whole_project_v2');
     check(input.scanInstalledClientData === undefined || input.scanInstalledClientData === true);
     if (input.scanInstalledClientData) check(input.stateRoot.endsWith('/home/.cliq/kernel-v1'));
     check(Array.isArray(input.evidenceDirs) && input.evidenceDirs.length <= 16 && new Set(input.evidenceDirs).size === input.evidenceDirs.length);
@@ -309,15 +313,25 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     stage = 'cas_inventory';
     const casNames = await names(cas);
     stage = 'cas_files';
-    for (const leaf of casNames) {
-      const published = /^[0-9a-f]{64}$/u.test(leaf);
-      check(published || /^\.tmp-[0-9a-f]{64}-[0-9a-f]{32}$/u.test(leaf));
-      const nameBytes = Buffer.from(leaf, 'ascii');
-      scanSource = { kind: 'cas', part: 'entry_name' };
-      try { scanValue(input.scanner, nameBytes); } finally { nameBytes.fill(0); }
-      scanSource = { kind: 'cas', part: 'file_bytes' };
-      await file(cas, leaf, { mode: published ? [0o400n] : [0o400n, 0o600n], links: published ? [1n] : [1n, 2n], limit: fileLimit });
-    }
+    // The whole-project partition is one continuous byte projection. Every
+    // name and file byte remains present, with overlap across object boundaries.
+    // Small-state campaigns retain their independent name/file streams.
+    const casStream = input.profile ? input.scanner.openStream() : undefined;
+    try {
+      for (const leaf of casNames) {
+        const published = /^[0-9a-f]{64}$/u.test(leaf);
+        check(published || /^\.tmp-[0-9a-f]{64}-[0-9a-f]{32}$/u.test(leaf));
+        const nameBytes = Buffer.from(leaf, 'ascii');
+        scanSource = { kind: 'cas', part: 'entry_name' };
+        try {
+          if (casStream) casStream.scan(nameBytes);
+          else scanValue(input.scanner, nameBytes);
+        } finally { nameBytes.fill(0); }
+        scanSource = { kind: 'cas', part: 'file_bytes' };
+        await file(cas, leaf, { mode: published ? [0o400n] : [0o400n, 0o600n], links: published ? [1n] : [1n, 2n],
+          limit: fileLimit, scan: casStream });
+      }
+    } finally { casStream?.close(); }
     check(JSON.stringify(await names(cas)) === JSON.stringify(casNames));
     stage = 'evidence';
     for (const filename of input.evidenceDirs) {
@@ -403,7 +417,7 @@ export async function scanCredentialSecretCorpus(input: CredentialSecretCorpusIn
     for (const directory of directories) await current(directory);
     for (const directory of clientDirectories) await current(directory, true);
     return Object.freeze({ diagnosticOnly: true as const, qualified: true as const, ...stats,
-      ...(input.profile ? { profile: input.profile, maxEntriesPerDirectory: maxEntries, maxFiles } : {}),
+      ...(input.profile ? { profile: input.profile, maxEntriesPerDirectory: maxEntries, maxFiles, casProjection: 'continuous_names_and_file_bytes_v1' as const } : {}),
       ...(input.scanInstalledClientData ? { installedClientDataScanned: true as const } : {}) });
   } catch (error) {
     if (error instanceof CredentialSecretScanError) {

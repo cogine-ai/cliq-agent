@@ -202,7 +202,7 @@ test('installed verifier uses its own free bounded manager journey without weake
   while (ts.isParenthesizedExpression(projectSelection)) projectSelection = projectSelection.expression;
   assert(ts.isConditionalExpression(projectSelection)); assert.equal(projectSelection.condition.getText(parsed), 'options.pr532');
   assert(ts.isObjectLiteralExpression(projectSelection.whenTrue) && ts.isObjectLiteralExpression(projectSelection.whenFalse));
-  assert.deepEqual(projectSelection.whenTrue.properties.map(property => property.getText(parsed)), ["profile: 'whole_project_v1' as const"]);
+  assert.deepEqual(projectSelection.whenTrue.properties.map(property => property.getText(parsed)), ["profile: 'whole_project_v2' as const"]);
   assert.equal(projectSelection.whenFalse.properties.length, 0);
 
   assert(driver.includes('assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);'));

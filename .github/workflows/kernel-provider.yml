@@ -46,6 +46,8 @@ jobs:
           scripts/ci/provider-qualification.test.ts
           scripts/kernel/testing/provider-journey-input.test.ts
           scripts/kernel/testing/installed-provider-journey.test.ts
+          scripts/kernel/testing/credential-secret-scan.test.ts
+          scripts/kernel/testing/credential-secret-corpus.test.ts
       - name: Install the original native, systemd and credential prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Obtain the exact PR #532 baseline and original checks

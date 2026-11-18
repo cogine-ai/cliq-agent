@@ -38,7 +38,7 @@ logical stream per copied database, preserving every value and cross-cell
 overlap under the unchanged cumulative stream/byte limits and independent
 row/cell/file/entry/time guards. Real copied-SQLite regressions cover more than
 4096 values, a final secret, cross-cell secret detection and original limit
-refusals. Complete installed validation remains required before the funded run.
+refusals. This revision's complete installed scan remained unqualified.
 
 The [whole-task rehearsal](https://github.com/cogine-ai/cliq-agent/actions/runs/44246979916)
 at `2aa4d6a27292513037e77112370b9009a944167d` completes the original assertion
@@ -51,7 +51,20 @@ directory, 4096 files and 8192 cumulative streams; the same512MiB/60s, complete
 byte coverage, secret detection, identity and join requirements apply. Original
 small-state capacity and refusal regressions remain. New real-Linux tests scan
 1100 actual CAS files, detect a secret in the last file and refuse beyond the
-new4096-entry boundary. A complete scanned rehearsal still precedes funding.
+new4096-entry boundary. This revision's complete scanned rehearsal remained open.
+
+The [next free whole-task run](https://github.com/cogine-ai/cliq-agent/actions/runs/44257549506)
+at `0a5cf4c366f8625ebec527d5d38e23f3b2f8742a` again completes the actual task,
+application and original Stop2. Its scan refuses the 4097th CAS entry. The
+locked project dependencies contain thousands of files in addition to retained
+kernel artifacts. The fixed `whole_project_v2` diagnostic capacity is now16384
+entries/files under the same512MiB/60s guards and8192 cumulative streams. One
+continuous CAS name/file-byte projection preserves every byte and cross-chunk
+match, also refusing cross-object matches. Original small-state streams and
+bounds remain. Real Linux scanner regressions validate this test-private change;
+the unchanged production-code task/Stop2 evidence is reused for the one funded
+journey. Final delivery still requires its complete scan and every task assertion.
+The failed free report stays unqualified.
 
 ## Goal and baseline
 

@@ -3116,7 +3116,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         scanStage = 'corpus';
         report.secretCorpus = await scanCredentialSecretCorpus({ stateRoot: recipe.stateRoot, uid: ledger.uid, evidenceDirs: [], scanner,
           ...(dailyJourney ? { scanInstalledClientData: true as const } : {}),
-          ...(options.pr532 ? { profile: 'whole_project_v1' as const } : {}) });
+          ...(options.pr532 ? { profile: 'whole_project_v2' as const } : {}) });
         assert.equal(report.secretCorpus.sqliteDatabasesScanned, 2); assert.equal(report.secretCorpus.evidenceDirectoriesScanned, dailyJourney ? 1 : 0);
         if (dailyJourney) assert.equal(report.secretCorpus.installedClientDataScanned, true);
         if (options.publicationRetirementStop) {

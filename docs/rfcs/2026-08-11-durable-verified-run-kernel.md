@@ -67,6 +67,13 @@ two-second service stop and thirty-second native HTTP independently. Original
 authorization expiry and fresh final-transaction checks continue to decide
 whether the application can be admitted.
 
+For an affected test-private scanner change, reuse the completed free task
+and original Stop2 evidence only when the production runtime source, fixed execution-recipe source
+and task/check inputs are byte-identical. Run the changed scanner's real Linux
+filesystem regressions separately. The final real-model journey still requires
+the complete corpus scan and every original task, deadline and join assertion
+before PR delivery. Record failed free reports as unqualified.
+
 The full-project PR #532 experiment supplies an explicit sixty-minute wall
 budget to each admitted Run under the approved task-limit extension. Its
 hosted job is bounded to 135 minutes, covering the agent Run, application
@@ -84,10 +91,14 @@ deadline and exit-summary checks.
 The final secret corpus uses one cumulative scanner with a 512-MiB limit
 and sixty-second corpus deadline. Small-state campaigns retain their
 4096-stream, 1024-entry-per-directory and 2048-file capacity. The complete
-PR #532 project campaign uses the fixed `whole_project_v1` diagnostic profile
-with 8192 cumulative streams, 4096 entries per directory and 4096 files. This
+PR #532 project campaign uses the fixed `whole_project_v2` diagnostic profile
+with 8192 cumulative streams, 16384 entries per directory and 16384 files. This
 explicitly expands diagnostic work capacity for the larger real project; the
-selected capacity is retained in the report. All bytes remain in one scan,
+selected capacity is retained in the report. Its CAS partition has one continuous
+byte projection containing each sorted name and that exact file's full bytes,
+retaining overlap across objects. This preserves every within-file match and
+also refuses matches across object boundaries. Separate raw databases, evidence
+files and process output retain independent streams. All bytes remain in one scan,
 with the same detection, ownership, identity, stability and join checks. A copied
 SQLite database has one continuous logical byte stream for every schema name,
 schema SQL and TEXT/BLOB value, in the real query order. Retain overlap across

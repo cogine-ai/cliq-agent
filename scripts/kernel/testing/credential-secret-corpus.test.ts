@@ -681,31 +681,59 @@ test('actual Linux whole-project corpus scans all 1100 CAS files and detects the
       await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), payload, { flag: 'wx', mode: 0o400 });
     const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
     try {
-      for (const invalid of [false, true, 'unbounded', 8192])
+      for (const invalid of [false, true, 'whole_project_v1', 'unbounded', 8192])
         await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
-          profile: invalid as 'whole_project_v1' }), CredentialSecretCorpusError);
+          profile: invalid as 'whole_project_v2' }), CredentialSecretCorpusError);
       assert.equal(scanner.stats().streamsOpened, 0); assert.equal(scanner.stats().bytesScanned, 0);
       const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
-        profile: 'whole_project_v1' });
+        profile: 'whole_project_v2' });
       assert.equal(result.filesScanned, count + 2); assert.equal(result.sqliteDatabasesScanned, 2);
       assert.equal(result.qualified, true); assert.equal(scanner.stats().matched, false);
-      assert.equal(result.profile, 'whole_project_v1'); assert.equal(result.maxEntriesPerDirectory, 4096); assert.equal(result.maxFiles, 4096);
-      assert.equal(scanner.stats().streamsOpened, 4 + count * 2); assert.equal(scanner.stats().streamsClosed, 4 + count * 2);
+      assert.equal(scanner.stats().streamsOpened, 5); assert.equal(scanner.stats().streamsClosed, 5);
+      assert.equal(result.profile, 'whole_project_v2'); assert.equal(result.maxEntriesPerDirectory, 16384); assert.equal(result.maxFiles, 16384);
+      assert.equal(result.casProjection, 'continuous_names_and_file_bytes_v1');
+      assert.equal(scanner.stats().bytesScanned, result.fileBytesScanned + result.logicalBytesScanned + count * 64);
     } finally { scanner.close(); }
     const last = path.join(cas, (count - 1).toString(16).padStart(64, '0'));
-    await chmod(last, 0o600); await writeFile(last, input); await chmod(last, 0o400);
+    const lastBytes = Buffer.concat([Buffer.alloc(65530, 3), input]);
+    await chmod(last, 0o600); await writeFile(last, lastBytes); await chmod(last, 0o400);
     const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
     try {
       await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: detecting,
-        profile: 'whole_project_v1' }), { code: 'SECRET_DETECTED' });
+        profile: 'whole_project_v2' }), { code: 'SECRET_DETECTED' });
       const stats = detecting.stats(); assert.equal(stats.matched, true); assert.equal(stats.streamsOpened, stats.streamsClosed);
       assert.equal(stats.retainedNeedleBytes, 0); assert.equal(stats.retainedTailBytes, 0);
-      assert.deepEqual(await readFile(last), input);
+      assert.deepEqual(await readFile(last), lastBytes);
     } finally { detecting.close(); input.fill(0); }
   });
 });
 
-for (const [profile, boundary] of [[undefined, 1024], ['whole_project_v1', 4096]] as const)
+for (const boundary of ['name_file', 'file_name'] as const)
+  test(`actual Linux continuous CAS projection detects the ${boundary} boundary`, linux, async () => {
+    await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+      const head = Buffer.from('diagnostic-cross-object-'), tail = Buffer.from('1'.repeat(12));
+      const input = boundary === 'name_file' ? Buffer.concat([tail, head]) : Buffer.concat([head, tail]);
+      const entries = boundary === 'name_file'
+        ? [['1'.repeat(64), head]] as const
+        : [['0'.repeat(64), head], ['1'.repeat(64), Buffer.from('ordinary bytes')]] as const;
+      for (const [name, bytes] of entries) await writeFile(path.join(cas, name), bytes, { flag: 'wx', mode: 0o400 });
+      const independent = createCredentialSecretScanner([input], limits);
+      try {
+        const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: independent });
+        assert.equal(result.qualified, true); assert.equal(independent.stats().matched, false);
+      } finally { independent.close(); }
+      const continuous = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+      try {
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: continuous,
+          profile: 'whole_project_v2' }), { code: 'SECRET_DETECTED' });
+        const stats = continuous.stats(); assert.equal(stats.matched, true); assert.equal(stats.streamsOpened, stats.streamsClosed);
+        assert.equal(stats.retainedNeedleBytes, 0); assert.equal(stats.retainedTailBytes, 0);
+        for (const [name, bytes] of entries) assert.deepEqual(await readFile(path.join(cas, name)), bytes);
+      } finally { continuous.close(); input.fill(0); }
+    });
+  });
+
+for (const [profile, boundary] of [[undefined, 1024], ['whole_project_v2', 16384]] as const)
   test(`actual Linux ${profile ?? 'original'} corpus refuses inventory beyond its fixed ${boundary}-entry guard`, linux, async () => {
   await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
     for (let index = 0; index <= boundary; index++)
