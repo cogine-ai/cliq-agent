@@ -338,8 +338,10 @@ test('model preparation detail appends fixed scheduler data without becoming pub
   const module = await import('./installed-run-diagnostics.js');
   const phases = ['drive_prior_read', 'drive_worker_activate', 'drive_model_prepare', 'drive_broker_prepare',
     'drive_credential_prepare', 'drive_model_claim', 'drive_model_release'];
-  assert.deepEqual(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.slice(-phases.length), phases);
-  assert.equal(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.at(-phases.length - 1), 'result_recovery_terminal');
+  const start = module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.indexOf('drive_prior_read');
+  assert.deepEqual(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES.slice(start, start + phases.length), phases);
+  assert.equal(module.INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES[start - 1], 'result_recovery_terminal');
+  phases.push('drive_prior_recovery_history_candidate', 'drive_prior_recovery_history_tool', 'drive_prior_request', 'drive_prior_grant');
   const records: unknown[] = [], diagnostic = channel(module.INSTALLED_RUN_FAILURE_CHANNEL);
   const receive = (record: unknown) => { records.push(record); }; diagnostic.subscribe(receive);
   try {

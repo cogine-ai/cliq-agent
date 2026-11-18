@@ -18,7 +18,7 @@ import { decodeContextManifest } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
-import { readRecoveryClosure } from '../recovery-closure.js';
+import { readRecoveryClosure, type RecoveryClosurePhase } from '../recovery-closure.js';
 import { readCheckpoint, readRun, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
 import { frozenSessionCompactionIndex } from '../session-context.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
@@ -48,6 +48,7 @@ export type LoadAgentRunInput = {
   releaseKeys?: readonly ReleaseTrustKey[];
 };
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;
+export type ModelAttemptReadPhase = `recovery_${RecoveryClosurePhase}` | 'request' | 'grant';
 
 async function publishPlans(artifacts: ArtifactCatalog, plans: readonly PlannedArtifact[]): Promise<PublishedArtifact[]> {
   return joinResourceOperations(plans.map(async (plan) => {
@@ -256,10 +257,12 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value! }) });
     }),
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */
-    readModelAttempt: stateOperation('RECOVERY_REQUIRED', async (readSignal?: AbortSignal) => {
+    readModelAttempt: stateOperation('RECOVERY_REQUIRED', async (readSignal?: AbortSignal,
+      onPhase?: (phase: ModelAttemptReadPhase) => void) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
-      const closure = await readRecoveryClosure(driver, reads, runId);
+      const phase = (value: ModelAttemptReadPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide a read. */ } };
+      const closure = await readRecoveryClosure(driver, reads, runId, value => phase(`recovery_${value}`));
       if (!closure.run.frontierRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal Run has no model frontier');
       const frontier = await readCanonicalArtifact<RunFrontier>(reads, closure.run.frontierRef!);
       if (frontier.kind !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a model frontier');
@@ -268,10 +271,12 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (!entry) return undefined;
       const state = closure.journal.filter((next) => next.opId === opId && next.attempt === entry.attempt).at(-1)!;
       const retry = modelRetryState(assembly.retry.model, closure.journal.filter((next) => next.opId === opId), sampleCanonicalNow());
+      phase('request');
       const request = await readCanonicalArtifact<ModelRequestV1>(reads, entry.requestRef);
       const prepared = await reproduceRequest(closure.run, request, reads);
       if (prepared.requestRef !== entry.requestRef) throw new TypeError('retained model request cannot be reproduced');
       if (!entry.grantRef || frontier.kind !== 'agent') throw new TypeError('model attempt has no exact model operation grant');
+      phase('grant');
       const authority = await readModelGrantClosure(driver, reads, { run: closure.run, spec, assembly, frontier,
         frontierRef: closure.run.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
       if (entry.target !== authority.targetRef) throw new TypeError('model attempt target differs from its operation grant');

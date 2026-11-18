@@ -820,17 +820,23 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (pr532) {
           assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
           const ordinal = ++postCount;
-          assert(ordinal <= 3);
-          const edit = ordinal === 2;
-          if (edit) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
+          assert(ordinal <= 5);
+          const edit = ordinal === 4;
+          if (ordinal >= 2 && ordinal <= 4) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
             entry.content.includes('Verifier "node-tests" failed an assertion (exit 1)') &&
             entry.content.includes(JSON.stringify(PR532_CHECK)) && entry.content.includes('"lines":[')),
           'the model request must carry the original check failure locations');
+          const calls: Record<string, unknown>[] = [];
+          if (ordinal === 2 || ordinal === 3) {
+            calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
+              type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
+          }
+          if (edit) calls.push({ id: 'pr532-preview-edit', type: 'function', function: { name: 'edit', arguments: JSON.stringify({
+            path: PR532_FILE, old_text: readGitBlob(PR532_BASE, PR532_FILE).toString('utf8'),
+            new_text: readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } });
           const response = Buffer.from(JSON.stringify({ id: 'pr532-preview-' + ordinal, object: 'chat.completion', model,
-            choices: [{ index: 0, finish_reason: edit ? 'tool_calls' : 'stop', message: edit ? { role: 'assistant', content: '',
-              tool_calls: [{ id: 'pr532-preview-edit', type: 'function', function: { name: 'edit', arguments: JSON.stringify({
-                path: PR532_FILE, old_text: readGitBlob(PR532_BASE, PR532_FILE).toString('utf8'),
-                new_text: readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } }] }
+            choices: [{ index: 0, finish_reason: calls.length ? 'tool_calls' : 'stop', message: calls.length
+              ? { role: 'assistant', content: '', tool_calls: calls }
               : { role: 'assistant', content: ordinal === 1 ? 'Run the baseline check.' : 'Run the check against the private repair.' } }],
             usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 } }));
           scanBytes(response);
@@ -996,8 +1002,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     ownedModelFixture = { provider: 'openai-compatible', model,
       target: { hostAscii: '127.0.0.1', port: address.port, basePath: '/v1' },
       tls: { serverNameAscii: 'installed-verifier-fixture.invalid', caPem: cert, spkiSha256Pins: [pin] },
-      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 4096 },
-      requestTokenCeiling: { inputTokens: 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: pr532 ? 1_000_000 : 32768, maxOutputTokens: 4096 },
+      requestTokenCeiling: { inputTokens: pr532 ? 1_000_000 : 32768, outputTokens: 4096, cacheReadTokens: 0, cacheWriteTokens: 0 },
       validFrom: new Date(Date.now() - 60000).toISOString(),
       validThrough: new Date(Date.now() + (mcpStatusUserReplay ? 3 : 2) * 60 * 60 * 1000).toISOString() };
     }
@@ -1671,7 +1677,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(git('--no-optional-locks', 'status', '--porcelain=v1'), expected.equals(originalBytes) ? '' : ` M ${PR532_FILE}\n`);
         },
       });
-      assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 3 && acceptedTcp === 3 && acceptedTls === 3);
+      assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 5 && acceptedTcp === 5 && acceptedTls === 5);
       assert(!responderFailure);
       report.pr532Preview.realModelUsed = options.provider !== undefined;
       report.normalCliWorkflowComplete = true; report.protocolWorkflowComplete = true;

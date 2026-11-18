@@ -124,6 +124,39 @@ test('the PR532 report retains the exact applied bytes and original review outpu
   assert.equal(report.reviewOutputUtf8, review.toString('utf8'));
 });
 
+test('the controlled PR532 journey reads both original files in two batches before its one repair', () => {
+  const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
+  let branch: ts.IfStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === 'pr532' &&
+        node.thenStatement.getText(parsed).includes('pr532-preview-read-')) branch = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(branch);
+  const replies: any[] = [], observed = new Set<string>();
+  const context = vm.createContext({ assert, Buffer, JSON, pr532: true, postCount: 0, model: 'inert-model', expectedToolNames: ['read', 'edit'],
+    body: { tools: ['read', 'edit'].map(name => ({ function: { name } })), messages: [{ content:
+      'Verifier "node-tests" failed an assertion (exit 1) "original.test.ts" "lines":[1]' }] },
+    PR532_FILE: 'original.ts', PR532_CHECK: 'original.test.ts', PR532_BASE: 'inert-base', PR532_CHECK_SOURCE: 'inert-reference',
+    readGitBlob: (commit: string) => Buffer.from(commit), scanBytes: () => {},
+    outgoing: { writeHead() {}, end(bytes: Buffer) { replies.push(JSON.parse(bytes.toString())); } } });
+  vm.runInContext(ts.transpileModule(`globalThis.reply = () => { ${branch.getText(parsed)} };`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
+  for (let index = 0; index < 5; index++) context.reply();
+  assert.equal(replies[0].choices[0].finish_reason, 'stop');
+  assert.equal(replies[4].choices[0].finish_reason, 'stop');
+  for (const reply of replies.slice(1, 3)) {
+    const calls = reply.choices[0].message.tool_calls;
+    assert.deepEqual(calls.map((call: any) => [call.function.name, JSON.parse(call.function.arguments).path]),
+      [['read', 'original.ts'], ['read', 'original.test.ts']]);
+    for (const call of calls) { assert(!observed.has(call.id)); observed.add(call.id); }
+  }
+  const edited = replies[3].choices[0].message.tool_calls;
+  assert.equal(edited.length, 1); assert.equal(edited[0].function.name, 'edit');
+  assert.throws(() => context.reply());
+});
+
 test('PR532 observation stays within the original client frame budget through a full Run and rejects late success', async () => {
   const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);

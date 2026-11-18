@@ -211,7 +211,7 @@ test('successful cached broker preparation keeps both original complete image re
 test('model diagnostic phases precede their exact original scheduler and dispatch operations', async () => {
   const source = await parsed('store.ts'), drive = methods(source, 'driveInstalledRun').getText(source);
   const pairs = [
-    ['drive_prior_read', 'const prior = await agent.readModelAttempt(readSignal);'],
+    ['drive_prior_read', 'const prior = await agent.readModelAttempt(readSignal, phase => this.installedRunPhases.set(runId, `drive_prior_${phase}`));'],
     ['drive_worker_activate', 'current = await native.activateCurrentWorker({ expectedRunRevision: current.revision });'],
     ['drive_model_prepare', 'prepared = await agent.prepareModel(']
   ];

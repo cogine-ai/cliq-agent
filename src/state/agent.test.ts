@@ -21,6 +21,24 @@ async function prepare(fixture: Awaited<ReturnType<typeof createAgentFixture>>) 
   return prepared;
 }
 
+test('model attempt read phases are inert and preserve the original complete read and request', async () => {
+  const fixture = await createAgentFixture('model-read-phase');
+  try {
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), phases: string[] = [];
+    const observe = (phase: string) => { phases.push(phase); throw new Error('observer failure'); };
+    assert.equal(await fixture.agent.readModelAttempt(undefined, observe), undefined);
+    assert.equal(phases[0], 'recovery_cut');
+    assert(phases.includes('recovery_terminal'));
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const prepared = await prepare(fixture), retained = await fixture.store.readRecoveryClosure(fixture.runId);
+    phases.length = 0;
+    const attempt = await fixture.agent.readModelAttempt(undefined, observe);
+    assert.equal(attempt?.prepared.requestRef, prepared.prepared.requestRef);
+    assert.deepEqual(phases.slice(-2), ['request', 'grant']);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), retained);
+  } finally { await disposeFixture(fixture); }
+});
+
 function response(fixture: Awaited<ReturnType<typeof createAgentFixture>>, prepared: Awaited<ReturnType<typeof prepare>>,
   calls: Array<{ id: string; name?: string; arguments: string }>, text = '') {
   const reader = fixture.agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });

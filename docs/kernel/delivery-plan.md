@@ -85,6 +85,26 @@ CNY 7.4/USD, reserving CNY 111 for the first USD 15 ceiling and CNY 89 for the
 next USD 12 ceiling. The cumulative reserve is CNY 200. Actual invoice settlement
 remains pending. [Official central-parity table](https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2)
 
+The [second real-model attempt](https://github.com/cogine-ai/cliq-agent/actions/runs/44281730823)
+at `2856dfb14ea9f15f6b3e8c49dbf224d5f644ac44` reaches an actual failed check
+and one authorized repair. It then completes four private tool calls in two
+batches. Its last retained Run cut remains running at Journal 27 and item 18;
+no next model request is prepared. The original scheduler records
+`drive_prior_read / RECOVERY_REQUIRED`, and the sixty-minute observer expires.
+The cut records 2,378,175 consumed USD micros and zero reserved micros. These
+are conservative kernel counters. Actual invoice reconciliation remains open.
+Both original services stop successfully, all writers join and cleanup reports
+zero errors. The temporary Actions secret was removed and absence verified.
+The task and complete corpus remain unqualified.
+
+Diagnosis now follows the existing model-attempt reader's fixed recovery,
+request and grant phases. Observer errors cannot affect the original read.
+The free controlled journey adds two actual two-file read batches before its
+single repair, followed by the same original check, reconnect, result review,
+exact application, complete scan and original service joins. Its signed
+complete-project fixture selects the same 1M context capacity. The original
+project, check and lock bytes stay fixed. No new real-model trial has started.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

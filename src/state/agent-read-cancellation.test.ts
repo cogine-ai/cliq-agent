@@ -502,9 +502,9 @@ test('cached Agent reads retain a close-owned signal without cancelling the rece
   assert.doesNotMatch(retain, /spec\.operation === 'delivery' \? new AbortController/u);
   assert.match(retain, /this\.installedAgents\.set\(runId, \{ agent, readAbort \}\)/u);
   const modelRead = between(agent, 'readModelAttempt: stateOperation(', 'prepareModel: stateOperation(');
-  assert.match(modelRead, /async \(readSignal\?: AbortSignal\)/u);
+  assert.match(modelRead, /async \(readSignal\?: AbortSignal,\s+onPhase\?: \(phase: ModelAttemptReadPhase\) => void\)/u);
   assert.match(modelRead, /const reads = readSignal \? artifacts\.withReadSignal\(readSignal\) : artifacts/u);
-  assert.match(modelRead, /readRecoveryClosure\(driver, reads, runId\)/u);
+  assert.match(modelRead, /readRecoveryClosure\(driver, reads, runId, value => phase\(`recovery_\$\{value\}`\)\)/u);
   assert.match(modelRead, /reproduceRequest\(closure\.run, request, reads\)/u);
   const prepare = between(agent, 'prepareModel: stateOperation(', 'completeModel: stateOperation(');
   assert.match(prepare, /readSignal\?: AbortSignal/u);
@@ -520,7 +520,7 @@ test('the installed driver propagates its retained read lifetime through materia
   const drive = between(store, 'private async driveInstalledRun(', 'async cancelInstalledRun(');
   assert.match(drive, /const readSignal = this\.installedAgents\.get\(runId\)\?\.readAbort\?\.signal/u);
   assert.match(drive, /loadInstalledRunMaterial\(\{ selected: this\.installedRuntime!, artifacts: reads, assemblyRef: spec\.assemblyRef,\s*driver: this\.driver, runId, signal: readSignal \}\)/u);
-  assert.match(drive, /agent\.readModelAttempt\(readSignal\)/u);
+  assert.match(drive, /agent\.readModelAttempt\(readSignal, phase => this\.installedRunPhases\.set\(runId, `drive_prior_\$\{phase\}`\)\)/u);
   assert.match(drive, /agent\.prepareModel\(\{ expectedRunRevision: current\.revision, leaseEpoch: current\.leaseEpoch \}, readSignal\)/u);
   const load = between(material, 'export async function loadInstalledRunMaterial(', 'export async function assembleInstalledRun(');
   assert.match(load, /const artifacts = input\.signal \? input\.artifacts\.withReadSignal\(input\.signal\) : input\.artifacts/u);

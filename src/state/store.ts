@@ -202,7 +202,7 @@ import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJourna
 import { assertModelGrantDispatch } from './model-grant.js';
 import { readCheckpoint } from './rows.js';
 import { decodeRunSpec } from './decoders.js';
-import type { AgentRunState } from './reducers/agent.js';
+import type { AgentRunState, ModelAttemptReadPhase } from './reducers/agent.js';
 import type { RunAssemblyValidationMaterial } from '../model/run-assembly.js';
 import type { ModelAttemptResult } from '../model/model-session.js';
 import type { RunExecution } from './run-execution.js';
@@ -1915,7 +1915,7 @@ export class StateStore {
   private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | BuiltinExecutionPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
     'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_dependency' | 'drive_verifier_history' |
     'drive_verifier_permission' | 'drive_verifier_execution' | 'drive_finalize' | 'terminal_retirement' |
-    'drive_prior_read' | 'drive_worker_activate' | 'drive_model_prepare' | 'drive_broker_prepare' | 'drive_credential_prepare' |
+    'drive_prior_read' | `drive_prior_${ModelAttemptReadPhase}` | 'drive_worker_activate' | 'drive_model_prepare' | 'drive_broker_prepare' | 'drive_credential_prepare' |
     'drive_model_claim' | 'drive_model_release'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort: AbortController }>();
   private readonly installedAgentLoads = new Map<string, Promise<InstalledContinuation>>();
@@ -3507,7 +3507,7 @@ export class StateStore {
       if (current.status === 'queued' && !this.installedWorkerSlotAvailable(runId)) return;
       if (current.nextStep !== 'agent') return;
       this.installedRunPhases.set(runId, 'drive_prior_read');
-      const prior = await agent.readModelAttempt(readSignal);
+      const prior = await agent.readModelAttempt(readSignal, phase => this.installedRunPhases.set(runId, `drive_prior_${phase}`));
       const progress = this.installedModelProgress(prior);
       if (progress === 'stop' && prior) {
         if (prior.prepared.request.kind === 'context_compaction') {

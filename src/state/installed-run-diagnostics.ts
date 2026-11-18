@@ -39,7 +39,13 @@ export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled',
   'result_recovery_history_items', 'result_recovery_history_candidate', 'result_recovery_history_verifier',
   'result_recovery_history_tool', 'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals',
   'result_recovery_terminal', 'drive_prior_read', 'drive_worker_activate', 'drive_model_prepare', 'drive_broker_prepare',
-  'drive_credential_prepare', 'drive_model_claim', 'drive_model_release'] as const);
+  'drive_credential_prepare', 'drive_model_claim', 'drive_model_release',
+  'drive_prior_recovery_cut', 'drive_prior_recovery_preparation', 'drive_prior_recovery_spec', 'drive_prior_recovery_context',
+  'drive_prior_recovery_journal', 'drive_prior_recovery_generations', 'drive_prior_recovery_history',
+  'drive_prior_recovery_history_model', 'drive_prior_recovery_history_items', 'drive_prior_recovery_history_candidate',
+  'drive_prior_recovery_history_verifier', 'drive_prior_recovery_history_tool', 'drive_prior_recovery_history_input',
+  'drive_prior_recovery_history_broker', 'drive_prior_recovery_seals', 'drive_prior_recovery_terminal',
+  'drive_prior_request', 'drive_prior_grant'] as const);
 const schedulerPhases: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES);
 export const INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS = Object.freeze(['drive', 'maintenance', 'maintenance_global', 'stop',
   'publication_recovery', 'publication_preparation'] as const);
