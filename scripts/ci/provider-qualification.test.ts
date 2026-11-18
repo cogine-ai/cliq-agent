@@ -17,6 +17,7 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   assert.equal(input.definition.requestTokenCeiling.inputTokens, 1048576);
   assert.equal(input.definition.requestTokenCeiling.outputTokens, 393216);
   assert.equal(input.definition.claims.trustedUsageEvidence, false);
+  assert.equal(input.definition.claims.contextLimitTokens, 1_000_000);
   assert.equal(input.definition.target.hostAscii, 'api.deepseek.com');
   assert.deepEqual(input.definition.tls.spkiSha256Pins, [
     '2ac9550952cd8f9b7f7baeccd3a140e4d4ae76c0a721a4e5231975f652a1a836',
@@ -25,7 +26,8 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   assert.equal(input.definition.validThrough, '2026-11-13T04:00:00.000Z');
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
   assert.equal(pr532.budgets.wallTimeMs, 60 * 60_000);
-  assert.equal(pr532.budgets.costMicros, 15_000_000);
+  assert.equal(pr532.budgets.costMicros, 12_000_000);
+  assert.equal(pr532.budgets.modelTokens, 64_000_000);
 });
 
 test('private bytes arrive once after the complete marker and EOF, with no inherited credential environment', async () => {

@@ -66,6 +66,25 @@ the unchanged production-code task/Stop2 evidence is reused for the one funded
 journey. Final delivery still requires its complete scan and every task assertion.
 The failed free report stays unqualified.
 
+The [first real-model attempt](https://github.com/cogine-ai/cliq-agent/actions/runs/44273132995)
+at `3ba3bdae2783523d680b101e947c2472036d29a2` completes genuine DeepSeek model
+and private tool calls, then terminates `runtime_failed` before the first
+verifier. Both original services stop successfully and cleanup reports zero
+errors. The exact retained Stop subtype was missing from the diagnostic report;
+its cause remains unverified. The temporary CI secret was removed. Reserve the
+first job's conservative CNY 111 ceiling, leaving CNY 89 of the approved CNY 200.
+A follow-up records the original closed Stop subtype, actual budget counters and
+last tool targets. The objective explicitly requests a no-tool first model turn
+so that the original check precedes exploration. The real model selection uses
+its published 1M context and a 64M reservation-token budget. The next trial has
+a lowered USD 12 cap. The native 1 MiB request bound and 30-second HTTP deadline
+apply. The complete real-model task still has to pass before a PR is opened.
+
+The official USD/CNY central parity on 2026-11-18 is 6.7118. Book the two jobs at
+CNY 7.4/USD, reserving CNY 111 for the first USD 15 ceiling and CNY 89 for the
+next USD 12 ceiling. The cumulative reserve is CNY 200. Actual invoice settlement
+remains pending. [Official central-parity table](https://www.chinamoney.com.cn/chinese/bkccpr/index.html?tab=2)
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

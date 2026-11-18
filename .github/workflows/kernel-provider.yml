@@ -46,6 +46,7 @@ jobs:
           scripts/ci/provider-qualification.test.ts
           scripts/kernel/testing/provider-journey-input.test.ts
           scripts/kernel/testing/installed-provider-journey.test.ts
+          scripts/kernel/testing/installed-pr532-journey.test.ts
           scripts/kernel/testing/credential-secret-scan.test.ts
           scripts/kernel/testing/credential-secret-corpus.test.ts
       - name: Install the original native, systemd and credential prerequisites

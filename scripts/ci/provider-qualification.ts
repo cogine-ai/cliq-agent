@@ -12,16 +12,16 @@ import { decodeProviderJourneyConfiguration, PR532_RUN_WALL_TIME_MS } from '../k
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const RUN_COST_CEILING_USD_MICROS = 5_000_000;
-const PR532_COST_CEILING_USD_MICROS = 15_000_000;
+const PR532_COST_CEILING_USD_MICROS = 12_000_000;
 
 export function providerSelection(now: Date, pr532 = false) {
   assert(Number.isFinite(now.getTime()));
   return decodeProviderJourneyConfiguration({
     budgets: { childConcurrency: 1, childDepth: 0, costMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
-      modelTokens: pr532 ? 32_000_000 : 20_000_000,
+      modelTokens: pr532 ? 64_000_000 : 20_000_000,
       repairAttempts: 2, toolCalls: 100, wallTimeMs: pr532 ? PR532_RUN_WALL_TIME_MS : 300_000 },
     definition: { provider: 'openai-compatible', model: 'deepseek-flash',
-      claims: { contextLimitTokens: 32768, maxOutputTokens: 8192, nativeToolCalling: true, streaming: false, trustedUsageEvidence: false },
+      claims: { contextLimitTokens: 1_000_000, maxOutputTokens: 8192, nativeToolCalling: true, streaming: false, trustedUsageEvidence: false },
       prices: { cacheRead: 6000, cacheWrite: 0, input: 300000, output: 1200000 },
       requestTokenCeiling: { cacheReadTokens: 1048576, cacheWriteTokens: 0, inputTokens: 1048576, outputTokens: 393216 },
       target: { basePath: '/', hostAscii: 'api.deepseek.com', port: 443 },

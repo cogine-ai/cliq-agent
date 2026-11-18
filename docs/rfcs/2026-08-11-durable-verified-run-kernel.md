@@ -69,7 +69,7 @@ whether the application can be admitted.
 
 For an affected test-private scanner change, reuse the completed free task
 and original Stop2 evidence only when the production runtime source, fixed execution-recipe source
-and task/check inputs are byte-identical. Run the changed scanner's real Linux
+and original project/check bytes are byte-identical. Run the changed scanner's real Linux
 filesystem regressions separately. The final real-model journey still requires
 the complete corpus scan and every original task, deadline and join assertion
 before PR delivery. Record failed free reports as unqualified.
@@ -80,6 +80,17 @@ hosted job is bounded to 135 minutes, covering the agent Run, application
 admission, Delivery Run and cleanup. The acceptance still requires the original
 failed assertion, model repair, passing recheck, reviewed result and exact
 application. Record observed durations independently of these task budgets.
+
+The real DeepSeek experiment selects the documented1M context. Its explicit
+reservation-token budget is64M. The next run has a12USD cost ceiling, with
+111CNY reserved for the first15USD job and89CNY for the next job under the
+approved200CNY total. Full-request pricing ceilings and native1MiB request
+bound still apply.
+The objective asks for an immediate first model turn with plain text and no
+tools or edits, then uses the genuine baseline failure for exploration/repair.
+Failure reports retain the original decoded Stop subtype and current budget
+counters. Missing historical diagnostics remain unknown. DeepSeek publishes
+its current context and pricing in its [official model table](https://api-docs.deepseek.com/quick_start/pricing/).
 
 When original publication preparation rejects, preserve its fixed phase and
 error classification before starting failure retirement. The trusted test image

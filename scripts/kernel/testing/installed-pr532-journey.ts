@@ -11,7 +11,8 @@ import { nodeTestArguments } from '../../../src/kernel/verifier.js';
 import { decodeRunResult, decodeVerificationClosure, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { decodeSourceManifest } from '../../../src/state/decoders.js';
 import { decodeVerifierCommand, decodeVerificationReceipt, verifierReportedLocations } from '../../../src/state/verifier-artifacts.js';
-import type { RunSpec } from '../../../src/kernel/types.js';
+import type { Run, RunSpec } from '../../../src/kernel/types.js';
+import { decodeAgentStop } from '../../../src/runtime/stop.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
 import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
@@ -24,6 +25,19 @@ export const PR532_CHECK = 'src/model/providers/openai-compatible.test.ts';
 export const PR532_REGISTRY = 'mirrors.tencent.com';
 export const PR532_REGISTRY_BASE = '/npm';
 export const PR532_REGISTRY_ID = 'pr532-public-npm-registry';
+
+/** Pure projection of the original decoded Stop into bounded diagnostic data. */
+export function pr532StopDiagnostic(run: Run, value: unknown) {
+  const stop = decodeAgentStop(value, run);
+  const base = { diagnosticOnly: true as const, origin: stop.origin, reason: stop.reason };
+  if (stop.origin !== 'runtime') return base;
+  if (stop.runtimeSubtype !== 'context_window_exhausted') return { ...base, runtimeSubtype: stop.runtimeSubtype };
+  return { ...base, runtimeSubtype: stop.runtimeSubtype, nextPromptTokens: stop.nextPromptTokens,
+    triggerThresholdTokens: stop.triggerThresholdTokens, hardPromptTokens: stop.hardPromptTokens,
+    protectedTokens: stop.protectedTokens, sourceInputTokenCap: stop.sourceInputTokenCap,
+    ...(stop.trigger === 'request_body_bytes' ? { trigger: stop.trigger, requestBodyBytes: stop.requestBodyBytes,
+      requestBodyLimitBytes: stop.requestBodyLimitBytes } : {}) };
+}
 
 export async function readPr532PublisherInputs() {
   // Provision the disposable publisher using a CA/hostname-authenticated TLS
@@ -71,6 +85,7 @@ export async function runInstalledPr532Journey(input: {
   progress(cut: Result<'run.get'>): void;
   dependencyFailure(value: Record<string, unknown>): void;
   verifierObservation(value: Record<string, unknown>): void;
+  runtimeFailure(value: Record<string, unknown>): void;
   mark(phase: string): void;
 }) {
   const read = async <M extends InstalledControlFeature>(request: InstalledControlRequestV1, method: M) => {
@@ -145,6 +160,10 @@ export async function runInstalledPr532Journey(input: {
           afterItemSeq: Math.max(0, cut.highWaterItemSeq - 8), itemLimit: 8, checkpointLimit: 1,
           afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
         context.progress(stopped);
+        try {
+          const original = stopped.snapshot.run;
+          if (original.stopIntentRef) context.runtimeFailure(pr532StopDiagnostic(original, await retained(original.stopIntentRef)));
+        } catch { /* Optional diagnosis preserves the original task failure. */ }
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
         try {
@@ -170,7 +189,14 @@ export async function runInstalledPr532Journey(input: {
 
   context.mark('pr532_submit');
   const sourceConsent = await context.authorizeGitSource();
-  const objective = 'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts. DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout. Keep behavior for other compatible endpoints. The first candidate should be the unchanged baseline: finish the first turn without an edit so the required original check runs. Use its failure locations to repair the implementation. Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.';
+  const objective = [
+    'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts.',
+    'DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout.',
+    'Keep behavior for other compatible endpoints.',
+    'Finish the first model turn immediately with plain text, no tool calls and no edits, so the kernel runs the required original check against the unchanged baseline.',
+    'After that check returns its actual failure, inspect the code and tests. Use its failure locations to repair the implementation.',
+    'Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.',
+  ].join(' ');
   const { modelTokens, costMicros, ...budgets } = input.budgets;
   const run = await admitted(['run', objective, '--workspace', input.workspace, '--model', input.alias, '--policy', 'yolo',
     '--session', input.sessionId, '--trust-workspace', '--check-node', PR532_CHECK, '--budget-tokens', String(modelTokens),
