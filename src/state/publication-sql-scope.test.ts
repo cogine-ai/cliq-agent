@@ -4,10 +4,67 @@ import { readFile } from 'node:fs/promises';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { Script } from 'node:vm';
 import ts from 'typescript';
+import { canonicalSha256 } from '../kernel/canonical.js';
+import type { BoundWorkerLaunch } from '../kernel/types.js';
+import { requireEqual } from '../policy/runtime-authority.js';
+import { projectRecordedPublicationLeases } from './publication-lease-read.js';
 import * as sqlite from './sqlite-driver.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 const { assertSqliteConnectionOwnedBy, openSqliteDriver } = sqlite;
+
+test('dependency candidate SQL comparisons recognize recorded publication renewals and preserve every other row', async () => {
+  // Original comparison code over ordinary SQLite data only. No Run,
+  // StateOwner, publication task, worker or native proof is created.
+  const parsed = await source('./dependency-candidate.ts'), comparison = namedFunction(parsed, 'assertUnchanged');
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-dependency-lease-cut-'));
+  const driver = openSqliteDriver(path.join(directory, 'inert.sqlite'));
+  const first = { launchId: 'inert-launch', runId: 'inert-run', phase: 'activated', generationWriteState: 'active',
+    leaseVersion: 1, leaseExpiresAt: '2026-11-18T00:01:00.000Z' } as BoundWorkerLaunch;
+  const latest = { ...first, leaseVersion: 2, leaseExpiresAt: '2026-11-18T00:01:30.000Z' };
+  const recorded = { initial: first, latest, rows: new Map([first, latest].map(row => [row.leaseVersion, canonicalSha256(row)])) };
+  const checkpoint = { id: 'inert-checkpoint', revision: 1 };
+  const cut = { run: { id: first.runId, activeWorkerLaunchId: first.launchId, deadlineAt: '2026-11-18T01:00:00.000Z', revision: 1 },
+    workers: [first], generations: [{ generationId: 'inert-generation', phase: 'active' }], checkpoints: [checkpoint] };
+  let scoped = true, originChecks = 0;
+  try {
+    driver.exec('CREATE TABLE inert_comparison_data (id INTEGER PRIMARY KEY, value TEXT) STRICT');
+    const write = (value: unknown) => driver.prepare('INSERT OR REPLACE INTO inert_comparison_data VALUES(1,?)').run(JSON.stringify(value));
+    const read = () => JSON.parse(driver.prepare('SELECT value FROM inert_comparison_data WHERE id=1').get<{ value: string }>()!.value) as typeof cut;
+    const context = { cut, runId: first.runId, checkpoint, input: {} as { renewingLaunchId?: string }, requireEqual,
+      databaseCut(connection: unknown) { assert.equal(connection, driver); return read(); },
+      readCheckpoint: () => read().checkpoints[0], originAssert() { originChecks++; },
+      assertPublicationLeaseReadRows(connection: unknown, runId: string, actual: BoundWorkerLaunch[], expected: BoundWorkerLaunch[], label: string) {
+        assert.equal(connection, driver); assert.equal(runId, first.runId);
+        if (!scoped) return requireEqual(actual, expected, label);
+        const current = read().workers[0]!;
+        requireEqual(projectRecordedPublicationLeases(recorded, current, actual),
+          projectRecordedPublicationLeases(recorded, current, expected), label);
+      }, check: undefined as undefined | ((connection: SqliteConnection) => void) };
+    const names = Object.keys(context);
+    const create = new Script(ts.transpileModule(`(function(${names.join(',')}) { return ${comparison.getText(parsed)}; })`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInThisContext() as
+      (...values: unknown[]) => (connection: SqliteConnection) => void;
+    context.check = create(...Object.values(context));
+    const current = { ...cut, workers: [latest] }, digest = canonicalSha256(cut);
+    write(current); context.check!(driver);
+    assert.equal(originChecks, 1); assert.equal(read().workers[0]!.leaseVersion, 2);
+    assert.equal(canonicalSha256(cut), digest, 'comparison never changes the retained actual snapshot');
+    for (const changed of [{ ...current, run: { ...cut.run, revision: 2 } },
+      { ...current, generations: [{ generationId: 'inert-generation', phase: 'revoking' }] },
+      { ...current, workers: [{ ...latest, leaseVersion: 3 }] },
+      { ...current, workers: [{ ...latest, workerIdentityDigest: 'b'.repeat(64) }] },
+      { ...current, workers: [latest, { ...latest, launchId: 'inert-extra' }] },
+      { ...current, workers: [{ ...latest, generationWriteState: 'revoking' }] }]) {
+      write(changed); assert.throws(() => context.check!(driver));
+    }
+    write(current); scoped = false;
+    assert.throws(() => context.check!(driver), 'an independent reader cannot recognize an unrecorded renewal');
+    context.input.renewingLaunchId = first.launchId;
+    context.check!(driver); assert.equal(originChecks, 2, 'the existing dependency owner keeps its original renewal path');
+  } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
+});
 
 async function source(name: string) {
   return ts.createSourceFile(name, await readFile(new URL(name, import.meta.url), 'utf8'),

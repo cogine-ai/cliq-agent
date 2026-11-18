@@ -35,6 +35,7 @@ import { readRootRunAdmissionOrigin } from './run-admission-origin.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readSourceInspectionAttempt } from './source-inspection.js';
 import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
+import { assertPublicationLeaseReadRows } from './publication-lease-read.js';
 
 type Options = { releaseKeys: readonly ReleaseTrustKey[]; signal?: AbortSignal };
 type Locator = { candidateItemId: string; sourceCheckpointId: string; dependencyPlanRef: string; resultSourceRef: string };
@@ -212,7 +213,8 @@ export async function readRetainedDependencyCandidate(driver: SqliteDriver, arti
           ? { ...after, leaseVersion: before.leaseVersion, leaseExpiresAt: before.leaseExpiresAt } : worker);
       }
     }
-    requireEqual(current, cut, 'dependency complete original SQL cut');
+    assertPublicationLeaseReadRows(connection, runId, current.workers, cut.workers, 'dependency original worker SQL cut');
+    requireEqual({ ...current, workers: cut.workers }, cut, 'dependency complete original SQL cut');
     requireEqual(readCheckpoint(connection, checkpoint.id), checkpoint, 'dependency original source Checkpoint');
     originAssert(connection);
   }

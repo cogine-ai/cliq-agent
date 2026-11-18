@@ -17,6 +17,17 @@ Its ordinary-child SIGKILL regression reproduces the missing record and passes
 after the fix on macOS and Linux. Complete application remains unverified. This
 round has made no funded request and has opened no PR.
 
+The [next original run](https://github.com/cogine-ai/cliq-agent/actions/runs/44215936954)
+at `de834b286e606b0c2f956cbe81b514ea7ac20fa6` preserves the first refusal at
+`publication_prepare_read` with `RECOVERY_REQUIRED`. Its agent/check/repair/review
+and application admission pass again; Delivery and original Stop still fail.
+Code inspection and an original-comparator regression identify a nested locked
+dependency reader whose whole-worker comparison rejects the publication holder's
+recorded renewal. That comparison now checks the same exact recorded rows before
+comparing every other SQL field. Failed producers also end productive renewal
+before the reducing recovery fence captures its row. Retryable original results
+retain their scope. Local regressions pass; installed validation remains open.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

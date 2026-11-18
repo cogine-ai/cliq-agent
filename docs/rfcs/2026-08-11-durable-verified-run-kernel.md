@@ -101,7 +101,8 @@ assuming the former sixteen reads remain on this connection path.
 An original publication holder renews its live worker during complete
 preparation and claim reads. Read comparisons may recognize only the exact
 rows returned by that holder's actual same-owner renewals, with unchanged
-non-lease fields and current SQL equal to the latest recorded row. Recovery
+non-lease fields and current SQL equal to the latest recorded row. This
+comparison includes the nested locked-dependency candidate reader. Recovery
 snapshots retain their actual rows. Revoking/checkpointing leaves this renewal
 equivalence. A failed producer ends its productive renewal scope before the
 recovery reader captures the exact row for its reducing fence. A retryable
