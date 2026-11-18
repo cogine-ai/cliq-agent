@@ -6,7 +6,7 @@ import { replayScannedResourceLines } from './installed-resource-wire.js';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess, type ChildProcessWithoutNullStreams, type SpawnSyncReturns } from 'node:child_process';
 import { createHash, randomBytes, X509Certificate } from 'node:crypto';
-import { constants, type BigIntStats } from 'node:fs';
+import { constants, lstatSync, statfsSync, type BigIntStats } from 'node:fs';
 import { chown, lstat, mkdir, open, readFile, readdir, readlink, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:https';
 import path from 'node:path';
@@ -79,7 +79,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledControlReadFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -820,9 +820,9 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         if (pr532) {
           assert.deepEqual(body.tools.map((entry: any) => entry.function.name), expectedToolNames);
           const ordinal = ++postCount;
-          assert(ordinal <= 5);
-          const edit = ordinal === 4;
-          if (ordinal >= 2 && ordinal <= 4) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
+          assert(ordinal <= 7);
+          const edit = ordinal === 4 || ordinal === 6;
+          if (ordinal >= 2 && ordinal <= 6) assert(body.messages.some((entry: any) => typeof entry.content === 'string' &&
             entry.content.includes('Verifier "node-tests" failed an assertion (exit 1)') &&
             entry.content.includes(JSON.stringify(PR532_CHECK)) && entry.content.includes('"lines":[')),
           'the model request must carry the original check failure locations');
@@ -831,9 +831,15 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
               type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
           }
-          if (edit) calls.push({ id: 'pr532-preview-edit', type: 'function', function: { name: 'edit', arguments: JSON.stringify({
-            path: PR532_FILE, old_text: readGitBlob(PR532_BASE, PR532_FILE).toString('utf8'),
-            new_text: readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } });
+          if (ordinal === 5) calls.push({ id: 'pr532-preview-after-edit-read', type: 'function',
+            function: { name: 'read', arguments: JSON.stringify({ path: PR532_FILE }) } });
+          if (edit) {
+            const original = readGitBlob(PR532_BASE, PR532_FILE).toString('utf8');
+            const intermediate = '// Controlled intermediate edit.\n' + original;
+            calls.push({ id: `pr532-preview-edit-${ordinal}`, type: 'function', function: { name: 'edit', arguments: JSON.stringify({
+              path: PR532_FILE, old_text: ordinal === 4 ? original : intermediate,
+              new_text: ordinal === 4 ? intermediate : readGitBlob(PR532_CHECK_SOURCE, PR532_FILE).toString('utf8') }) } });
+          }
           const response = Buffer.from(JSON.stringify({ id: 'pr532-preview-' + ordinal, object: 'chat.completion', model,
             choices: [{ index: 0, finish_reason: calls.length ? 'tool_calls' : 'stop', message: calls.length
               ? { role: 'assistant', content: '', tool_calls: calls }
@@ -1662,6 +1668,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         verifierObservation: value => { report.pr532VerifierObservation = value; },
         runtimeFailure: value => { report.pr532RuntimeFailure = value; },
         toolActivity: value => { report.pr532ToolActivity = value; },
+        controlRefusal: value => { report.pr532ControlRefusal = value; },
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); }, mark,
         progress: ({ snapshot: { run }, highWaterJournalSeq, highWaterItemSeq, journal }) => {
           report.pr532Progress = { runId: run.id, status: run.status, nextStep: run.nextStep, waitingReason: run.waitingReason,
@@ -1678,7 +1685,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           assert.equal(git('--no-optional-locks', 'status', '--porcelain=v1'), expected.equals(originalBytes) ? '' : ` M ${PR532_FILE}\n`);
         },
       });
-      assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 5 && acceptedTcp === 5 && acceptedTls === 5);
+      assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 7 && acceptedTcp === 7 && acceptedTls === 7);
       assert(!responderFailure);
       report.pr532Preview.realModelUsed = options.provider !== undefined;
       report.normalCliWorkflowComplete = true; report.protocolWorkflowComplete = true;
@@ -2847,6 +2854,14 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     report.qualified = true;
   } catch (error) { primary = error; }
   finally {
+    if (pr532 && primary) try {
+      const before = lstatSync(recipe.stateRoot, { bigint: true }), volume = statfsSync(recipe.stateRoot, { bigint: true });
+      const after = lstatSync(recipe.stateRoot, { bigint: true });
+      assert(before.isDirectory() && after.isDirectory() && before.dev === after.dev && before.ino === after.ino);
+      report.pr532FilesystemAtFailure = { diagnosticOnly: true, rootDevice: String(before.dev), rootInode: String(before.ino),
+        totalBytes: String(volume.blocks * volume.bsize), freeBytes: String(volume.bfree * volume.bsize),
+        availableBytes: String(volume.bavail * volume.bsize), freeInodes: String(volume.ffree) };
+    } catch { /* Optional capacity data supplies no quota, resource-join or completion proof. */ }
     const cleanup: unknown[] = [];
     try { await client?.close(); } catch (error) { cleanup.push(error); }
     try { await inspectionClient?.close(); } catch (error) { cleanup.push(error); }
@@ -3023,8 +3038,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 const timestamp = (value: number) => '@' + Math.floor(value / 1000) + '.' + String(value % 1000).padStart(3, '0');
                 const log = spawnSync('/usr/bin/journalctl', ['--no-pager', '--all', '--no-tail', '--output=json', '--boot=0',
                   mcpJourney
-                    ? '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:|CLIQ_MCP_ADMIN_LIFECYCLE_V1:)'
-                    : '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
+                    ? '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_CONTROL_READ_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:|CLIQ_MCP_ADMIN_LIFECYCLE_V1:)'
+                    : '--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_CONTROL_READ_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)',
                   `--since=${timestamp(storeFailureBinding.windowOpenedAt)}`, `--until=${timestamp(until)}`,
                   `_UID=${ledger.uid}`, `_PID=${storeFailureBinding.pid}`, '_TRANSPORT=stdout',
                   `_SYSTEMD_INVOCATION_ID=${storeFailureBinding.invocationId}`],
@@ -3040,6 +3055,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 const publicationFailure = readInstalledPublicationFailureJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                const controlReadFailure = readInstalledControlReadFailureJournal(text,
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                if (sameStoppedLifetime && controlReadFailure) report.controlReadFailure = { diagnosticOnly: true,
+                  source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true,
+                  originalInvocationBound: true, originalPidObservedAbsent: true, ...controlReadFailure };
                 if (sameStoppedLifetime && publicationFailure) report.publicationPreparationFailure = { diagnosticOnly: true,
                   source: 'actual_absent_original_supervisor_journal', preexistingProcessStartAndFullImageBound: true, originalInvocationBound: true,
                   originalPidObservedAbsent: true, ...publicationFailure };

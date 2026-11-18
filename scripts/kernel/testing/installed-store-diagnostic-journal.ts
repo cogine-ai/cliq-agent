@@ -208,6 +208,18 @@ export function readInstalledPublicationFailureJournal(text: string, expected: O
   return Object.freeze({ phase: fields[1]!, ...failure(fields[2]!, fields[3]!, fields[4]!, fields[5]!) });
 }
 
+/** First original query failure with its current driver phase. This tuple
+ * can survive abnormal exit and supplies diagnosis of that original query. */
+export function readInstalledControlReadFailureJournal(text: string, expected: OriginalJournalIdentity) {
+  const rows = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_CONTROL_READ_FAILURE'));
+  if (!rows.length) return;
+  need(rows.length === 1 && rows[0]!.length <= 255 && /^[\x20-\x7e]+$/u.test(rows[0]!));
+  const fields = rows[0]!.split(':');
+  need(fields.length === 6 && fields[0] === 'CLIQ_CONTROL_READ_FAILURE_V1' &&
+    (fields[1] === 'unavailable' || phases.has(fields[1]!)));
+  return Object.freeze({ driverPhase: fields[1]!, ...failure(fields[2]!, fields[3]!, fields[4]!, fields[5]!) });
+}
+
 /** First arrival of each fixed phase, not a Run attribution, latest phase,
  * completed task, original resource join or physical publication proof. The
  * caller independently binds the original live image/start and later PID

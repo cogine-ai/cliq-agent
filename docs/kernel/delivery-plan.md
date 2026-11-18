@@ -244,6 +244,38 @@ reservation. CNY 82 + 89 = 171 fits the authorized CNY 200 total. The original
 native cost guard permits fifteen full requests within this ceiling. The exact
 source/test context and fixed terminal tool diagnosis accompany that trial.
 
+The [fifth actual attempt](https://github.com/cogine-ai/cliq-agent/actions/runs/44363882618)
+at `77029946f3fc07d52ac759fa614deb273530500f` reaches five settled model
+requests and seven private native tools. Its last captured Run is queued at
+Journal 42/item28, with 3,963,625 consumed USD micros and zero reserved. The
+following `run.get` response is refused; its code was lost by the assertion.
+The refusal precedes the optional terminal tool-data collection. During cleanup,
+the original Supervisor exceeds Stop2 and systemd sends SIGKILL. Keeper and
+Secret Service join, while installed-writer join remains unproven. The outer
+fixture reports zero cleanup errors. The temporary secret was removed and
+absence verified. This attempt remains failed with full real qualification open.
+
+The free reproduction now performs seven fixed requests with two genuine
+private edits, a read between their distinct generations, both original
+two-file read batches, the original failed check and final repaired check,
+reconnect, review, exact application and complete scan. Its intermediate edit
+adds only a comment; the final edit uses that actual intermediate source.
+All seven requests/connections remain exact assertions. This reproduction
+has yet to execute.
+
+The diagnostic batch retains successful tool observations during normal bounded
+item polling, before any later query can fail. It adds no extra poll frame and
+retains each observation's actual cursor interval. Decoded refusal method/code
+are preserved separately. Store read failures publish only the existing closed
+error classification and the current driver phase; the test-owned image writes
+the first such tuple immediately. Its reader independently checks the original
+UID/PID/invocation and later PID absence. This carries diagnosis of that query.
+The fixture also samples actual StateRoot free bytes/inodes before cleanup,
+outside the Stop2 measurement, with its observed directory identity. These data
+provide neither native quota nor resource-join proof. Snapshot competition,
+expensive multi-generation work and fixture capacity remain hypotheses until
+the free reproduction distinguishes them.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

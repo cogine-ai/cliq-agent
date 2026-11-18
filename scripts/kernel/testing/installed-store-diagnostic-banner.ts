@@ -25,7 +25,7 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const classes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES)}), codes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES)});
   const prefix = 'CLIQ_STORE_DIAG_V1:';
   let applyFailures = 0, schedulerFailures = 0, authorizationFailures = 0, apply, scheduler, schedulerLast,
-    schedulerFailuresBeforeStop, authorization, stop, invalid = false, publicationFailureWritten = false;
+    schedulerFailuresBeforeStop, authorization, stop, invalid = false, publicationFailureWritten = false, controlFailureWritten = false;
   const count = value => Number.isSafeInteger(value) && value >= 0;
   const own = (value, keys) => {
     if (!value || typeof value !== 'object' || isProxy(value) || Array.isArray(value) ||
@@ -127,6 +127,11 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
       if (row.origin === 'publication_preparation' && row.phase.startsWith('publication_prepare') && !publicationFailureWritten) {
         publicationFailureWritten = true;
         try { write(2, 'CLIQ_PUBLICATION_FAILURE_V1:' + row.phase + ':' + (row.closing ? '1' : '0') + ':' +
+          row.errorClass + ':' + row.code + ':' + (row.sqliteCode === null ? '-' : row.sqliteCode) + '\\n'); } catch {}
+      }
+      if (row.origin === 'control_read' && !controlFailureWritten) {
+        controlFailureWritten = true;
+        try { write(2, 'CLIQ_CONTROL_READ_FAILURE_V1:' + row.phase + ':' + (row.closing ? '1' : '0') + ':' +
           row.errorClass + ':' + row.code + ':' + (row.sqliteCode === null ? '-' : row.sqliteCode) + '\\n'); } catch {}
       }
     } else if (kind.value === 'authorization_failure') {

@@ -4658,7 +4658,15 @@ export class StateStore {
       return Promise.reject(new KernelStorageError('LEASE_FENCED', 'StateStore is closing or closed'));
     // Register this complete query producer before its first await, retaining
     // StateOwner until a cancelled CAS stream has joined its original handles.
-    return this.ownInstalledAdmission(signal => readControl(this.driver, this.artifacts, this.owner, request, identity, signal));
+    return this.ownInstalledAdmission(async signal => {
+      const diagnostic = beginInstalledSchedulerDiagnostic('control_read');
+      try { return await readControl(this.driver, this.artifacts, this.owner, request, identity, signal); }
+      catch (error) {
+        diagnostic?.phase('runId' in request ? this.installedRunPhases.get(request.runId) : undefined);
+        diagnostic?.failure(error, this.closeRequested);
+        throw error;
+      }
+    });
   }
 
   getRun(runId: string): Run {

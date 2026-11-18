@@ -108,10 +108,14 @@ export async function runInstalledPr532Journey(input: {
   verifierObservation(value: Record<string, unknown>): void;
   runtimeFailure(value: Record<string, unknown>): void;
   toolActivity(value: Record<string, unknown>): void;
+  controlRefusal(value: Record<string, unknown>): void;
   mark(phase: string): void;
 }) {
   const read = async <M extends InstalledControlFeature>(request: InstalledControlRequestV1, method: M) => {
     const response = decodeInstalledControlResponse(await context.send(request, 30_000), request);
+    if (!response.ok) try {
+      context.controlRefusal({ diagnosticOnly: true, method, code: response.error.code, retryable: response.error.retryable });
+    } catch { /* Diagnosis cannot replace the original refusal. */ }
     assert(response.ok && response.result.method === method);
     return response.result as Result<M>;
   };
@@ -163,14 +167,30 @@ export async function runInstalledPr532Journey(input: {
     assert(response.type === 'response' && response.response.ok);
     return response.response.result as Result<M>;
   };
+  const describeToolActivity = async (cut: Result<'run.get'>) => {
+    const results = [];
+    for (const row of cut.items) {
+      const item = await retained(row.payloadRef) as ContinuationItem;
+      assert.equal(item.runId, cut.snapshot.run.id); assert.equal(item.itemId, row.itemId);
+      if (item.kind !== 'tool_result') continue;
+      const payload = await retained(item.resultRef) as ToolResultPayloadV1;
+      results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload) });
+    }
+    if (results.length) context.toolActivity({ diagnosticOnly: true,
+      afterItemSeq: cut.items[0]!.itemSeq - 1, throughItemSeq: cut.nextItemSeq,
+      highWaterItemSeq: cut.highWaterItemSeq, results });
+  };
   const finish = async (runId: string) => {
     const deadline = Date.now() + input.budgets.wallTimeMs;
-    let journalHighWater = 0;
+    let journalHighWater = 0, itemCursor = 0;
     for (;;) {
-      const cut = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 1,
+      const cut = await read({ protocolVersion: 1, method: 'run.get', runId, afterItemSeq: itemCursor, itemLimit: 8,
         afterJournalSeq: Math.max(0, journalHighWater - 6), journalLimit: 8, checkpointLimit: 1 }, 'run.get');
       journalHighWater = cut.highWaterJournalSeq;
+      itemCursor = cut.nextItemSeq;
       context.progress(cut);
+      try { await describeToolActivity(cut); }
+      catch { /* Keep the last observed tool batch if later diagnosis is unavailable. */ }
       const run = cut.snapshot.run;
       if (run.status === 'succeeded') {
         assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
@@ -188,18 +208,8 @@ export async function runInstalledPr532Journey(input: {
         } catch { /* Optional diagnosis preserves the original task failure. */ }
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
-        try {
-          const results = [];
-          for (const row of stopped.items) {
-            const item = await retained(row.payloadRef) as ContinuationItem;
-            assert.equal(item.runId, runId); assert.equal(item.itemId, row.itemId);
-            if (item.kind !== 'tool_result') continue;
-            const payload = await retained(item.resultRef) as ToolResultPayloadV1;
-            results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload) });
-          }
-          context.toolActivity({ diagnosticOnly: true, tailOnly: true,
-            throughItemSeq: stopped.highWaterItemSeq, results });
-        } catch { /* Missing result diagnosis preserves the original task failure. */ }
+        try { await describeToolActivity(stopped); }
+        catch { /* Missing result diagnosis preserves the original task failure. */ }
         try {
           const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);
           if (entry?.receiptRef) {

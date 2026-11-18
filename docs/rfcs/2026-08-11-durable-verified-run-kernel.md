@@ -92,9 +92,13 @@ native 1 MiB request bound still apply.
 The objective asks for an immediate first model turn with plain text and no
 tools or edits, then uses the genuine baseline failure for exploration/repair.
 Failure reports retain the original decoded Stop subtype and current budget
-counters. An optional tail projection of the last eight committed items keeps
-only declared tool names, outcomes and fixed failure codes, bound to the exact
-retained result. Raw arguments, source contents and model text remain withheld.
+counters. Optional batches of at most eight committed items keep only declared
+tool names, outcomes and fixed failure codes, bound to the exact retained result.
+Retain the latest observed batch before a later query refusal. Query diagnosis
+keeps the decoded method/code and the original fixed error classification with
+its observed current driver phase. An early bounded marker can survive abnormal
+exit, with the original process/invocation independently bound by its reader.
+Raw arguments, source contents and model text remain withheld.
 Missing historical diagnostics remain unknown. DeepSeek publishes
 its current context and pricing in its [official model table](https://api-docs.deepseek.com/quick_start/pricing/).
 

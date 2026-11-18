@@ -86,7 +86,7 @@ test('PR532 admission asks for the original check before exploration and retains
     },
     authorizeGitSource: async () => ({ sourceInspectionGrantId: 'inert-grant', ignoreReadGrantIds: [] }),
     send: unused, artifact: unused, retained: unused, reconnect: unused, verifyHost: unused,
-    progress: () => {}, dependencyFailure: () => {}, verifierObservation: () => {}, runtimeFailure: () => {}, toolActivity: () => {}, mark: () => {},
+    progress: () => {}, dependencyFailure: () => {}, verifierObservation: () => {}, runtimeFailure: () => {}, toolActivity: () => {}, controlRefusal: () => {}, mark: () => {},
   }), error => error === captured);
   assert.equal(calls, 1);
 });

@@ -8,7 +8,7 @@ import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import { runSnapshot, sessionSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { encodeControlCheckpointCursor } from '../../../src/kernel/control-wire.js';
 import { parseClientInvocation } from '../../../src/client/commands.js';
-import type { InstalledControlRequestV1 } from '../../../src/control/v1.js';
+import { decodeInstalledControlResponse, type InstalledControlRequestV1 } from '../../../src/control/v1.js';
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
 import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
@@ -124,6 +124,30 @@ test('the PR532 report retains the exact applied bytes and original review outpu
   assert.equal(report.reviewOutputUtf8, review.toString('utf8'));
 });
 
+test('the original PR532 reader preserves a closed refusal even when its diagnostic sink fails', async () => {
+  const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
+  let reader: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'read' &&
+        node.initializer?.getText(parsed).includes('decodeInstalledControlResponse')) reader = node.initializer;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(reader);
+  for (const sinkFails of [false, true]) {
+    const observed: unknown[] = [];
+    const context = vm.createContext({ assert, decodeInstalledControlResponse, context: {
+      send: async () => ({ protocolVersion: 1, ok: false, method: 'run.get', error: { schemaVersion: 1,
+        code: 'INTERNAL', retryable: false, messageCode: 'control.internal', errorId: '11111111-1111-4111-8111-111111111111' } }),
+      controlRefusal: (value: Record<string, unknown>) => { observed.push({ ...value }); if (sinkFails) throw new Error('sink failed'); }
+    } });
+    vm.runInContext(ts.transpileModule(`globalThis.read = ${reader.getText(parsed)};`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
+    await assert.rejects(context.read({ protocolVersion: 1, method: 'run.get', runId: 'inert' }, 'run.get'), { code: 'ERR_ASSERTION' });
+    assert.deepEqual(observed, [{ diagnosticOnly: true, method: 'run.get', code: 'INTERNAL', retryable: false }]);
+  }
+});
+
 test('the controlled PR532 model covers the existing compaction output and full request reservation', () => {
   const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
@@ -148,7 +172,7 @@ test('the controlled PR532 model covers the existing compaction output and full 
   }
 });
 
-test('the controlled PR532 journey reads both original files in two batches before its one repair', () => {
+test('the controlled PR532 journey reads across two original private edit generations before its final check', () => {
   const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
   let branch: ts.IfStatement | undefined;
@@ -167,9 +191,9 @@ test('the controlled PR532 journey reads both original files in two batches befo
     outgoing: { writeHead() {}, end(bytes: Buffer) { replies.push(JSON.parse(bytes.toString())); } } });
   vm.runInContext(ts.transpileModule(`globalThis.reply = () => { ${branch.getText(parsed)} };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
-  for (let index = 0; index < 5; index++) context.reply();
+  for (let index = 0; index < 7; index++) context.reply();
   assert.equal(replies[0].choices[0].finish_reason, 'stop');
-  assert.equal(replies[4].choices[0].finish_reason, 'stop');
+  assert.equal(replies[6].choices[0].finish_reason, 'stop');
   for (const reply of replies.slice(1, 3)) {
     const calls = reply.choices[0].message.tool_calls;
     assert.deepEqual(calls.map((call: any) => [call.function.name, JSON.parse(call.function.arguments).path]),
@@ -178,6 +202,14 @@ test('the controlled PR532 journey reads both original files in two batches befo
   }
   const edited = replies[3].choices[0].message.tool_calls;
   assert.equal(edited.length, 1); assert.equal(edited[0].function.name, 'edit');
+  const firstEdit = JSON.parse(edited[0].function.arguments);
+  assert.equal(firstEdit.old_text, 'inert-base');
+  assert.equal(firstEdit.new_text, '// Controlled intermediate edit.\ninert-base');
+  const afterEdit = replies[4].choices[0].message.tool_calls;
+  assert.equal(afterEdit.length, 1); assert.equal(afterEdit[0].function.name, 'read');
+  assert.equal(JSON.parse(afterEdit[0].function.arguments).path, 'original.ts');
+  const finalEdit = JSON.parse(replies[5].choices[0].message.tool_calls[0].function.arguments);
+  assert.equal(finalEdit.old_text, firstEdit.new_text); assert.equal(finalEdit.new_text, 'inert-reference');
   assert.throws(() => context.reply());
 });
 
@@ -192,19 +224,21 @@ test('PR532 observation stays within the original client frame budget through a 
   };
   visit(parsed); assert(finish);
   for (const late of [false, true]) {
-    let now = 0, frames = 1;
+    let now = 0, frames = 1, observations = 0;
     const wallTimeMs = 3_600_000;
     const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert,
       context: { progress() {} }, read: async () => {
         assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
         if (late) now = wallTimeMs + 1;
         return { snapshot: { run: { status: now >= wallTimeMs - 5000 ? 'succeeded' : 'running' } },
-          journal: [], highWaterJournalSeq: 0, highWaterItemSeq: 0 };
-      }, delay: async (milliseconds: number) => { now += milliseconds; } });
+          items: [], nextItemSeq: 0, journal: [], highWaterJournalSeq: 0, highWaterItemSeq: 0 };
+      }, describeToolActivity: async () => { observations++; throw new Error('optional data unavailable'); },
+      delay: async (milliseconds: number) => { now += milliseconds; } });
     vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
       { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
     if (late) await assert.rejects(context.finish('inert-run'), /preview observation deadline/);
     else { await context.finish('inert-run'); assert(frames < 1024); }
+    assert(observations > 0);
   }
 });
 

@@ -48,7 +48,7 @@ export const INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES = Object.freeze(['scheduled',
   'drive_prior_request', 'drive_prior_grant'] as const);
 const schedulerPhases: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES);
 export const INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS = Object.freeze(['drive', 'maintenance', 'maintenance_global', 'stop',
-  'publication_recovery', 'publication_preparation'] as const);
+  'publication_recovery', 'publication_preparation', 'control_read'] as const);
 type SchedulerOrigin = typeof INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS[number];
 const origins: ReadonlySet<string> = new Set(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS);
 export const INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES = Object.freeze(['ADMISSION_KEY_CONFLICT', 'REQUEST_ID_CONFLICT', 'ARTIFACT_MISMATCH', 'AGENT_HANDOFF_PENDING',

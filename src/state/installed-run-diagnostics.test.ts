@@ -17,14 +17,16 @@ test('builtin and original recovery phases reuse the same scheduler failure enve
     for (const name of ['message', 'cause', 'stack']) Object.defineProperty(error, name, {
       get() { accesses++; throw Error('must not read private error'); }
     });
-    const observer = beginInstalledSchedulerDiagnostic('drive'); assert(observer);
     const phases = [...BUILTIN_EXECUTION_PHASES, 'result_recovery_cut', 'result_recovery_preparation'];
-    for (const phase of phases) {
-      assert((INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES as readonly string[]).includes(phase));
-      observer.phase(phase); observer.failure(error, false);
+    for (const origin of ['drive', 'control_read'] as const) {
+      const observer = beginInstalledSchedulerDiagnostic(origin); assert(observer);
+      for (const phase of phases) {
+        assert((INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES as readonly string[]).includes(phase));
+        observer.phase(phase); observer.failure(error, false);
+      }
     }
-    assert.deepEqual(records, phases.map(phase => ({ kind: 'scheduler_failure', origin: 'drive', phase,
-      closing: false, errorClass: 'kernel', code: 'ARTIFACT_MISMATCH', sqliteCode: null })));
+    assert.deepEqual(records, ['drive', 'control_read'].flatMap(origin => phases.map(phase => ({ kind: 'scheduler_failure', origin, phase,
+      closing: false, errorClass: 'kernel', code: 'ARTIFACT_MISMATCH', sqliteCode: null }))));
     assert.equal(accesses, 0); assert(records.every(value => Object.isFrozen(value)));
   } finally { diagnostic.unsubscribe(receive); }
 });

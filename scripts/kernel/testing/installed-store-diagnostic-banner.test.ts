@@ -3,6 +3,28 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('the first fixed control-read failure survives actual child SIGKILL and validates fixed journal sender fields', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const { readInstalledControlReadFailureJournal } = await import('./installed-store-diagnostic-journal.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    const row={kind:'scheduler_failure',origin:'control_read',phase:'drive_worker_activate',closing:false,
+      errorClass:'kernel',code:'RECOVERY_REQUIRED',sqliteCode:null};
+    d.publish(row);d.publish({...row,phase:'drive_agent'});process.kill(process.pid,'SIGKILL');
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.error, undefined); assert.equal(child.signal, 'SIGKILL'); assert.equal(child.status, null);
+  const message = 'CLIQ_CONTROL_READ_FAILURE_V1:drive_worker_activate:0:kernel:RECOVERY_REQUIRED:-';
+  assert.equal(child.stderr, message + '\n');
+  const sender = { uid: 1000, pid: 2000, invocationId: 'a'.repeat(32) };
+  const journal = JSON.stringify({ _UID: '1000', _PID: '2000', _TRANSPORT: 'stdout',
+    _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE: message });
+  assert.deepEqual(readInstalledControlReadFailureJournal(journal, sender), { driverPhase: 'drive_worker_activate',
+    closing: false, errorClass: 'kernel', code: 'RECOVERY_REQUIRED', sqliteCode: null });
+  assert.throws(() => readInstalledControlReadFailureJournal(journal, { ...sender, pid: 2001 }));
+  assert.throws(() => readInstalledControlReadFailureJournal(journal + '\n' + journal, sender));
+  assert.throws(() => readInstalledControlReadFailureJournal(journal.replace('RECOVERY_REQUIRED', 'private'), sender));
+});
+
 test('received tool subphases round-trip through the original bounded failure summary and preserve the old label', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const { readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal,
