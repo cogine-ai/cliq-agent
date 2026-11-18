@@ -243,25 +243,27 @@ test('SQL connection provenance rejects forged and proxied inputs before any get
   } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('SQL issuer revocation cannot be suppressed by replacing a returned scope method', async () => {
+test('SQL issuer revocation survives replacement or freezing of the returned scope', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-sql-scope-revocation-'));
   const driver = openSqliteDriver(path.join(directory, 'state.sqlite'));
   let expired!: SqliteConnection;
   try {
-    driver.transaction(connection => {
-      expired = connection;
-      // No SQL/Run authority is manufactured: this is the genuine callback
-      // object. Its caller-visible method cannot own the private issuer Map.
-      Object.defineProperty(connection, 'deactivate', { value() {}, configurable: true });
-      assertSqliteConnectionOwnedBy(driver, connection);
-    });
-    assert.throws(() => assertSqliteConnectionOwnedBy(driver, expired), TypeError,
-      'the driver itself must revoke the issuer at the original scope boundary');
-    driver.transaction(connection => {
-      assertSqliteConnectionOwnedBy(driver, connection);
-      assert.throws(() => assertSqliteConnectionOwnedBy(driver, expired), TypeError);
-    });
-  } finally { driver.close(); await rm(directory, { recursive: true, force: true }); }
+    for (const mutation of ['replace', 'freeze']) {
+      driver.transaction(connection => {
+        expired = connection;
+        // The genuine callback object cannot control its private issuer Map.
+        if (mutation === 'freeze') Object.freeze(connection);
+        else Object.defineProperty(connection, 'deactivate', { value() {}, configurable: true });
+        assertSqliteConnectionOwnedBy(driver, connection);
+      });
+      assert.throws(() => assertSqliteConnectionOwnedBy(driver, expired), TypeError,
+        'the driver itself must revoke the issuer at the original scope boundary');
+      driver.transaction(connection => {
+        assertSqliteConnectionOwnedBy(driver, connection);
+        assert.throws(() => assertSqliteConnectionOwnedBy(driver, expired), TypeError);
+      });
+    }
+  } finally { try { driver.close(); } finally { await rm(directory, { recursive: true, force: true }); } }
 });
 
 test('publication resource friends keep their original brands and validate the issuer before resource SQL', async () => {

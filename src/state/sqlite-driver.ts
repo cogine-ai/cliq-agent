@@ -175,11 +175,13 @@ export function isRolledBackSqliteTransactionFailure(driver: SqliteDriver, error
   return error instanceof Error && rolledBackTransactionFailures.get(driver)?.has(error) === true;
 }
 
+type NativeSqliteFailureObserver = (error: unknown, method: keyof SqliteStatement | 'exec' | 'commit') => void;
+
 class NodeSqliteStatement implements SqliteStatement {
   constructor(
     private readonly statement: StatementSync,
     private readonly requireUsable: () => void = () => undefined,
-    private readonly onRunFailure?: (error: unknown) => void
+    private readonly onFailure?: NativeSqliteFailureObserver
   ) {
     statement.setReadBigInts(true);
   }
@@ -187,24 +189,28 @@ class NodeSqliteStatement implements SqliteStatement {
   run(...parameters: SqliteInputValue[]): SqliteRunResult {
     this.requireUsable();
     try { return this.statement.run(...parameters) as SqliteRunResult; }
-    catch (error) { this.onRunFailure?.(error); throw error; }
+    catch (error) { this.onFailure?.(error, 'run'); throw error; }
   }
 
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined {
     this.requireUsable();
-    return this.statement.get(...parameters) as Row | undefined;
+    try { return this.statement.get(...parameters) as Row | undefined; }
+    catch (error) { this.onFailure?.(error, 'get'); throw error; }
   }
 
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[] {
     this.requireUsable();
-    return this.statement.all(...parameters) as Row[];
+    try { return this.statement.all(...parameters) as Row[]; }
+    catch (error) { this.onFailure?.(error, 'all'); throw error; }
   }
   *iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row> {
     this.requireUsable();
-    for (const row of iterateNodeSqliteStatement(this.statement, ...parameters)) {
-      this.requireUsable(); yield row as Row;
-    }
-    this.requireUsable();
+    try {
+      for (const row of iterateNodeSqliteStatement(this.statement, ...parameters)) {
+        this.requireUsable(); yield row as Row;
+      }
+      this.requireUsable();
+    } catch (error) { this.onFailure?.(error, 'iterate'); throw error; }
   }
 }
 
@@ -325,32 +331,32 @@ function assertNoTransactionControl(sql: string, readOnly = false): void {
 }
 
 class TransactionScopedConnection implements SqliteConnection {
-  private active = true;
-
   constructor(private readonly database: DatabaseSync, private readonly readOnly = false,
-    private readonly onRunFailure?: (error: unknown) => void) {}
+    private readonly onFailure?: NativeSqliteFailureObserver) {}
 
   deactivate(): void {
-    this.active = false;
+    connectionIssuers.delete(this);
   }
 
   exec(sql: string): void {
     this.requireActive();
     assertNoTransactionControl(sql, this.readOnly);
-    this.database.exec(sql);
+    try { this.database.exec(sql); }
+    catch (error) { this.onFailure?.(error, 'exec'); throw error; }
   }
 
   prepare(sql: string): SqliteStatement {
     this.requireActive();
     assertNoTransactionControl(sql, this.readOnly);
     return new TransactionScopedStatement(
-      new NodeSqliteStatement(this.database.prepare(sql), undefined, this.onRunFailure),
+      new NodeSqliteStatement(this.database.prepare(sql), undefined, this.onFailure),
       this.requireActive
     );
   }
 
   private readonly requireActive = (): void => {
-    if (!this.active) {
+    if (!connectionIssuers.has(this) || this.database.isTransaction === false) {
+      this.deactivate();
       throw new Error('SQLite transaction scope is no longer active');
     }
   };
@@ -418,18 +424,26 @@ class NodeSqliteDriver implements SqliteDriver {
       throw error;
     }
     this.transactionActive = true;
-    let nativeFailure: Error | undefined;
-    const recordNativeFailure = (error: unknown) => {
+    let nativeFailure: Error | undefined, automaticRollback: Error | undefined;
+    const recordNativeFailure: NativeSqliteFailureObserver = (error, method) => {
+      if (automaticRollback) return;
       if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
-      nativeFailure = !readOnly && error instanceof Error &&
+      const nativeError = error instanceof Error &&
         Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ERR_SQLITE_ERROR' ? error : undefined;
+      // A genuine statement error can end its entire transaction (e.g.
+      // SQLITE_FULL). Only the original native state before COMMIT proves
+      // this rollback. A failed COMMIT may have an uncertain outcome.
+      if (nativeError && method !== 'commit' && this.database.isTransaction === false) {
+        automaticRollback = nativeError;
+        deactivateScope();
+      }
+      nativeFailure = !readOnly && nativeError &&
+        (automaticRollback || method === 'run' || method === 'commit') ? nativeError : undefined;
     };
     const scopedConnection = new TransactionScopedConnection(this.database, readOnly, recordNativeFailure);
     connectionIssuers.set(scopedConnection, { driver: this });
-    const deactivateScope = () => {
-      connectionIssuers.delete(scopedConnection);
-      scopedConnection.deactivate();
-    };
+    // Capture revocation before the callback can replace a scope method.
+    const deactivateScope = scopedConnection.deactivate.bind(scopedConnection);
     let primaryError: unknown, rolledBack = false;
     try {
       const result = operation(scopedConnection) as ReturnType<Operation>;
@@ -438,15 +452,16 @@ class NodeSqliteDriver implements SqliteDriver {
         observeRejectedThenable(result);
         throw new TypeError(`SQLite ${readOnly ? 'read snapshot' : 'transaction'} callback must be synchronous`);
       }
+      if (automaticRollback) throw automaticRollback;
       try { this.database.exec('COMMIT'); }
-      catch (error) { recordNativeFailure(error); throw error; }
+      catch (error) { recordNativeFailure(error, 'commit'); throw error; }
       return result;
     } catch (error) {
       primaryError = error;
       if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
       deactivateScope();
       try {
-        this.database.exec('ROLLBACK');
+        if (!automaticRollback || this.database.isTransaction !== false) this.database.exec('ROLLBACK');
         rolledBack = true;
       } catch (rollbackError) {
         this.poisoned = true;

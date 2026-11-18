@@ -305,7 +305,8 @@ requests. With the original 8192 serialized-output bound and the previously
 audited full input/cache components, fifteen potential requests reserve
 ceil(15 × USD0.330696 × CNY7.4/USD) = CNY37. Earlier four reservations remain
 CNY82, making CNY119 before a new job. Actual invoices remain unreconciled.
-This is a source-based documented-contract bound and awaits independent review.
+Independent Standards and Spec reviews support this source-based,
+documented-contract bound. The completed-job reserve is now CNY119.
 
 The private next-trial selector lowers its native ceiling to USD10, retaining
 its full CNY74 prospective reservation. CNY119 + 74 = 193 fits the authorized
@@ -313,6 +314,32 @@ CNY200. It permits twelve original full native reservations. The signed
 393216-output accounting, UNKNOWN charges, security and acceptance remain
 unchanged. This preparation starts no paid request and supplies no evidence
 that the fifth job's failure has been repaired. Free diagnosis is still running.
+
+The [failed-edit free case](https://github.com/cogine-ai/cliq-agent/actions/runs/44396982999)
+at `8e62d4d9166056e4c6b05621ed66b24f91f60d44` completes all seven model
+exchanges and the genuine failed/successful edit batch. It then reproduces
+`run.get / INTERNAL` and original Supervisor Stop2 SIGKILL. The last Run is
+queued for verification at Journal51/item35. The first query-failure marker
+records `drive_verifier_execution / other / none`. At failure, the original
+1GiB test volume has 70,463,488 free bytes but zero bytes available to the
+ordinary user. Keeper/Secret Service join; original writer join remains
+unproven. The failure report stays unqualified and no paid call is made.
+
+A real native SQLite regression now isolates one defect in milliseconds.
+`SQLITE_FULL` automatically ends and rolls back the original transaction. The
+driver's unconditional second `ROLLBACK` then rejects because no transaction is
+active, incorrectly poisoning the connection. The original driver reproduces
+this loss of readability and an additional caught-error scope escape. The fix
+uses the same native connection's transaction-state getter before COMMIT,
+preserves the original failure and invalidates expired statement scopes. A
+lost COMMIT acknowledgement and actual rollback failures still poison the
+uncertain connection. All58 driver regressions pass locally, including genuine
+FULL, caught automatic rollback, all three DML-RETURNING row methods and
+lost-COMMIT coverage. Pure-read failures retain their original ineligibility
+for mutation retry classification. This establishes the
+SQLite defect; the unchanged-capacity installed Linux read/Stop2 reproduction
+must still validate the repair. The fifth real job's identical cause remains
+unproven. [SQLite transaction-state contract](https://www.sqlite.org/c3ref/get_autocommit.html)
 
 ## Goal and baseline
 

@@ -77,6 +77,12 @@ filesystem regressions separately. The final real-model journey still requires
 the complete corpus scan and every original task, deadline and join assertion
 before PR delivery. Record failed free reports as unqualified.
 
+An actual native statement failure may automatically roll back its original
+SQLite transaction. The same connection's native transaction-state observation
+before COMMIT can establish that rollback and close the original statement
+scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
+the connection unusable. This supplies no invocation replay or refund authority.
+
 The full-project PR #532 experiment supplies an explicit sixty-minute wall
 budget to each admitted Run under the approved task-limit extension. Its
 hosted job is bounded to 135 minutes, covering the agent Run, application
