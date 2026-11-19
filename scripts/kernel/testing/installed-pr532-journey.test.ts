@@ -3,7 +3,7 @@ import test from 'node:test';
 import { runSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
-import type { ToolResultItem, ToolResultPayloadV1 } from '../../../src/kernel/types.js';
+import type { ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../../src/kernel/types.js';
 import { pr532StopDiagnostic, pr532ToolDiagnostic, pr532TaskObjective, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
 
 // Inert retained data projected through the original production decoder.
@@ -60,6 +60,33 @@ test('PR532 failure diagnosis preserves the closed context cause and original nu
   assert.deepEqual(pr532StopDiagnostic(run, contextStop), { diagnosticOnly: true, origin: 'runtime', reason: 'runtime_failed',
     runtimeSubtype: 'context_window_exhausted', nextPromptTokens: 25000, triggerThresholdTokens: 16384,
     hardPromptTokens: 24576, protectedTokens: 16000, sourceInputTokenCap: 8192 });
+});
+
+test('Bash diagnosis binds the original model result and retains only termination, duration and exit code', () => {
+  const model: ToolResultModelContentV1 = { schemaVersion: 1, format: 'cliq-tool-result-model-content-v1',
+    callId: 'inert-call', index: 0, toolName: 'bash', outcome: 'executed',
+    content: { tool: 'bash', terminationReason: 'exit', durationMs: 7, exitCode: 127,
+      stdout: { text: 'untrusted output' }, stderr: { text: 'untrusted failure' } }, contentDigest: '' };
+  model.contentDigest = digestOmitting(model, 'contentDigest');
+  const payload: ToolResultPayloadV1 = { schemaVersion: 1, format: 'cliq-tool-result-payload-v1', runId: run.id,
+    batchItemId: 'inert-batch', callId: model.callId, index: 0, toolName: 'bash', outcome: 'executed', source: 'invocation',
+    opId: 'inert-op', attempt: 0, journalResultRef: ref, journalResultDigest: ref,
+    modelContentRef: canonicalSha256(model), modelContentDigest: model.contentDigest, payloadDigest: '' };
+  payload.payloadDigest = digestOmitting(payload, 'payloadDigest');
+  const item: ToolResultItem = { schemaVersion: 1, kind: 'tool_result', itemId: 'inert-item', runId: run.id,
+    batchItemId: payload.batchItemId, callId: payload.callId, index: 0, outcome: 'executed',
+    resultRef: canonicalSha256(payload), createdAt: at };
+  assert.deepEqual(pr532ToolDiagnostic(item, payload, model),
+    { toolName: 'bash', outcome: 'executed', terminationReason: 'exit', durationMs: 7, exitCode: 127 });
+  assert.throws(() => pr532ToolDiagnostic(item, payload));
+  assert.throws(() => pr532ToolDiagnostic(item, payload, { ...model, callId: 'foreign' }));
+  for (const changed of [{ exitCode: 256 }, { terminationReason: 'untrusted text' }, { durationMs: -1 }]) {
+    const replacement = { ...model, content: { ...model.content as object, ...changed } };
+    replacement.contentDigest = digestOmitting(replacement, 'contentDigest');
+    const result = { ...payload, modelContentRef: canonicalSha256(replacement), modelContentDigest: replacement.contentDigest };
+    result.payloadDigest = digestOmitting(result, 'payloadDigest');
+    assert.throws(() => pr532ToolDiagnostic({ ...item, resultRef: canonicalSha256(result) }, result, replacement));
+  }
 });
 
 test('PR532 failure diagnosis distinguishes compaction and context-byte exhaustion', () => {

@@ -752,7 +752,9 @@ export class ContentAddressedStore {
     });
   }
 
-  async verify(ref: ArtifactRef, signal?: AbortSignal): Promise<ArtifactStat> {
+  async verify(ref: ArtifactRef, signal?: AbortSignal, retainBytesUpTo?: number): Promise<ArtifactStat & { bytes?: Buffer }> {
+    if (retainBytesUpTo !== undefined && (!Number.isSafeInteger(retainBytesUpTo) || retainBytesUpTo < 0))
+      throw new TypeError('artifact verification requires a nonnegative safe retention ceiling');
     // Recovery often knows only a ref. Its original checked open supplies the
     // exact length; large discard-only reads use the same joined reader as
     // verifyChunks, without a second open or a completed-result cache. The
@@ -766,8 +768,11 @@ export class ContentAddressedStore {
           signal?.throwIfAborted();
           const opened = await openPublishedFile(this.root, root, ref);
           try {
-            let result: ArtifactStat;
-            if (isMainThread && opened.info.size >= 8_388_608) {
+            let result: ArtifactStat & { bytes?: Buffer };
+            if (retainBytesUpTo !== undefined && opened.info.size <= retainBytesUpTo) {
+              const bytes = await readAndVerifyOpened(ref, opened, 1, signal, work);
+              result = { ref, byteLength: bytes.length, bytes };
+            } else if (isMainThread && opened.info.size >= 8_388_608) {
               await discardCasChunks({ file: opened, rootPath: this.root, rootInfo: root.info, ref, byteLength: opened.info.size },
                 signal, bytes => { if (work) noteInstalledAssemblyRead(work, bytes); });
               result = { ref, byteLength: opened.info.size };

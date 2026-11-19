@@ -83,14 +83,18 @@ before COMMIT can establish that rollback and close the original statement
 scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
 the connection unusable. This supplies no invocation replay or refund authority.
 
-One complete recovery projection may reuse its own fully verified JSON byte
-copies. The first read opens and verifies the real CAS object and joins its
+One complete recovery projection may reuse its own fully verified small-object
+byte copies for both existence verification and JSON decoding. The first read
+opens and verifies the real CAS object and joins its
 handles. Repeated uses receive independent copies and retain their full digest,
 canonical encoding and typed-decoder checks. The captured content reference
 identifies those immutable bytes. A separate projection, including a nested
 projection, starts with fresh reads. SQL snapshots, StateOwner, grants, current
-lease and native release checks keep their existing boundaries. Raw, bounded,
-stream and discard readers retain their original physical verification.
+lease and native release checks keep their existing boundaries. Explicit raw,
+bounded and stream reads retain their original physical verification. An
+existence-verification miss retains bytes only when the actual held size fits
+the remaining cache budget. Larger objects keep complete discard verification.
+Failed verification, cancellation or descriptor retirement supplies no copy.
 The data cache holds at most 16 MiB, 4096 objects and 1 MiB per object. Cache capacity
 selects the original complete read path for additional objects. These limits
 govern temporary reuse and preserve the supported artifact sizes. Callback exit

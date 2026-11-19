@@ -11,7 +11,7 @@ import { nodeTestArguments } from '../../../src/kernel/verifier.js';
 import { decodeRunResult, decodeVerificationClosure, decodeWorkspaceDiff } from '../../../src/state/result-artifacts.js';
 import { decodeSourceManifest } from '../../../src/state/decoders.js';
 import { decodeVerifierCommand, decodeVerificationReceipt, verifierReportedLocations } from '../../../src/state/verifier-artifacts.js';
-import type { ContinuationItem, Run, RunSpec, ToolResultItem, ToolResultPayloadV1 } from '../../../src/kernel/types.js';
+import type { ContinuationItem, Run, RunSpec, ToolResultItem, ToolResultPayloadV1, ToolResultModelContentV1 } from '../../../src/kernel/types.js';
 import { INSTALLED_TOOL_NAMES } from '../../../src/tools/installed-contracts.js';
 import { decodeAgentStop } from '../../../src/runtime/stop.js';
 import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
@@ -30,7 +30,7 @@ export const PR532_REGISTRY_ID = 'pr532-public-npm-registry';
 
 /** Fixed diagnostic data from the exact retained result. No arguments, file
  * contents, model text or execution authority enter this projection. */
-export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPayloadV1) {
+export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPayloadV1, model?: ToolResultModelContentV1) {
   assert.equal(item.schemaVersion, 1); assert.equal(payload.schemaVersion, 1);
   assert.equal(item.kind, 'tool_result');
   assert.equal(canonicalSha256(payload), item.resultRef);
@@ -40,6 +40,24 @@ export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPay
   const toolName = INSTALLED_TOOL_NAMES.find(name => name === payload.toolName);
   assert(toolName);
   assert(['executed', 'denied', 'error', 'batch_not_executed', 'cancelled'].includes(payload.outcome));
+  if (toolName === 'bash' && payload.outcome === 'executed') {
+    assert(model && model.schemaVersion === 1 && model.format === 'cliq-tool-result-model-content-v1');
+    assert.equal(canonicalSha256(model), payload.modelContentRef);
+    assert.equal(model.contentDigest, payload.modelContentDigest);
+    assert.equal(model.contentDigest, digestOmitting(model, 'contentDigest'));
+    for (const key of ['callId', 'index', 'toolName', 'outcome'] as const) assert.equal(model[key], payload[key]);
+    const content = model.content as Record<string, unknown>;
+    assert(content && typeof content === 'object' && !Array.isArray(content) && content.tool === 'bash');
+    const terminationReason = ['exit', 'signal', 'spawn_error', 'timeout', 'resource_failure', 'controller_stop']
+      .find(reason => reason === content.terminationReason);
+    assert(terminationReason);
+    const durationMs = content.durationMs;
+    assert(typeof durationMs === 'number' && Number.isSafeInteger(durationMs) && durationMs >= 0);
+    if (terminationReason !== 'exit') return { toolName, outcome: payload.outcome, terminationReason, durationMs };
+    const exitCode = content.exitCode;
+    assert(typeof exitCode === 'number' && Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 255);
+    return { toolName, outcome: payload.outcome, terminationReason, durationMs, exitCode };
+  }
   if (payload.outcome !== 'error') return { toolName, outcome: payload.outcome };
   const code = ['TOOL_NOT_FOUND', 'TOOL_INPUT_INVALID', 'TOOL_AUTHORITY_UNAVAILABLE',
     'TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED', 'TOOL_RESULT_UNAVAILABLE',
@@ -200,7 +218,9 @@ export async function runInstalledPr532Journey(input: {
       assert.equal(item.runId, cut.snapshot.run.id); assert.equal(item.itemId, row.itemId);
       if (item.kind !== 'tool_result') continue;
       const payload = await retained(item.resultRef) as ToolResultPayloadV1;
-      results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload) });
+      const model = payload.toolName === 'bash' && payload.outcome === 'executed'
+        ? await retained(payload.modelContentRef) as ToolResultModelContentV1 : undefined;
+      results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload, model) });
     }
     if (results.length) context.toolActivity({ diagnosticOnly: true,
       afterItemSeq: cut.items[0]!.itemSeq - 1, throughItemSeq: cut.nextItemSeq,

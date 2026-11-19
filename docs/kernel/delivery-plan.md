@@ -5,6 +5,27 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-19 current blocker.** The [next real task](https://github.com/cogine-ai/cliq-agent/actions/runs/44530594083)
+at `8b7f88439441a726390c8d06fba79fe7afe2644e` reaches nine model calls and
+thirteen private Bash operations before its original ninety-minute observer
+expires. It remains queued for the agent with no pre-stop scheduler failure.
+Budget remains available. Repaired verification, review and application are
+unverified. Both original services meet Stop2 and their actual writers, daemon
+and command pipes join. The owned temporary CI secret was deleted and absence
+verified. Its entire thirteen-call lifetime remains conservatively booked
+within CNY200. Actual billing remains unreconciled.
+
+A real SQLite/CAS regression isolates repeated graph verification. One recovery
+projection physically opens, verifies and closes the same immutable workspace
+object five times. Reuse the existing bounded traversal-owned byte cache for
+small-object existence verification as well as JSON decoding. Every use still
+hashes the complete owned bytes, first reads retain the original file/root
+checks and joins, and the next traversal reads the real object again. Large
+objects, explicit raw/stream readers and all live authority boundaries retain
+their original paths. The regression now observes one actual joined read.
+The changed runtime still requires a new complete free Linux journey. No
+further funded experiment or PR is authorized by this result.
+
 **2026-11-19 current qualification.** Fixed source
 `728616c968b9f067fcefeec43a2e31afe47cc113` passes the complete free
 [21-tool Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44494474360).

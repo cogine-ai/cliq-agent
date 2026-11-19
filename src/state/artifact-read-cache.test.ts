@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ArtifactCatalog, withArtifactReadCache } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
+import { ResourceRetirementError } from './errors.js';
 
 async function files(t: import('node:test').TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-read-cache-'));
@@ -99,6 +101,74 @@ test('a closed traversal cannot lend its cache to a deferred reader', async t =>
   assert.deepEqual(await artifacts.readCanonical(ref), { value: 'original' });
 });
 
+test('recovery verification retains bounded binary bytes, hashes each use and keeps later readers fresh', async t => {
+  const { root, cas, artifacts } = await files(t);
+  const bytes = Buffer.from([0xff, 0, 1, 2]);
+  const { ref } = await artifacts.publishBytes(bytes, 'application/octet-stream', 'inert-binary-data');
+  const verify = cas.verify.bind(cas);
+  let verifications = 0, returned: Buffer | undefined;
+  t.mock.method(cas, 'verify', async (...args: Parameters<typeof cas.verify>) => {
+    verifications++;
+    const result = await verify(...args); returned = result.bytes; return result;
+  });
+  await withArtifactReadCache(async () => {
+    await artifacts.verifyBytes(ref);
+    assert.deepEqual(returned, bytes);
+    returned!.fill(0);
+    await artifacts.verifyBytes(ref);
+    assert.equal(verifications, 1, 'the immutable copy must be independent of the verifier result buffer');
+    await assert.rejects(artifacts.readCanonical(ref), { code: 'ARTIFACT_MISMATCH' });
+    const abort = new AbortController(), reason = new Error('original verification cancelled');
+    const pending = artifacts.withReadSignal(abort.signal).verifyBytes(ref);
+    abort.abort(reason); await assert.rejects(pending, error => error === reason);
+  });
+  await artifacts.verifyBytes(ref);
+  assert.equal(verifications, 2, 'verification outside the projection must read the real object');
+  assert.equal(returned, undefined, 'ordinary discard verification retains no result buffer');
+  await chmod(path.join(root, ref), 0o600); await writeFile(path.join(root, ref), Buffer.from([0xfe, 0, 1, 2]));
+  await chmod(path.join(root, ref), 0o400);
+  await assert.rejects(withArtifactReadCache(() => artifacts.verifyBytes(ref)), /corrupt/u);
+});
+
+test('a failed original verification close cannot populate the recovery byte cache', async t => {
+  const { root, artifacts } = await files(t);
+  const { ref } = await artifacts.publishBytes(Buffer.from('original'), 'application/octet-stream', 'inert-binary-data');
+  const open = fs.open.bind(fs), failure = new Error('original descriptor close failed');
+  let opened = 0, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (args[0] === path.join(root, ref)) {
+      opened++;
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => {
+        await close(); closed++;
+        if (closed === 1) throw failure;
+      });
+    }
+    return handle;
+  });
+  await withArtifactReadCache(async () => {
+    await assert.rejects(artifacts.verifyBytes(ref), error => error instanceof ResourceRetirementError && error.cause === failure);
+    await artifacts.verifyBytes(ref);
+    assert.equal(opened, 2, 'failed retirement must force a new complete actual read');
+    assert.equal(closed, opened);
+    await artifacts.verifyBytes(ref); assert.equal(opened, 2);
+  });
+});
+
+test('large verification inputs retain the complete discard path inside a recovery traversal', async t => {
+  const { cas, artifacts } = await files(t);
+  const { ref } = await artifacts.publishBytes(Buffer.alloc(1024 * 1024 + 1, 0x81), 'application/octet-stream', 'inert-binary-data');
+  const verify = cas.verify.bind(cas);
+  let verifications = 0;
+  t.mock.method(cas, 'verify', async (...args: Parameters<typeof cas.verify>) => {
+    verifications++;
+    const result = await verify(...args); assert.equal(result.bytes, undefined); return result;
+  });
+  await withArtifactReadCache(async () => { await artifacts.verifyBytes(ref); await artifacts.verifyBytes(ref); });
+  assert.equal(verifications, 2);
+});
+
 test('large JSON objects keep full reads and their original accepted size', async t => {
   const { cas, artifacts } = await files(t);
   const value = { text: 'x'.repeat(1024 * 1024) };
@@ -112,23 +182,31 @@ test('large JSON objects keep full reads and their original accepted size', asyn
   assert.equal(reads, 2);
 });
 
-test('one recovery traversal reads its repeated immutable workspace data once and the next traversal is fresh', async t => {
-  // Real SQLite/CAS and the existing offline authority fixture. This performs
-  // no provider or tool I/O and supplies no installed/native qualification.
-  const fixture = await createAgentFixture('recovery-immutable-read-cache');
+test('recovery existence checks and decoders share one complete original workspace-object read per traversal', async t => {
+  // Real SQLite/CAS with the existing offline fixture. No installed/native
+  // execution authority or provider qualification is produced.
+  const fixture = await createAgentFixture('recovery-verified-workspace-bytes');
   try {
     const initial = await fixture.store.readRecoveryClosure(fixture.runId);
     const ref = initial.latestCheckpoint.workspaceStateRef;
-    const read = ArtifactCatalog.prototype.readBytes;
-    let reads = 0;
-    t.mock.method(ArtifactCatalog.prototype, 'readBytes', async function (this: ArtifactCatalog, value: string) {
-      if (value === ref) reads++;
-      return read.call(this, value);
+    const open = fs.open.bind(fs);
+    let opened = 0, closed = 0;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (String(args[0]).endsWith(path.sep + ref)) {
+        opened++;
+        const close = handle.close.bind(handle);
+        t.mock.method(handle, 'close', async () => { await close(); closed++; });
+      }
+      return handle;
     });
     const first = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(first.latestCheckpoint.workspaceStateRef, ref);
-    assert.equal(reads, 1, 'recursive consumers must reuse the same verified immutable bytes within one traversal');
+    t.diagnostic(`original workspace-object reads ${opened}, joined ${closed}`);
+    assert.equal(opened, 1, 'one immutable graph traversal must share fully verified bytes across existence and decoding checks');
+    assert.equal(closed, opened);
     await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.equal(reads, 2, 'a separate traversal must fully read the original object again');
+    assert.equal(opened, 2, 'the next recovery cut must read the actual CAS object again');
+    assert.equal(closed, opened);
   } finally { await disposeFixture(fixture); }
 });

@@ -88,7 +88,7 @@ function assertJoined(identities: Array<{ dev: number; ino: number }>): void {
   }
 }
 
-for (const mode of ['read', 'verify', 'chunks'] as const) for (const closeFails of [false, true])
+for (const mode of ['read', 'verify', 'verify_retained', 'chunks'] as const) for (const closeFails of [false, true])
   test(`subscribed ${mode} preserves actual returned-read cancellation, joined descriptors and close priority (${closeFails})`, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-work-abort-'));
     const cas = new ContentAddressedStore(root), bytes = Buffer.alloc(ARTIFACT_CHUNK_BYTES + 5, 0x63), ref = await cas.publish(bytes);
@@ -112,6 +112,7 @@ for (const mode of ['read', 'verify', 'chunks'] as const) for (const closeFails 
       await assert.rejects(async () => {
         if (mode === 'read') await cas.read(ref, owner.signal);
         else if (mode === 'verify') await cas.verify(ref, owner.signal);
+        else if (mode === 'verify_retained') await cas.verify(ref, owner.signal, bytes.length);
         else for await (const _part of cas.readChunks(ref, bytes.length, owner.signal)) { /* Full original reader. */ }
       }, error => closeFails ? error instanceof ResourceRetirementError && error.cause === closeFailure : error === original);
       assert.equal(reads, 1); assertJoined(identities);

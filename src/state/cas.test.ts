@@ -37,6 +37,30 @@ test('publish makes immutable bytes readable by their raw SHA-256 ref', async ()
   }
 });
 
+test('optional verification retention uses the original complete read and joins before returning bounded bytes', async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-retain-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const root = path.join(home, 'objects'); await mkdir(root, { mode: 0o700 });
+  const store = new ContentAddressedStore(root), bytes = Buffer.from('original verified bytes');
+  const ref = await store.publish(bytes), open = fs.open.bind(fs);
+  let opened = 0, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args); opened++;
+    const close = handle.close.bind(handle);
+    t.mock.method(handle, 'close', async () => { await close(); closed++; }); return handle;
+  });
+  assert.deepEqual(await store.verify(ref, undefined, bytes.length), { ref, byteLength: bytes.length, bytes });
+  assert.equal(opened, 2); assert.equal(closed, opened);
+  assert.deepEqual(await store.verify(ref, undefined, bytes.length - 1), { ref, byteLength: bytes.length });
+  assert.equal(opened, 4); assert.equal(closed, opened);
+  for (const limit of [-1, NaN, Infinity, 0.5]) await assert.rejects(store.verify(ref, undefined, limit), TypeError);
+  assert.equal(opened, 4, 'invalid limits must be refused before opening any descriptor');
+  await chmod(path.join(root, ref), 0o600); await writeFile(path.join(root, ref), Buffer.alloc(bytes.length));
+  await chmod(path.join(root, ref), 0o400);
+  await assert.rejects(store.verify(ref, undefined, bytes.length), /corrupt/u);
+  assert.equal(opened, 6); assert.equal(closed, opened);
+});
+
 test('a fixed four-object publication preserves all four durable namespace boundaries and joins its real descriptors', async t => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-'));
   const root = path.join(home, 'objects');

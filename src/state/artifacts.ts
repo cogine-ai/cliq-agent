@@ -20,9 +20,9 @@ const MAX_READ_CACHE_BYTES = 16 * 1024 * 1024;
 const MAX_READ_CACHE_ENTRIES = 4096;
 const MAX_READ_CACHE_OBJECT_BYTES = 1024 * 1024;
 
-/** One immutable graph traversal owns these verified JSON byte copies.
+/** One immutable graph traversal owns these verified byte copies.
  * A later traversal starts fresh. Every consumer still hashes and decodes its
- * own copy; binary, stream and discard verification keep their original I/O. */
+ * own copy. Explicit raw, bounded and stream reads keep their original I/O. */
 export async function withArtifactReadCache<T>(read: () => Promise<T>): Promise<T> {
   const cache: ArtifactReadCache = { objects: new Map(), bytes: 0, entries: 0, closed: false };
   try { return await artifactReadCache.run(cache, read); }
@@ -116,7 +116,7 @@ export class ArtifactCatalog {
   /** Independent read-only histories may overlap, but their nested catalog
    * groups must not multiply the four-reader bound. Each callback uses this
    * serial view for all nested reads and awaits them before returning. Scoped
-   * JSON byte copies share only the current traversal's lifetime. Each use
+   * Byte copies share only the current traversal's lifetime. Each use
    * retains its original digest and decoder validation. */
   async mapReadGroups<T, Result>(values: readonly T[], read: (artifacts: ArtifactCatalog, value: T, index: number) => Promise<Result>): Promise<Result[]> {
     const serial = new ArtifactCatalog(this.cas, this.readSignal, this.trustedReleases, this.runtimeConversionTarget);
@@ -241,12 +241,19 @@ export class ArtifactCatalog {
     return Buffer.concat(chunks, verified.byteLength);
   }
 
-  /** Complete original-byte verification without retaining an object buffer. */
+  /** A recovery traversal can verify its own complete immutable byte copy.
+   * On a miss, retain only a bounded small object after the actual CAS reader
+   * has verified every byte and joined both descriptors. Large objects and
+   * readers outside a traversal keep the original discard-only path. */
   async verifyBytes(ref: ArtifactRef): Promise<void> {
-    assertArtifactRef(ref);
-    this.readSignal?.throwIfAborted();
-    await this.cas.verify(ref, this.readSignal);
-    this.readSignal?.throwIfAborted();
+    assertArtifactRef(ref); this.assertReadActive();
+    if (await this.cachedReadBytes(ref) !== undefined) return;
+    const cache = artifactReadCache.getStore();
+    const limit = cache && cache.entries < MAX_READ_CACHE_ENTRIES
+      ? Math.min(MAX_READ_CACHE_OBJECT_BYTES, MAX_READ_CACHE_BYTES - cache.bytes) : undefined;
+    const verified = await this.cas.verify(ref, this.readSignal, limit);
+    this.assertReadActive();
+    if (verified.bytes !== undefined) this.retainReadBytes(ref, verified.bytes);
   }
 
   /** Discard-only equivalent of exhausting readChunks at this exact size. */
@@ -256,14 +263,32 @@ export class ArtifactCatalog {
     this.assertReadActive();
   }
 
-  async readCanonical<T>(ref: ArtifactRef): Promise<T> {
-    assertArtifactRef(ref); this.assertReadActive();
-    const cache = artifactReadCache.getStore(), objects = cache?.objects.get(this.cas);
-    const retained = objects?.get(ref);
+  private async cachedReadBytes(ref: ArtifactRef): Promise<Buffer | undefined> {
+    const retained = artifactReadCache.getStore()?.objects.get(this.cas)?.get(ref);
     // Cached copies retain the event-loop turn formerly supplied by real I/O,
     // so cancellation, worker maintenance and control requests can progress.
-    if (retained !== undefined) { await setImmediate(); this.assertReadActive(); }
-    const bytes = retained === undefined ? await this.readBytes(ref) : Buffer.from(retained);
+    if (retained === undefined) return undefined;
+    await setImmediate(); this.assertReadActive();
+    const bytes = Buffer.from(retained);
+    if (sha256Bytes(bytes) !== ref) {
+      throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
+    }
+    return bytes;
+  }
+
+  private retainReadBytes(ref: ArtifactRef, bytes: Buffer): void {
+    const cache = artifactReadCache.getStore();
+    if (cache && !cache.objects.get(this.cas)?.has(ref) && bytes.byteLength <= MAX_READ_CACHE_OBJECT_BYTES &&
+        cache.entries < MAX_READ_CACHE_ENTRIES && cache.bytes + bytes.byteLength <= MAX_READ_CACHE_BYTES) {
+      const entries = cache.objects.get(this.cas) ?? new Map<ArtifactRef, Buffer>();
+      entries.set(ref, Buffer.from(bytes)); cache.objects.set(this.cas, entries);
+      cache.entries++; cache.bytes += bytes.byteLength;
+    }
+  }
+
+  async readCanonical<T>(ref: ArtifactRef): Promise<T> {
+    assertArtifactRef(ref); this.assertReadActive();
+    const bytes = await this.cachedReadBytes(ref) ?? await this.readBytes(ref);
     this.assertReadActive();
     if (sha256Bytes(bytes) !== ref) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
@@ -276,12 +301,7 @@ export class ArtifactCatalog {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} is not JSON`);
     }
     this.assertReadActive();
-    if (cache && !cache.objects.get(this.cas)?.has(ref) && bytes.byteLength <= MAX_READ_CACHE_OBJECT_BYTES &&
-        cache.entries < MAX_READ_CACHE_ENTRIES && cache.bytes + bytes.byteLength <= MAX_READ_CACHE_BYTES) {
-      const entries = cache.objects.get(this.cas) ?? new Map<ArtifactRef, Buffer>();
-      entries.set(ref, Buffer.from(bytes)); cache.objects.set(this.cas, entries);
-      cache.entries++; cache.bytes += bytes.byteLength;
-    }
+    this.retainReadBytes(ref, bytes);
     return value;
   }
 
