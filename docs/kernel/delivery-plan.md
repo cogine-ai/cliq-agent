@@ -26,6 +26,16 @@ their original paths. The regression now observes one actual joined read.
 The changed runtime still requires a new complete free Linux journey. No
 funded qualification or PR follows from this result.
 
+The preceding free fixture contained21 private read/edit calls and no Bash.
+Retain all21 and add the real failure's thirteen consecutive Bash retirements.
+Each signed Node invocation reads and rewrites the existing target with the
+same bytes, then returns a fixed marker. The next actual model request must
+contain all thirteen genuine zero-exit results before the original final edit.
+The free-only tool budget becomes37 for34 private calls, one dependency claim
+and both original checks. Seven original exchanges, every original assertion,
+the90-minute Run deadline, READY5, Stop2, HTTP30 and full corpus/join checks
+remain required. Host command-data tests supply no native execution proof.
+
 The same dedicated CNY account and official peak tariff give a uniform
 source-based financial bound for the eight previous lifetimes. Keep their
 independently audited request maxima of15,4,10,4,15,12,12,13, including the

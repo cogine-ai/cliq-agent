@@ -833,14 +833,36 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             assert.equal(failures.length, 1);
             assert.equal(failures[0].content, JSON.stringify({ code: 'TOOL_EXECUTION_FAILED' }));
           }
+          if (ordinal >= 6) report.pr532ControlledBash = Array.from({ length: 13 }, (_, index) => {
+            const results = body.messages.filter((entry: any) => entry.role === 'tool' &&
+              entry.tool_call_id === `pr532-preview-bash-${index}`);
+            assert.equal(results.length, 1);
+            const result = parseJsonStrict(results[0].content) as Record<string, any>;
+            assert.equal(result.tool, 'bash'); assert.equal(result.terminationReason, 'exit'); assert.equal(result.exitCode, 0);
+            assert.equal(result.stdout.text, 'CLIQ_PR532_NODE_WRITE_OK\n');
+            assert(Number.isSafeInteger(result.durationMs) && result.durationMs >= 0);
+            return { callId: `pr532-preview-bash-${index}`, durationMs: result.durationMs, exitCode: 0 };
+          });
           const calls: Record<string, unknown>[] = [];
           if (ordinal === 2 || ordinal === 3) {
             calls.push(...Array.from({ length: 8 }, (_, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
               type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: index % 2 ? PR532_CHECK : PR532_FILE }) } })));
           }
-          if (ordinal === 5) calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({
-            id: `pr532-preview-after-edit-read-${index}`, type: 'function',
-            function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
+          if (ordinal === 5) {
+            calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({
+              id: `pr532-preview-after-edit-read-${index}`, type: 'function',
+              function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
+            // Keep all original reads/edits and replay the thirteen Bash
+            // retirements observed in the stalled real task. The signed Node
+            // reads and rewrites the actual existing target without changing
+            // its bytes. Every invocation must independently succeed and join.
+            const program = ['const fs = require("node:fs");', `const filename = ${JSON.stringify(PR532_FILE)};`,
+              'const bytes = fs.readFileSync(filename);', 'fs.writeFileSync(filename, bytes);',
+              'process.stdout.write("CLIQ_PR532_NODE_WRITE_OK\\n");'].join(' ');
+            const command = "/usr/bin/node --no-addons -e '" + program.replaceAll("'", "'\\''") + "'";
+            calls.push(...Array.from({ length: 13 }, (_, index) => ({ id: `pr532-preview-bash-${index}`,
+              type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } })));
+          }
           if (edit) {
             const original = readGitBlob(PR532_BASE, PR532_FILE).toString('utf8');
             const intermediate = '// Controlled intermediate edit.\n' + original;
@@ -1676,7 +1698,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         ...(options.provider ? { modelRequestCostMicros: calculateModelCostMicros(
           options.provider.definition.requestTokenCeiling, options.provider.definition.prices) } : {}),
         budgets: options.provider?.budgets ?? { wallTimeMs: PR532_RUN_WALL_TIME_MS, modelTokens: 20_000_000, costMicros: 5_000_000,
-          toolCalls: 24, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
+          toolCalls: 37, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
         command: argv => dailyCommand(argv, argv[0] === 'run' ? 90_000 : 30_000),
         send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
@@ -1702,7 +1724,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         },
       });
       assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 7 && acceptedTcp === 7 && acceptedTls === 7);
-      if (!options.provider) assert.equal(report.pr532Preview.toolCalls, 24);
+      if (!options.provider) assert.equal(report.pr532Preview.toolCalls, 37);
       assert(!responderFailure);
       report.pr532Preview.realModelUsed = options.provider !== undefined;
       report.normalCliWorkflowComplete = true; report.protocolWorkflowComplete = true;

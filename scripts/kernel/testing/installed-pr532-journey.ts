@@ -19,6 +19,7 @@ import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
 import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
 import { decodeDependencyProcessCapture } from '../../../src/state/dependency-capture.js';
 import { PR532_POLL_INTERVAL_MS } from './provider-journey-input.js';
+import { readInstalledTerminalCut } from './installed-provider-journey.js';
 
 export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
 export const PR532_CHECK_SOURCE = '961658fcf80116b6ef13e39cf39d901276a48c3c';
@@ -240,7 +241,7 @@ export async function runInstalledPr532Journey(input: {
       const run = cut.snapshot.run;
       if (run.status === 'succeeded') {
         assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
-        return read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100 }, 'run.get');
+        return readInstalledTerminalCut(runId, request => read(request, 'run.get'));
       }
       const dependencyFailed = cut.journal.some(row => row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
       if (dependencyFailed || (run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {

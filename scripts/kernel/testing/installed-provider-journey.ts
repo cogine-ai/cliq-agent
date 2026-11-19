@@ -93,6 +93,37 @@ type Journey = { kind: 'control'; input: InstalledProviderJourneyInput; context:
   { kind: 'daily'; input: InstalledDailyProviderJourneyInput; context: InstalledDailyProviderJourneyContext };
 const same = (a: unknown, b: unknown) => check(canonicalJsonBytes(a).equals(canonicalJsonBytes(b)));
 
+/** Collect the existing immutable terminal projection through its original
+ * bounded pages. This data reader opens no connection or execution owner. */
+export async function readInstalledTerminalCut(runId: string,
+  read: (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => Promise<Cut>): Promise<Cut> {
+  const first = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100, checkpointLimit: 100 });
+  check(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(first.snapshot.run.status));
+  const items = [...first.items], journal = [...first.journal], checkpoints = [...first.checkpoints];
+  let page = first, pages = 1;
+  while (page.nextItemSeq < first.highWaterItemSeq || page.nextJournalSeq < first.highWaterJournalSeq || page.nextCheckpointCursor !== first.highWaterCheckpointCursor) {
+    check(++pages <= 1000 && items.length + journal.length + checkpoints.length <= 10_000);
+    const next = await read({ protocolVersion: 1, method: 'run.get', runId, afterItemSeq: page.nextItemSeq, afterJournalSeq: page.nextJournalSeq,
+      // A full item/Journal frame may not have reached checkpoints yet.
+      // Only an actually issued next cursor advances that stream.
+      ...(page.nextCheckpointCursor === undefined ? {} : { checkpointCursor: page.nextCheckpointCursor }),
+      itemLimit: 100, journalLimit: 100, checkpointLimit: 100 });
+    same(next.snapshot, first.snapshot); same([next.highWaterItemSeq, next.highWaterJournalSeq, next.highWaterCheckpointCursor ?? null],
+      [first.highWaterItemSeq, first.highWaterJournalSeq, first.highWaterCheckpointCursor ?? null]);
+    check(next.nextItemSeq > page.nextItemSeq || next.nextJournalSeq > page.nextJournalSeq ||
+      next.nextCheckpointCursor !== page.nextCheckpointCursor);
+    items.push(...next.items); journal.push(...next.journal); checkpoints.push(...next.checkpoints); page = next;
+  }
+  check(items.length + journal.length + checkpoints.length <= 10_000);
+  check(items.length === first.highWaterItemSeq && journal.length === first.highWaterJournalSeq);
+  items.forEach((row, index) => check(row.itemSeq === index + 1)); journal.forEach((row, index) => check(row.seq === index + 1));
+  check(new Set(items.map(item => item.itemId)).size === items.length && new Set(checkpoints.map(item => item.id)).size === checkpoints.length);
+  check(checkpoints.some(row => row.id === first.snapshot.run.latestCheckpointId));
+  const { nextCheckpointCursor: _firstNext, ...captured } = first;
+  return { ...captured, items, journal, checkpoints, nextItemSeq: page.nextItemSeq, nextJournalSeq: page.nextJournalSeq,
+    ...(page.nextCheckpointCursor === undefined ? {} : { nextCheckpointCursor: page.nextCheckpointCursor }) };
+}
+
 /** Run only after the owner has installed and registered the actual package,
  * endpoint, safe credential and Workspace Trust. A test protocol implementation
  * can exercise these decisions, but can never turn this report into provider,
@@ -213,33 +244,7 @@ async function runProviderJourney(journey: Journey) {
         await delay(Math.min(5000, Math.max(250, 2 * (observed - reading))));
       }
     }
-    async function fullCut(runId: string): Promise<Cut> {
-      const first = await send({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100, checkpointLimit: 100 }, 'run.get');
-      check(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(first.snapshot.run.status));
-      const items = [...first.items], journal = [...first.journal], checkpoints = [...first.checkpoints];
-      let page = first, pages = 1;
-      while (page.nextItemSeq < first.highWaterItemSeq || page.nextJournalSeq < first.highWaterJournalSeq || page.nextCheckpointCursor !== first.highWaterCheckpointCursor) {
-        check(++pages <= 1000 && items.length + journal.length + checkpoints.length <= 10_000);
-        const next = await send({ protocolVersion: 1, method: 'run.get', runId, afterItemSeq: page.nextItemSeq, afterJournalSeq: page.nextJournalSeq,
-          // A full item/Journal frame may not have reached checkpoints yet.
-          // Only an actually issued next cursor advances that stream.
-          ...(page.nextCheckpointCursor === undefined ? {} : { checkpointCursor: page.nextCheckpointCursor }),
-          itemLimit: 100, journalLimit: 100, checkpointLimit: 100 }, 'run.get');
-        same(next.snapshot, first.snapshot); same([next.highWaterItemSeq, next.highWaterJournalSeq, next.highWaterCheckpointCursor ?? null],
-          [first.highWaterItemSeq, first.highWaterJournalSeq, first.highWaterCheckpointCursor ?? null]);
-        check(next.nextItemSeq > page.nextItemSeq || next.nextJournalSeq > page.nextJournalSeq ||
-          next.nextCheckpointCursor !== page.nextCheckpointCursor);
-        items.push(...next.items); journal.push(...next.journal); checkpoints.push(...next.checkpoints); page = next;
-      }
-      check(items.length + journal.length + checkpoints.length <= 10_000);
-      check(items.length === first.highWaterItemSeq && journal.length === first.highWaterJournalSeq);
-      items.forEach((row, index) => check(row.itemSeq === index + 1)); journal.forEach((row, index) => check(row.seq === index + 1));
-      check(new Set(items.map(item => item.itemId)).size === items.length && new Set(checkpoints.map(item => item.id)).size === checkpoints.length);
-      check(checkpoints.some(row => row.id === first.snapshot.run.latestCheckpointId));
-      const { nextCheckpointCursor: _firstNext, ...captured } = first;
-      return { ...captured, items, journal, checkpoints, nextItemSeq: page.nextItemSeq, nextJournalSeq: page.nextJournalSeq,
-        ...(page.nextCheckpointCursor === undefined ? {} : { nextCheckpointCursor: page.nextCheckpointCursor }) };
-    }
+    const fullCut = (runId: string) => readInstalledTerminalCut(runId, request => send(request, 'run.get'));
     async function accounting(cut: Cut, verifiedRepairs = 0) {
       same(cut.snapshot.run.budgetReserved, ZERO);
       const consumed = { ...ZERO, repairAttempts: verifiedRepairs }, settlements = new Map<string, string>();

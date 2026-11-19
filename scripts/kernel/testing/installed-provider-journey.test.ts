@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import os from 'node:os';
+import path from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { canonicalSha256 } from '../../../src/kernel/canonical.js';
@@ -11,11 +14,12 @@ import { parseClientInvocation } from '../../../src/client/commands.js';
 import { decodeInstalledControlResponse, type InstalledControlRequestV1 } from '../../../src/control/v1.js';
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
 import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
-  type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
+  readInstalledTerminalCut, type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
 import { PR532_POLL_INTERVAL_MS, PR532_RUN_WALL_TIME_MS } from './provider-journey-input.js';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
 
-// Powerless public-protocol data only. These cases do not create an installed
-// client, accepted Run, grant, process, model request or native death evidence.
+// Public-protocol data and a fixed command-data check with an owned local
+// child/file. Installed authority and physical retirement require Linux.
 const input: InstalledProviderJourneyInput = {
   workspacePath: '/owned/workspace', model: { provider: 'openai-compatible', model: 'inert-wire-model',
     endpoint: { kind: 'registered', endpointRegistrationId: 'inert-endpoint' }, modelCredentialGrantIds: ['inert-credential'] },
@@ -184,8 +188,8 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   };
   visit(parsed); assert(branch);
   const replies: any[] = [], observed = new Set<string>();
-  const context = vm.createContext({ assert, Buffer, JSON, pr532: true, postCount: 0, model: 'inert-model', expectedToolNames: ['read', 'edit'],
-    body: { tools: ['read', 'edit'].map(name => ({ function: { name } })), messages: [{ content:
+  const context = vm.createContext({ assert, Buffer, JSON, parseJsonStrict, report: {}, pr532: true, postCount: 0, model: 'inert-model', expectedToolNames: ['read', 'edit', 'bash'],
+    body: { tools: ['read', 'edit', 'bash'].map(name => ({ function: { name } })), messages: [{ content:
       'Verifier "node-tests" failed an assertion (exit 1) "original.test.ts" "lines":[1]' }] },
     PR532_FILE: 'original.ts', PR532_CHECK: 'original.test.ts', PR532_BASE: 'inert-base', PR532_CHECK_SOURCE: 'inert-reference',
     readGitBlob: (commit: string) => Buffer.from(commit), scanBytes: () => {},
@@ -195,6 +199,9 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   for (let index = 0; index < 7; index++) {
     if (index === 4) context.body.messages.push({ role: 'tool', tool_call_id: 'pr532-preview-rejected-edit',
       content: JSON.stringify({ code: 'TOOL_EXECUTION_FAILED' }) });
+    if (index === 5) for (let call = 0; call < 13; call++) context.body.messages.push({ role: 'tool',
+      tool_call_id: `pr532-preview-bash-${call}`, content: JSON.stringify({ tool: 'bash', terminationReason: 'exit', exitCode: 0, durationMs: 1,
+        stdout: { text: 'CLIQ_PR532_NODE_WRITE_OK\n' } }) });
     context.reply();
   }
   assert.equal(replies[0].choices[0].finish_reason, 'stop');
@@ -215,14 +222,44 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   assert.equal(firstEdit.old_text, 'inert-base');
   assert.equal(firstEdit.new_text, '// Controlled intermediate edit.\ninert-base');
   const afterEdit = replies[4].choices[0].message.tool_calls;
-  assert.equal(afterEdit.length, 2); assert(afterEdit.every((call: any) => call.function.name === 'read'));
+  assert.equal(afterEdit.length, 15); assert(afterEdit.slice(0, 2).every((call: any) => call.function.name === 'read'));
   assert.equal(JSON.parse(afterEdit[0].function.arguments).path, 'original.ts');
   assert.equal(JSON.parse(afterEdit[1].function.arguments).path, 'original.test.ts');
+  const bash = afterEdit.slice(2);
+  assert.equal(bash.length, 13);
+  assert.equal(context.report.pr532ControlledBash.length, 13);
+  assert(context.report.pr532ControlledBash.every((value: any) => value.durationMs === 1 && value.exitCode === 0));
+  for (const [index, call] of bash.entries()) {
+    assert.equal(call.id, `pr532-preview-bash-${index}`); assert.equal(call.function.name, 'bash');
+    assert(!observed.has(call.id)); observed.add(call.id);
+    assert.equal(JSON.parse(call.function.arguments).command, JSON.parse(bash[0].function.arguments).command);
+  }
+  // Command-data regression using the host Node and an owned file. The actual
+  // signed /usr/bin/node, private workspace and retirement require Linux.
+  const command = JSON.parse(bash[0].function.arguments).command as string;
+  const prefix = '/usr/bin/node'; assert(command.startsWith(prefix + ' --no-addons -e '));
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'cliq-bash-command-'));
+  try {
+    const bytes = Buffer.from([0xef, 0xbb, 0xbf, 0xff, 0, 10]); writeFileSync(path.join(directory, 'original.ts'), bytes);
+    const hostNode = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
+    const executed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', hostNode + command.slice(prefix.length)],
+      { cwd: directory, timeout: 5000, encoding: 'utf8' });
+    assert.equal(executed.status, 0); assert.equal(executed.stderr, '');
+    assert.equal(executed.stdout, 'CLIQ_PR532_NODE_WRITE_OK\n');
+    assert.deepEqual(readFileSync(path.join(directory, 'original.ts')), bytes);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
   const finalEdit = JSON.parse(replies[5].choices[0].message.tool_calls[0].function.arguments);
   assert.equal(finalEdit.old_text, firstEdit.new_text); assert.equal(finalEdit.new_text, 'inert-reference');
   assert.throws(() => context.reply());
+  const original = context.body.messages.find((entry: any) => entry.tool_call_id === 'pr532-preview-bash-0');
+  const content = original.content;
+  for (const changed of [{ exitCode: 127 }, { terminationReason: 'controller_stop' }, { stdout: { text: 'untrusted output' } }]) {
+    context.postCount = 5; original.content = JSON.stringify({ ...JSON.parse(content), ...changed });
+    assert.throws(() => context.reply());
+  }
+  original.content = content;
   context.postCount = 4;
-  context.body.messages.pop();
+  context.body.messages = context.body.messages.filter((entry: any) => entry.tool_call_id !== 'pr532-preview-rejected-edit');
   assert.throws(() => context.reply());
 });
 
@@ -240,17 +277,26 @@ test('PR532 observation stays within the original client frame budget through a 
     let now = 0, frames = 1, observations = 0;
     const wallTimeMs = PR532_RUN_WALL_TIME_MS;
     const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert, PR532_POLL_INTERVAL_MS,
-      context: { progress() {} }, read: async () => {
+      readInstalledTerminalCut,
+      context: { progress() {} }, read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
         assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
         if (late) now = wallTimeMs + 1;
-        return { snapshot: { run: { status: now >= wallTimeMs - PR532_POLL_INTERVAL_MS ? 'succeeded' : 'running' } },
-          items: [], nextItemSeq: 0, journal: [], highWaterJournalSeq: 0, highWaterItemSeq: 0 };
+        const after = request.afterJournalSeq ?? 0;
+        const journal = Array.from({ length: Math.min(request.journalLimit ?? 100, 132 - after) }, (_, index) => ({ seq: after + index + 1 }));
+        return { snapshot: { run: { status: now >= wallTimeMs - PR532_POLL_INTERVAL_MS ? 'succeeded' : 'running',
+          latestCheckpointId: 'inert-checkpoint' } }, items: [], nextItemSeq: 0, journal, nextJournalSeq: after + journal.length,
+          highWaterJournalSeq: 132, highWaterItemSeq: 0, checkpoints: request.checkpointCursor ? [] : [{ id: 'inert-checkpoint' }],
+          highWaterCheckpointCursor: 'inert-checkpoint-cursor', nextCheckpointCursor: 'inert-checkpoint-cursor' };
       }, describeToolActivity: async () => { observations++; throw new Error('optional data unavailable'); },
       delay: async (milliseconds: number) => { now += milliseconds; } });
     vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
       { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
     if (late) await assert.rejects(context.finish('inert-run'), /preview observation deadline/);
-    else { await context.finish('inert-run'); assert(frames < 1024); }
+    else {
+      const terminal = await context.finish('inert-run');
+      assert.equal(terminal.journal.length, 132); assert.equal(terminal.nextJournalSeq, 132);
+      assert(frames < 1024);
+    }
     assert(observations > 0);
   }
 });
