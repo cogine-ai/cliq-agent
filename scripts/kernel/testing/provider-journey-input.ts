@@ -25,12 +25,13 @@ export function decodeProviderJourneyConfiguration(value: unknown): ProviderJour
   assert.deepEqual(definition.target, { hostAscii: 'api.deepseek.com', port: 443, basePath: '/' });
   assert.equal(definition.tls.serverNameAscii, 'api.deepseek.com');
   assert.equal(definition.claims.nativeToolCalling, true); assert.equal(definition.claims.trustedUsageEvidence, false);
-  // This experiment reserves the published whole-request context and output
-  // maxima at the non-discount price, including cache as an independent upper
-  // component. Input estimates and returned usage never reduce that reserve.
+  // Reserve the full provider input/cache bounds and every admitted output cap
+  // at peak prices. The signed 8192-output catalog and serialized max_tokens
+  // bound this recipe's output. Estimates and returned usage supply no refund.
   assert(definition.prices.input >= 300000 && definition.prices.output >= 1200000 && definition.prices.cacheRead >= 6000);
   assert.equal(definition.prices.cacheWrite, 0);
-  assert(definition.requestTokenCeiling.inputTokens >= 1048576 && definition.requestTokenCeiling.outputTokens >= 393216 &&
+  assert(definition.requestTokenCeiling.inputTokens >= 1048576 &&
+    definition.requestTokenCeiling.outputTokens >= Math.max(8192, definition.claims.maxOutputTokens) &&
     definition.requestTokenCeiling.cacheReadTokens >= 1048576);
   const budget = input.budgets;
   assert(budget && exactKeys(budget, ['wallTimeMs', 'modelTokens', 'costMicros', 'toolCalls', 'repairAttempts', 'childDepth', 'childConcurrency']));

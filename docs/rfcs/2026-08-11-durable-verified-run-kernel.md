@@ -118,6 +118,20 @@ finite token and USD cost budgets must fit the owner's approved CNY 200 total,
 including prior unresolved reservations. Record each trial's ceilings and
 reconciliation in the delivery plan. Full-request pricing ceilings and the
 native 1 MiB request bound still apply.
+The PR #532 recipe's signed catalog admits at most8192 output tokens, including
+its Run-compaction summary. Every original normal/compaction wire request
+serializes that admitted cap as `max_tokens`. Its price table therefore selects
+an8192-output ceiling, with the full1048576 input and independent cache-read
+ceilings. Assembly, reservation and reproduced wire-body checks reject an
+output cap above the signed bound before release. At the selected peak prices,
+each released or UNKNOWN request consumes its complete330696-USD-micro
+reservation. Current-run usage supplies no budget refund. The experiment's
+USD4.30 Run ceiling permits at most13 such full charges. The delivery plan
+accounts for its full lifetime within the approved cumulative CNY200 total.
+The task presents the original source/check as repository data, then gives the
+model its affordable full-call count and coherent-edit/check guidance. These
+are advisory prompt facts. The original kernel budget and verifier decisions
+continue to enforce the Run.
 The objective asks for an immediate first model turn with plain text and no
 tools or edits, then uses the genuine baseline failure for exploration/repair.
 Failure reports retain the original decoded Stop subtype and current budget

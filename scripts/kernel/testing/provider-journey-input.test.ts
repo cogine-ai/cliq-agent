@@ -16,7 +16,7 @@ const selection = {
     tls: { serverNameAscii: 'api.deepseek.com', spkiSha256Pins: ['a'.repeat(64)] },
     claims: { nativeToolCalling: true, streaming: false, trustedUsageEvidence: false, contextLimitTokens: 32768, maxOutputTokens: 8192 },
     prices: { input: 300000, output: 1200000, cacheRead: 6000, cacheWrite: 0 },
-    requestTokenCeiling: { inputTokens: 1048576, outputTokens: 393216, cacheReadTokens: 1048576, cacheWriteTokens: 0 },
+    requestTokenCeiling: { inputTokens: 1048576, outputTokens: 8192, cacheReadTokens: 1048576, cacheWriteTokens: 0 },
     validFrom: '2026-10-30T00:00:00.000Z', validThrough: '2026-10-31T00:00:00.000Z' },
   budgets: { wallTimeMs: 300000, modelTokens: 20000000, costMicros: 5000000, toolCalls: 100,
     repairAttempts: 2, childDepth: 0, childConcurrency: 1 }
@@ -30,7 +30,8 @@ test('explicit provider selection preserves the complete conservative ceiling an
     { ...selection, definition: { ...selection.definition, model: 'different-model' } },
     { ...selection, definition: { ...selection.definition, target: { ...selection.definition.target, hostAscii: 'other.example' } } },
     { ...selection, definition: { ...selection.definition, prices: { ...selection.definition.prices, input: 150000 } } },
-    { ...selection, definition: { ...selection.definition, requestTokenCeiling: { ...selection.definition.requestTokenCeiling, outputTokens: 8192 } } },
+    { ...selection, definition: { ...selection.definition, requestTokenCeiling: { ...selection.definition.requestTokenCeiling, outputTokens: 8191 } } },
+    { ...selection, definition: { ...selection.definition, claims: { ...selection.definition.claims, maxOutputTokens: 8193 } } },
     { ...selection, definition: { ...selection.definition, claims: { ...selection.definition.claims, trustedUsageEvidence: true } } },
     { ...selection, budgets: { ...selection.budgets, costMicros: 0 } },
     { ...selection, budgets: { ...selection.budgets, costMicros: Infinity } },

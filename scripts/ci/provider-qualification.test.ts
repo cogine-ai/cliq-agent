@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { providerSelection, runProviderProcess } from './provider-qualification.js';
 import { PR532_POLL_INTERVAL_MS } from '../kernel/testing/provider-journey-input.js';
+import { buildModelRequestWire, type ModelVisiblePromptV1 } from '../../src/model/request.js';
+import { calculateModelCostMicros } from '../../src/model/pricing.js';
 
 // Real subprocess/pipe tests with inert bytes. No StateOwner, credential
 // enrollment, installed identity, provider request or native proof is created.
@@ -28,8 +30,51 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
   assert.equal(pr532.budgets.wallTimeMs, 90 * 60_000);
   assert.equal(pr532.budgets.wallTimeMs / PR532_POLL_INTERVAL_MS, 720);
-  assert.equal(pr532.budgets.costMicros, 10_000_000);
+  assert.equal(pr532.budgets.costMicros, 4_300_000);
+  assert.equal(pr532.definition.requestTokenCeiling.outputTokens, 8192);
   assert.equal(pr532.budgets.modelTokens, 32_000_000);
+});
+
+test('the fixed provider ceiling covers every admitted output cap and the exact serialized request', () => {
+  // Pure public selection, wire bytes and price arithmetic. No installed
+  // identity, request preparation, native claim or provider call is created.
+  const { definition } = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
+  const { claims, requestTokenCeiling: ceiling } = definition;
+  const summaryCap = Math.min(8192, Math.floor(claims.contextLimitTokens / 8));
+  assert.equal(ceiling.outputTokens, Math.max(claims.maxOutputTokens, summaryCap));
+  const prompt: ModelVisiblePromptV1 = { format: 'cliq-model-visible-prompt-v1',
+    messages: [{ role: 'user', contentUtf8: 'inert request data' }], tools: [],
+    responseContract: { mode: 'text-only', toolCallsAllowed: false } };
+  for (const output of [claims.maxOutputTokens, summaryCap]) {
+    const wire = buildModelRequestWire({ provider: definition.provider, model: definition.model,
+      streaming: claims.streaming, contextLimitTokens: claims.contextLimitTokens }, prompt, output, 'text-only');
+    assert.equal(JSON.parse(wire.bodyBytes.toString('utf8')).max_tokens, ceiling.outputTokens);
+  }
+  assert.equal(ceiling.inputTokens, 1048576);
+  assert.equal(ceiling.cacheReadTokens, 1048576);
+  assert.equal(calculateModelCostMicros(ceiling, definition.prices), 330696);
+  const { budgets } = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
+  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 13);
+});
+
+test('the source-bounded CNY-account booking covers the next complete native lifetime within the approved total', () => {
+  // External conservative bookkeeping, under the separately authenticated CNY
+  // account observation and published peak tariffs. This creates no billing,
+  // price-table, native budget or refund authority and uses no usage telemetry.
+  const input = providerSelection(new Date('2026-11-19T00:00:00.000Z'), true);
+  const ceiling = input.definition.requestTokenCeiling;
+  const usdMicros = calculateModelCostMicros(ceiling, input.definition.prices);
+  const cnyMicros = calculateModelCostMicros(ceiling,
+    { input: 2_000_000, output: 8_000_000, cacheRead: 40_000, cacheWrite: 0 });
+  assert.equal(cnyMicros, 2_204_632);
+  const firstFour = Number((33n * 330_696n * 74n + 9_999_999n) / 10_000_000n);
+  const fifth = 37;
+  const sixthAndSeventh = Number((24n * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
+  const nextCalls = Math.floor(input.budgets.costMicros / usdMicros);
+  const next = Number((BigInt(nextCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
+  assert.deepEqual({ firstFour, fifth, sixthAndSeventh, nextCalls, next },
+    { firstFour: 81, fifth: 37, sixthAndSeventh: 53, nextCalls: 13, next: 29 });
+  assert.equal(firstFour + fifth + sixthAndSeventh + next, 200);
 });
 
 test('private bytes arrive once after the complete marker and EOF, with no inherited credential environment', async () => {

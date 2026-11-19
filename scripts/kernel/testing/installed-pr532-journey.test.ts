@@ -1,16 +1,35 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { runSnapshot, ref, at } from '../../../src/client/testing/protocol.js';
-import { canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { ToolResultItem, ToolResultPayloadV1 } from '../../../src/kernel/types.js';
-import { pr532StopDiagnostic, pr532ToolDiagnostic, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
+import { pr532StopDiagnostic, pr532ToolDiagnostic, pr532TaskObjective, runInstalledPr532Journey, PR532_FILE, PR532_CHECK } from './installed-pr532-journey.js';
 
 // Inert retained data projected through the original production decoder.
 const run = runSnapshot().run;
 const contextStop = { schemaVersion: 1, runId: run.id, createdAt: at, origin: 'runtime', targetStatus: 'failed',
   reason: 'runtime_failed', runtimeSubtype: 'context_window_exhausted', contextManifestRef: ref,
   nextPromptTokens: 25000, triggerThresholdTokens: 16384, hardPromptTokens: 24576, protectedTokens: 16000, sourceInputTokenCap: 8192 };
+
+test('the original task preserves complete source/check data and puts affordable-call and candidate-check guidance after it', () => {
+  const originalBytes = Buffer.from('inert unfixed source'), testBytes = Buffer.from('inert original check');
+  const input = { originalBytes, testBytes, modelRequestCostMicros: 330696,
+    budgets: { wallTimeMs: 5400000, costMicros: 4300000, modelTokens: 32000000, toolCalls: 100,
+      repairAttempts: 2, childDepth: 0, childConcurrency: 1 } };
+  const objective = pr532TaskObjective(input);
+  const files = [{ path: PR532_FILE, bytes: originalBytes }, { path: PR532_CHECK, bytes: testBytes }]
+    .map(({ path, bytes }) => ({ path, sha256: sha256Bytes(bytes), contentUtf8: bytes.toString('utf8') }));
+  const source = canonicalJsonBytes({ files }).toString('utf8');
+  assert(objective.includes(source));
+  assert(objective.indexOf('Finish the first model turn immediately with plain text, no tool calls and no edits') > objective.indexOf(source));
+  assert(objective.indexOf('at most 13 fully charged model calls') > objective.indexOf(source));
+  assert(objective.indexOf('one coherent patch') > objective.indexOf(source));
+  assert(objective.endsWith('Use its actual diagnostics for any further repair.'));
+  const controlled = pr532TaskObjective({ originalBytes, testBytes, budgets: input.budgets });
+  assert(controlled.includes(source)); assert(!controlled.includes('fully charged model calls'));
+  assert(controlled.endsWith('Use its actual diagnostics for any further repair.'));
+});
 
 test('PR532 result diagnosis retains only a bound tool name, outcome and fixed failure code', () => {
   const payload: ToolResultPayloadV1 = { schemaVersion: 1, format: 'cliq-tool-result-payload-v1', runId: run.id,
@@ -74,7 +93,9 @@ test('PR532 admission asks for the original check before exploration and retains
       calls++;
       assert.equal(args[0], 'run');
       assert(args[1]!.includes('first model turn immediately with plain text, no tool calls and no edits'));
-      const context = JSON.parse(args[1]!.split('\nOriginal repository files:\n')[1]!);
+      const sourceSection = args[1]!.split('\nOriginal repository files:\n')[1]!;
+      const originalFiles = sourceSection.split('\nEnd of original repository files.\n')[0]!;
+      const context = JSON.parse(originalFiles);
       assert.deepEqual(context, { files: [
         { path: PR532_FILE, sha256: sha256Bytes(originalBytes), contentUtf8: originalBytes.toString('utf8') },
         { path: PR532_CHECK, sha256: sha256Bytes(testBytes), contentUtf8: testBytes.toString('utf8') },

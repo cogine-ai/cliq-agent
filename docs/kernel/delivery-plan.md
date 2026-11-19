@@ -5,6 +5,48 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-19 current qualification.** Fixed source
+`728616c968b9f067fcefeec43a2e31afe47cc113` passes the complete free
+[21-tool Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44494474360).
+Seven model exchanges and24 charged tools cover both original checks, actual
+repair, reconnect, reviewed one-file application, original Stop2 and complete
+writer/daemon joins. All142 Linux private checks pass. The complete corpus
+covers4768 files, both databases and actual client data. All189 streams close
+with zero matches, limit violations or retained secret/tail bytes. Checking and
+repair take about67 minutes and application49 minutes. Latency remains poor.
+
+The [same-source real task](https://github.com/cogine-ai/cliq-agent/actions/runs/44513620296)
+completes12 model calls and20 private tools. Its latest retained batch contains
+three executed edit results, then reaches the genuine `budget_exhausted` stop. Its original USD10
+ceiling cannot fund another792725-micro reservation. Zero scheduler failures
+precede Stop. Both services meet Stop2, all writers/daemon and the original
+process/pipes join, and the matching owned CI secret is removed. The repaired
+check, result review, application and complete corpus remain unqualified.
+
+The next coherent candidate aligns the price ceiling with the existing signed
+8192-output catalog and actual normal/compaction `max_tokens`. Complete input
+and cache ceilings stay1048576 each. Peak-price reservation is330696 USD micros
+per released/UNKNOWN request. The selected USD4.30 cap funds at most13 full
+charges. The model receives that advisory limit after the complete original
+files, followed by coherent-edit and configured-check guidance. Original
+failure/pass, reconnect, review, exact application, READY5, Stop2, HTTP30 and
+complete-corpus assertions apply to the next free and real journeys.
+
+External booking now uses the separately CA/hostname/original-SPKI-authenticated
+read-only `/user/balance` observation of a CNY account and the official peak
+CNY tariff,2 input/0.04 cache-read/8 output per million tokens. Input/cache
+1048576 and output8192 give an upward-rounded2204632 CNY micros per potential
+request. The first four previously audited lifetimes total33 requests. Their
+original USD330696-micro bound and7.4/USD booking aggregate to CNY81. Keep the
+fifth job's original CNY37. The sixth/seventh entire USD10 native lifetimes allow
+12 requests each, aggregating to CNY53 at the authenticated account's peak CNY
+tariff. Completed-job conservative booking is CNY171. The next entire13-call
+lifetime reserves CNY29, totaling the approved CNY200. This uses full source
+bounds, including unobserved releases. Actual invoice reconciliation remains
+open. These accounting observations supply no native authority or Run refund.
+[Balance contract](https://api-docs.deepseek.com/api/get-user-balance/),
+[official CNY tariff](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/).
+
 The [first retained free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44196702356)
 at `972b5956a1fb084316cce454176a1c00e885659b` reaches the original failed
 assertion, repair, passing original check, single-file result review and actual

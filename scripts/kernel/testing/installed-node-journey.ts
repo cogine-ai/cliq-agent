@@ -89,6 +89,7 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 import { PR532_BASE, PR532_CHECK_SOURCE, PR532_FILE, PR532_CHECK, PR532_REGISTRY, PR532_REGISTRY_BASE, PR532_REGISTRY_ID,
   readPr532PublisherInputs, runInstalledPr532Journey } from './installed-pr532-journey.js';
 import { PR532_RUN_WALL_TIME_MS } from './provider-journey-input.js';
+import { calculateModelCostMicros } from '../../../src/model/pricing.js';
 
 type Recipe = { buildFixture: string; packageRoot: string; installerEntry: string; stateRoot: string; releaseKeysFile: string;
   controlDirectory: string; observer: string; storeFixture: string; publicationObserver: string; workspace: string; reportFile: string };
@@ -1672,6 +1673,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         return { sourceInspectionGrantId, ignoreReadGrantIds };
       };
       report.pr532Preview = await runInstalledPr532Journey({ workspace, sessionId: session.id, alias: dailyAlias, originalBytes, testBytes, lockBytes,
+        ...(options.provider ? { modelRequestCostMicros: calculateModelCostMicros(
+          options.provider.definition.requestTokenCeiling, options.provider.definition.prices) } : {}),
         budgets: options.provider?.budgets ?? { wallTimeMs: PR532_RUN_WALL_TIME_MS, modelTokens: 20_000_000, costMicros: 5_000_000,
           toolCalls: 24, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
         command: argv => dailyCommand(argv, argv[0] === 'run' ? 90_000 : 30_000),

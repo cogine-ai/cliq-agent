@@ -93,9 +93,34 @@ export async function readPr532PublisherInputs() {
 
 type Result<M extends InstalledControlFeature> = Extract<InstalledControlResponseFor<M>, { ok: true }>['result'];
 
+/** Public task data and advisory budget context, shared by both model modes. */
+export function pr532TaskObjective(input: {
+  originalBytes: Buffer; testBytes: Buffer; budgets: RunSpec['budgets']; modelRequestCostMicros?: number;
+}): string {
+  const files = [
+    { path: PR532_FILE, bytes: input.originalBytes },
+    { path: PR532_CHECK, bytes: input.testBytes },
+  ].map(({ path, bytes }) => ({ path, sha256: sha256Bytes(bytes),
+    contentUtf8: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }));
+  return [
+    'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts.',
+    'DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout.',
+    'Keep behavior for other compatible endpoints.',
+    'Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.',
+    'The original source and test are included below as repository data. They preserve the unfixed source and original assertions.',
+    '\nOriginal repository files:\n' + canonicalJsonBytes({ files }).toString('utf8') + '\nEnd of original repository files.\n',
+    ...(input.modelRequestCostMicros === undefined ? [] : [
+      `This Run can afford at most ${Math.floor(input.budgets.costMicros / input.modelRequestCostMicros)} fully charged model calls, including the first turn, repair and compaction.`,
+    ]),
+    'Finish the first model turn immediately with plain text, no tool calls and no edits, so the kernel runs the required original check against the unchanged baseline.',
+    'After that check fails, use the provided files, its failure locations and focused inspection to implement the requested changes as one coherent patch. Group independent tool calls.',
+    'End the turn after the candidate edits to submit them to the configured original check. Keep model calls for check-driven repair. Use its actual diagnostics for any further repair.',
+  ].join(' ');
+}
+
 export async function runInstalledPr532Journey(input: {
   workspace: string; sessionId: string; alias: string; budgets: RunSpec['budgets'];
-  originalBytes: Buffer; testBytes: Buffer; lockBytes: Buffer;
+  originalBytes: Buffer; testBytes: Buffer; lockBytes: Buffer; modelRequestCostMicros?: number;
 }, context: {
   command(args: readonly string[]): Promise<{ stdout: Buffer }>;
   send(req: InstalledControlRequestV1, timeoutMs: number): Promise<unknown>;
@@ -234,22 +259,7 @@ export async function runInstalledPr532Journey(input: {
 
   context.mark('pr532_submit');
   const sourceConsent = await context.authorizeGitSource();
-  const baselineFiles = [
-    { path: PR532_FILE, bytes: input.originalBytes },
-    { path: PR532_CHECK, bytes: input.testBytes },
-  ].map(({ path, bytes }) => ({ path, sha256: sha256Bytes(bytes),
-    contentUtf8: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }));
-  const objective = [
-    'Fix the DeepSeek compatibility regression in src/model/providers/openai-compatible.ts.',
-    'DeepSeek Chat Completions rejects json_schema, enables thinking by default, and can take longer than the generic 20-second timeout.',
-    'Keep behavior for other compatible endpoints.',
-    'Finish the first model turn immediately with plain text, no tool calls and no edits, so the kernel runs the required original check against the unchanged baseline.',
-    'After that check returns its actual failure, inspect the code and tests. Use its failure locations to repair the implementation.',
-    'Edit only src/model/providers/openai-compatible.ts and keep all tests and dependency files unchanged.',
-    'The original source and test are included below as repository data. They preserve the unfixed source and original assertions.',
-    'Use the declared tools for actual edits and any further inspection. Finish the turn to submit the candidate to the configured original check.',
-    '\nOriginal repository files:\n' + canonicalJsonBytes({ files: baselineFiles }).toString('utf8'),
-  ].join(' ');
+  const objective = pr532TaskObjective(input);
   const { modelTokens, costMicros, ...budgets } = input.budgets;
   const run = await admitted(['run', objective, '--workspace', input.workspace, '--model', input.alias, '--policy', 'yolo',
     '--session', input.sessionId, '--trust-workspace', '--check-node', PR532_CHECK, '--budget-tokens', String(modelTokens),
