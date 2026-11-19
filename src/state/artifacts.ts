@@ -264,7 +264,7 @@ export class ArtifactCatalog {
   /** Exact-size discard checks may hash this traversal's complete byte copy.
    * A small miss exhausts the original stream and joins before retaining it.
    * Large files and exhausted caches keep the original discard-only reader. */
-  async verifyChunks(ref: ArtifactRef, expectedByteLength: number): Promise<void> {
+  async verifyChunks(ref: ArtifactRef, expectedByteLength: number, reader: 'discard' | 'stream' = 'discard'): Promise<void> {
     assertArtifactRef(ref);
     if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0)
       throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
@@ -277,12 +277,13 @@ export class ArtifactCatalog {
       return;
     }
     const cache = artifactReadCache.getStore();
-    if (cache && expectedByteLength <= MAX_READ_CACHE_OBJECT_BYTES && cache.entries < MAX_READ_CACHE_ENTRIES &&
-        cache.bytes + expectedByteLength <= MAX_READ_CACHE_BYTES) {
-      const chunks: Buffer[] = [];
-      for await (const chunk of this.readChunks(ref, expectedByteLength)) chunks.push(chunk);
+    const retain = cache && expectedByteLength <= MAX_READ_CACHE_OBJECT_BYTES && cache.entries < MAX_READ_CACHE_ENTRIES &&
+      cache.bytes + expectedByteLength <= MAX_READ_CACHE_BYTES;
+    if (retain || reader === 'stream') {
+      const chunks: Buffer[] | undefined = retain ? [] : undefined;
+      for await (const chunk of this.readChunks(ref, expectedByteLength)) chunks?.push(chunk);
       this.assertReadActive();
-      this.retainReadBytes(ref, Buffer.concat(chunks, expectedByteLength));
+      if (chunks) this.retainReadBytes(ref, Buffer.concat(chunks, expectedByteLength));
       return;
     }
     await this.cas.verifyChunks(ref, expectedByteLength, this.readSignal);

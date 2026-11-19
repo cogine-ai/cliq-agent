@@ -551,9 +551,9 @@ export async function validateToolRecovery(input: {
         throw new TypeError('completed mutating tool cannot recover over its pre-effect workspace');
       }
       for (const entry of entries.entries) if (entry.kind === 'file') {
-        // Exhaustion retains the exact size/hash/stat/root checks and real
-        // closes without allocating an otherwise discarded workspace file.
-        for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* complete original-byte verification */ }
+        // Rehash complete owned small bytes. A miss preserves this original
+        // stream's size/hash/stat/root guards, cancellation cadence and joins.
+        await artifacts.verifyChunks(entry.blobRef, entry.size, 'stream');
       }
       if (workspace.privateGitStateRef) await artifacts.readBytes(workspace.privateGitStateRef);
       await artifacts.readBytes(snapshot.generationRef);

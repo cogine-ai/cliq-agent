@@ -6,7 +6,43 @@ import { readFile } from 'node:fs/promises';
 import { Script } from 'node:vm';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { ResourceRetirementError } from './errors.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+
+test('checkpoint retirement checks original owned state before revocation without reopening unrelated history', async () => {
+  // Source wiring and inert values only. The real SQL/CAS identity regression
+  // and installed Linux journey independently own their respective proofs.
+  const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest, true);
+  let declaration: ts.FunctionDeclaration | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'checkpointRetirement') declaration = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(declaration);
+  for (const cancelled of [false, true]) {
+    const events: string[] = [], cancellation = new Error('original retirement cancelled'), reachedRevocation = new Error('original native boundary reached');
+    const launch = { launchId: 'original-launch', phase: 'activated', leaseEpoch: 1, workspaceGenerationRef: 'original-generation',
+      workerIdentityDigest: 'original-worker', processContainmentRef: 'original-containment' };
+    const original = { authority: { generationRef: launch.workspaceGenerationRef }, recipe: {}, reserved: {},
+      activated: { launch }, processContainmentRef: launch.processContainmentRef, closure: {} };
+    const context = { activeWorker: original, worker: {}, generation: {}, ownedLaunchId: launch.launchId,
+      driver: {}, artifacts: {}, owner: {}, runId: 'original-run', KernelStorageError,
+      identityHash: () => 'original-quiesce', assertActiveStateOwner() {},
+      async readRecoveryClosure() { events.push('unrelated-history'); throw new Error('unrelated history must not delay native retirement'); },
+      readOwnedWorkerRetirementCut(_driver: unknown, _owner: unknown, activated: unknown, closure: unknown) {
+        assert.equal(activated, original.activated); assert.equal(closure, original.closure); events.push('owned-state');
+        return { run: { activeWorkerLaunchId: launch.launchId, leaseEpoch: launch.leaseEpoch },
+          workspaceGenerations: [{ generationRef: launch.workspaceGenerationRef }], workerLaunches: [launch] };
+      },
+      beginGenerationRevocation() { events.push('native-revocation'); throw reachedRevocation; },
+      current: original, signal: { throwIfAborted() { if (cancelled) throw cancellation; } },
+      retire: undefined as undefined | (() => Promise<unknown>) };
+    new Script(ts.transpileModule(`${declaration.getText(parsed)}\nglobalThis.retire = checkpointRetirement(current, 'checkpoint', signal);`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
+    await assert.rejects(context.retire!(), error => error === (cancelled ? cancellation : reachedRevocation));
+    assert.deepEqual(events, cancelled ? ['owned-state'] : ['owned-state', 'native-revocation']);
+  }
+});
 
 test('a pending tool-selection read keeps its original live worker lease through the read', async () => {
   // Inert renewal-policy values only. This does not create a clock, worker,

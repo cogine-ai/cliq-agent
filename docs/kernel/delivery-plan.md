@@ -5,7 +5,33 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
-**2026-11-19 current blocker.** The expanded [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44578854363)
+**2026-11-19 current blocker.** The next [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44605509115)
+at `25e0e01a2a4edf1af2c8ecaa87dd581288d4d4df` passes all231 Linux contract
+tests, then completes31 charged tools before the original90-minute observer.
+Its retained Bash outcomes have zero exits and durations275–390ms. The actual
+shutdown marker places the subsequent original Supervisor SIGKILL at
+`tool_received_checkpoint_retirement`. Stop2 fails, installed-writer join and
+complete corpus qualification are absent, and no additional provider trial
+was dispatched. The marker does not distinguish the retirement substeps.
+
+Two further concrete repeated-read paths remain. Historical tool validation
+discards its source stream, so it can rehash this traversal's owned small-byte
+copy while preserving the original large stream's cancellation cadence and
+joins on a miss. A real SQLite/CAS sealed-file regression goes from two reads
+to one. The existing64MiB corruption/cancellation/close regression retains its
+four original full physical passes.
+
+Before sealing its still-held original worker, `checkpointRetirement` also
+opens a full, uncancellable recovery traversal solely to select three current
+SQL rows. Reuse the same current-owner/opaque-closure/pointer-bound reader as
+the existing shutdown fence. Native quiescence, full workspace observation,
+all syncs and complete result-commit history validation remain. The regression
+uses actual SQL/CAS/StateOwner with explicitly offline worker metadata, plus
+source wiring that reaches the original revocation boundary without reopening
+unrelated history. Physical shutdown still requires real Linux qualification.
+The observed received-retirement Stop2 failure remains open until that proof.
+
+The preceding expanded [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44578854363)
 at `de73fabda60cfedba1a30334be0cb04996e208bc` also reaches the original
 ninety-minute observer before repaired verification. Its last observed Bash
 results have real zero exits and durations255–265ms. No pre-stop scheduler

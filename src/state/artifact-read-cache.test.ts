@@ -283,10 +283,10 @@ test('sealed recovery shares verified small file bytes with exact-size discard c
     });
     await fixture.store.readRecoveryClosure(fixture.runId);
     t.diagnostic(`sealed small-file reads ${opened}, joined ${closed}`);
-    assert.equal(opened, 2, 'existence and exact-size discard checks share bytes, while the explicit history stream still reads independently');
+    assert.equal(opened, 1, 'all discard-only sealed-history checks hash the same fully verified small byte copy');
     assert.equal(closed, opened);
     await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.equal(opened, 4, 'a later recovery projection must start with fresh physical reads');
+    assert.equal(opened, 2, 'a later recovery projection must start with fresh physical reads');
     assert.equal(closed, opened);
   } finally { await disposeFixture(fixture); }
 });

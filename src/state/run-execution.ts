@@ -30,7 +30,7 @@ import { loadAgentRun } from './reducers/agent.js';
 import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
 import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe,
-  fenceOwnedWorkerOnShutdown } from './reducers/worker-recovery.js';
+  fenceOwnedWorkerOnShutdown, readOwnedWorkerRetirementCut } from './reducers/worker-recovery.js';
 import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
@@ -953,9 +953,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       if (current !== activeWorker || worker !== currentWorker || generation !== currentGeneration || ownedLaunchId !== activated.launch.launchId) {
         throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint continuation lost its original physical owner');
       }
-      assertActiveStateOwner(driver, owner);
       onPhase?.('history');
-      const beforeSeal = await readRecoveryClosure(driver, artifacts, runId);
+      const beforeSeal = readOwnedWorkerRetirementCut(driver, owner, current.activated, current.closure);
       signal.throwIfAborted();
       const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef);
       const activeLaunch = beforeSeal.workerLaunches.find(row => row.launchId === activated.launch.launchId);

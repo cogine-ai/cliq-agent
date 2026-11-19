@@ -108,6 +108,21 @@ selects the original complete read path for additional objects. These limits
 govern temporary reuse and preserve the supported artifact sizes. Callback exit
 clears the byte copies and closes their lifetime, including failure/cancellation.
 
+Discard-only historical file checks may use those same complete small byte
+copies. A miss preserves the consumer's original streaming cadence, complete
+hash, exact length, metadata/root checks and descriptor joins. Explicit readers
+that consume bytes and large historical streams keep their existing paths.
+
+An execution that still holds its original physical worker may begin private
+Checkpoint retirement using the same fresh pointer-bound SQL cut as its
+shutdown fence. Recheck the active StateOwner, original branded launch closure,
+Run identity/epoch, worker identity/nonces, containment and generation/source
+binding. Quiescence and snapshot observation use the original native receiver.
+Every file sync, complete snapshot read, native death observation and original
+result-completion transaction remains required. The completion reader still
+validates the full retained history before committing the result. This avoids
+an additional full-history traversal solely to select the current owned rows.
+
 The full-project PR #532 experiment supplies an explicit ninety-minute wall
 budget to each admitted Run under the approved task-limit extension. Its
 hosted job is bounded to 195 minutes, covering the agent Run, application

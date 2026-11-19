@@ -220,16 +220,16 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
   return commitWorkerRecoveryFence(driver, artifacts, owner, input.expectedRunRevision, cut);
 });
 
-/** The closing execution still owns the verified activation. Install the
- * same unresolved fence without reopening unrelated history inside Stop2.
- * The successor must complete that history walk before observing or resuming. */
-export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', async (
-  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+/** Current pointer-bound state for an already held original activation.
+ * This read grants no release or result-commit authority. Native retirement
+ * uses its original receiver; completion still verifies the full history. */
+export function readOwnedWorkerRetirementCut(
+  driver: SqliteDriver, owner: StateOwnerContext,
   original: Readonly<{ run: Run; launch: BoundWorkerLaunch }>, closure: WorkerLaunchClosure
-): Promise<Run> => {
+) {
   assertWorkerLaunchClosure(closure);
   const active = assertActiveStateOwner(driver, owner);
-  const cut = driver.readSnapshot(connection => {
+  return driver.readSnapshot(connection => {
     const run = readRun(connection, original.run.id);
     const workerLaunches = readWorkerLaunchesForRun(connection, run.id, true);
     const launch = workerLaunches[0];
@@ -245,7 +245,7 @@ export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', as
         launch.activationNonceDigest !== original.launch.activationNonceDigest || closure.spec.owner.workerLaunchId !== launch.launchId ||
         closure.spec.owner.runId !== run.id || closure.spec.owner.intendedLeaseEpoch !== run.leaseEpoch ||
         canonicalSha256(closure.runSpec) !== run.specRef)
-      throw new KernelStorageError('LEASE_FENCED', 'shutdown worker fence requires its original owned activation');
+      throw new KernelStorageError('LEASE_FENCED', 'worker retirement requires its original owned activation');
     const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
     if ((generation.phase !== 'active' && generation.phase !== 'revoking' && generation.phase !== 'checkpointing') ||
         generation.runId !== run.id || generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== launch.leaseEpoch ||
@@ -254,11 +254,21 @@ export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', as
         generation.sourceCheckpointId !== closure.generation.sourceCheckpointId ||
         generation.sourceWorkspaceStateRef !== closure.generation.sourceWorkspaceStateRef ||
         generation.sourceWorkspaceStateDigest !== closure.generation.sourceWorkspaceStateDigest)
-      throw new KernelStorageError('LEASE_FENCED', 'shutdown worker fence requires its original pointer-bound generation');
+      throw new KernelStorageError('LEASE_FENCED', 'worker retirement requires its original pointer-bound generation');
     return { run, workerLaunches, workspaceGenerations: [generation], journal: readInvocationJournal(connection, run.id),
       refs: [run.frontierRef, launch.workerIdentityDigest, launch.processContainmentRef, launch.sandboxLaunchSpecRef,
         launch.containmentPlanRef, launch.workspaceGenerationRef] };
   });
+}
+
+/** The closing execution still owns the verified activation. Install the
+ * same unresolved fence without reopening unrelated history inside Stop2.
+ * The successor must complete that history walk before observing or resuming. */
+export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', async (
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  original: Readonly<{ run: Run; launch: BoundWorkerLaunch }>, closure: WorkerLaunchClosure
+): Promise<Run> => {
+  const cut = readOwnedWorkerRetirementCut(driver, owner, original, closure);
   await artifacts.mapReads(cut.refs, ref => artifacts.verifyBytes(ref));
   return commitWorkerRecoveryFence(driver, artifacts, owner, cut.run.revision, cut);
 });
