@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
-import { ContentAddressedStore } from './cas.js';
+import { ArtifactCatalog } from './artifacts.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
@@ -46,7 +46,7 @@ test('tool history does not reinterpret a verifier wait, but still validates its
 test('independent original tool histories read together and all join before recovery returns', async () => {
   const fixture = await createAgentFixture('tool-history-concurrency', { wallTimeMs: 300_000 }, { mode: 'yolo' });
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
-  const actual = ContentAddressedStore.prototype.read;
+  const actual = ArtifactCatalog.prototype.readCanonical;
   let release!: () => void, timer: ReturnType<typeof setTimeout> | undefined;
   const gate = new Promise<void>(resolve => { release = resolve; });
   try {
@@ -59,11 +59,12 @@ test('independent original tool histories read together and all join before reco
         expectedRunRevision: prepared.run.revision, observationRef: ref });
     }
     let inHistory = false, held = false, entered = 0, overlapped = false, joined = 0;
-    ContentAddressedStore.prototype.read = async function (ref, signal) {
+    ArtifactCatalog.prototype.readCanonical = async function <T>(ref: string): Promise<T> {
       const observed = inHistory && refs.includes(ref);
       if (observed) {
-        // Either original history can arrive first. Observe entry before real
-        // I/O so filesystem completion order cannot manufacture a failure.
+        // Existence verification may already own complete bytes. Hold the
+        // actual per-use decoder, which still yields and hashes its own copy,
+        // so either history can enter first without depending on duplicate I/O.
         entered++;
         if (entered === 1) {
           held = true;
@@ -74,9 +75,9 @@ test('independent original tool histories read together and all join before reco
           release();
         }
       }
-      const bytes = await actual.call(this, ref, signal);
+      const value = await actual.call(this, ref) as T;
       if (observed) joined++;
-      return bytes;
+      return value;
     };
     const cut = await readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId,
       phase => { inHistory = phase === 'history_tool'; });
@@ -85,7 +86,7 @@ test('independent original tool histories read together and all join before reco
     assert.equal(cut.journal.filter(row => row.opKind === 'tool' && row.phase === 'completed').length, 2);
   } finally {
     release(); if (timer) clearTimeout(timer);
-    ContentAddressedStore.prototype.read = actual;
+    ArtifactCatalog.prototype.readCanonical = actual;
     driver.close(); await disposeFixture(fixture);
   }
 });
