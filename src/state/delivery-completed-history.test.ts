@@ -15,7 +15,7 @@ import { stopInvocationHistory } from '../runtime/stop.js';
 import { isZeroBudget } from './invariants.js';
 import { requireEqual } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { ArtifactCatalog } from './artifacts.js';
+import { ArtifactCatalog, withArtifactReadCache } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
@@ -153,7 +153,7 @@ test('the actual recovery selector leaves live cuts on the original reader and i
   const f = await fixture(t), original = await f.open(); await original.data.basis();
   const parsed = ts.createSourceFile('recovery-closure.ts', await readFile(new URL('./recovery-closure.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
   const declaration = parsed.statements.find((node): node is ts.FunctionDeclaration =>
-    ts.isFunctionDeclaration(node) && node.name?.text === 'readRecoveryProjection');
+    ts.isFunctionDeclaration(node) && node.name?.text === 'readRecoveryProjectionData');
   assert(declaration?.body);
   const selectors: ts.IfStatement[] = [], finalizers: ts.Block[] = [];
   const visit = (node: ts.Node) => {
@@ -343,7 +343,8 @@ async function completionReader(f: Awaited<ReturnType<typeof fixture>>, data: No
       ts.isFunctionDeclaration(node) && node.name?.text === name);
     assert(declaration?.body); return declaration;
   };
-  const projection = select('readRecoveryProjection'), wrapper = select('readResultRecoveryClosure');
+  const projection = select('readRecoveryProjectionData'), scoped = select('readRecoveryProjection');
+  const wrapper = select('readResultRecoveryClosure');
   const original = projection.body!.statements.find((node): node is ts.TryStatement =>
     ts.isTryStatement(node) && !!node.finallyBlock?.getText(parsed).includes('closeDeliveryReadData'));
   assert(original?.finallyBlock);
@@ -351,12 +352,13 @@ async function completionReader(f: Awaited<ReturnType<typeof fixture>>, data: No
   assert(ts.isReturnStatement(finalReturn));
   const requested = original.tryBlock.statements.at(-2)!;
   assert(ts.isVariableStatement(requested) && requested.declarationList.declarations[0]?.name.getText(parsed) === 'basis');
-  const body = `async function readRecoveryProjection(${projection.parameters.map(parameter => parameter.getText(parsed)).join(',')}) {
+  const body = `async function readRecoveryProjectionData(${projection.parameters.map(parameter => parameter.getText(parsed)).join(',')}) {
     try { ${requested.getText(parsed)} ${finalReturn.getText(parsed)} } finally ${original.finallyBlock.getText(parsed)}
   }
+${scoped.getText(parsed)}
 ${wrapper.getText(parsed).replace(/^export\s+/u, '')}`;
   let independentReads = 0, agentReads = 0, agentCloses = 0;
-  const dependencies = { closure: f.cut, delivery: agent ? undefined : data, publicationPrefix: undefined, agent,
+  const dependencies = { closure: f.cut, delivery: agent ? undefined : data, publicationPrefix: undefined, agent, withArtifactReadCache,
     closeDeliveryReadData: f.api.closeDeliveryReadData,
     readResultBasisInDeliveryEpoch: f.api.readResultBasisInDeliveryEpoch,
     readResultBasis: async () => { independentReads++; return readCanonicalArtifact<Value>(f.artifacts, f.refs.basis!); },
