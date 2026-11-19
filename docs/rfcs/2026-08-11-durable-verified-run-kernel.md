@@ -84,7 +84,7 @@ scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
 the connection unusable. This supplies no invocation replay or refund authority.
 
 One complete recovery projection may reuse its own fully verified small-object
-byte copies for both existence verification and JSON decoding. The first read
+byte copies for existence verification, exact-size discard verification and JSON decoding. The first read
 opens and verifies the real CAS object and joins its
 handles. Repeated uses receive independent copies and retain their full digest,
 canonical encoding and typed-decoder checks. The captured content reference
@@ -95,7 +95,15 @@ bounded and stream reads retain their original physical verification. An
 existence-verification miss retains bytes only when the actual held size fits
 the remaining cache budget. Larger objects keep complete discard verification.
 Failed verification, cancellation or descriptor retirement supplies no copy.
-The data cache holds at most 16 MiB, 4096 objects and 1 MiB per object. Cache capacity
+Exact-size discard uses rehash the complete owned bytes and check their exact
+length. On a small miss, exhaust the original exact-size stream and join both
+handles before retaining a copy. Explicit byte streams still perform their
+independent physical reads. Large discard inputs keep their existing joined
+reader. The temporary data cache holds at most 64 MiB, 8192 objects and 1 MiB
+per object. The earlier 16 MiB capacity was smaller than the unfixed project's
+distinct eligible source and dependency bytes. This increases temporary reuse
+capacity. Artifact acceptance, workspace quotas and execution limits retain
+their existing values. Cache capacity
 selects the original complete read path for additional objects. These limits
 govern temporary reuse and preserve the supported artifact sizes. Callback exit
 clears the byte copies and closes their lifetime, including failure/cancellation.

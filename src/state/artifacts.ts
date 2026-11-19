@@ -16,8 +16,8 @@ type ArtifactReadCache = {
   closed: boolean;
 };
 const artifactReadCache = new AsyncLocalStorage<ArtifactReadCache>();
-const MAX_READ_CACHE_BYTES = 16 * 1024 * 1024;
-const MAX_READ_CACHE_ENTRIES = 4096;
+const MAX_READ_CACHE_BYTES = 64 * 1024 * 1024;
+const MAX_READ_CACHE_ENTRIES = 8192;
 const MAX_READ_CACHE_OBJECT_BYTES = 1024 * 1024;
 
 /** One immutable graph traversal owns these verified byte copies.
@@ -261,9 +261,30 @@ export class ArtifactCatalog {
     if (verified.bytes !== undefined) this.retainReadBytes(ref, verified.bytes);
   }
 
-  /** Discard-only equivalent of exhausting readChunks at this exact size. */
+  /** Exact-size discard checks may hash this traversal's complete byte copy.
+   * A small miss exhausts the original stream and joins before retaining it.
+   * Large files and exhausted caches keep the original discard-only reader. */
   async verifyChunks(ref: ArtifactRef, expectedByteLength: number): Promise<void> {
+    assertArtifactRef(ref);
+    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0)
+      throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
     this.assertReadActive();
+    const bytes = await this.cachedReadBytes(ref);
+    if (bytes !== undefined) {
+      if (bytes.length !== expectedByteLength) throw new Error(`artifact ${ref} has an unexpected byte count`);
+      if (sha256Bytes(bytes) !== ref)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
+      return;
+    }
+    const cache = artifactReadCache.getStore();
+    if (cache && expectedByteLength <= MAX_READ_CACHE_OBJECT_BYTES && cache.entries < MAX_READ_CACHE_ENTRIES &&
+        cache.bytes + expectedByteLength <= MAX_READ_CACHE_BYTES) {
+      const chunks: Buffer[] = [];
+      for await (const chunk of this.readChunks(ref, expectedByteLength)) chunks.push(chunk);
+      this.assertReadActive();
+      this.retainReadBytes(ref, Buffer.concat(chunks, expectedByteLength));
+      return;
+    }
     await this.cas.verifyChunks(ref, expectedByteLength, this.readSignal);
     this.assertReadActive();
   }

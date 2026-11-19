@@ -9,6 +9,11 @@ import { ContentAddressedStore } from './cas.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { ResourceRetirementError } from './errors.js';
+import { digestOmitting } from '../kernel/identity.js';
+import type { WorkspaceEntryManifest, WorkspaceStateManifest } from '../kernel/types.js';
+import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
+import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
+import { quiescedToolCheckpoint } from './testing/tool-effects.js';
 
 async function files(t: import('node:test').TestContext) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-read-cache-'));
@@ -56,7 +61,7 @@ test('nested and failed traversals keep independent fresh byte ownership', async
 test('cache byte exhaustion continues complete original reads without changing accepted inputs', async t => {
   const { cas, artifacts } = await files(t);
   const refs: string[] = [];
-  for (let index = 0; index < 17; index++) refs.push((await artifacts.publishCanonical({ index,
+  for (let index = 0; index < 65; index++) refs.push((await artifacts.publishCanonical({ index,
     text: 'x'.repeat(1024 * 1024 - 256) }, 'inert-cache-capacity')).ref);
   const read = cas.read.bind(cas), counts = new Map<string, number>();
   t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
@@ -64,9 +69,11 @@ test('cache byte exhaustion continues complete original reads without changing a
   });
   await withArtifactReadCache(async () => {
     for (const ref of refs) await artifacts.readCanonical(ref);
-    await artifacts.readCanonical(refs[0]!); await artifacts.readCanonical(refs.at(-1)!);
+    await artifacts.readCanonical(refs[0]!); await artifacts.readCanonical(refs[19]!);
+    await artifacts.readCanonical(refs.at(-1)!);
   });
   assert.equal(counts.get(refs[0]!), 1);
+  assert.equal(counts.get(refs[19]!), 1, 'the original project exceeds the previous 16 MiB reuse capacity');
   assert.equal(counts.get(refs.at(-1)!), 2);
 });
 
@@ -130,7 +137,7 @@ test('recovery verification retains bounded binary bytes, hashes each use and ke
   await assert.rejects(withArtifactReadCache(() => artifacts.verifyBytes(ref)), /corrupt/u);
 });
 
-test('a failed original verification close cannot populate the recovery byte cache', async t => {
+for (const mode of ['existence', 'exact-size'] as const) test(`a failed original ${mode} verification close cannot populate the recovery byte cache`, async t => {
   const { root, artifacts } = await files(t);
   const { ref } = await artifacts.publishBytes(Buffer.from('original'), 'application/octet-stream', 'inert-binary-data');
   const open = fs.open.bind(fs), failure = new Error('original descriptor close failed');
@@ -147,13 +154,47 @@ test('a failed original verification close cannot populate the recovery byte cac
     }
     return handle;
   });
+  const verify = () => mode === 'existence' ? artifacts.verifyBytes(ref) : artifacts.verifyChunks(ref, Buffer.byteLength('original'));
   await withArtifactReadCache(async () => {
-    await assert.rejects(artifacts.verifyBytes(ref), error => error instanceof ResourceRetirementError && error.cause === failure);
-    await artifacts.verifyBytes(ref);
+    await assert.rejects(verify(), error => error instanceof ResourceRetirementError && error.cause === failure);
+    await verify();
     assert.equal(opened, 2, 'failed retirement must force a new complete actual read');
     assert.equal(closed, opened);
-    await artifacts.verifyBytes(ref); assert.equal(opened, 2);
+    await verify(); assert.equal(opened, 2);
   });
+});
+
+test('exact-size discard reuse preserves full byte count, cancellation and fresh traversal integrity', async t => {
+  const { root, artifacts } = await files(t);
+  const bytes = Buffer.from([0xff, 0, 1, 2]), file = await artifacts.publishBytes(bytes, 'application/octet-stream', 'inert-discard-data');
+  const open = fs.open.bind(fs); let opened = 0, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (args[0] === path.join(root, file.ref)) {
+      opened++;
+      const close = handle.close.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); closed++; });
+    }
+    return handle;
+  });
+  await withArtifactReadCache(async () => {
+    await assert.rejects(artifacts.verifyChunks(file.ref, -1), TypeError);
+    assert.equal(opened, 0);
+    await assert.rejects(artifacts.verifyChunks(file.ref, bytes.length - 1), /unexpected byte count/u);
+    await artifacts.verifyChunks(file.ref, bytes.length);
+    assert.equal(opened, 2); assert.equal(closed, opened);
+    await assert.rejects(artifacts.verifyChunks(file.ref, bytes.length + 1), /unexpected byte count/u);
+    await artifacts.verifyBytes(file.ref);
+    const abort = new AbortController(), reason = new Error('exact-size cached verification cancelled');
+    const pending = artifacts.withReadSignal(abort.signal).verifyChunks(file.ref, bytes.length);
+    abort.abort(reason); await assert.rejects(pending, error => error === reason);
+    await artifacts.verifyChunks(file.ref, bytes.length);
+    assert.equal(opened, 2);
+  });
+  await chmod(path.join(root, file.ref), 0o600); await writeFile(path.join(root, file.ref), Buffer.from([0xfe, 0, 1, 2]));
+  await chmod(path.join(root, file.ref), 0o400);
+  await assert.rejects(withArtifactReadCache(() => artifacts.verifyChunks(file.ref, bytes.length)), /corrupt/u);
+  assert.equal(opened, 3); assert.equal(closed, opened);
 });
 
 test('large verification inputs retain the complete discard path inside a recovery traversal', async t => {
@@ -207,6 +248,45 @@ test('recovery existence checks and decoders share one complete original workspa
     assert.equal(closed, opened);
     await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(opened, 2, 'the next recovery cut must read the actual CAS object again');
+    assert.equal(closed, opened);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('sealed recovery shares verified small file bytes with exact-size discard checks', async t => {
+  const clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const fixture = await createAgentFixture('recovery-sealed-small-bytes', undefined, { mode: 'accept-edits', tools: ['edit'] });
+  try {
+    // Existing offline history over real SQLite/CAS. This proves data reads,
+    // not native retirement or installed execution.
+    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
+    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
+    const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, 'small complete file bytes');
+    const result = await fixture.store.artifacts.readCanonical<ToolObservationV1>(await observation(fixture, claimed, { changed: true }));
+    result.postEffect = proof.checkpoint; result.observationDigest = digestOmitting(result, 'observationDigest');
+    const published = await fixture.store.artifacts.publishCanonical(result, result.format);
+    await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
+      expectedRunRevision: prepared.run.revision, observationRef: published.ref });
+    const state = await fixture.store.artifacts.readCanonical<WorkspaceStateManifest>(proof.workspaceStateRef);
+    const entries = await fixture.store.artifacts.readCanonical<WorkspaceEntryManifest>(state.entriesRef);
+    const file = entries.entries[0]!;
+    if (file.kind !== 'file') assert.fail('the sealed fixture requires its actual persisted file');
+    const open = fs.open.bind(fs); let opened = 0, closed = 0;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (String(args[0]).endsWith(path.sep + file.blobRef)) {
+        opened++;
+        const close = handle.close.bind(handle);
+        t.mock.method(handle, 'close', async () => { await close(); closed++; });
+      }
+      return handle;
+    });
+    await fixture.store.readRecoveryClosure(fixture.runId);
+    t.diagnostic(`sealed small-file reads ${opened}, joined ${closed}`);
+    assert.equal(opened, 2, 'existence and exact-size discard checks share bytes, while the explicit history stream still reads independently');
+    assert.equal(closed, opened);
+    await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(opened, 4, 'a later recovery projection must start with fresh physical reads');
     assert.equal(closed, opened);
   } finally { await disposeFixture(fixture); }
 });

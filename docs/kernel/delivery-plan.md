@@ -5,7 +5,32 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
-**2026-11-19 current blocker.** The [next real task](https://github.com/cogine-ai/cliq-agent/actions/runs/44530594083)
+**2026-11-19 current blocker.** The expanded [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44578854363)
+at `de73fabda60cfedba1a30334be0cb04996e208bc` also reaches the original
+ninety-minute observer before repaired verification. Its last observed Bash
+results have real zero exits and durations255–265ms. No pre-stop scheduler
+failure occurs. Both original services pass Stop2 and all original writers,
+daemon, command pipes and HTTPS fixture join. The full final corpus was not
+reached. No additional provider spend was dispatched.
+
+Two local regressions now isolate avoidable repeated I/O. A real SQLite/CAS
+sealed-tool recovery reads the same small file three times, including an
+exact-size discard check that bypasses its traversal's complete verified byte
+copy. Share that copy, retain the full per-use hash and exact-length check,
+and preserve the independent explicit history stream. The new regression
+observes two actual reads and both joins. Large64MiB history reads retain their
+existing full physical passes, bounded allocation and failure/cancel/close
+assertions. A later recovery starts with fresh reads.
+
+The independent unfixed-project fixture contains19818783 bytes of distinct
+cache-eligible source/dependency data on macOS, before recovery metadata. That
+exceeds the temporary16MiB reuse capacity. Increase only that internal reuse
+capacity to64MiB/8192 objects, retaining the1MiB per-object bound and complete
+read fallback. Supported artifact sizes, source/workspace quotas, grants,
+READY5, Stop2, HTTP30 and both original task deadlines retain their values.
+The new complete free Linux journey remains required before provider spend.
+
+The preceding [real task](https://github.com/cogine-ai/cliq-agent/actions/runs/44530594083)
 at `8b7f88439441a726390c8d06fba79fe7afe2644e` reaches nine model calls and
 thirteen private Bash operations before its original ninety-minute observer
 expires. It remains queued for the agent with no pre-stop scheduler failure.
