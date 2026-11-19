@@ -247,7 +247,12 @@ export class ArtifactCatalog {
    * readers outside a traversal keep the original discard-only path. */
   async verifyBytes(ref: ArtifactRef): Promise<void> {
     assertArtifactRef(ref); this.assertReadActive();
-    if (await this.cachedReadBytes(ref) !== undefined) return;
+    const bytes = await this.cachedReadBytes(ref);
+    if (bytes !== undefined) {
+      if (sha256Bytes(bytes) !== ref)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
+      return;
+    }
     const cache = artifactReadCache.getStore();
     const limit = cache && cache.entries < MAX_READ_CACHE_ENTRIES
       ? Math.min(MAX_READ_CACHE_OBJECT_BYTES, MAX_READ_CACHE_BYTES - cache.bytes) : undefined;
@@ -269,11 +274,7 @@ export class ArtifactCatalog {
     // so cancellation, worker maintenance and control requests can progress.
     if (retained === undefined) return undefined;
     await setImmediate(); this.assertReadActive();
-    const bytes = Buffer.from(retained);
-    if (sha256Bytes(bytes) !== ref) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
-    }
-    return bytes;
+    return Buffer.from(retained);
   }
 
   private retainReadBytes(ref: ArtifactRef, bytes: Buffer): void {
