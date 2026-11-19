@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { setImmediate } from 'node:timers/promises';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
@@ -6,6 +8,26 @@ import type { ArtifactRef } from '../kernel/types.js';
 import { ContentAddressedStore } from './cas.js';
 import { joinResourceOperations, KernelStorageError } from './errors.js';
 import type { SqliteConnection } from './sqlite-driver.js';
+
+type ArtifactReadCache = {
+  objects: Map<ContentAddressedStore, Map<ArtifactRef, Buffer>>;
+  bytes: number;
+  entries: number;
+  closed: boolean;
+};
+const artifactReadCache = new AsyncLocalStorage<ArtifactReadCache>();
+const MAX_READ_CACHE_BYTES = 16 * 1024 * 1024;
+const MAX_READ_CACHE_ENTRIES = 4096;
+const MAX_READ_CACHE_OBJECT_BYTES = 1024 * 1024;
+
+/** One immutable graph traversal owns these verified JSON byte copies.
+ * A later traversal starts fresh. Every consumer still hashes and decodes its
+ * own copy; binary, stream and discard verification keep their original I/O. */
+export async function withArtifactReadCache<T>(read: () => Promise<T>): Promise<T> {
+  const cache: ArtifactReadCache = { objects: new Map(), bytes: 0, entries: 0, closed: false };
+  try { return await artifactReadCache.run(cache, read); }
+  finally { cache.closed = true; cache.objects.clear(); }
+}
 
 export type PublishedArtifact = {
   ref: ArtifactRef;
@@ -60,6 +82,8 @@ export class ArtifactCatalog {
    * only a cancellation checkpoint, not a new scope or execution authority. */
   assertReadActive(): void {
     this.readSignal?.throwIfAborted();
+    if (artifactReadCache.getStore()?.closed)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'artifact read traversal has closed');
   }
 
   /** Exact original cancellation identity. Every issued I/O still joins. */
@@ -91,9 +115,9 @@ export class ArtifactCatalog {
 
   /** Independent read-only histories may overlap, but their nested catalog
    * groups must not multiply the four-reader bound. Each callback uses this
-   * serial view for all nested reads and awaits them before returning. No
-   * completed bytes, identities or validation results are cached. The CAS may
-   * coalesce live reads only after each caller opens the same actual object. */
+   * serial view for all nested reads and awaits them before returning. Scoped
+   * JSON byte copies share only the current traversal's lifetime. Each use
+   * retains its original digest and decoder validation. */
   async mapReadGroups<T, Result>(values: readonly T[], read: (artifacts: ArtifactCatalog, value: T, index: number) => Promise<Result>): Promise<Result[]> {
     const serial = new ArtifactCatalog(this.cas, this.readSignal, this.trustedReleases, this.runtimeConversionTarget);
     serial.readWidth = 1;
@@ -233,18 +257,32 @@ export class ArtifactCatalog {
   }
 
   async readCanonical<T>(ref: ArtifactRef): Promise<T> {
-    const bytes = await this.readBytes(ref);
-    this.readSignal?.throwIfAborted();
+    assertArtifactRef(ref); this.assertReadActive();
+    const cache = artifactReadCache.getStore(), objects = cache?.objects.get(this.cas);
+    const retained = objects?.get(ref);
+    // Cached copies retain the event-loop turn formerly supplied by real I/O,
+    // so cancellation, worker maintenance and control requests can progress.
+    if (retained !== undefined) { await setImmediate(); this.assertReadActive(); }
+    const bytes = retained === undefined ? await this.readBytes(ref) : Buffer.from(retained);
+    this.assertReadActive();
     if (sha256Bytes(bytes) !== ref) {
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} failed a digest rehash`);
     }
+    let value: T;
     try {
-      const value = JSON.parse(bytes.toString('utf8')) as T;
-      this.readSignal?.throwIfAborted(); return value;
+      value = JSON.parse(bytes.toString('utf8')) as T;
     } catch (cause) {
       if (this.isReadCancellation(cause)) throw cause;
       throw new KernelStorageError('ARTIFACT_MISMATCH', `artifact ${ref} is not JSON`);
     }
+    this.assertReadActive();
+    if (cache && !cache.objects.get(this.cas)?.has(ref) && bytes.byteLength <= MAX_READ_CACHE_OBJECT_BYTES &&
+        cache.entries < MAX_READ_CACHE_ENTRIES && cache.bytes + bytes.byteLength <= MAX_READ_CACHE_BYTES) {
+      const entries = cache.objects.get(this.cas) ?? new Map<ArtifactRef, Buffer>();
+      entries.set(ref, Buffer.from(bytes)); cache.objects.set(this.cas, entries);
+      cache.entries++; cache.bytes += bytes.byteLength;
+    }
+    return value;
   }
 
   async describe(

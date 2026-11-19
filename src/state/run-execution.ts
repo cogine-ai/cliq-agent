@@ -574,7 +574,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let publicationLeaseReads: WorkerLeaseReads | undefined;
   let agentLeaseReads: WorkerLeaseReads | undefined;
   let stopJoin: Promise<void> | undefined;
-  let operationPhase: 'preparing' | 'claimed' | 'received' | undefined;
+  let operationPhase: 'reading' | 'preparing' | 'claimed' | 'received' | undefined;
   let verifierReleased = false;
   let toolReleased = false;
   let receivedCompletion: ReceivedCompletion | undefined;
@@ -1749,7 +1749,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const acquiringDependencies = dependencyOwner !== undefined && operationPhase === 'claimed' &&
         receivedCompletion?.kind === 'dependency_acquisition';
       const maintainingPublication = publicationLeaseReads !== undefined && (operationPhase === 'preparing' || operationPhase === 'claimed');
-      if (pending && !maintainingPublication && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
+      const readingToolSelection = agentLeaseReads !== undefined && operationPhase === 'reading';
+      if (pending && !maintainingPublication && !readingToolSelection && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
           receivedCompletion && !maintainingPublication && !acquiringDependencies) return 'inactive';
       return renewOwnedWorkerLease();
     },
@@ -2356,15 +2357,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const abort = new AbortController();
       operationAbort = abort;
       if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      // Selection only reads retained data. The original active worker keeps
+      // its guarded heartbeat until execution preparation begins.
       const signal = abort.signal;
       const reads = artifacts.withReadSignal(signal);
-      operationPhase = 'preparing';
+      operationPhase = 'reading';
       let claimedTool: Awaited<ReturnType<typeof currentAgent.claimTool>> | undefined;
       const work = (async () => {
         builtinPhase('tool_select');
         signal.throwIfAborted();
         const selected = await currentAgent.readToolInvocation(signal);
         signal.throwIfAborted();
+        operationPhase = 'preparing';
         const queued = selected.run.status === 'queued' && selected.run.activeWorkerLaunchId === undefined;
         const retained = selected.run.status === 'running' && activeWorker !== undefined && worker !== undefined && generation !== undefined &&
           selected.run.activeWorkerLaunchId === activeWorker.activated.launch.launchId;

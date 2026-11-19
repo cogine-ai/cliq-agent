@@ -8,6 +8,41 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { ResourceRetirementError } from './errors.js';
 
+test('a pending tool-selection read keeps its original live worker lease through the read', async () => {
+  // Inert renewal-policy values only. This does not create a clock, worker,
+  // StateOwner, lease or native proof. Linux owns the physical qualification.
+  const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest, true);
+  let renewal: ts.Block | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(parsed) === 'renewCurrentWorkerLease' &&
+        ts.isArrowFunction(node.initializer) && ts.isBlock(node.initializer.body)) renewal = node.initializer.body;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(renewal);
+  for (const phase of ['reading', 'preparing', 'received']) for (const held of [false, true]) {
+    let now = 0, expiresAt = 35, calls = 0;
+    const context = { pending: {}, receivedCompletion: phase === 'received' ? {} : undefined,
+      operationPhase: phase, publicationLeaseReads: undefined, agentLeaseReads: held ? {} : undefined,
+      dependencyOwner: undefined, verifierReleased: false, toolReleased: false,
+      renewOwnedWorkerLease() { calls++; if (now >= expiresAt) return 'expired'; expiresAt = now + 60; return 'renewed'; },
+      renew: undefined as undefined | (() => string) };
+    new Script(ts.transpileModule(`globalThis.renew = () => ${renewal.getText(parsed)};`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
+    now = 20;
+    const result = context.renew!();
+    now = 45;
+    if (phase === 'reading' && held) {
+      assert.equal(result, 'renewed'); assert.equal(calls, 1);
+      assert(expiresAt > now, 'a pure selection read must not consume its original worker lease');
+      now = expiresAt;
+      assert.equal(context.renew!(), 'expired', 'the original renewal still refuses expiry');
+      context.agentLeaseReads = undefined;
+      assert.equal(context.renew!(), 'inactive', 'a closed producer cannot retain read renewal');
+    } else { assert.equal(result, 'inactive'); assert.equal(calls, 0); }
+  }
+});
+
 test('failed worker producers close lease reads before recovery while original retryable results retain them', async () => {
   // Execute the original lifecycle decisions only. The callbacks below carry
   // no Run, lease, StateOwner, native worker, result or recovery authority.

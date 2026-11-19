@@ -545,7 +545,8 @@ test('MCP preparation scopes grant and credential reads without replacing receiv
     'the original HTTP claim boundary must follow its complete transport preparation; a separate stdio launch callback is not that boundary');
   const preparation = branch.slice(0, httpClaim);
   const execute = between(execution, 'executeCurrentTool: async value =>', "if (prepared.target.execution.kind === 'mcp')");
-  assert.match(execute, /const signal = abort\.signal;\s*const reads = artifacts\.withReadSignal\(signal\);\s*operationPhase = 'preparing';/u);
+  assert.match(execute, /const signal = abort\.signal;\s*const reads = artifacts\.withReadSignal\(signal\);\s*operationPhase = 'reading';/u);
+  assert.match(execute, /const selected = await currentAgent\.readToolInvocation\(signal\);\s*signal\.throwIfAborted\(\);\s*operationPhase = 'preparing';/u);
   assert.match(preparation, /const grant = await reads\.readCanonical<import\('\.\.\/kernel\/tool-authorization\.js'\)\.ToolOperationGrantV1>\(prepared\.entry\.grantRef!\)/u);
   assert.match(preparation, /readMcpRegistryClosure\(driver, reads, execution\.registryRevisionRef, grant\.principalId\)/u);
   assert.match(preparation, /withInstalledMcpHttpAuthority\(selectedRuntime, owner, reads, grant\.principalId, transport, async authority => \{\s*signal\.throwIfAborted\(\); authority\.assertCurrent\(\);/u);

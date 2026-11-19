@@ -202,7 +202,7 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   for (const reply of replies.slice(1, 3)) {
     const calls = reply.choices[0].message.tool_calls;
     assert.deepEqual(calls.map((call: any) => [call.function.name, JSON.parse(call.function.arguments).path]),
-      [['read', 'original.ts'], ['read', 'original.test.ts']]);
+      Array.from({ length: 8 }, (_, index) => ['read', index % 2 ? 'original.test.ts' : 'original.ts']));
     for (const call of calls) { assert(!observed.has(call.id)); observed.add(call.id); }
   }
   const edited = replies[3].choices[0].message.tool_calls;
@@ -215,8 +215,9 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   assert.equal(firstEdit.old_text, 'inert-base');
   assert.equal(firstEdit.new_text, '// Controlled intermediate edit.\ninert-base');
   const afterEdit = replies[4].choices[0].message.tool_calls;
-  assert.equal(afterEdit.length, 1); assert.equal(afterEdit[0].function.name, 'read');
+  assert.equal(afterEdit.length, 2); assert(afterEdit.every((call: any) => call.function.name === 'read'));
   assert.equal(JSON.parse(afterEdit[0].function.arguments).path, 'original.ts');
+  assert.equal(JSON.parse(afterEdit[1].function.arguments).path, 'original.test.ts');
   const finalEdit = JSON.parse(replies[5].choices[0].message.tool_calls[0].function.arguments);
   assert.equal(finalEdit.old_text, firstEdit.new_text); assert.equal(finalEdit.new_text, 'inert-reference');
   assert.throws(() => context.reply());

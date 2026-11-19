@@ -1,0 +1,134 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { ArtifactCatalog, withArtifactReadCache } from './artifacts.js';
+import { ContentAddressedStore } from './cas.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
+import { disposeFixture } from './testing/fixtures.js';
+
+async function files(t: import('node:test').TestContext) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-read-cache-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const root = path.join(directory, 'objects'); await mkdir(root, { mode: 0o700 });
+  const cas = new ContentAddressedStore(root), artifacts = new ArtifactCatalog(cas);
+  return { root, cas, artifacts };
+}
+
+test('verified JSON byte copies retain independent decoding, raw verification and fresh later traversals', async t => {
+  const { root, cas, artifacts } = await files(t);
+  const { ref } = await artifacts.publishCanonical({ value: 'original' }, 'inert-cache-data');
+  const read = cas.read.bind(cas); let reads = 0, returned: Buffer | undefined;
+  t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => { reads++; returned = await read(...args); return returned; });
+  await withArtifactReadCache(async () => {
+    const first = await artifacts.readCanonical<{ value: string }>(ref); first.value = 'caller mutation';
+    returned!.fill(0);
+    assert.deepEqual(await artifacts.withReadSignal(new AbortController().signal).readCanonical(ref), { value: 'original' });
+    assert.equal(reads, 1);
+    await artifacts.readBytes(ref); await artifacts.readBytes(ref);
+    assert.equal(reads, 3, 'explicit raw-byte reads retain their complete independent verification');
+  });
+  await chmod(path.join(root, ref), 0o600); await writeFile(path.join(root, ref), 'corrupt'); await chmod(path.join(root, ref), 0o400);
+  await assert.rejects(withArtifactReadCache(() => artifacts.readCanonical(ref)));
+  assert.equal(reads, 4, 'a later traversal cannot borrow the earlier verified copy');
+});
+
+test('nested and failed traversals keep independent fresh byte ownership', async t => {
+  const { cas, artifacts } = await files(t);
+  const { ref } = await artifacts.publishCanonical({ value: 'original' }, 'inert-cache-data');
+  const read = cas.read.bind(cas); let reads = 0;
+  t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => { reads++; return read(...args); });
+  const failure = new Error('original traversal failed');
+  await assert.rejects(withArtifactReadCache(async () => {
+    await artifacts.readCanonical(ref);
+    await withArtifactReadCache(() => artifacts.readCanonical(ref));
+    assert.equal(reads, 2);
+    await artifacts.readCanonical(ref); assert.equal(reads, 2);
+    throw failure;
+  }), error => error === failure);
+  await withArtifactReadCache(() => artifacts.readCanonical(ref));
+  assert.equal(reads, 3);
+});
+
+test('cache byte exhaustion continues complete original reads without changing accepted inputs', async t => {
+  const { cas, artifacts } = await files(t);
+  const refs: string[] = [];
+  for (let index = 0; index < 17; index++) refs.push((await artifacts.publishCanonical({ index,
+    text: 'x'.repeat(1024 * 1024 - 256) }, 'inert-cache-capacity')).ref);
+  const read = cas.read.bind(cas), counts = new Map<string, number>();
+  t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => {
+    counts.set(args[0], (counts.get(args[0]) ?? 0) + 1); return read(...args);
+  });
+  await withArtifactReadCache(async () => {
+    for (const ref of refs) await artifacts.readCanonical(ref);
+    await artifacts.readCanonical(refs[0]!); await artifacts.readCanonical(refs.at(-1)!);
+  });
+  assert.equal(counts.get(refs[0]!), 1);
+  assert.equal(counts.get(refs.at(-1)!), 2);
+});
+
+test('a cached JSON read preserves its caller cancellation and CAS identity', async t => {
+  const first = await files(t), second = await files(t);
+  const { ref } = await first.artifacts.publishCanonical({ value: 'owned' }, 'inert-cache-data');
+  const abort = new AbortController(), reason = new Error('original reader closed');
+  await withArtifactReadCache(async () => {
+    await first.artifacts.readCanonical(ref);
+    const interrupted = new AbortController(), interruption = new Error('cached read cancelled during its yield');
+    const pending = first.artifacts.withReadSignal(interrupted.signal).readCanonical(ref);
+    interrupted.abort(interruption);
+    await assert.rejects(pending, error => error === interruption);
+    abort.abort(reason);
+    await assert.rejects(first.artifacts.withReadSignal(abort.signal).readCanonical(ref), error => error === reason);
+    await assert.rejects(second.artifacts.readCanonical(ref), { code: 'ENOENT' });
+    assert.deepEqual(await first.artifacts.readCanonical(ref), { value: 'owned' });
+  });
+});
+
+test('a closed traversal cannot lend its cache to a deferred reader', async t => {
+  const { artifacts } = await files(t);
+  const { ref } = await artifacts.publishCanonical({ value: 'original' }, 'inert-cache-data');
+  let release!: () => void, later!: Promise<unknown>;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  await withArtifactReadCache(async () => {
+    await artifacts.readCanonical(ref);
+    later = (async () => { await gate; return artifacts.readCanonical(ref); })();
+  });
+  release();
+  await assert.rejects(later, { code: 'RECOVERY_REQUIRED' });
+  assert.deepEqual(await artifacts.readCanonical(ref), { value: 'original' });
+});
+
+test('large JSON objects keep full reads and their original accepted size', async t => {
+  const { cas, artifacts } = await files(t);
+  const value = { text: 'x'.repeat(1024 * 1024) };
+  const { ref } = await artifacts.publishCanonical(value, 'inert-large-cache-data');
+  const read = cas.read.bind(cas); let reads = 0;
+  t.mock.method(cas, 'read', async (...args: Parameters<typeof cas.read>) => { reads++; return read(...args); });
+  await withArtifactReadCache(async () => {
+    assert.deepEqual(await artifacts.readCanonical(ref), value);
+    assert.deepEqual(await artifacts.readCanonical(ref), value);
+  });
+  assert.equal(reads, 2);
+});
+
+test('one recovery traversal reads its repeated immutable workspace data once and the next traversal is fresh', async t => {
+  // Real SQLite/CAS and the existing offline authority fixture. This performs
+  // no provider or tool I/O and supplies no installed/native qualification.
+  const fixture = await createAgentFixture('recovery-immutable-read-cache');
+  try {
+    const initial = await fixture.store.readRecoveryClosure(fixture.runId);
+    const ref = initial.latestCheckpoint.workspaceStateRef;
+    const read = ArtifactCatalog.prototype.readBytes;
+    let reads = 0;
+    t.mock.method(ArtifactCatalog.prototype, 'readBytes', async function (this: ArtifactCatalog, value: string) {
+      if (value === ref) reads++;
+      return read.call(this, value);
+    });
+    const first = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(first.latestCheckpoint.workspaceStateRef, ref);
+    assert.equal(reads, 1, 'recursive consumers must reuse the same verified immutable bytes within one traversal');
+    await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal(reads, 2, 'a separate traversal must fully read the original object again');
+  } finally { await disposeFixture(fixture); }
+});

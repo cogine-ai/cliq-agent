@@ -18,7 +18,7 @@ import type {
   WorkspaceGenerationStateV1,
   WorkspaceStateManifest
 } from '../kernel/types.js';
-import type { ArtifactCatalog } from './artifacts.js';
+import { withArtifactReadCache, type ArtifactCatalog } from './artifacts.js';
 import { closeAgentRecoveryData, validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInDeliveryResultEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
 import { closeDeliveryReadData, completeDeliveryRecoveryHistory, createDeliveryReadData } from './delivery-read-data.js';
 import { validateStopRecovery, validateStopRecoveryInDeliveryEpoch } from './stop-recovery.js';
@@ -689,7 +689,11 @@ export async function readDeliveryPublicationClosure(
   });
 }
 
-async function readRecoveryProjection(
+async function readRecoveryProjection(...args: Parameters<typeof readRecoveryProjectionData>) {
+  return withArtifactReadCache(() => readRecoveryProjectionData(...args));
+}
+
+async function readRecoveryProjectionData(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
   runId: string,

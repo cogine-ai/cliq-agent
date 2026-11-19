@@ -392,6 +392,48 @@ READY5, Stop2, native HTTP30, authorization expiry and every result/apply/scan
 assertion remain. This allocation addresses the observed task-budget exhaustion.
 It supplies no new physical qualification, and the measured latency remains poor.
 
+The [ninety-minute free rehearsal](https://github.com/cogine-ai/cliq-agent/actions/runs/44450257622)
+at `f1ec979e25975763f38b8590f66903f9535b9a73` qualifies completely. Its seven
+fixed exchanges, failed-edit continuation, two edits, original failing/passing
+checks, reconnect, review and exact application all pass. Both original services
+meet Stop2, all writers and Secret Service join, and cleanup has zero errors.
+All 142 Linux private tests pass. The complete corpus covers 4519 files, both
+databases and actual client data. Its 150 streams all close with zero matches,
+limit violations or retained secret/tail bytes. Submission to completion takes
+about 123 minutes, including 57 minutes checking/repairing and 65 minutes applying.
+
+The [same-source real DeepSeek task](https://github.com/cogine-ai/cliq-agent/actions/runs/44465266735)
+then completes eight model calls and 21 private tool operations. It enters
+`waiting/reconciliation` at `tool_select / LEASE_FENCED`, Journal 93/item 62,
+before the ninety-minute Run deadline. Actual available space is 2,873,556,992
+bytes. Both original services meet Stop2, all writers and Secret Service join,
+and cleanup has zero errors. The owned temporary secret is removed and absence
+verified. Final recheck, review, exact application and complete corpus remain
+unqualified. Its precise original fence condition remains unverified.
+
+The next coherent candidate addresses the observed pure-selection liveness and
+read amplification. The existing source-backed renewal decision first rejects
+keeping an original worker live during its pure selection read. The corrected
+phase permits that guarded heartbeat while preserving execution preparation and
+all current identity/expiry/cancellation checks. A real SQLite/CAS regression
+also first reads the same workspace-state JSON twice in one traversal. Scoped
+verified JSON copies now serve repeated consumers, with independent hash and
+decoder validation, fresh separate traversals and the original raw/stream/
+discard checks. The free fixed journey expands to 21 actual private tools and
+asserts all 24 charged tool calls, including dependency acquisition and both
+original verifiers. Every original task, stop, join and corpus assertion remains.
+Physical liveness, throughput and the real-model task still need qualification.
+
+The sixth task's immutable USD 10 ceiling bounds its whole lifetime by twelve
+potential billable requests. The previously audited original 8192-output body
+bound and peak-price calculation give 330696 USD micros per potential request.
+The full lifetime upper booking is ceil(12 ×0.330696 ×7.4) = CNY 30, with every
+unobserved request included. Earlier five reservations remain CNY 119. A later
+same-bound USD 10 task can reserve another CNY 30, for a prospective total CNY 179
+within the authorized CNY 200. This uses the published generated-completion
+contract. Actual invoices remain unreconciled. Native 393216-output accounting,
+full 792725-micro charges, UNKNOWN treatment and the USD 10 ceiling remain.
+
 ## Goal and baseline
 
 Deliver the approved Linux preview described in the RFC's 2026-11-13 amendment:

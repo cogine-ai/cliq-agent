@@ -834,11 +834,12 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
           }
           const calls: Record<string, unknown>[] = [];
           if (ordinal === 2 || ordinal === 3) {
-            calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
-              type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
+            calls.push(...Array.from({ length: 8 }, (_, index) => ({ id: `pr532-preview-read-${ordinal}-${index}`,
+              type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: index % 2 ? PR532_CHECK : PR532_FILE }) } })));
           }
-          if (ordinal === 5) calls.push({ id: 'pr532-preview-after-edit-read', type: 'function',
-            function: { name: 'read', arguments: JSON.stringify({ path: PR532_FILE }) } });
+          if (ordinal === 5) calls.push(...[PR532_FILE, PR532_CHECK].map((file, index) => ({
+            id: `pr532-preview-after-edit-read-${index}`, type: 'function',
+            function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
           if (edit) {
             const original = readGitBlob(PR532_BASE, PR532_FILE).toString('utf8');
             const intermediate = '// Controlled intermediate edit.\n' + original;
@@ -1698,6 +1699,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         },
       });
       assert(options.provider ? report.pr532Preview.modelCostMicros > 0 : postCount === 7 && acceptedTcp === 7 && acceptedTls === 7);
+      if (!options.provider) assert.equal(report.pr532Preview.toolCalls, 24);
       assert(!responderFailure);
       report.pr532Preview.realModelUsed = options.provider !== undefined;
       report.normalCliWorkflowComplete = true; report.protocolWorkflowComplete = true;

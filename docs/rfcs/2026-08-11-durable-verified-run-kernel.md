@@ -83,6 +83,19 @@ before COMMIT can establish that rollback and close the original statement
 scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
 the connection unusable. This supplies no invocation replay or refund authority.
 
+One complete recovery projection may reuse its own fully verified JSON byte
+copies. The first read opens and verifies the real CAS object and joins its
+handles. Repeated uses receive independent copies and retain their full digest,
+canonical encoding and typed-decoder checks. The captured content reference
+identifies those immutable bytes. A separate projection, including a nested
+projection, starts with fresh reads. SQL snapshots, StateOwner, grants, current
+lease and native release checks keep their existing boundaries. Raw, bounded,
+stream and discard readers retain their original physical verification.
+The data cache holds at most 16 MiB, 4096 objects and 1 MiB per object. Cache capacity
+selects the original complete read path for additional objects. These limits
+govern temporary reuse and preserve the supported artifact sizes. Callback exit
+clears the byte copies and closes their lifetime, including failure/cancellation.
+
 The full-project PR #532 experiment supplies an explicit ninety-minute wall
 budget to each admitted Run under the approved task-limit extension. Its
 hosted job is bounded to 195 minutes, covering the agent Run, application
@@ -167,7 +180,13 @@ assuming the former sixteen reads remain on this connection path.
 An original activated agent worker or publication holder records its actual
 same-owner renewals for complete history reads. The agent scope requires the
 genuine execution, held native resources, active generation and unexpired lease.
-Only the publication task retains its existing in-flight renewal eligibility.
+An original agent worker may also retain its guarded heartbeat while the pure
+tool-selection read is pending. Execution preparation starts after that read
+and its cancellation checkpoint complete. Native activation, revocation,
+Checkpoint, received-result custody and execution preparation retain their
+existing renewal rules. Every renewal still requires the same held physical
+worker, productive Run, active generation, original StateOwner and unexpired
+current lease. The Run deadline and final release checks stay current.
 Read comparisons may recognize only the exact recorded rows, with unchanged
 non-lease fields and current SQL equal to the latest recorded row. This
 comparison includes the nested locked-dependency candidate reader. Recovery
