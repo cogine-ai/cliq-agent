@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { AgentModelTurn, ToolCallInputV1 } from '../protocol/agent-ir.js';
+import type { ModelRequestV1 } from '../model/request.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readRecoveryClosure } from './recovery-closure.js';
@@ -31,7 +32,11 @@ for (const closeFails of [false, true]) test(`nested recovery cancellation joins
     // No tool, native worker or physical execution evidence is produced.
     await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    const filename = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.latestCheckpoint.contextManifestRef);
+    const prepared = before.journal.find(entry => entry.opKind === 'model' && entry.phase === 'prepared')!;
+    const request = await fixture.store.artifacts.readCanonical<ModelRequestV1>(prepared.requestRef);
+    // Nested history must physically reread the original serialized request.
+    // Repeated JSON metadata may already belong to this traversal's cache.
+    const filename = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, request.bodyBytesRef);
     driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
     fs.open = (async (...args: Parameters<typeof fs.open>) => {
       const handle = await originalOpen(...args);
