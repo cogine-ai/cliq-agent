@@ -336,10 +336,8 @@ lost COMMIT acknowledgement and actual rollback failures still poison the
 uncertain connection. All58 driver regressions pass locally, including genuine
 FULL, caught automatic rollback, all three DML-RETURNING row methods and
 lost-COMMIT coverage. Pure-read failures retain their original ineligibility
-for mutation retry classification. This establishes the
-SQLite defect; the unchanged-capacity installed Linux read/Stop2 reproduction
-must still validate the repair. The fifth real job's identical cause remains
-unproven. [SQLite transaction-state contract](https://www.sqlite.org/c3ref/get_autocommit.html)
+for mutation retry classification. This establishes the SQLite defect. The
+original paid failure's exact cause remains unproven. [SQLite transaction-state contract](https://www.sqlite.org/c3ref/get_autocommit.html)
 
 A separate `pr532_full_project_v1` fixture profile now selects a fixed4GiB
 owned test volume for the controlled and real-provider whole-project journeys.
@@ -356,13 +354,43 @@ volumes, image substitution, delayed-profile refusal and original-profile
 capacity refusals. They exercise the root harness's exact program without
 mounting a volume or providing native authority. The original-size Linux repeat
 checks the driver repair on its fixed source while the complete4GiB task
-rehearsal runs on its own fixed source. Both physical results are pending.
+rehearsal runs on its own fixed source.
 
 The initial4GiB dispatch waits in the old global controlled concurrency group.
 Controlled rehearsals now group by their fixed Git ref so the two independent
 free-runner fixtures can execute together. Funded jobs use the global `funded`
 group with cancellation disabled. A source-backed expression test checks both
 ref cases and the shared funded group. This changes scheduling only.
+
+The [original-size repeat](https://github.com/cogine-ai/cliq-agent/actions/runs/44419601864)
+at `55daa2763354c59b64936e66c74acec8776e3a00` completes all seven model
+exchanges. Queries continue until the original sixty-minute observation deadline
+without the previous control refusal. The last Run remains queued for verification
+at Journal51/item35. The actual volume again has zero ordinary-user available
+bytes, and the original Supervisor still exceeds Stop2 and receives SIGKILL.
+Original-writer join remains unproven. Keeper and Secret Service join, and outer
+cleanup reports zero errors. This is failed task and shutdown evidence. The
+driver fix improves readability under the reproduced capacity failure. The
+zero-space execution and shutdown closure remain open. No paid request is made.
+The separate [4GiB complete-project rehearsal](https://github.com/cogine-ai/cliq-agent/actions/runs/44422055653)
+at `34446b2b9c47371bee404ca90751338937eddd55` completes all seven exchanges,
+the rejected-edit continuation, successful edits, original failing and passing
+checks, reconnect and result review. Checking and repair take about58 minutes.
+Delivery reaches its original permanent publication claim and received-result
+settlement preparation, then exceeds the sixty-minute observer. Its actual
+volume still has2,933,329,920 ordinary-user available bytes. Recovery spans
+continue completing, and the scheduler has zero failures before shutdown.
+Both original services stop successfully under Stop2, all writers and Secret
+Service join, and outer cleanup reports zero errors. Exact application,
+terminal settlement and the final complete corpus remain unqualified.
+
+The approved task-limit extension now allocates90 minutes per experimental Run
+and195 minutes to the hosted job. Timed polling uses7.5 seconds, preserving the
+same720 timed-poll upper bound within the original1024-frame channel. Delivery
+uses its existing fresh authentication. Cost, token, tool and repair budgets,
+READY5, Stop2, native HTTP30, authorization expiry and every result/apply/scan
+assertion remain. This allocation addresses the observed task-budget exhaustion.
+It supplies no new physical qualification, and the measured latency remains poor.
 
 ## Goal and baseline
 

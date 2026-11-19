@@ -83,12 +83,15 @@ before COMMIT can establish that rollback and close the original statement
 scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
 the connection unusable. This supplies no invocation replay or refund authority.
 
-The full-project PR #532 experiment supplies an explicit sixty-minute wall
+The full-project PR #532 experiment supplies an explicit ninety-minute wall
 budget to each admitted Run under the approved task-limit extension. Its
-hosted job is bounded to 135 minutes, covering the agent Run, application
+hosted job is bounded to 195 minutes, covering the agent Run, application
 admission, Delivery Run and cleanup. The acceptance still requires the original
 failed assertion, model repair, passing recheck, reviewed result and exact
-application. Record observed durations independently of these task budgets.
+application. Timed polling uses 7.5-second intervals, retaining the original
+720-poll upper bound and 1024-frame authenticated channel lifetime. Delivery
+reauthenticates through the existing path. Record observed durations
+independently of these task budgets.
 
 The whole-project rehearsal selects the fixed `pr532_full_project_v1` owned
 4GiB test-volume profile, which records its actual hard capacity and

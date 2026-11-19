@@ -12,6 +12,7 @@ import { decodeInstalledControlResponse, type InstalledControlRequestV1 } from '
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
 import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
   type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
+import { PR532_POLL_INTERVAL_MS, PR532_RUN_WALL_TIME_MS } from './provider-journey-input.js';
 
 // Powerless public-protocol data only. These cases do not create an installed
 // client, accepted Run, grant, process, model request or native death evidence.
@@ -236,12 +237,12 @@ test('PR532 observation stays within the original client frame budget through a 
   visit(parsed); assert(finish);
   for (const late of [false, true]) {
     let now = 0, frames = 1, observations = 0;
-    const wallTimeMs = 3_600_000;
-    const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert,
+    const wallTimeMs = PR532_RUN_WALL_TIME_MS;
+    const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert, PR532_POLL_INTERVAL_MS,
       context: { progress() {} }, read: async () => {
         assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
         if (late) now = wallTimeMs + 1;
-        return { snapshot: { run: { status: now >= wallTimeMs - 5000 ? 'succeeded' : 'running' } },
+        return { snapshot: { run: { status: now >= wallTimeMs - PR532_POLL_INTERVAL_MS ? 'succeeded' : 'running' } },
           items: [], nextItemSeq: 0, journal: [], highWaterJournalSeq: 0, highWaterItemSeq: 0 };
       }, describeToolActivity: async () => { observations++; throw new Error('optional data unavailable'); },
       delay: async (milliseconds: number) => { now += milliseconds; } });

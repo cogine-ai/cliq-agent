@@ -14,7 +14,8 @@ export type ProviderJourneyConfiguration = Readonly<{ definition: InstalledProvi
 
 // Includes dependency acquisition, model-directed tools and both original
 // checks. Each native request and worker has its own independent limit.
-export const PR532_RUN_WALL_TIME_MS = 60 * 60_000;
+export const PR532_RUN_WALL_TIME_MS = 90 * 60_000;
+export const PR532_POLL_INTERVAL_MS = 7_500;
 
 export function decodeProviderJourneyConfiguration(value: unknown): ProviderJourneyConfiguration {
   assert(value && typeof value === 'object' && !Array.isArray(value) && exactKeys(value, ['definition', 'budgets']),

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { providerSelection, runProviderProcess } from './provider-qualification.js';
+import { PR532_POLL_INTERVAL_MS } from '../kernel/testing/provider-journey-input.js';
 
 // Real subprocess/pipe tests with inert bytes. No StateOwner, credential
 // enrollment, installed identity, provider request or native proof is created.
@@ -25,7 +26,8 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   assert.equal(input.definition.validFrom, '2026-11-12T23:59:00.000Z');
   assert.equal(input.definition.validThrough, '2026-11-13T04:00:00.000Z');
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
-  assert.equal(pr532.budgets.wallTimeMs, 60 * 60_000);
+  assert.equal(pr532.budgets.wallTimeMs, 90 * 60_000);
+  assert.equal(pr532.budgets.wallTimeMs / PR532_POLL_INTERVAL_MS, 720);
   assert.equal(pr532.budgets.costMicros, 10_000_000);
   assert.equal(pr532.budgets.modelTokens, 32_000_000);
 });

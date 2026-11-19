@@ -18,6 +18,7 @@ import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
 import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
 import { decodeDependencyProcessCapture } from '../../../src/state/dependency-capture.js';
+import { PR532_POLL_INTERVAL_MS } from './provider-journey-input.js';
 
 export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
 export const PR532_CHECK_SOURCE = '961658fcf80116b6ef13e39cf39d901276a48c3c';
@@ -225,9 +226,9 @@ export async function runInstalledPr532Journey(input: {
       assert(!dependencyFailed, 'installed Run owns a failed dependency acquisition or npm process');
       assert(run.status === 'queued' || run.status === 'running', `installed Run stopped at ${run.status}/${run.nextStep}`);
       assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
-      // One full sixty-minute Run fits within the original 1024-frame client
-      // lifetime. A separate Delivery uses a genuinely reauthenticated client.
-      await delay(Math.min(5000, Math.max(0, deadline - Date.now())));
+      // A ninety-minute Run uses at most 720 timed polls within the original
+      // 1024-frame lifetime. Delivery uses a genuinely reauthenticated client.
+      await delay(Math.min(PR532_POLL_INTERVAL_MS, Math.max(0, deadline - Date.now())));
     }
   };
 
