@@ -130,7 +130,7 @@ ceilings. Assembly, reservation and reproduced wire-body checks reject an
 output cap above the signed bound before release. At the selected peak prices,
 each released or UNKNOWN request consumes its complete330696-USD-micro
 reservation. Current-run usage supplies no budget refund. The experiment's
-USD4.30 Run ceiling permits at most13 such full charges. The delivery plan
+USD1.66 Run ceiling permits at most5 such full charges. The delivery plan
 accounts for its full lifetime within the approved cumulative CNY200 total.
 The task presents the original source/check as repository data, then gives the
 model its affordable full-call count and coherent-edit/check guidance. These

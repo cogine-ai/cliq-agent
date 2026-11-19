@@ -30,7 +30,7 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
   assert.equal(pr532.budgets.wallTimeMs, 90 * 60_000);
   assert.equal(pr532.budgets.wallTimeMs / PR532_POLL_INTERVAL_MS, 720);
-  assert.equal(pr532.budgets.costMicros, 4_300_000);
+  assert.equal(pr532.budgets.costMicros, 1_660_000);
   assert.equal(pr532.definition.requestTokenCeiling.outputTokens, 8192);
   assert.equal(pr532.budgets.modelTokens, 32_000_000);
 });
@@ -54,7 +54,7 @@ test('the fixed provider ceiling covers every admitted output cap and the exact 
   assert.equal(ceiling.cacheReadTokens, 1048576);
   assert.equal(calculateModelCostMicros(ceiling, definition.prices), 330696);
   const { budgets } = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
-  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 13);
+  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 5);
 });
 
 test('the source-bounded CNY-account booking covers the next complete native lifetime within the approved total', () => {
@@ -67,14 +67,15 @@ test('the source-bounded CNY-account booking covers the next complete native lif
   const cnyMicros = calculateModelCostMicros(ceiling,
     { input: 2_000_000, output: 8_000_000, cacheRead: 40_000, cacheWrite: 0 });
   assert.equal(cnyMicros, 2_204_632);
-  const firstFour = Number((33n * 330_696n * 74n + 9_999_999n) / 10_000_000n);
-  const fifth = 37;
-  const sixthAndSeventh = Number((24n * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
+  // Preserve the already-audited original bounds, including the entire fifth
+  // lifetime despite its failed Stop and the entire eighth thirteen-call cap.
+  const historicalCalls = [15, 4, 10, 4, 15, 12, 12, 13].reduce((sum, count) => sum + count, 0);
+  const historical = Number((BigInt(historicalCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
   const nextCalls = Math.floor(input.budgets.costMicros / usdMicros);
   const next = Number((BigInt(nextCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
-  assert.deepEqual({ firstFour, fifth, sixthAndSeventh, nextCalls, next },
-    { firstFour: 81, fifth: 37, sixthAndSeventh: 53, nextCalls: 13, next: 29 });
-  assert.equal(firstFour + fifth + sixthAndSeventh + next, 200);
+  assert.deepEqual({ historicalCalls, historical, nextCalls, next },
+    { historicalCalls: 85, historical: 188, nextCalls: 5, next: 12 });
+  assert.equal(historical + next, 200);
 });
 
 test('private bytes arrive once after the complete marker and EOF, with no inherited credential environment', async () => {

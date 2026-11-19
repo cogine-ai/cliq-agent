@@ -24,7 +24,22 @@ checks and joins, and the next traversal reads the real object again. Large
 objects, explicit raw/stream readers and all live authority boundaries retain
 their original paths. The regression now observes one actual joined read.
 The changed runtime still requires a new complete free Linux journey. No
-further funded experiment or PR is authorized by this result.
+funded qualification or PR follows from this result.
+
+The same dedicated CNY account and official peak tariff give a uniform
+source-based financial bound for the eight previous lifetimes. Keep their
+independently audited request maxima of15,4,10,4,15,12,12,13, including the
+failed fifth Stop and every possible unobserved release. All85 potential
+requests total187393720 CNY micros, rounded upward to CNY188. A later USD1.66
+native Run permits at most five full330696-USD-micro charges. Its complete
+lifetime books CNY12, keeping the cumulative upper at the approved CNY200.
+Official September10/October17 updates and the current tariff support the
+price-continuity inference. Actual invoices remain unreconciled. This
+reconciliation changes external financial booking and the next experiment's
+hard spend cap. Native full charges, UNKNOWN handling and every acceptance
+condition remain required. A new funded trial still waits for the complete
+free Linux result. [Official tariff](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/),
+[official change log](https://api-docs.deepseek.com/zh-cn/updates/).
 
 **2026-11-19 current qualification.** Fixed source
 `728616c968b9f067fcefeec43a2e31afe47cc113` passes the complete free
@@ -44,7 +59,7 @@ precede Stop. Both services meet Stop2, all writers/daemon and the original
 process/pipes join, and the matching owned CI secret is removed. The repaired
 check, result review, application and complete corpus remain unqualified.
 
-The next coherent candidate aligns the price ceiling with the existing signed
+The `8b7f884` candidate aligned the price ceiling with the existing signed
 8192-output catalog and actual normal/compaction `max_tokens`. Complete input
 and cache ceilings stay1048576 each. Peak-price reservation is330696 USD micros
 per released/UNKNOWN request. The selected USD4.30 cap funds at most13 full
@@ -53,7 +68,7 @@ files, followed by coherent-edit and configured-check guidance. Original
 failure/pass, reconnect, review, exact application, READY5, Stop2, HTTP30 and
 complete-corpus assertions apply to the next free and real journeys.
 
-External booking now uses the separately CA/hostname/original-SPKI-authenticated
+That candidate's external booking used the separately CA/hostname/original-SPKI-authenticated
 read-only `/user/balance` observation of a CNY account and the official peak
 CNY tariff,2 input/0.04 cache-read/8 output per million tokens. Input/cache
 1048576 and output8192 give an upward-rounded2204632 CNY micros per potential
