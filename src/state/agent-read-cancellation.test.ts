@@ -630,7 +630,10 @@ test('preparation and recovery bind full CAS reads to their actual task while re
   assert.doesNotMatch(recovery, /readRecoveryClosure\(driver, artifacts|readRetainedWorkerLaunchClosure\(artifacts/u);
   const checkpoint = between(execution, 'function checkpointRetirement(', 'async function retireToCheckpoint(');
   assert.doesNotMatch(checkpoint, /withReadSignal/u);
-  assert.match(checkpoint, /readRecoveryClosure\(driver, artifacts, runId\)/u);
+  assert.match(checkpoint, /readOwnedWorkerRetirementCut\(driver, owner, current\.activated, current\.closure\)/u);
+  assert.match(checkpoint, /await currentGeneration\.observe\(\{ signal \}\)/u);
+  assert.match(checkpoint, /await publishInspector\(artifacts, assertActiveStateOwner\(driver, owner\)\)/u);
+  assert.match(checkpoint, /await artifacts\.publishCanonical\(retirementBody,/u);
 });
 
 test('installed model budget refusal rechecks resource Stop before requesting the normal drain', () => {
