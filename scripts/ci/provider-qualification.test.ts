@@ -30,7 +30,7 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
   assert.equal(pr532.budgets.wallTimeMs, 90 * 60_000);
   assert.equal(pr532.budgets.wallTimeMs / PR532_POLL_INTERVAL_MS, 720);
-  assert.equal(pr532.budgets.costMicros, 10_000_000);
+  assert.equal(pr532.budgets.costMicros, 4_700_000);
   assert.equal(pr532.definition.requestTokenCeiling.outputTokens, 8192);
   assert.equal(pr532.budgets.modelTokens, 32_000_000);
 });
@@ -54,7 +54,7 @@ test('the fixed provider ceiling covers every admitted output cap and the exact 
   assert.equal(ceiling.cacheReadTokens, 1048576);
   assert.equal(calculateModelCostMicros(ceiling, definition.prices), 330696);
   const { budgets } = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
-  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 30);
+  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 14);
 });
 
 test('the source-bounded CNY-account booking covers the next complete native lifetime within the approved total', () => {
@@ -69,16 +69,17 @@ test('the source-bounded CNY-account booking covers the next complete native lif
   assert.equal(cnyMicros, 2_204_632);
   // Preserve the already-audited original bounds, including the entire fifth
   // lifetime despite its failed Stop, the eighth thirteen-call cap and the
-  // ninth five-call lifetime. Keep its previously rounded CNY200 booking.
-  const historicalCalls = [15, 4, 10, 4, 15, 12, 12, 13, 5].reduce((sum, count) => sum + count, 0);
+  // ninth five-call lifetime and the entire failed thirty-call lifetime.
+  // Preserve its rounded CNY267 booking without refunding unobserved claims.
+  const historicalCalls = [15, 4, 10, 4, 15, 12, 12, 13, 5, 30].reduce((sum, count) => sum + count, 0);
   const historical = Number((BigInt(historicalCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
   const nextCalls = Math.floor(input.budgets.costMicros / usdMicros);
   const next = Number((BigInt(nextCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
   assert.deepEqual({ historicalCalls, historical, nextCalls, next },
-    { historicalCalls: 90, historical: 199, nextCalls: 30, next: 67 });
-  const retainedHistoricalBooking = 200;
+    { historicalCalls: 120, historical: 265, nextCalls: 14, next: 31 });
+  const retainedHistoricalBooking = 267;
   assert(retainedHistoricalBooking >= historical);
-  assert.equal(retainedHistoricalBooking + next, 267);
+  assert.equal(retainedHistoricalBooking + next, 298);
   assert(retainedHistoricalBooking + next <= 300);
 });
 

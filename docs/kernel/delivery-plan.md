@@ -5,6 +5,21 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 next funded input.** The complete current local suite passes at
+`da244ec`:4142 tests,4110 passes and32 platform skips, zero failures. Its build
+passes with43 SDK declarations. The exact source is now running the complete
+free [PR532 task](https://github.com/cogine-ai/cliq-agent/actions/runs/44684447471)
+and [verifier group](https://github.com/cogine-ai/cliq-agent/actions/runs/44684464765).
+Neither result is qualified yet. Prepare only the next private funding input:
+4700000 USD micros permits at most14 full claims. Keep all previous120 possible
+claims and their rounded CNY267 booking; do not refund the failed30-claim
+lifetime. A new complete14-claim lifetime reserves a rounded CNY31, prospective
+total CNY298 within the approved CNY300. Full input/cache/output reservations,
+UNKNOWN charges, retries and all runtime limits retain their rules. No paid
+dispatch is allowed before the current free task passes; preparation alone
+does not book or send a new model call. This input change touches no production,
+native, package or core-test bytes.
+
 **2026-11-20 measured read amplification.** The retained
 [real Linux budget-stop report](https://github.com/cogine-ai/cliq-agent/actions/runs/44652661069)
 from the current preceding runtime records1212609 CAS reads and97965344432
@@ -103,9 +118,9 @@ secret was deleted and absence verified. Historical whole-lifetime maxima now
 cover90 possible requests, with a uniform peak upper198416880 CNY micros.
 Actual invoices remain unreconciled. The existing conservative rounded booking
 is CNY200. The owner authorized an additional CNY100 on2026-11-20, raising
-this round's ceiling to CNY300. One next Run is capped at10000000 USD micros,
+this round's ceiling to CNY300. That funded Run was capped at10000000 USD micros,
 at most30 complete model claims under the unchanged request/token ceilings.
-At the published peak CNY tariffs this reserves another rounded CNY67, for
+At the published peak CNY tariffs it reserved another rounded CNY67, for
 a cumulative booking of CNY267. It does not authorize automatic paid retries
 or change any execution, shutdown or qualification limit.
 
