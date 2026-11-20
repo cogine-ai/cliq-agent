@@ -12,7 +12,7 @@ import { decodeProviderJourneyConfiguration, PR532_RUN_WALL_TIME_MS } from '../k
 const READY = 'CLIQ_PROVIDER_SECRET_STDIN_READY_V1';
 const OUTPUT_LIMIT = 8 * 1024 * 1024;
 const RUN_COST_CEILING_USD_MICROS = 5_000_000;
-const PR532_COST_CEILING_USD_MICROS = 1_660_000;
+const PR532_COST_CEILING_USD_MICROS = 10_000_000;
 
 export function providerSelection(now: Date, pr532 = false) {
   assert(Number.isFinite(now.getTime()));
@@ -123,7 +123,7 @@ async function main() {
     phase => process.stdout.write(phase + '\n'));
     await writeFile(path.join(root, 'cliq-provider-invocation.json'), JSON.stringify({ format: 'cliq-funded-provider-ci-v1', revision,
       ...report, runCostCeilingUsdMicros: pr532 ? PR532_COST_CEILING_USD_MICROS : RUN_COST_CEILING_USD_MICROS,
-      experimentCeilingCny: pr532 ? 200 : 235, automaticRetries: 0,
+      experimentCeilingCny: pr532 ? 300 : 235, automaticRetries: 0,
       actualProviderBillingQualified: false }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     assert(report.passed);
   } finally { secret.fill(0); }

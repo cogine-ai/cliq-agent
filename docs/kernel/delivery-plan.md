@@ -24,7 +24,12 @@ returns zero errors. Its complete corpus is absent. The matching owned CI
 secret was deleted and absence verified. Historical whole-lifetime maxima now
 cover90 possible requests, with a uniform peak upper198416880 CNY micros.
 Actual invoices remain unreconciled. The existing conservative rounded booking
-is CNY200. Additional funding has been selected, with its amount still pending.
+is CNY200. The owner authorized an additional CNY100 on2026-11-20, raising
+this round's ceiling to CNY300. One next Run is capped at10000000 USD micros,
+at most30 complete model claims under the unchanged request/token ceilings.
+At the published peak CNY tariffs this reserves another rounded CNY67, for
+a cumulative booking of CNY267. It does not authorize automatic paid retries
+or change any execution, shutdown or qualification limit.
 
 That failed report retained only the last eight items and numeric Bash exit1.
 It cannot establish the complete tool sequence, the command's actual failure
