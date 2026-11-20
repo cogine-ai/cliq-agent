@@ -2,15 +2,40 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { channel } from 'node:diagnostics_channel';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import { ContentAddressedStore } from '../../../src/state/cas.js';
 import { INSTALLED_BUILTIN_WORK_CHANNEL, noteInstalledBuiltinWorkPhase } from '../../../src/state/installed-work-diagnostics.js';
 import { INSTALLED_RUN_FAILURE_CHANNEL, noteInstalledStoreStop } from '../../../src/state/installed-run-diagnostics.js';
 import { INSTALLED_BUILTIN_WORK_DIAGNOSTIC_BANNER as banner } from './installed-builtin-work-banner.js';
 import { readInstalledBuiltinWorkJournal } from './installed-store-diagnostic-journal.js';
+
+test('successful task shutdown retains actual process-window diagnosis under the same original join binding', () => {
+  // Inert selection predicate only, never process identity or join evidence.
+  const source = readFileSync(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('journey.ts', source, ts.ScriptTarget.Latest, true);
+  let guard: ts.Expression | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed).startsWith('storeFailureDiagnostics &&') &&
+        node.thenStatement.getText(parsed).includes('const work = readInstalledBuiltinWorkJournal(text,')) {
+      assert.equal(guard, undefined); guard = node.expression;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(guard);
+  for (const matches of [false, true]) {
+    const context = { storeFailureDiagnostics: true, primary: undefined,
+      storeFailureBinding: { pid: 123, invocationId: 'inert-original' },
+      before: [{ MainPID: matches ? '123' : '124', InvocationID: 'inert-original' }] };
+    assert.equal(runInNewContext(ts.transpileModule(`globalThis.observed = Boolean(${guard.getText(parsed)});`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context), matches);
+  }
+});
 
 test('fixed phase observations count actual small and threaded CAS reads and ignore invalid Stop input', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-builtin-work-')), cas = new ContentAddressedStore(root);

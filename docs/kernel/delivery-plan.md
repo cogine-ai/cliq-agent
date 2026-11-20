@@ -35,6 +35,17 @@ explicitly nonterminal and cannot satisfy success, accounting, retirement or
 recovery evidence. The original deadline and terminal-only success collector
 remain. This cannot reconstruct the disposed real task's missing sequence.
 
+The next free rehearsal keeps the original21 read/edit calls and13 Bash
+retirements. Its first Bash appends a fixed source comment; the next independent
+worker must observe and remove those exact bytes. The remaining11 preserve
+bytes, and the same final original check/review/application assertions remain.
+This distinguishes actual Bash workspace continuity from same-byte rewrites.
+Host command-data execution is not Linux qualification. Successful task shutdown
+also reads the existing bounded process-window counters after the same original
+Stop/join/identity checks, so a successful free task retains useful cost evidence.
+The former failure-only selection left that diagnosis unavailable on success.
+No pause, new process authority or larger journal/read limit is introduced.
+
 **2026-11-20 preceding runtime evidence.** The exact `49a8349493253e2253f8ae1934cf8d011aa9957c`
 [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44634845267)
 passes the full original task. It retains all21 read/edit calls plus13 real

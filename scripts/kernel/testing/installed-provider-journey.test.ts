@@ -232,7 +232,7 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   for (const [index, call] of bash.entries()) {
     assert.equal(call.id, `pr532-preview-bash-${index}`); assert.equal(call.function.name, 'bash');
     assert(!observed.has(call.id)); observed.add(call.id);
-    assert.equal(JSON.parse(call.function.arguments).command, JSON.parse(bash[0].function.arguments).command);
+    if (index >= 2) assert.equal(JSON.parse(call.function.arguments).command, JSON.parse(bash[2].function.arguments).command);
   }
   // Command-data regression using the host Node and an owned file. The actual
   // signed /usr/bin/node, private workspace and retirement require Linux.
@@ -242,11 +242,17 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   try {
     const bytes = Buffer.from([0xef, 0xbb, 0xbf, 0xff, 0, 10]); writeFileSync(path.join(directory, 'original.ts'), bytes);
     const hostNode = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
-    const executed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', hostNode + command.slice(prefix.length)],
-      { cwd: directory, timeout: 5000, encoding: 'utf8' });
-    assert.equal(executed.status, 0); assert.equal(executed.stderr, '');
-    assert.equal(executed.stdout, 'CLIQ_PR532_NODE_WRITE_OK\n');
-    assert.deepEqual(readFileSync(path.join(directory, 'original.ts')), bytes);
+    const marker = Buffer.from('\n// CLIQ_PR532_BASH_STATE_V1\n');
+    for (const [index, call] of bash.entries()) {
+      const actual = JSON.parse(call.function.arguments).command as string;
+      assert(actual.startsWith(prefix + ' --no-addons -e '));
+      const executed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', hostNode + actual.slice(prefix.length)],
+        { cwd: directory, timeout: 5000, encoding: 'utf8' });
+      assert.equal(executed.status, 0); assert.equal(executed.stderr, '');
+      assert.equal(executed.stdout, 'CLIQ_PR532_NODE_WRITE_OK\n');
+      assert.deepEqual(readFileSync(path.join(directory, 'original.ts')), index === 0 ? Buffer.concat([bytes, marker]) : bytes,
+        'the next original Bash must observe and remove the preceding real byte change');
+    }
   } finally { rmSync(directory, { recursive: true, force: true }); }
   const finalEdit = JSON.parse(replies[5].choices[0].message.tool_calls[0].function.arguments);
   assert.equal(finalEdit.old_text, firstEdit.new_text); assert.equal(finalEdit.new_text, 'inert-reference');

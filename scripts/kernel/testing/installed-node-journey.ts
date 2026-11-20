@@ -853,15 +853,22 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
               id: `pr532-preview-after-edit-read-${index}`, type: 'function',
               function: { name: 'read', arguments: JSON.stringify({ path: file }) } })));
             // Keep all original reads/edits and replay the thirteen Bash
-            // retirements observed in the stalled real task. The signed Node
-            // reads and rewrites the actual existing target without changing
-            // its bytes. Every invocation must independently succeed and join.
-            const program = ['const fs = require("node:fs");', `const filename = ${JSON.stringify(PR532_FILE)};`,
-              'const bytes = fs.readFileSync(filename);', 'fs.writeFileSync(filename, bytes);',
-              'process.stdout.write("CLIQ_PR532_NODE_WRITE_OK\\n");'].join(' ');
-            const command = "/usr/bin/node --no-addons -e '" + program.replaceAll("'", "'\\''") + "'";
-            calls.push(...Array.from({ length: 13 }, (_, index) => ({ id: `pr532-preview-bash-${index}`,
-              type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command }) } })));
+            // retirements observed in the stalled real task. The first actual
+            // Node writes new bytes; its successor must observe and remove
+            // them after the original Checkpoint/worker retirement. All thirteen
+            // invocations still independently succeed and join.
+            calls.push(...Array.from({ length: 13 }, (_, index) => {
+              const program = ['const fs = require("node:fs");', 'const assert = require("node:assert/strict");',
+                `const filename = ${JSON.stringify(PR532_FILE)};`, 'const bytes = fs.readFileSync(filename);',
+                'const marker = Buffer.from("\\n// CLIQ_PR532_BASH_STATE_V1\\n");',
+                index === 0 ? 'assert(!bytes.includes(marker)); fs.writeFileSync(filename, Buffer.concat([bytes, marker]));'
+                  : index === 1 ? 'assert(bytes.subarray(-marker.length).equals(marker)); fs.writeFileSync(filename, bytes.subarray(0, -marker.length));'
+                    : 'fs.writeFileSync(filename, bytes);',
+                'process.stdout.write("CLIQ_PR532_NODE_WRITE_OK\\n");'].join(' ');
+              const command = "/usr/bin/node --no-addons -e '" + program.replaceAll("'", "'\\''") + "'";
+              return { id: `pr532-preview-bash-${index}`, type: 'function',
+                function: { name: 'bash', arguments: JSON.stringify({ command }) } };
+            }));
           }
           if (edit) {
             const original = readGitBlob(PR532_BASE, PR532_FILE).toString('utf8');
@@ -2999,7 +3006,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   originalInvocationBound: true, originalServerJoined: true, records };
               } catch { /* Diagnosis never replaces the original failure or invents a missing observation. */ }
             }
-            if (storeFailureDiagnostics && primary && storeFailureBinding &&
+            if (storeFailureDiagnostics && storeFailureBinding &&
                 String(storeFailureBinding.pid) === before[0]!.MainPID && storeFailureBinding.invocationId === before[0]!.InvocationID) {
               report.storeFailureDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };
               report.assemblyWorkDiagnostics = { diagnosticOnly: true, kind: 'unavailable', reason: 'journal_unavailable' };

@@ -56,7 +56,7 @@ test('the abnormal assembly stream keeps independent original bounds, scan and c
   assert(args.includes('_UID=${ledger.uid}') && args.includes('--until=${timestamp(until)}'));
   for (const field of ['timeout: Math.min(5000, remaining)', "killSignal: 'SIGKILL'", 'maxBuffer: 256 * 1024']) assert(options.includes(field));
   const text = parsed.getText();
-  assert.equal(text.split("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)'" ).length, 2,
+  assert.equal(text.split("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_CONTROL_READ_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)'" ).length, 2,
     'the earlier publication stream keeps its exact independent entry bound');
   for (const field of ['scanBytes(assemblyLog.stdout)', 'scanBytes(assemblyLog.stderr)',
     'assemblyLog.stdout?.fill(0)', 'assemblyLog.stderr?.fill(0)', 'assertRetained()', 'assert(Date.now() < logBy']) assert(text.includes(field));

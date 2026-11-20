@@ -481,7 +481,7 @@ test('assembly work reuses only the original joined whole journal after the unch
   // Source wiring only, never a substitute Supervisor identity, join or timing proof.
   const journey = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
   const stop = journey.indexOf("assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', ...units]).status, 0);");
-  const original = journey.indexOf('if (storeFailureDiagnostics && primary && storeFailureBinding &&', stop);
+  const original = journey.indexOf('if (storeFailureDiagnostics && storeFailureBinding &&', stop);
   const finish = journey.indexOf('} catch (error) { originalStopFailed = true; throw error; }', original);
   const body = journey.slice(original, finish);
   assert(stop >= 0 && original > stop && finish > original);
@@ -575,7 +575,7 @@ test('arrival diagnostics can observe an abnormal original exit without satisfyi
   const body = journey.slice(originalThrow, joined);
   assert.match(body, /finally \{[\s\S]*storeFailureDiagnostics && \(primary \|\| originalStopFailed\)/u);
   assert.match(body, /String\(storeFailureBinding.pid\) === before\[0\]!.MainPID &&\s*storeFailureBinding.invocationId === before\[0\]!.InvocationID/u);
-  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)'"));
+  assert(body.includes("'--grep=^(CLIQ_PUBLICATION_STAGE_V1:|CLIQ_STORE_STOP_PHASE_V1:|CLIQ_PUBLICATION_FAILURE_V1:|CLIQ_CONTROL_READ_FAILURE_V1:|CLIQ_PUBLICATION_WORK_V2:)'"));
   assert(body.includes('timeout: 5000, killSignal: \'SIGKILL\', maxBuffer: 256 * 1024'));
   assert(body.includes('scanBytes(log.stdout); scanBytes(log.stderr);'));
   assert(body.includes("source: 'actual_absent_original_supervisor_journal'"));
