@@ -38,7 +38,6 @@ export async function validateToolRecovery(input: {
   driver?: SqliteDriver;
 }): Promise<void> {
   const { artifacts, run, spec, items, journal } = input;
-  const workspaceContents = new Map<string, Promise<void>>();
   const retryHistories = new Map<string, Readonly<{ entries: readonly InvocationJournalEntry[];
     policy: Readonly<{ maxDispatchedAttempts: number; postAttemptDelaysMs: readonly number[] }>;
     deadline: number | undefined; launchCapacity?: Readonly<{ used: number; limit: number }> }>>();
@@ -551,19 +550,11 @@ export async function validateToolRecovery(input: {
           snapshot.runId !== run.id || snapshot.observedAt < result.observedAt || snapshot.observedAt > completion.timestamp) {
         throw new TypeError('completed mutating tool cannot recover over its pre-effect workspace');
       }
-      let contents = workspaceContents.get(workspace.entriesRef);
-      if (!contents) {
-        // One history cut can refer to the same immutable content graph from
-        // several distinct snapshots. Share only its complete file walk;
-        // every snapshot/Checkpoint/generation/death binding stays independent.
-        contents = (async () => {
-          for (const entry of entries.entries) if (entry.kind === 'file') {
-            await artifacts.verifyChunks(entry.blobRef, entry.size, 'stream');
-          }
-        })();
-        workspaceContents.set(workspace.entriesRef, contents);
+      for (const entry of entries.entries) if (entry.kind === 'file') {
+        // Rehash complete owned small bytes. A miss preserves this original
+        // stream's size/hash/stat/root guards, cancellation cadence and joins.
+        await artifacts.verifyChunks(entry.blobRef, entry.size, 'stream');
       }
-      await contents;
       if (workspace.privateGitStateRef) await artifacts.readBytes(workspace.privateGitStateRef);
       await artifacts.readBytes(snapshot.generationRef);
       const death = validateMatchingWorkerDeath(await readCanonicalArtifact(artifacts, snapshot.quiescenceEvidenceRef),

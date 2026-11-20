@@ -5,6 +5,35 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 retained guest-image amplification.** Exact `476c045`
+[free Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44704297995)
+still fails the original90-minute observation. All36 tools settle, including
+all13 real Bash operations and the final edit; the last cut is queued for
+verification. The scheduler retains a pre-Stop `RECOVERY_REQUIRED` at
+`drive_verifier_execution`. Baseline check exits1; repaired check, review and
+application remain unqualified. Both original units pass Stop2 and the installed
+writers, daemon and observers join. No paid call or complete corpus qualification
+is claimed. Local build and all4144 tests pass at that exact source, with4112
+passes and32 platform skips.
+
+Tool-prepare still returns156366178761 bytes across34 entries, effectively
+unchanged from the prior run. These are overlapping process counters, not
+exclusive Run attribution. Remove the ineffective workspace-graph map and its
+added synthetic regression. The actual retained private-script claim reader
+rehashes the same large signed guest members for every historical capture.
+Its existing real CAS/Ed25519 data fixture reproduces two full image opens
+where one joined check should serve the same traversal. The candidate shares
+only that exact CAS/ref/size content verification, within the existing bounded
+traversal. All per-claim bindings remain independent; later reads and physical
+native activation stay fresh. The real caller regression is RED2→GREEN1 above
+the16MiB byte-copy threshold and still refuses later actual corruption. Joined
+close failures reach every reader; independent cancellation, different CAS,
+wrong size and original large-discard fallback remain checked. These component
+results do not yet establish a Linux speedup or resolve the verifier refusal.
+Four fixed pre-claim verifier work labels distinguish its original permission,
+recovery, activation and preparation awaits in the existing numeric diagnostics.
+They expose no error message, stack, path, clock or execution authority.
+
 Local full-suite routing retains every source test. A two-file-concurrency run
 at `66a0041` finishes4143 tests with one maximum Session-list SIGTERM capture
 at2.04 seconds; the original2-second assertion remains. Run the two list timing
@@ -81,8 +110,8 @@ retains independent bytes, exact length, hashes, cancellation and decoding.
 Later and nested projections still read afresh. The fallback boundary moves
 to16MiB+1; the same no-retention/two-full-verification assertions remain. The
 original64MiB bounded-allocation/corruption/cancellation/close checks retain
-their physical-read requirements. Retained cache bytes stay globally
-bounded; individual transient copied views may now reach16MiB. Accepted
+their physical-read requirements. Retained cache bytes stay bounded per
+traversal; individual transient copied views may now reach16MiB. Accepted
 artifacts, wire limits, native proofs and execution quotas retain their values. The real SQLite/CAS sealed-history regression now also uses
 a nine-MiB file. Actual installed gain still requires the complete free task.
 

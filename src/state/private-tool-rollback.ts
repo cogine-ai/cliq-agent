@@ -178,9 +178,10 @@ export async function readPrivateBuiltinClaim(artifacts: ArtifactCatalog, prepar
       runtimeBundleManifestDigest: assembly.runtime.runtimeBundleManifestDigest, toolchain: { kind: 'guest_toolchain',
         guestToolchainManifestRef: execution.guestToolchainManifestRef, guestToolchainManifestDigest: execution.guestToolchainManifestDigest,
         guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest } }, 'private rollback original runtime closure');
-    // Each original claim independently rereads every byte. Discard-only
-    // verification retains the stream's exact size, hash, root and join checks.
-    for (const entry of [scriptEntry, ...members]) await artifacts.verifyChunks(entry.digest, entry.byteCount);
+    // Every claim above binds its complete original recipe independently.
+    // One history traversal may share identical content checks after their
+    // original full size/hash/root verification and descriptor joins.
+    for (const entry of [scriptEntry, ...members]) await artifacts.verifyRetainedChunks(entry.digest, entry.byteCount);
   }
   return { request, spec };
 }

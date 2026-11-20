@@ -2268,13 +2268,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       };
       const work = (async () => {
         signal.throwIfAborted();
+        builtinPhase('verifier_permission');
         const waiting = await preparePermission(expectedRunRevision); if (waiting) return waiting;
+        builtinPhase('verifier_recovery');
         const { cut: selected, progress } = await readVerifierRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
         if (!progress || selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' || progress.complete ||
             selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt)
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its exact unstopped pending candidate');
         const queued = selected.run.status === 'queued' && !selected.run.activeWorkerLaunchId;
+        builtinPhase('verifier_activate');
         const current = queued ? await activateWorker(selected, signal) : activeWorker;
         if (!current || !worker || !generation || !controller || !reservation ||
             ownedLaunchId !== current.activated.launch.launchId || readRun(driver, runId).activeWorkerLaunchId !== ownedLaunchId)
@@ -2283,6 +2286,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // Refresh only between phases, when no verifier reader holds a
         // WorkerLaunch cut. The held worker and original lease still decide.
         const refreshVerifierLease = () => refreshInvocationLease(current, currentWorker);
+        builtinPhase('verifier_prepare');
         const prepared = await continuation.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, signal);
         if (prepared.disposition !== 'prepared') {
           const waiting = await preparePermission(prepared.run.revision);

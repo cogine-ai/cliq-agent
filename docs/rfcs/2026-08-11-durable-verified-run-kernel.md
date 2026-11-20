@@ -125,15 +125,21 @@ The next query starts with fresh physical reads. Source/cut capacity, signal
 checks, scratch retirement and the original Stop2 boundary retain their values;
 cached bytes never become current StateOwner, grant or execution authority.
 
-Within one complete tool-history validation, distinct snapshots may name the
-same canonical workspace-entries content graph. Walk that graph's files once
-and await its complete original size/hash/root/stat/close checks before any
-snapshot using it can pass. Concurrent histories join that same in-flight
-walk. Every snapshot's Run, generation, Checkpoint, observation and retirement
-bindings still validate independently. A different entries reference gets its
-own walk, and every later history validation starts afresh. This consolidates
-visits to an identical immutable graph; it grants no current native execution
-or retirement authority and changes no byte-cache or physical-reader limit.
+The retained private-script claim reader may share identical signed member
+content verification within one existing recovery traversal. The key binds the
+actual CAS instance, artifact reference and exact byte count. The first use
+performs the original complete size/hash/root/stat verification and joins every
+physical handle; concurrent uses await that same complete operation. Every claim
+still independently validates its request, grant, launch, runtime and guest
+bindings. No large image bytes, live permission or native execution proof are
+cached. All verification records share the existing 8192-entry ceiling; capacity
+exhaustion selects the original complete reader. Failure remains failure for
+every consumer, and each consumer retains cancellation and a scheduling turn.
+Traversal exit closes and clears the records, including on failure. Later and
+nested traversals read afresh. Explicit raw, bounded and streaming reads,
+ordinary discard checks and original native activation/release checks retain
+their independent physical reads. This replaces the workspace-entries-only
+optimization, which did not reduce actual installed read amplification.
 
 Discard-only historical file checks may use those same complete small byte
 copies. A miss preserves the consumer's original streaming cadence, complete

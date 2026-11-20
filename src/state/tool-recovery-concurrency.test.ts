@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { chmodSync, promises as fs, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -7,75 +6,11 @@ import { ArtifactCatalog } from './artifacts.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { activateFixtureWorker, disposeFixture } from './testing/fixtures.js';
+import { disposeFixture } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
 import { validateToolRecovery } from './tool-recovery.js';
-import type { ContinuationItem, WorkspaceEntryManifest, WorkspaceStateManifest } from '../kernel/types.js';
+import type { ContinuationItem } from '../kernel/types.js';
 import { checkpointFromRow } from './rows.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
-import { digestOmitting } from '../kernel/identity.js';
-import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
-
-test('identical sealed workspace graphs verify once per tool history while every later cut reads afresh', async t => {
-  // Real SQLite/CAS over the existing offline history fixture. The large files
-  // exceed the byte-cache eligibility; no native retirement is qualified here.
-  const fixture = await createAgentFixture('tool-history-shared-workspace', { wallTimeMs: 300_000 },
-    { mode: 'accept-edits', tools: ['edit'] });
-  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
-  try {
-    const text = 'x'.repeat(16 * 1024 * 1024 + 1), refs: string[] = [], entryRefs: string[] = [];
-    // Five identical graphs cross the existing four-reader batch; the sixth
-    // remains a distinct graph that needs its own complete file verification.
-    await batch(fixture, Array.from({ length: 6 }, () => ({ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } })));
-    for (let index = 0; index < 6; index++) {
-      if (index) Object.assign(fixture, await activateFixtureWorker(fixture, `shared-workspace-${index}`));
-      const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
-      const result = await fixture.store.artifacts.readCanonical<ToolObservationV1>(await observation(fixture, claimed, { changed: true }));
-      const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, index < 5 ? text : 'y' + text.slice(1));
-      result.postEffect = proof.checkpoint; result.observationDigest = digestOmitting(result, 'observationDigest');
-      const published = await fixture.store.artifacts.publishCanonical(result, result.format);
-      await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
-        expectedRunRevision: prepared.run.revision, observationRef: published.ref });
-      const state = await fixture.store.artifacts.readCanonical<WorkspaceStateManifest>(proof.workspaceStateRef);
-      const entries = await fixture.store.artifacts.readCanonical<WorkspaceEntryManifest>(state.entriesRef);
-      const file = entries.entries[0]!; assert(file.kind === 'file');
-      refs.push(file.blobRef); entryRefs.push(state.entriesRef);
-    }
-    assert(entryRefs.slice(0, 5).every(ref => ref === entryRefs[0])); assert.notEqual(entryRefs[0], entryRefs[5]);
-    const open = fs.open.bind(fs), opened = new Map<string, number>(); let inHistory = false, closed = 0;
-    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
-      const handle = await open(...args), ref = refs.find(ref => String(args[0]).endsWith(path.sep + ref));
-      if (inHistory && ref) {
-        opened.set(ref, (opened.get(ref) ?? 0) + 1);
-        const close = handle.close.bind(handle);
-        t.mock.method(handle, 'close', async () => { await close(); closed++; });
-      }
-      return handle;
-    });
-    const filename = path.join(fixture.stateRoot, 'cas', refs[0]!);
-    let corruptHistory = false, corrupted = false;
-    const recover = () => readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId, phase => {
-      inHistory = phase === 'history_tool';
-      if (inHistory && corruptHistory && !corrupted) {
-        // Earlier closure reachability has finished. Exercise the shared
-        // history walk itself, using only this test-owned real CAS file.
-        chmodSync(filename, 0o600); writeFileSync(filename, Buffer.alloc(Buffer.byteLength(text), 0x7a));
-        chmodSync(filename, 0o400); corrupted = true;
-      }
-    });
-    for (let traversal = 1; traversal <= 2; traversal++) {
-      await recover();
-      assert.equal(opened.get(refs[0]!), traversal, 'the same immutable entries graph needs one complete original file verification');
-      assert.equal(opened.get(refs[5]!), traversal, 'a distinct entries graph must retain its own complete verification');
-      assert.equal(closed, traversal * 2);
-    }
-    corruptHistory = true;
-    await assert.rejects(recover(), { code: 'RECOVERY_REQUIRED' });
-    assert.equal(corrupted, true);
-    assert.equal(opened.get(refs[0]!), 3, 'corruption must reach the actual shared history reader');
-    assert.equal(closed, [...opened.values()].reduce((sum, count) => sum + count, 0));
-  } finally { t.mock.restoreAll(); driver.close(); await disposeFixture(fixture); }
-});
 
 test('tool history does not reinterpret a verifier wait, but still validates its prior tool results', async () => {
   const fixture = await createAgentFixture('tool-history-verifier-wait', { wallTimeMs: 300_000 }, { mode: 'yolo' });

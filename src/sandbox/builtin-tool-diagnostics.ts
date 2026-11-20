@@ -1,5 +1,6 @@
 // Closed inert work labels only. No resource identity, timing or authority.
 export const BUILTIN_EXECUTION_PHASES = Object.freeze([
+  'verifier_permission', 'verifier_recovery', 'verifier_activate', 'verifier_prepare',
   'tool_select', 'tool_prepare', 'tool_claim_spec', 'tool_claim', 'tool_claim_data', 'tool_claim_live',
   'tool_script_closure', 'tool_edit_closure', 'tool_native_parent', 'tool_native_recipe',
   'tool_native_guest_open', 'tool_native_guest_identity', 'tool_native_claim_identity',

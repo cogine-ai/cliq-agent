@@ -1,7 +1,7 @@
 // Real CAS + Ed25519 data regression only. No StateOwner, accepted Run,
 // OperationGrant capability, process, native receipt or physical proof exists.
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, rename } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, rename, writeFile } from 'node:fs/promises';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +14,7 @@ import type { SandboxLaunchSpecV1 } from '../kernel/execution.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { builtinInputContracts } from '../tools/builtin-inputs.js';
-import { ArtifactCatalog } from './artifacts.js';
+import { ArtifactCatalog, withArtifactReadCache } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { signedVerifierAuthority } from './testing/verifier-authority.js';
 import { fixtureSandboxProfile } from './testing/worker-launch.js';
@@ -22,10 +22,10 @@ import { LINUX_VERIFIER_RECIPE } from '../sandbox/linux-worker.js';
 import { hasOnlySettledPrivateToolUnknowns, readPrivateRollbackClaim } from './private-tool-rollback.js';
 import { ResourceRetirementError } from './errors.js';
 
-async function fixture(tool: 'read' | 'ls' | 'find' | 'grep' | 'bash') {
+async function fixture(tool: 'read' | 'ls' | 'find' | 'grep' | 'bash', imageByteCount?: number) {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-script-rollback-data-'));
   const cas = new ContentAddressedStore(directory), artifacts = new ArtifactCatalog(cas);
-  const signed = await signedVerifierAuthority({ builtinScriptBytes: Buffer.from('// inert signed data; never execute\n') });
+  const signed = await signedVerifierAuthority({ imageByteCount, builtinScriptBytes: Buffer.from('// inert signed data; never execute\n') });
   for (const object of signed.objects) await artifacts.publishBytes(object.bytes, 'application/octet-stream', 'offline-data');
   const bundleRef = (await artifacts.publishCanonical(signed.bundle, 'cliq-runtime-bundle-v1')).ref;
   const builtin = builtinInputContracts[tool], script = signed.bundle.entries.find(entry => entry.entryId === 'builtin_tools')!;
@@ -138,6 +138,38 @@ for (const tool of ['read', 'ls', 'find', 'grep', 'bash'] as const) test(`fixed 
       { ...value.unknown, budgetSettlementRef: undefined }, value.generation));
     assert.equal(hasOnlySettledPrivateToolUnknowns([value.prepared, value.claim,
       { ...value.unknown, budgetDelta: { ...value.unknown.budgetDelta, toolCalls: 0 } }]), false);
+  } finally { await rm(value.directory, { recursive: true, force: true }); }
+});
+
+test('retained script claims share one complete large image read only within the same history traversal', async t => {
+  const value = await fixture('read', 16 * 1024 * 1024 + 1);
+  const filename = path.join(value.directory, value.signed.manifest.guestImageRef), open = fs.open;
+  let opened = 0, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (args[0] === filename) {
+      opened++;
+      const close = handle.close.bind(handle);
+      handle.close = async () => { await close(); closed++; };
+    }
+    return handle;
+  });
+  try {
+    await withArtifactReadCache(async () => {
+      await value.read(); await value.read();
+      assert.equal(opened, 1, 'historical claims must not reopen their identical large signed image');
+      assert.equal(closed, 1);
+      await assert.rejects(readPrivateRollbackClaim(value.artifacts,
+        { ...value.prepared, target: canonicalSha256('another target') }, value.claim, value.unknown, value.generation));
+      await value.read(); assert.equal(opened, 1, 'each claim binding is still independently validated');
+    });
+    await withArtifactReadCache(value.read);
+    assert.equal(opened, 2, 'a new traversal must revalidate the actual image');
+    await chmod(filename, 0o600); await writeFile(filename, Buffer.alloc(value.signed.manifest.guestImageByteCount, 0x7a));
+    await chmod(filename, 0o400);
+    await assert.rejects(withArtifactReadCache(value.read));
+    assert.equal(opened, 3, 'later actual image corruption cannot borrow an earlier verification');
+    assert.equal(closed, opened);
   } finally { await rm(value.directory, { recursive: true, force: true }); }
 });
 

@@ -235,6 +235,71 @@ test('large verification inputs retain the complete discard path inside a recove
   assert.equal(verifications, 2);
 });
 
+test('retained image verification joins the original close and preserves each caller, CAS and exact size', async t => {
+  const first = await files(t), second = await files(t);
+  const bytes = Buffer.alloc(16 * 1024 * 1024 + 1, 0x61);
+  const { ref } = await first.artifacts.publishBytes(bytes, 'application/octet-stream', 'inert-retained-image');
+  const filename = path.join(first.root, ref), open = fs.open;
+  let release!: () => void, reached!: () => void, closed = 0;
+  const gate = new Promise<void>(resolve => { release = resolve; }), closing = new Promise<void>(resolve => { reached = resolve; });
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (args[0] === filename) {
+      const close = handle.close.bind(handle);
+      handle.close = async () => { reached(); await gate; await close(); closed++; };
+    }
+    return handle;
+  });
+  await withArtifactReadCache(async () => {
+    let completed = 0;
+    const one = first.artifacts.verifyRetainedChunks(ref, bytes.length).then(() => { completed++; });
+    const two = first.artifacts.verifyRetainedChunks(ref, bytes.length).then(() => { completed++; });
+    const joined = Promise.allSettled([one, two]);
+    try {
+      await closing; assert.equal(completed, 0);
+      const abort = new AbortController(), reason = new Error('this retained reader closed');
+      const cancelled = first.artifacts.withReadSignal(abort.signal).verifyRetainedChunks(ref, bytes.length);
+      abort.abort(reason); await assert.rejects(cancelled, error => error === reason);
+      assert.equal(completed, 0);
+    } finally { release(); }
+    assert.deepEqual((await joined).map(value => value.status), ['fulfilled', 'fulfilled']);
+    assert.equal(closed, 1);
+    await assert.rejects(second.artifacts.verifyRetainedChunks(ref, bytes.length), { code: 'ENOENT' });
+    await assert.rejects(first.artifacts.verifyRetainedChunks(ref, bytes.length + 1));
+    assert.equal(closed, 2, 'a different declared size retains the original rejecting physical read');
+  });
+});
+
+test('a retained image close failure reaches every reader and cannot become a successful cached proof', async t => {
+  const { root, artifacts } = await files(t);
+  const bytes = Buffer.alloc(16 * 1024 * 1024 + 1, 0x62);
+  const { ref } = await artifacts.publishBytes(bytes, 'application/octet-stream', 'inert-retained-image');
+  const filename = path.join(root, ref), open = fs.open, failure = new Error('actual retained image close failure');
+  let failClose = true, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args);
+    if (args[0] === filename) {
+      const close = handle.close.bind(handle);
+      handle.close = async () => { await close(); closed++; if (failClose) throw failure; };
+    }
+    return handle;
+  });
+  await withArtifactReadCache(async () => {
+    const results = await Promise.allSettled([artifacts.verifyRetainedChunks(ref, bytes.length),
+      artifacts.verifyRetainedChunks(ref, bytes.length)]);
+    for (const value of results) {
+      assert.equal(value.status, 'rejected');
+      if (value.status === 'rejected') assert(value.reason instanceof ResourceRetirementError && value.reason.cause === failure);
+    }
+    await assert.rejects(artifacts.verifyRetainedChunks(ref, bytes.length),
+      error => error instanceof ResourceRetirementError && error.cause === failure);
+    assert.equal(closed, 1, 'the failed original physical read is never silently retried');
+  });
+  failClose = false;
+  await withArtifactReadCache(() => artifacts.verifyRetainedChunks(ref, bytes.length));
+  assert.equal(closed, 2);
+});
+
 test('JSON objects above one MiB retain their accepted size and independent decoding', async t => {
   const { cas, artifacts } = await files(t);
   const value = { text: 'x'.repeat(1024 * 1024) };

@@ -11,6 +11,7 @@ import type { SqliteConnection } from './sqlite-driver.js';
 
 type ArtifactReadCache = {
   objects: Map<ContentAddressedStore, Map<ArtifactRef, Buffer>>;
+  verifications: Map<ContentAddressedStore, Map<ArtifactRef, { byteCount: number; complete: Promise<void> }>>;
   bytes: number;
   entries: number;
   closed: boolean;
@@ -21,12 +22,12 @@ const MAX_READ_CACHE_ENTRIES = 8192;
 const MAX_READ_CACHE_OBJECT_BYTES = 16 * 1024 * 1024;
 
 /** One immutable graph traversal owns these verified byte copies.
- * A later traversal starts fresh. Every consumer still hashes and decodes its
+ * A later traversal starts fresh. Byte consumers still hash and decode their
  * own copy. Explicit raw, bounded and stream reads keep their original I/O. */
 export async function withArtifactReadCache<T>(read: () => Promise<T>): Promise<T> {
-  const cache: ArtifactReadCache = { objects: new Map(), bytes: 0, entries: 0, closed: false };
+  const cache: ArtifactReadCache = { objects: new Map(), verifications: new Map(), bytes: 0, entries: 0, closed: false };
   try { return await artifactReadCache.run(cache, read); }
-  finally { cache.closed = true; cache.objects.clear(); }
+  finally { cache.closed = true; cache.objects.clear(); cache.verifications.clear(); }
 }
 
 export type PublishedArtifact = {
@@ -288,6 +289,27 @@ export class ArtifactCatalog {
     }
     await this.cas.verifyChunks(ref, expectedByteLength, this.readSignal);
     this.assertReadActive();
+  }
+
+  /** Retained data only: one traversal may share a complete original content
+   * verification, including its actual closes. Each claim still checks its
+   * own metadata. Large image bytes and native/live authority are not cached. */
+  async verifyRetainedChunks(ref: ArtifactRef, expectedByteLength: number): Promise<void> {
+    this.assertReadActive();
+    const cache = artifactReadCache.getStore(), entries = cache?.verifications.get(this.cas);
+    const prior = entries?.get(ref);
+    if (prior && prior.byteCount === expectedByteLength) {
+      await setImmediate(); this.assertReadActive();
+      await prior.complete; this.assertReadActive();
+      return;
+    }
+    const complete = this.verifyChunks(ref, expectedByteLength);
+    if (cache && !entries?.has(ref) && cache.entries < MAX_READ_CACHE_ENTRIES) {
+      const values = entries ?? new Map();
+      values.set(ref, { byteCount: expectedByteLength, complete });
+      cache.verifications.set(this.cas, values); cache.entries++;
+    }
+    await complete; this.assertReadActive();
   }
 
   private async cachedReadBytes(ref: ArtifactRef): Promise<Buffer | undefined> {
