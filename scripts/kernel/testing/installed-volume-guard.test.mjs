@@ -30,7 +30,7 @@ const homeIdentity = { device: '1', inode: '2', uid, gid: uid, mode: 0o700 };
 const imageIdentity = { device: '1', inode: '3', uid: 0, gid: 0, mode: 0o600, size: String(size), links: 1 };
 
 function setup(overrides = {}) {
-  const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign'].includes(overrides.campaign);
+  const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign', '--pr532-cpu-diagnostic'].includes(overrides.campaign);
   const selectedSize = wholeProject ? 4 * size : size;
   const selectedImage = { ...imageIdentity, size: String(selectedSize) };
   const files = new Map([[originalFile, { uid: 0, gid: 0, mode: 0o444, links: 1,
@@ -219,7 +219,7 @@ test('current exact bounded ext4 fixture captures, revalidates and retires only 
 });
 
 test('only complete-project campaigns select the fixed 4 GiB volume and retain its strict identity and capacity guards', () => {
-  for (const campaign of ['--pr532-campaign', '--provider-pr532-campaign']) {
+  for (const campaign of ['--pr532-campaign', '--provider-pr532-campaign', '--pr532-cpu-diagnostic']) {
     const context = setup({ campaign }); context.run('capture');
     const report = JSON.parse(context.files.get(output).text);
     assert.equal(report.hardCapacityCeilingBytes, 4 * size);

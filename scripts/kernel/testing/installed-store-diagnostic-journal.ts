@@ -34,7 +34,7 @@ function failure(closing: string, errorClass: string, code: string, sqlite: stri
 }
 
 type OriginalJournalIdentity = Readonly<{ uid: number; pid: number; invocationId: string }>;
-function originalJournalMessages(text: string, expected: OriginalJournalIdentity) {
+export function originalJournalMessages(text: string, expected: OriginalJournalIdentity) {
   need(typeof text === 'string' && Buffer.byteLength(text, 'utf8') <= 256 * 1024);
   need(expected && typeof expected === 'object' && !types.isProxy(expected) && !Array.isArray(expected) &&
     [Object.prototype, null].includes(Object.getPrototypeOf(expected)));

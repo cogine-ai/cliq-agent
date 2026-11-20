@@ -50,6 +50,7 @@ case ${1:-} in
   --run-mcp-status-user-replay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-status-user-replay-campaign; shift ;;
   --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
   --run-pr532-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--pr532-campaign; shift ;;
+  --run-pr532-cpu-diagnostic) probe_campaign_kind=run-journey; probe_run_driver_mode=--pr532-cpu-diagnostic; shift ;;
   --run-local-inference-journey)
     [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
       printf 'local inference qualification requires its pinned offline input directory\n' >&2; exit 2;
@@ -117,7 +118,7 @@ done
 [[ "$probe_run_driver_mode" != --local-inference-campaign || "$probe_volume_mode" = loop ]] || {
   printf 'the local inference scope requires the original non-delayed volume\n' >&2; exit 2;
 }
-[[ ( "$probe_run_driver_mode" != --pr532-campaign && "$probe_run_driver_mode" != --provider-pr532-campaign ) || "$probe_volume_mode" = loop ]] || {
+[[ ( "$probe_run_driver_mode" != --pr532-campaign && "$probe_run_driver_mode" != --provider-pr532-campaign && "$probe_run_driver_mode" != --pr532-cpu-diagnostic ) || "$probe_volume_mode" = loop ]] || {
   printf 'the PR 532 preview requires the original non-delayed volume\n' >&2; exit 2;
 }
 [[ "$probe_run_driver_mode" != --daily-campaign || "$probe_volume_mode" = loop ]] || {
@@ -133,7 +134,7 @@ done
   printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
 }
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-pr532-journey|--run-provider-pr532-journey PUBLIC_CONFIG|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-pr532-journey|--run-pr532-cpu-diagnostic|--run-provider-pr532-journey PUBLIC_CONFIG|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
   printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   printf 'local model option: --run-local-inference-journey PINNED_INPUT_DIRECTORY ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
@@ -185,7 +186,7 @@ elif [[ "$probe_run_driver_mode" = --mcp-recovery-campaign || "$probe_run_driver
   readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-recovery-journey.ts"
 elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign || "$probe_run_driver_mode" = --provider-pr532-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
-elif [[ "$probe_run_driver_mode" = --daily-campaign || "$probe_run_driver_mode" = --pr532-campaign ]]; then
+elif [[ "$probe_run_driver_mode" = --daily-campaign || "$probe_run_driver_mode" = --pr532-campaign || "$probe_run_driver_mode" = --pr532-cpu-diagnostic ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-daily-journey.ts"
 elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
   readonly probe_run_driver="$probe_source_dir/qualify-installed-local-inference-journey.ts"
@@ -324,7 +325,7 @@ assert.equal(process.geteuid(), 0);
 assert.match(fixture, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+$/u);
 assert.equal(home, `${fixture}/home`); assert.equal(image, `${fixture}/run-home.ext4`);
 assert.equal(originalFile, `${fixture}/run-home-original.json`); assert.equal(mountedFile, `${fixture}/run-home-mounted.json`);
-const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign'].includes(campaign);
+const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign', '--pr532-cpu-diagnostic'].includes(campaign);
 const uid = Number(uidText), gid = Number(gidText), ceiling = (wholeProject ? 4 : 1) * 1024 ** 3;
 assert(Number.isSafeInteger(uid) && uid > 0 && uid === gid);
 assert(['loop', 'delay-50ms'].includes(volumeMode));

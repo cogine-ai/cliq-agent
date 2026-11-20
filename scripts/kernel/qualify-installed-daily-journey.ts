@@ -6,7 +6,7 @@ import { runInstalledNodeJourney } from './testing/installed-node-journey.js';
 
 assert.equal(process.platform, 'linux'); assert.equal(process.arch, 'x64');
 const [mode, filename, ...extra] = process.argv.slice(2);
-if (mode === '--pr532-campaign') {
+if (mode === '--pr532-campaign' || mode === '--pr532-cpu-diagnostic') {
   assert(filename); assert.equal(extra.length, 0);
   await runInstalledNodeJourney(filename, 'daily', { pr532: true });
 } else {

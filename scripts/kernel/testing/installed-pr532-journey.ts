@@ -19,6 +19,7 @@ import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
 import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
 import { decodeDependencyProcessCapture } from '../../../src/state/dependency-capture.js';
 import { PR532_POLL_INTERVAL_MS } from './provider-journey-input.js';
+import { PR532_CPU_DIAGNOSTIC } from './installed-cpu-diagnostic.js';
 import { readInstalledTerminalCut, readInstalledStableCut } from './installed-provider-journey.js';
 
 export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
@@ -266,6 +267,11 @@ export async function runInstalledPr532Journey(input: {
       try { await describeToolActivity(cut); }
       catch { /* Keep the last observed tool batch if later diagnosis is unavailable. */ }
       const run = cut.snapshot.run;
+      if (PR532_CPU_DIAGNOSTIC && (run.status === 'succeeded' || run.budgetConsumed.toolCalls >= 8 ||
+          Date.now() - Date.parse(run.createdAt) >= 15 * 60_000)) {
+        context.mark('pr532_cpu_diagnostic_stop');
+        throw new Error('CPU diagnostic intentionally stops before complete qualification');
+      }
       if (run.status === 'succeeded') {
         assert(Date.now() < deadline, 'installed Run reached the preview observation deadline');
         return readInstalledTerminalCut(runId, request => read(request, 'run.get'));

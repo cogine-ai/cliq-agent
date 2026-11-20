@@ -5,6 +5,29 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 CPU diagnosis before another acceptance run.** Exact `be65c99`
+[free Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44722773294)
+reduces observed tool-prepare returned bytes from156366178761 to101130412012,
+but its overlapping process window remains about1878 seconds. The seventh model
+finishes at5170 seconds; the Run remains queued for verification. The original
+scheduler refuses at `verifier_permission` with `RECOVERY_REQUIRED`. Baseline
+check exits1; repaired check, review/apply and complete corpus qualification
+remain absent. Both original Stop2 observations and writer joins pass. The
+exact local build and4146 tests pass (4114 pass,32 platform skips). No paid
+call or extra financial reservation is made.
+
+Use one controlled-only V8 main-isolate sampling probe instead of another blind
+complete Run. It samples between original tool preparations four and six, disconnects
+before Stop and emits only fixed numeric CPU buckets; no frame name, URL,
+source text or error string is exported. The observer deliberately stops after
+eight accounted tools or fifteen minutes, preserves the actual original
+Stop2/joins and always leaves qualification false. It does not change the
+original Run90, full workload, READY5, Stop2 or paid journey. The exact current
+production/native/package/core-test bytes remain `be65c99`; only this private
+measurement/CI path is added. The sample includes concurrent main-isolate work;
+it does not attribute a Run or background reader threads. These measurements
+and the existing process counters must select the next fix.
+
 **2026-11-20 retained guest-image amplification.** Exact `476c045`
 [free Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44704297995)
 still fails the original90-minute observation. All36 tools settle, including

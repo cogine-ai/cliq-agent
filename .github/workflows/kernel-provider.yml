@@ -12,6 +12,9 @@ on:
       funded:
         type: boolean
         default: true
+      diagnostic_cpu:
+        type: boolean
+        default: false
     secrets:
       provider_key:
         required: false
@@ -26,7 +29,7 @@ concurrency:
 jobs:
   installed-provider:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' && (inputs.funded || inputs.pr532) }}
-    name: Installed model edit, check, review and apply
+    name: ${{ inputs.diagnostic_cpu && 'Installed CPU diagnosis (not qualification)' || 'Installed model edit, check, review and apply' }}
     runs-on: ubuntu-22.04
     timeout-minutes: ${{ inputs.pr532 && 195 || 20 }}
     steps:
@@ -47,6 +50,7 @@ jobs:
           scripts/kernel/testing/provider-journey-input.test.ts
           scripts/kernel/testing/installed-provider-journey.test.ts
           scripts/kernel/testing/installed-pr532-journey.test.ts
+          scripts/kernel/testing/installed-cpu-diagnostic.test.ts
           scripts/kernel/testing/credential-secret-scan.test.ts
           scripts/kernel/testing/credential-secret-corpus.test.ts
           src/state/artifact-read-cache.test.ts
@@ -59,10 +63,11 @@ jobs:
       - name: Obtain the exact PR #532 baseline and original checks
         if: inputs.pr532
         run: git fetch --no-tags --depth=1 origin 9cce652c2a91d8484344e4794ae56576a915cc67 961658fcf80116b6ef13e39cf39d901276a48c3c
-      - name: Rehearse the installed PR #532 workflow over the controlled model endpoint
+      - name: ${{ inputs.diagnostic_cpu && 'Sample installed CPU (diagnostic only)' || 'Rehearse the installed PR532 workflow' }}
         if: inputs.pr532 && !inputs.funded
         run: >-
-          sudo -n /bin/bash scripts/kernel/qualify-systemd-user.sh --run-pr532-journey
+          sudo -n /bin/bash scripts/kernel/qualify-systemd-user.sh
+          ${{ inputs.diagnostic_cpu && '--run-pr532-cpu-diagnostic' || '--run-pr532-journey' }}
           "$(realpath "$(command -v node)")" "$RUNNER_TEMP/cliq-installed-provider"
       - name: Verify the public provider TLS peer without a credential
         if: inputs.funded

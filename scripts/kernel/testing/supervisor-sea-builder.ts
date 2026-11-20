@@ -7,6 +7,7 @@ import { chmod, copyFile, lstat, mkdir, open, readFile, realpath, writeFile } fr
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { PR532_CPU_DIAGNOSTIC, INSTALLED_CPU_DIAGNOSTIC_BANNER } from './installed-cpu-diagnostic.js';
 import { inject } from 'postject';
 import { INSTALLED_CREDENTIAL_PHASE_CHANNEL, INSTALLED_CREDENTIAL_PHASES,
   INSTALLED_SERVER_AUTHENTICATION_CHANNEL, INSTALLED_SERVER_AUTHENTICATION_PHASES } from '../../../src/state/installed-diagnostics.js';
@@ -345,7 +346,8 @@ export async function buildSupervisorSeaImage(input: {
   // installed diagnostics. Load their additional source only when requested.
   const builtinWorkBanner = input.storeFailureDiagnostics
     ? (await import('./installed-builtin-work-banner.js')).INSTALLED_BUILTIN_WORK_DIAGNOSTIC_BANNER : '';
-  const banner = (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
+  const banner = (PR532_CPU_DIAGNOSTIC ? INSTALLED_CPU_DIAGNOSTIC_BANNER : '') +
+    (input.credentialPhaseDiagnostics ? CREDENTIAL_PHASE_DIAGNOSTIC_BANNER + INSTALLED_WORK_DIAGNOSTIC_BANNER : '') +
     (input.publicationRetirementDiagnostics ? PUBLICATION_RETIREMENT_DIAGNOSTIC_BANNER : '') +
     (input.serverAuthenticationDiagnostics ? SERVER_AUTHENTICATION_DIAGNOSTIC_BANNER : '') +
     (input.storeFailureDiagnostics ? INSTALLED_STORE_DIAGNOSTIC_BANNER + INSTALLED_ASSEMBLY_WORK_DIAGNOSTIC_BANNER + builtinWorkBanner : '');

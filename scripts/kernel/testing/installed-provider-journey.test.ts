@@ -279,25 +279,27 @@ test('PR532 observation stays within the original client frame budget through a 
     ts.forEachChild(node, visit);
   };
   visit(parsed); assert(finish);
-  for (const late of [false, true]) {
+  for (const cpuProbe of [false, true]) for (const late of [false, true]) {
     let now = 0, frames = 1, observations = 0;
     const wallTimeMs = PR532_RUN_WALL_TIME_MS;
-    const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert, PR532_POLL_INTERVAL_MS,
+    const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now, parse: Date.parse }, assert, PR532_POLL_INTERVAL_MS,
+      PR532_CPU_DIAGNOSTIC: cpuProbe,
       readInstalledTerminalCut, readInstalledStableCut,
-      context: { progress() {} }, read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
+      context: { progress() {}, mark(phase: string) { assert.equal(phase, 'pr532_cpu_diagnostic_stop'); } }, read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
         assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
         if (late) now = wallTimeMs + 1;
         const after = request.afterJournalSeq ?? 0;
         const journal = Array.from({ length: Math.min(request.journalLimit ?? 100, 132 - after) }, (_, index) => ({ seq: after + index + 1 }));
         return { snapshot: { run: { status: now >= wallTimeMs - PR532_POLL_INTERVAL_MS ? 'succeeded' : 'running',
-          latestCheckpointId: 'inert-checkpoint' } }, items: [], nextItemSeq: 0, journal, nextJournalSeq: after + journal.length,
+          latestCheckpointId: 'inert-checkpoint', createdAt: new Date(0).toISOString(), budgetConsumed: { toolCalls: cpuProbe && late ? 8 : 0 } } }, items: [], nextItemSeq: 0, journal, nextJournalSeq: after + journal.length,
           highWaterJournalSeq: 132, highWaterItemSeq: 0, checkpoints: request.checkpointCursor ? [] : [{ id: 'inert-checkpoint' }],
           highWaterCheckpointCursor: 'inert-checkpoint-cursor', nextCheckpointCursor: 'inert-checkpoint-cursor' };
       }, describeToolActivity: async () => { observations++; throw new Error('optional data unavailable'); },
       delay: async (milliseconds: number) => { now += milliseconds; } });
     vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
       { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
-    if (late) await assert.rejects(context.finish('inert-run'), /preview observation deadline/);
+    if (cpuProbe) await assert.rejects(context.finish('inert-run'), /CPU diagnostic intentionally stops/);
+    else if (late) await assert.rejects(context.finish('inert-run'), /preview observation deadline/);
     else {
       const terminal = await context.finish('inert-run');
       assert.equal(terminal.journal.length, 132); assert.equal(terminal.nextJournalSeq, 132);
@@ -321,6 +323,7 @@ test('failed or over-deadline PR532 diagnosis collects only a complete stable cu
     let frames = 0, now = 0;
     const observations: Array<{ items: number; complete: boolean }> = [];
     const context = vm.createContext({ input: { budgets: { wallTimeMs: PR532_RUN_WALL_TIME_MS } }, Date: { now: () => now }, assert,
+      PR532_CPU_DIAGNOSTIC: false,
       readInstalledTerminalCut, readInstalledStableCut, context: { progress() {} },
       read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
         assert(frames++ < 1024);

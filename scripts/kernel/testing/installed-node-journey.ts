@@ -13,6 +13,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import { PR532_CPU_DIAGNOSTIC, readInstalledCpuJournal } from './installed-cpu-diagnostic.js';
 import { buildInstalledClientDriver } from './installed-client-build.js';
 import { isReplacementControlSocketHint } from './installed-control-readiness.js';
 import { InstalledClientConsumerDeadlineError, InstalledClientDriverError, openInstalledClientConsumer } from './installed-client-consumer.js';
@@ -225,6 +226,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
   if (journeyKind === 'permission') assert.deepEqual(Object.keys(options), [], 'ordinary permission has one fixed owned campaign');
   if (mcpJourney) assert.deepEqual(Object.keys(options), [], 'installed MCP qualification has one fixed owned campaign');
   const dailyJourney = journeyKind === 'daily' || journeyKind === 'provider-daily';
+  assert(!PR532_CPU_DIAGNOSTIC || journeyKind === 'daily' && options.pr532 === true && options.provider === undefined,
+    'CPU diagnosis is restricted to the controlled PR532 fixture and cannot use a real provider');
   if (journeyKind === 'daily' && !options.pr532) assert.deepEqual(Object.keys(options), [], 'normal daily qualification has no alternate authority or scenario options');
   assert.deepEqual(Object.keys(options).sort(), [
     ...(options.publicationRetirementDiagnostics === true ? ['publicationRetirementDiagnostics'] : []),
@@ -329,6 +332,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
     }, { officialReleaseQualified: false, ownedHttpsFixtureCreated: !options.provider, actualProviderQualified: false, actualProviderBillingQualified: false,
       normalCliCommands: [] });
   }
+  if (PR532_CPU_DIAGNOSTIC) Object.assign(report, { cpuDiagnosticOnly: true,
+    scope: 'Controlled PR532 V8 CPU sample only. Deliberately stops before complete delivery and cannot qualify the preview or a real provider.' });
   const secret = options.provider ? Buffer.from(options.provider.secret) : Buffer.from(randomBytes(32).toString('hex'));
   const password = Buffer.from(randomBytes(32).toString('hex'));
   let scanStage: CredentialSecretScanFailureStage = 'runtime', firstFailureStage: CredentialSecretScanFailureStage | null = null;
@@ -3032,6 +3037,11 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                 assert.equal(log.error, undefined, 'actual Store diagnostic journal command must join');
                 assert.equal(log.signal, null); assert.equal(log.status, 0);
                 const text = new TextDecoder('utf-8', { fatal: true }).decode(log.stdout);
+                if (PR532_CPU_DIAGNOSTIC) try {
+                  report.cpuDiagnostic = { source: 'actual_joined_original_supervisor_journal',
+                    preexistingProcessStartAndFullImageBound: true, originalInvocationBound: true, originalServerJoined: true,
+                    ...readInstalledCpuJournal(text, { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId }) };
+                } catch { report.cpuDiagnostic = { diagnosticOnly: true, kind: 'unavailable' }; }
                 const broker = readInstalledModelBrokerDiagnosticJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 const summary = readInstalledStoreDiagnosticJournal(text,

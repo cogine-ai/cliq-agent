@@ -16,6 +16,10 @@ on:
         description: Run only the explicitly funded, real-provider journey
         type: boolean
         default: false
+      diagnostic_cpu:
+        description: Controlled PR532 CPU sample only; intentionally does not qualify delivery
+        type: boolean
+        default: false
       expected_revision:
         description: Exact reviewed commit required for a targeted manual journey
         type: string
@@ -32,7 +36,7 @@ concurrency:
 
 jobs:
   real-provider:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.qualification_group == 'full' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && !inputs.diagnostic_cpu && inputs.qualification_group == 'full' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
     uses: ./.github/workflows/kernel-provider.yml
     with:
       expected_revision: ${{ inputs.expected_revision }}
@@ -46,9 +50,10 @@ jobs:
       expected_revision: ${{ inputs.expected_revision }}
       pr532: true
       funded: false
+      diagnostic_cpu: ${{ inputs.diagnostic_cpu }}
 
   pr532-provider:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && inputs.qualification_group == 'pr532' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.real_provider && !inputs.diagnostic_cpu && inputs.qualification_group == 'pr532' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent' }}
     uses: ./.github/workflows/kernel-provider.yml
     with:
       expected_revision: ${{ inputs.expected_revision }}
