@@ -40,7 +40,7 @@ static bool builtin_sealed_data(int fd, uint64_t expected, const char *digest) {
  * identical. This does not trust the initial namespace pathname or a cache. */
 static bool builtin_bind_runtime(const struct cliq_verifier_config *config, const char *path) {
     const char *parent = !strcmp(path, "/bin/bash") ? "/bin" : "/usr/bin";
-    const char *leaf = !strcmp(path, "/bin/bash") ? "bash" : "git";
+    const char *leaf = strrchr(path, '/') + 1;
     int directory = open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW), image = -1;
     const char *digest = NULL; uint64_t size = 0;
     for (uint32_t i = 0; i < config->file_count; i++) if (!strcmp(config->files[i].path, path)) {
@@ -109,9 +109,10 @@ static bool builtin_confinement(const struct cliq_builtin_config *fixed, uint32_
     int script = open(CLIQ_BUILTIN_SCRIPT_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     bool valid = script >= 0 && builtin_full_data(script, fixed->script_bytes, fixed->script_digest, false);
     if (script >= 0 && close(script) != 0) valid = false;
-    if (!valid || !builtin_git_current(fixed) || !verifier_node_mount(config, scope) ||
-        (bash && (!builtin_bind_runtime(config, "/usr/bin/git") || !builtin_bind_runtime(config, "/bin/bash"))) ||
-        !verifier_setup_stage(scope, CLIQ_VERIFIER_SETUP_CONFINEMENT) ||
+    if (!valid || !builtin_git_current(fixed) || !verifier_node_mount(config, scope)) return false;
+    for (uint32_t i = 0; bash && i < config->file_count; i++)
+        if (cliq_builtin_shell_path(config->files[i].path) && !builtin_bind_runtime(config, config->files[i].path)) return false;
+    if (!verifier_setup_stage(scope, CLIQ_VERIFIER_SETUP_CONFINEMENT) ||
         !verifier_mount_attributes("/", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NOSUID, 0) ||
         !verifier_mount_attributes("/", 0, MOUNT_ATTR_RDONLY | MOUNT_ATTR_NODEV, 0) ||
         !verifier_mount_attributes("/work", AT_RECURSIVE, MOUNT_ATTR_NOEXEC | MOUNT_ATTR_NODEV | (bash ? 0 : MOUNT_ATTR_RDONLY), 0) ||

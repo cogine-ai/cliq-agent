@@ -6,6 +6,12 @@ export const GUEST_EXTRACTOR_RECIPE = Object.freeze({
   maxImageBytes: 268_435_456, maxPinnedExecutables: 32, maxMappedFiles: 32,
 } as const);
 
+/** Fixed shell discovery roots, measured and signed with their actual ELF
+ * dependencies. These names never select host executables at runtime. */
+export const LINUX_BASH_UTILITIES = Object.freeze(
+  ['cat', 'find', 'grep', 'head', 'ls', 'sed', 'sort', 'tail', 'uniq', 'wc', 'xargs']
+    .map(logicalName => Object.freeze({ logicalName, canonicalGuestPath: `/usr/bin/${logicalName}` })));
+
 /** Fixed Node test subset, not an automatic enlargement of caller limits. */
 export const LINUX_VERIFIER_RESOURCE_MINIMUMS = Object.freeze({ maxProcesses: 32 } as const);
 export const LINUX_TSX_COMPILER = Object.freeze({
@@ -47,7 +53,7 @@ export type NativeSourceGitToolchain = Readonly<{
 }>;
 
 declare const builtinBashToolchainBrand: unique symbol;
-/** A distinct genuine extraction of the same signed image's Node/Git/Bash closure. */
+/** A distinct genuine extraction of the same signed image's shell closure. */
 export type NativeBuiltinBashToolchain = Readonly<{
   readonly [builtinBashToolchainBrand]: true;
   pollReady(): boolean;

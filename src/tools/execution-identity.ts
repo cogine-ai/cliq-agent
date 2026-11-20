@@ -5,6 +5,7 @@ import type { ToolContractManifestV1 } from '../kernel/continuation.js';
 import { assertArtifactRef } from '../kernel/identity.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { GuestToolchainManifest } from '../kernel/execution.js';
+import { LINUX_BASH_UTILITIES } from '../sandbox/guest-toolchain.js';
 
 export type ToolExecutionIdentity = ToolContractManifestV1['entries'][number]['execution'];
 export const BUILTIN_SCRIPT_TOOL_NAMES = Object.freeze(['read', 'ls', 'find', 'grep', 'bash'] as const);
@@ -12,8 +13,9 @@ export const BUILTIN_SCRIPT_TOOL_NAMES = Object.freeze(['read', 'ls', 'find', 'g
  * A signed Node discovery root alone does not promise a Bash executable. */
 export function assertBuiltinScriptGuest(manifest: GuestToolchainManifest, tools: readonly string[]): void {
   const admitted = manifest.admittedExecutables;
-  if (admitted.length > 1 || admitted.some(entry => entry.logicalName !== 'bash' || entry.canonicalGuestPath !== '/bin/bash') ||
-      tools.includes('bash') && admitted.length !== 1)
+  const roots = [{ logicalName: 'bash', canonicalGuestPath: '/bin/bash' }, ...LINUX_BASH_UTILITIES];
+  if (admitted.some(entry => !roots.some(root => root.logicalName === entry.logicalName && root.canonicalGuestPath === entry.canonicalGuestPath)) ||
+      tools.includes('bash') && !admitted.some(entry => entry.logicalName === 'bash'))
     throw new TypeError('fixed builtin tools require their exact signed Bash discovery root');
 }
 function invalid(): never { throw new TypeError('invalid closed tool execution identity'); }

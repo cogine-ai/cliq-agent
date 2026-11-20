@@ -411,7 +411,7 @@ static void verifier_bubblewrap(int generation_source, int helper_source, int bw
         ARG("--perms"); ARG("0555");
         ARG(strcmp(config->files[i].path, "/usr/bin/node") == 0 ||
             strcmp(config->files[i].path, CLIQ_VERIFIER_TSX_COMPILER) == 0 || (bash &&
-            (!strcmp(config->files[i].path, "/usr/bin/git") || !strcmp(config->files[i].path, "/bin/bash"))) ? "--file" : "--ro-bind-data");
+            cliq_builtin_shell_path(config->files[i].path)) ? "--file" : "--ro-bind-data");
         ARG(descriptors[i + 1]); ARG(config->files[i].path);
     }
     if (script >= 0) { ARG("--perms"); ARG("0444"); ARG("--ro-bind-data"); ARG(script_descriptor); ARG(CLIQ_BUILTIN_SCRIPT_PATH); }

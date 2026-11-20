@@ -18,6 +18,7 @@ test('signed script-capable prompts explain the actual tools, candidate checks a
     assert(system.value.utf8.includes('/usr/bin/node'));
     assert(system.value.utf8.includes('Do not assume host utilities or package managers are available.'));
     assert(system.value.utf8.includes('Your final response submits a candidate for the configured checks.'));
+    assert(system.value.utf8.includes('submit that candidate before editing or calling tools.'));
     assert(system.value.utf8.includes('If verifier feedback returns, fix the reported failure within the original task and budget.'));
     assert(system.value.utf8.includes('The user reviews the result and explicitly applies it to the original workspace.'));
     assert.equal(system.value.byteCount, Buffer.byteLength(system.value.utf8));

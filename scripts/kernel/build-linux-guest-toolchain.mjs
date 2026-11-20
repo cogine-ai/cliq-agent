@@ -110,6 +110,11 @@ try {
   const bashSource = await protectedSource('/bin/bash');
   const bash = await executable(bashSource, '/bin/bash', 'bash', digest(await readFile(bashSource)));
   const node = await executable(selectedNode, '/usr/bin/node', 'node', nodeVersion.slice(1));
+  const shellUtilities = [];
+  for (const name of ['cat', 'find', 'grep', 'head', 'ls', 'sed', 'sort', 'tail', 'uniq', 'wc', 'xargs']) {
+    const source = await protectedSource(`/usr/bin/${name}`);
+    shellUtilities.push(await executable(source, `/usr/bin/${name}`, name, digest(await readFile(source))));
+  }
   const verifiers = extra.includes('--preview-tsx') ? [await previewCompiler()] : [];
   const files = [...copied.values()].sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path)));
   const totalBytes = files.reduce((sum, file) => sum + file.byteCount, 0);
@@ -138,7 +143,7 @@ try {
     guestImageRef: imageDigest, guestImageDigest: imageDigest, guestImageByteCount: imageByteCount,
     guestImageFormat: 'raw-ext4-v1', architecture: 'x86_64', kernelAbi: 'linux-x86_64-v1',
     userspaceAbi: 'linux-x86_64-glibc-v1', worker, shell, git, node,
-    searchTools: [], verifiers, admittedExecutables: [bash], files, extractedFileBytes: totalBytes, imageLayout,
+    searchTools: [], verifiers, admittedExecutables: [bash, ...shellUtilities], files, extractedFileBytes: totalBytes, imageLayout,
     scope: 'actual build bytes only; not release-signed, execution-qualified or a Run proof' };
   const metadataFile = path.join(staging, 'guest-toolchain-input.json');
   await writeFile(metadataFile, JSON.stringify(metadata), { flag: 'wx', mode: 0o400 });

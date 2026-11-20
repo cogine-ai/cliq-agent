@@ -36,6 +36,10 @@ test('fixed Bash discovery cannot be inferred from a signed Node-only root or a 
   assert.doesNotThrow(() => assertBuiltinScriptGuest(root([]), ['read', 'find']));
   assert.throws(() => assertBuiltinScriptGuest(root([]), ['bash']));
   assert.doesNotThrow(() => assertBuiltinScriptGuest(root([bash]), ['read', 'bash']));
+  const utilities = ['cat', 'find', 'grep', 'head', 'ls', 'sed', 'sort', 'tail', 'uniq', 'wc', 'xargs']
+    .map(name => ({ ...bash, logicalName: name, canonicalGuestPath: `/usr/bin/${name}` }));
+  assert.doesNotThrow(() => assertBuiltinScriptGuest(root([bash, ...utilities]), ['read', 'bash']));
+  assert.throws(() => assertBuiltinScriptGuest(root([bash, { ...utilities[0]!, canonicalGuestPath: '/bin/cat' }]), ['bash']));
   for (const entries of [[{ ...bash, canonicalGuestPath: '/usr/bin/bash' }], [{ ...bash, logicalName: 'sh' }],
     [bash, { ...bash, logicalName: 'python', canonicalGuestPath: '/usr/bin/python' }]])
     assert.throws(() => assertBuiltinScriptGuest(root(entries), ['bash']));

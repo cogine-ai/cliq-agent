@@ -82,7 +82,7 @@ import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
 import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledControlReadFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
-import { installedReadOnlyGitCall, assertInstalledToolsOutcome } from './installed-tools-result.js';
+import { installedReadOnlyGitCall, assertInstalledToolsOutcome, installedShellUtilitiesProbe } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
   createInstalledSkillSources, assertInstalledSkillPrompt, assertInstalledSkillsOutcome } from './installed-skills.js';
 import { installedBashStopCall, observeInstalledBash, assertInstalledBashStopped, type InstalledBashProcesses } from './installed-tools-stop.js';
@@ -870,7 +870,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                   : index === 1 ? 'assert(bytes.subarray(-marker.length).equals(marker)); fs.writeFileSync(filename, bytes.subarray(0, -marker.length));'
                     : 'fs.writeFileSync(filename, bytes);',
                 'process.stdout.write("CLIQ_PR532_NODE_WRITE_OK\\n");'].join(' ');
-              const command = "/usr/bin/node --no-addons -e '" + program.replaceAll("'", "'\\''") + "'";
+              const command = (index === 0 ? `set -eu\n${installedShellUtilitiesProbe}\n` : '') +
+                "/usr/bin/node --no-addons -e '" + program.replaceAll("'", "'\\''") + "'";
               return { id: `pr532-preview-bash-${index}`, type: 'function',
                 function: { name: 'bash', arguments: JSON.stringify({ command }) } };
             }));
@@ -973,6 +974,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             const reply = body.messages.filter((entry: any) => entry.role === 'tool' && entry.tool_call_id === installedReadOnlyGitCall(afterText).callId);
             assert.equal(reply.length, 1); assert(reply[0].content.includes('CLIQ_PRIVATE_GIT_READ_ONLY_OK'));
             assert(reply[0].content.includes('CLIQ_SIGNED_NODE_FROM_BASH_OK'));
+            assert(reply[0].content.includes('CLIQ_SIGNED_SHELL_UTILITIES_OK'));
           }
         }
         if (kind === 'required_repair' && ordinal === 3) {

@@ -37,6 +37,14 @@ int main(void) {
     for (unsigned int bash = 0; bash < 2; bash++) {
         fixed_config(&fixed, bash != 0); assert(cliq_builtin_config_valid(&fixed)); checks++;
         if (bash) { assert(!cliq_verifier_config_valid(&fixed.capture)); checks++; } /* Bash mapping never widens the Node verifier validator. */
+        const char *utilities[] = { "cat", "find", "grep", "head", "ls", "sed", "sort", "tail", "uniq", "wc", "xargs" };
+        for (size_t i = 0; i < sizeof(utilities) / sizeof(utilities[0]); i++) {
+            changed = fixed; uint32_t at = changed.capture.file_count++;
+            changed.capture.files[at] = changed.capture.files[0];
+            snprintf(changed.capture.files[at].path, sizeof(changed.capture.files[at].path), "/usr/bin/%s", utilities[i]);
+            assert(cliq_builtin_config_valid(&changed) == (bash != 0)); checks++;
+            assert(!cliq_verifier_config_valid(&changed.capture)); checks++;
+        }
 #define REFUSE(change) do { changed = fixed; change; assert(!cliq_builtin_config_valid(&changed)); checks++; } while (0)
         REFUSE(changed.builtin_version = 2); REFUSE(changed.git_kind = 2); REFUSE(changed.tool = 0); REFUSE(changed.tool = 6);
         REFUSE(changed.input_bytes = CLIQ_BUILTIN_INPUT_BYTES + 1); REFUSE(changed.script_bytes = 1048577);

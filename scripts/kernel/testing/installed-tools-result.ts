@@ -14,6 +14,17 @@ import { readSourceIncludeClassification } from '../../../src/state/source-inclu
 import { toolCheckpointId, validateMatchingWorkerDeath } from '../../../src/state/tool-checkpoint.js';
 import type { InstalledWorkerRetirementInspection } from './installed-worker-lease.js';
 
+// Runs only inside the actual signed Bash namespace. Quiet on success so it
+// can also precede an existing tool call without changing its output contract.
+export const installedShellUtilitiesProbe = [
+  'set -o pipefail',
+  "printf 'b\\na\\nb\\n' > /tmp/cliq-shell-tools-input",
+  "[ \"$(cat /tmp/cliq-shell-tools-input | head -n 2 | tail -n 1 | grep '^a$' | sed 's/a/A/')\" = A ]",
+  '[ "$(sort /tmp/cliq-shell-tools-input | uniq | wc -l)" -eq 2 ]',
+  '[ "$(ls -d -- /tmp/cliq-shell-tools-input)" = /tmp/cliq-shell-tools-input ]',
+  '[ "$(find /tmp -maxdepth 1 -name cliq-shell-tools-input -type f -print0 | xargs -0 /usr/bin/cat)" = "$(/usr/bin/cat /tmp/cliq-shell-tools-input)" ]',
+].join('\n');
+
 export function installedToolsCalls(before: string, after: string) {
   const reads = Array.from({ length: 15 }, (_, index) => ({ name: ['read', 'ls', 'find', 'grep'][index % 4]!,
     input: index % 4 === 0 ? { path: 'example.txt', start_line: index + 1, end_line: index + 1 } : index % 4 === 1 ? { path: '.' }
@@ -29,6 +40,8 @@ export function installedReadOnlyGitCall(after: string) {
   return { callId: 'owned-installed-private-git-readonly', name: 'bash', input: { command:
     "set -eu\n" +
     "/usr/bin/node --no-addons -e \"process.stdout.write('CLIQ_SIGNED_NODE_FROM_BASH_OK\\n')\"\n" +
+    installedShellUtilitiesProbe + '\n' +
+    "printf '%s\\n' 'CLIQ_SIGNED_SHELL_UTILITIES_OK'\n" +
     "/usr/bin/git status --porcelain\n/usr/bin/git diff -- example.txt\n" +
     "if GIT_OPTIONAL_LOCKS=1 /usr/bin/git add -- example.txt; then printf '%s\\n' 'UNEXPECTED_GIT_WRITE'; exit 42; fi\n" +
     "printf '%s' 'temporary authorized worktree write' > example.txt\n" +

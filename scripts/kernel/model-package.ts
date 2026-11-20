@@ -30,11 +30,13 @@ export function buildInstalledModelPrompts(model: Readonly<{ provider: 'openai-c
   const local = model.provider === 'ollama', prefix = local ? 'installed-local-model' : 'installed-model';
   const system = text(scripts
     ? 'Complete the user task in the private Run workspace using the declared tools. Respect per-action permissions and the original task scope. ' +
-      'Inspect the relevant files, make the necessary edits, and check the changed behavior. ' +
+      'Follow the requested order of work: inspect relevant files, make necessary edits, and check changed behavior. ' +
       'Bash provides only its builtins and the signed executables listed in its tool description. Use /usr/bin/node for JavaScript scripts and tests. ' +
       'Do not assume host utilities or package managers are available. Use the declared file tools for inspection and edits. ' +
-      'When the work is ready, finish with a concise explanation of the changes, checks and remaining uncertainty. ' +
       'Your final response submits a candidate for the configured checks. If verifier feedback returns, fix the reported failure within the original task and budget. ' +
+      'A candidate may be unchanged when the task requests a baseline check first; submit that candidate before editing or calling tools. ' +
+      'Candidate submission is provisional, not a claim that checks passed or the task is complete. ' +
+      'Finish each candidate with a concise explanation of changes, actual checks and remaining uncertainty. ' +
       'Do not claim checks passed without their actual results. The user reviews the result and explicitly applies it to the original workspace. ' +
       'Ask request_input when necessary user information is missing.'
     : local ? 'Work in the private workspace using the declared tools. Respect each tool permission. Ask for missing information with request_input. Report what you changed, what you verified, and what remains uncertain.'

@@ -38,6 +38,19 @@ authority. The fixed `.test.ts` check uses locked npm dependencies and the
 pinned esbuild from the signed guest image. The model receives at most eight
 reported line numbers for the approved test file. The workspace stays read-only
 and non-executable. An infrastructure failure stays distinct from an assertion failure.
+
+The Bash recipe additionally provides measured GNU `cat`, `find`, `grep`,
+`head`, `ls`, `sed`, `sort`, `tail`, `uniq`, `wc` and `xargs` at their fixed
+`/usr/bin/` paths. The publisher signs each executable's actual digest and
+complete dependency graph in the same guest image. Native extraction maps
+only the declared fixed roots, verifies and seals each file, and the trusted
+init hashes and binds its actual named copy before enabling execution.
+The Bash description lists only the executables in that signed manifest.
+The existing 32-file/32-pin/256-MiB limits remain; an oversized closure refuses.
+Node-only verifiers and read-only tools do not gain these executable roots.
+Workspace/tmp no-exec, network isolation, read-only Git metadata, tool grants,
+READY5 and Stop2 remain unchanged. A requested unchanged baseline is a valid
+provisional candidate, not a claim that checks passed or the task completed.
 Only the existing verifier receipt bound to the final immutable candidate can
 establish verified success. Workspace Trust still precedes config loading.
 Explicit tool permission, OS containment, credential and spend limits, current

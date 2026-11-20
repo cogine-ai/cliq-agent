@@ -60,3 +60,14 @@ test('a Node-only discovery root and executable script disguise cannot advertise
   assert.throws(() => buildInstalledToolContracts({ edit: entry, scripts: { entry: script, supervisor,
     guest: { ...guest, manifest: { ...guest.manifest, admittedExecutables: [] } } } }));
 });
+
+test('Bash advertises only utility paths in its actual signed guest manifest', () => {
+  const cat = image('cat', '/usr/bin/cat'), head = image('head', '/usr/bin/head');
+  const selected = { ...guest, manifest: { ...guest.manifest,
+    admittedExecutables: [...guest.manifest.admittedExecutables, cat, head] } };
+  const compiled = buildInstalledToolContracts({ edit: entry, scripts: { entry: script, supervisor, guest: selected } });
+  const description = compiled.manifest.entries.find(item => item.name === 'bash')!.description;
+  assert(description.includes('/usr/bin/cat')); assert(description.includes('/usr/bin/head'));
+  assert(!description.includes('/usr/bin/tail')); assert(!description.includes('/usr/bin/python'));
+  assert(description.includes('Network is disabled'));
+});

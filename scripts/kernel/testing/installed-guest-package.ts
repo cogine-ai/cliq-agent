@@ -9,7 +9,7 @@ import type { GuestToolchainManifest } from '../../../src/kernel/execution.js';
 import { assertArtifactRef, identityHash, sha256Bytes } from '../../../src/kernel/identity.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 import { exactKeys, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
-import { GUEST_EXTRACTOR_RECIPE, LINUX_TSX_COMPILER } from '../../../src/sandbox/guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE, LINUX_TSX_COMPILER, LINUX_BASH_UTILITIES } from '../../../src/sandbox/guest-toolchain.js';
 import { joinResourceOperations } from '../../../src/state/errors.js';
 import { decodeGuestToolchainManifest } from '../../../src/state/guest-toolchain.js';
 import { guestImageLayout } from '../guest-image-layout.mjs';
@@ -75,7 +75,7 @@ function publisher(value: unknown, publisherKeyId: string) {
       !Array.isArray(data.searchTools) || data.searchTools.length !== 0 ||
       !Array.isArray(data.verifiers) || data.verifiers.length > 1 ||
       data.verifiers.some(entry => canonicalSha256(entry) !== canonicalSha256(LINUX_TSX_COMPILER)) ||
-      !Array.isArray(data.admittedExecutables) || data.admittedExecutables.length > 1)
+      !Array.isArray(data.admittedExecutables) || data.admittedExecutables.length > 1 + LINUX_BASH_UTILITIES.length)
     fail('publisher input is outside the fixed installed Node recipe');
   const manifest = { schemaVersion: 1, format: 'cliq-guest-toolchain-v1', guestImageRef: data.guestImageRef,
     guestImageDigest: data.guestImageDigest, guestImageByteCount: data.guestImageByteCount, guestImageFormat: data.guestImageFormat,
@@ -88,8 +88,9 @@ function publisher(value: unknown, publisherKeyId: string) {
       decoded.worker.logicalName !== 'cliq-worker' || decoded.worker.canonicalGuestPath !== '/runtime/cliq-linux-worker' || decoded.worker.version !== '1' ||
       decoded.shell.logicalName !== 'sh' || decoded.shell.canonicalGuestPath !== '/bin/sh' ||
       decoded.git.logicalName !== 'git' || decoded.git.canonicalGuestPath !== '/usr/bin/git') fail('publisher executable identity differs from the fixed recipe');
-  if (decoded.admittedExecutables.some(entry => entry.logicalName !== 'bash' ||
-    entry.canonicalGuestPath !== '/bin/bash' || entry.version !== entry.digest))
+  const shellRoots = [{ logicalName: 'bash', canonicalGuestPath: '/bin/bash' }, ...LINUX_BASH_UTILITIES];
+  if (decoded.admittedExecutables.some(entry => entry.version !== entry.digest ||
+    !shellRoots.some(root => root.logicalName === entry.logicalName && root.canonicalGuestPath === entry.canonicalGuestPath)))
     fail('publisher admitted executable differs from a fixed measured guest recipe');
   if (!Array.isArray(data.files) || data.files.length < 4 || data.files.length > GUEST_EXTRACTOR_RECIPE.maxMappedFiles)
     fail('publisher file inventory exceeds its fixed bound');

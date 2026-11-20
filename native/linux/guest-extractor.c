@@ -9,6 +9,7 @@
 
 #if defined(__linux__)
 #include "guest-toolchain.h"
+#include "guest-shell-tools.h"
 #include "verifier-protocol.h"
 #include "worker-sha256.h"
 #include <elf.h>
@@ -83,7 +84,7 @@ static bool image_path(const char *path) {
 static bool mapped_path(struct extraction *job, const char *path) {
     if (!image_path(path)) return false;
     if ((job->held.source_recipe_version == 1 || job->held.builtin_recipe_version == 1) && !strcmp(path, "/usr/bin/git")) return true;
-    if (job->held.builtin_recipe_version == 1 && !strcmp(path, "/bin/bash")) return true;
+    if (job->held.builtin_recipe_version == 1 && cliq_builtin_shell_path(path)) return true;
     if (job->tsx_compiler && !strcmp(path, job->tsx_compiler->path)) return true;
     if (!strcmp(path, NODE_PATH) || !strcmp(path, LOADER_PATH)) return true;
     const char *roots[] = { "/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/" };
@@ -398,6 +399,9 @@ static void execute(napi_env env, void *data) {
         valid = extract_file(job, fs, job->held.git_path, job->held.git_digest) == 1;
     if (valid && job->held.builtin_recipe_version == 1)
         valid = extract_file(job, fs, job->held.bash_path, job->held.bash_digest) == 2;
+    for (uint32_t i = 0; valid && job->held.builtin_recipe_version == 1 && i < job->pinned_count; i++)
+        if (cliq_guest_shell_utility_path(job->pinned[i].path))
+            valid = extract_file(job, fs, job->pinned[i].path, job->pinned[i].digest) >= 0;
     if (valid && job->tsx_compiler)
         valid = extract_file(job, fs, job->tsx_compiler->path, job->tsx_compiler->digest) == 1;
     /* Newly discovered libraries extend this same bounded worklist; paths and

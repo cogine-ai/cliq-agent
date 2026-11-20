@@ -179,14 +179,18 @@ test('guest packaging refuses a writable, incomplete, linked or symlinked image 
 });
 
 
-test('fixed Bash publisher keeps one measured admitted root, exact inventory and unchanged image bounds', async () => {
+test('fixed Bash publisher keeps measured shell utilities, exact inventory and unchanged image bounds', async () => {
   const current = await fixture(true);
   const bashDigest = sha256Bytes(Buffer.from('opaque Bash inventory data; not an executable'));
   const bash = { logicalName: 'bash', canonicalGuestPath: '/bin/bash', digest: bashDigest, version: bashDigest };
-  const files = [...current.metadata.files, { path: bash.canonicalGuestPath, digest: bash.digest, byteCount: 1 }]
+  const utilities = ['cat', 'find', 'grep', 'head', 'ls', 'sed', 'sort', 'tail', 'uniq', 'wc', 'xargs']
+    .map(logicalName => { const digest = sha256Bytes(Buffer.from(`inert ${logicalName} inventory data`));
+      return { logicalName, canonicalGuestPath: `/usr/bin/${logicalName}`, digest, version: digest }; });
+  const admitted = [bash, ...utilities];
+  const files = [...current.metadata.files, ...admitted.map(entry => ({ path: entry.canonicalGuestPath, digest: entry.digest, byteCount: 1 }))]
     .sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
-  const metadata = { ...current.metadata, admittedExecutables: [bash], files, extractedFileBytes: 5,
-    imageLayout: { ...current.metadata.imageLayout, contentBytes: 5 } };
+  const metadata = { ...current.metadata, admittedExecutables: admitted, files, extractedFileBytes: 4 + admitted.length,
+    imageLayout: { ...current.metadata.imageLayout, contentBytes: 4 + admitted.length } };
   const replace = async (value: unknown) => {
     await chmod(current.metadataPath, 0o600); await writeFile(current.metadataPath, JSON.stringify(value)); await chmod(current.metadataPath, 0o400);
   };
@@ -196,13 +200,16 @@ test('fixed Bash publisher keeps one measured admitted root, exact inventory and
       { ...metadata, admittedExecutables: [{ ...bash, canonicalGuestPath: '/usr/bin/bash' }] },
       { ...metadata, admittedExecutables: [{ ...bash, version: 'unmeasured-host-version' }] },
       { ...metadata, admittedExecutables: [bash, { ...bash, logicalName: 'other', canonicalGuestPath: '/bin/other' }] },
+      { ...metadata, admittedExecutables: [bash, { ...utilities[0]!, canonicalGuestPath: '/bin/cat' }] },
+      { ...metadata, admittedExecutables: [bash, { ...utilities[0]!, version: 'unmeasured-host-version' }] },
+      { ...metadata, admittedExecutables: [...admitted, utilities[0]!] },
       { ...metadata, files: current.metadata.files, extractedFileBytes: 4, imageLayout: current.metadata.imageLayout },
       { ...metadata, files: files.map(file => file.path === '/bin/bash' ? { ...file, digest: 'f'.repeat(64) } : file) },
       { ...metadata, searchTools: [bash] }, { ...metadata, verifiers: [bash] },
     ]) { await replace(changed); await assert.rejects(writeInstalledGuestToolchain(current.input), /publisher|guest toolchain/); }
     await replace(metadata);
     const result = await writeInstalledGuestToolchain(current.input);
-    assert.deepEqual(result.manifest.admittedExecutables, [bash]);
+    assert.deepEqual(result.manifest.admittedExecutables, admitted);
     assert.equal(result.manifest.guestImageByteCount, current.metadata.guestImageByteCount);
     assert(result.manifest.guestImageByteCount <= GUEST_EXTRACTOR_RECIPE.maxImageBytes);
   } finally { await rm(current.directory, { recursive: true, force: true }); }

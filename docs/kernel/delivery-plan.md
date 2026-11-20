@@ -5,6 +5,27 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 signed shell environment.** Exact `c280e598` completes the
+[free installed PR532 workflow](https://github.com/cogine-ai/cliq-agent/actions/runs/44749594974):
+37 tools, original check1→0, normal CLI, reconnect, review and explicit apply;
+Stop2, writer joins and the complete secret corpus pass. Local build and4147
+checks pass (4115 passes,32 platform skips). This is controlled-model evidence.
+The subsequent [real DeepSeek run](https://github.com/cogine-ai/cliq-agent/actions/runs/44760752754)
+exhausts its budget after14 model calls and20 tools before the original verifier.
+Four Bash calls encounter missing standard utilities. Stop2 and joins pass;
+the temporary owned secret is deleted. It does not qualify real delivery.
+
+Fix the actual environment in one batch: include the eleven fixed GNU shell
+utilities in the same measured/signed image, carry their complete ELF graph
+through extraction and trusted executable mounts, and describe the actual
+signed inventory to the model. Preserve the original32-file/256-MiB bounds
+and every permission/mount/network/retirement check. The existing installed
+Git probe and first of the thirteen original controlled PR532 Bash calls
+exercise all eleven utilities; the full original workload and assertions stay.
+Clarify that the model may submit a requested unchanged baseline before tools
+or edits. Current local/native/Linux results for this candidate are pending;
+no real-provider completion, independent model-diff audit or PR is claimed.
+
 **2026-11-20 shared retained toolchain image.** The real CAS/Ed25519 signed
 toolchain reader still uses an ordinary image discard check, while private
 script history uses the existing traversal-owned joined verification. Their

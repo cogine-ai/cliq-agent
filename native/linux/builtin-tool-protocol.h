@@ -2,6 +2,7 @@
 #define CLIQ_BUILTIN_TOOL_PROTOCOL_H
 /* A fixed native recipe projection, never a new grant or caller argv/env. */
 #include "verifier-protocol.h"
+#include "guest-shell-tools.h"
 #define CLIQ_BUILTIN_CONFIG_MAGIC UINT32_C(0x43425431)
 #define CLIQ_BUILTIN_SCRIPT_PATH "/runtime/cliq-builtin-tools.mjs"
 #define CLIQ_BUILTIN_INPUT_BYTES UINT64_C(16777216)
@@ -57,7 +58,7 @@ static inline bool cliq_builtin_config_valid(const struct cliq_builtin_config *f
     bool node = false, git = false, bash = false;
     for (uint32_t i = 0; i < config->file_count; i++) {
         const char *path = config->files[i].path;
-        bool tool_path = fixed->tool == CLIQ_BUILTIN_BASH && (!strcmp(path, "/usr/bin/git") || !strcmp(path, "/bin/bash"));
+        bool tool_path = fixed->tool == CLIQ_BUILTIN_BASH && cliq_builtin_shell_path(path);
         if (!cliq_verifier_path(path) || (!tool_path && !cliq_verifier_mapping_path(path)) ||
             !cliq_builtin_digest(config->files[i].digest) || config->files[i].byte_count < 1 ||
             config->files[i].byte_count > UINT64_C(268435456)) return false;

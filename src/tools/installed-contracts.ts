@@ -37,7 +37,8 @@ export function buildInstalledToolContracts(input: { edit: Entry;
   const entries: ToolContractManifestV1['entries'] = names.map(name => {
     const builtin = builtinInputContracts[name], schemaRef = canonicalSha256(builtin.inputSchema);
     const description = name === 'bash' ? `${descriptions.bash} Bash builtins and the signed executables ${scripts!.guest.manifest.node.canonicalGuestPath}, ` +
-      `${scripts!.guest.manifest.git.canonicalGuestPath} and /bin/bash are available. Other external commands are not provided. ` +
+      `${scripts!.guest.manifest.git.canonicalGuestPath}, ${scripts!.guest.manifest.admittedExecutables.map(entry => entry.canonicalGuestPath).join(', ')} ` +
+      'are available. Other external commands are not provided. ' +
       'Network is disabled; workspace and temporary files are not directly executable. Existing workspace .git is read-only; ' +
       'creating or replacing workspace Git metadata is unsupported.' : descriptions[name];
     const common = { name, version: builtin.version, description, access: builtin.access,
