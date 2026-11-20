@@ -30,7 +30,7 @@ test('funded selection keeps the exact endpoint, full request ceilings and one f
   const pr532 = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
   assert.equal(pr532.budgets.wallTimeMs, 90 * 60_000);
   assert.equal(pr532.budgets.wallTimeMs / PR532_POLL_INTERVAL_MS, 720);
-  assert.equal(pr532.budgets.costMicros, 4_700_000);
+  assert.equal(pr532.budgets.costMicros, 10_000_000);
   assert.equal(pr532.definition.requestTokenCeiling.outputTokens, 8192);
   assert.equal(pr532.budgets.modelTokens, 32_000_000);
 });
@@ -54,10 +54,10 @@ test('the fixed provider ceiling covers every admitted output cap and the exact 
   assert.equal(ceiling.cacheReadTokens, 1048576);
   assert.equal(calculateModelCostMicros(ceiling, definition.prices), 330696);
   const { budgets } = providerSelection(new Date('2026-11-13T00:00:00.000Z'), true);
-  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 14);
+  assert.equal(Math.floor(budgets.costMicros / calculateModelCostMicros(ceiling, definition.prices)), 30);
 });
 
-test('the source-bounded CNY-account booking covers the next complete native lifetime within the approved total', () => {
+test('the renewed allowance covers one complete native lifetime while preserving all earlier bookings', () => {
   // External conservative bookkeeping, under the separately authenticated CNY
   // account observation and published peak tariffs. This creates no billing,
   // price-table, native budget or refund authority and uses no usage telemetry.
@@ -69,18 +69,20 @@ test('the source-bounded CNY-account booking covers the next complete native lif
   assert.equal(cnyMicros, 2_204_632);
   // Preserve the already-audited original bounds, including the entire fifth
   // lifetime despite its failed Stop, the eighth thirteen-call cap and the
-  // ninth five-call lifetime and the entire failed thirty-call lifetime.
-  // Preserve its rounded CNY267 booking without refunding unobserved claims.
-  const historicalCalls = [15, 4, 10, 4, 15, 12, 12, 13, 5, 30].reduce((sum, count) => sum + count, 0);
+  // ninth five-call lifetime, the entire failed thirty-call lifetime and the
+  // last fourteen-call lifetime. The owner renewed the separate CNY300
+  // allowance from zero; the old rounded CNY298 booking is never refunded.
+  const historicalCalls = [15, 4, 10, 4, 15, 12, 12, 13, 5, 30, 14].reduce((sum, count) => sum + count, 0);
   const historical = Number((BigInt(historicalCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
   const nextCalls = Math.floor(input.budgets.costMicros / usdMicros);
   const next = Number((BigInt(nextCalls) * BigInt(cnyMicros) + 999_999n) / 1_000_000n);
   assert.deepEqual({ historicalCalls, historical, nextCalls, next },
-    { historicalCalls: 120, historical: 265, nextCalls: 14, next: 31 });
-  const retainedHistoricalBooking = 267;
+    { historicalCalls: 134, historical: 296, nextCalls: 30, next: 67 });
+  const retainedHistoricalBooking = 298;
   assert(retainedHistoricalBooking >= historical);
-  assert.equal(retainedHistoricalBooking + next, 298);
-  assert(retainedHistoricalBooking + next <= 300);
+  const renewedAllowanceUsed = 0, renewedAllowance = 300;
+  assert.equal(renewedAllowanceUsed + next, 67);
+  assert(renewedAllowanceUsed + next <= renewedAllowance);
 });
 
 test('private bytes arrive once after the complete marker and EOF, with no inherited credential environment', async () => {
