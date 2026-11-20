@@ -31,6 +31,11 @@ npm run dev -- "your task here"
 node dist/index.js chat
 ```
 
+`npm test` runs all source test files, with two files at a time. The two large
+list suites then run alone and serially so their real two-second SIGTERM checks
+do not compete with other test processes. No assertions or test files are
+omitted. `node scripts/test.mjs --list` prints the complete file routing.
+
 ## TUI development (Phase A)
 
 The Ink TUI lives at `src/tui/` and is the default interactive surface on a TTY (escape hatches: `--classic` or `CLIQ_TUI=0`). It is loaded with `await import('./tui/index.js')` on the dispatch path so headless / RPC code never pulls in Ink or React.

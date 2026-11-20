@@ -5,6 +5,14 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+Local full-suite routing retains every source test. A two-file-concurrency run
+at `66a0041` finishes4143 tests with one maximum Session-list SIGTERM capture
+at2.04 seconds; the original2-second assertion remains. Run the two list timing
+files alone and serially after the other585 files complete with concurrency2.
+The Node22/24 routing regression independently checks the complete Git file
+inventory, real child failure propagation and execution of both timing files.
+No product, workload check, source fixture or qualification limit changes.
+
 **2026-11-20 complete-task read amplification.** The exact `da244ec`
 [free task](https://github.com/cogine-ai/cliq-agent/actions/runs/44684447471)
 fails the original90-minute observation after36 settled tools. The stable
