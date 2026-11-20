@@ -5,6 +5,18 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-21 complete mount-table reads.** The isolated real installed probe
+[44784315632](https://github.com/cogine-ai/cliq-agent/actions/runs/44784315632)
+reproduces Bash startup rejection at confinement stage4, after the named
+executable copies have been hashed and bound. The native mount observer makes
+only one `read` of `/proc/self/mountinfo`; a short read can omit later mounts.
+A real-FD data regression with the actual native reader and4096-byte reads
+fails before the fix and passes with complete bounded reads through EOF.
+Duplicate targets, wrong flags, partial final rows and the unchanged256KiB
+bound still refuse. These inert rows do not prove physical containment; the
+same real installed probe must validate the fix. No mount, execution, process
+or timing guard is removed or increased.
+
 **2026-11-21 Bash native startup diagnosis.** The corrected private precheck
 and both Linux native data/seal tests pass. The complete controlled task
 [44771236701](https://github.com/cogine-ai/cliq-agent/actions/runs/44771236701)

@@ -134,46 +134,7 @@ static bool verifier_read_config(int fd, struct cliq_verifier_config *config) {
     return cliq_verifier_config_valid(config);
 }
 
-static bool verifier_option(const char *options, const char *wanted) {
-    size_t bytes = strlen(wanted);
-    for (const char *at = options; at && *at; at = strchr(at, ',')) {
-        if (*at == ',') at++;
-        if (strncmp(at, wanted, bytes) == 0 && (at[bytes] == '\0' || at[bytes] == ',')) return true;
-    }
-    return false;
-}
-
-static bool verifier_mount_observed(const char *target, bool readonly, bool executable, bool devices) {
-    int fd = open("/proc/self/mountinfo", O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0) return false;
-    size_t bound = 262144; char *bytes = malloc(bound); bool valid = bytes != NULL, found = false;
-    ssize_t count = valid ? read(fd, bytes, bound - 1) : -1;
-    if (count <= 0 || (size_t)count == bound - 1) valid = false;
-    if (close(fd) != 0) valid = false;
-    if (valid) {
-        bytes[count] = '\0'; char *line = bytes;
-        while (line && *line) {
-            char *end = strchr(line, '\n');
-            if (!end) { valid = false; break; }
-            *end++ = '\0'; char *field = line;
-            for (unsigned int i = 1; i < 5 && field; i++) { field = strchr(field, ' '); if (field) field++; }
-            if (!field) { valid = false; break; }
-            char *options = strchr(field, ' ');
-            if (!options) { valid = false; break; }
-            *options++ = '\0'; char *tail = strchr(options, ' ');
-            if (!tail) { valid = false; break; }
-            *tail = '\0';
-            if (strcmp(field, target) == 0) {
-                if (found || !verifier_option(options, readonly ? "ro" : "rw") ||
-                    verifier_option(options, "noexec") == executable || !verifier_option(options, "nosuid") ||
-                    (!devices && !verifier_option(options, "nodev"))) { valid = false; break; }
-                found = true;
-            }
-            line = end;
-        }
-    }
-    free(bytes); return valid && found;
-}
+#include "verifier-mount.h"
 
 static bool verifier_setup_stage(uint32_t scope, uint32_t stage) {
     struct cliq_worker_packet progress = cliq_verifier_setup_packet(scope, stage);

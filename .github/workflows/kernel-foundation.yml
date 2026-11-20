@@ -1197,6 +1197,8 @@ jobs:
       - run: npm run build
       - name: Check the original tool grammar and fixed probe wiring
         run: node --test scripts/kernel/testing/installed-tools-result.test.mjs
+      - name: Check native bounded mount reads
+        run: node --test --import tsx src/sandbox/verifier-mount.test.ts
       - name: Install actual guest, transport and Secret Service prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev libssl-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build e2fsprogs libext2fs-dev pkg-config
       - name: Execute the signed child Node and retain the original Run checks and joins

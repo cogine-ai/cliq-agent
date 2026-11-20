@@ -59,7 +59,8 @@ export function projectQualificationWorkflow(workflow, kind = 'foundation') {
     const original = "    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}";
     const expanded = original.replace(" != 'false')", " != 'false' || (github.event_name == 'workflow_dispatch' && !inputs.real_provider && !inputs.diagnostic_cpu && inputs.qualification_group == 'builtin' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent'))");
     assert.equal(probe[0].split(expanded).length, 2, 'only the existing builtin probe gains exact manual diagnosis');
-    const originalProbe = probe[0].replace(expanded, original);
+    const mountTest = '      - name: Check native bounded mount reads\n        run: node --test --import tsx src/sandbox/verifier-mount.test.ts\n';
+    const originalProbe = replaceOnce(probe[0].replace(expanded, original), mountTest, '');
     assert.equal(createHash('sha256').update(originalProbe).digest('hex'), '87acfb7dc2ecbd5e76a85158104bb3d8e3f6b0a701e631225642c0f113e4ca82');
     workflow = replaceOnce(workflow, probe[0], '');
     const readCost = workflow.match(/^  linux-installed-read-cost:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m);
