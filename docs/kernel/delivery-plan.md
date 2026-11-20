@@ -24,8 +24,21 @@ result-source and sealed tool history share the completed reference and
 length checks within that cut. Candidate/verification history takes sole
 responsibility for the dependency acquisition audit in the Agent history.
 Each consumer retains its typed, SQL and native checks, and a separate
-traversal reads the original files again. The revised Linux performance
-and real DeepSeek gates remain pending.
+traversal reads the original files again. The [controlled Linux rerun](https://github.com/cogine-ai/cliq-agent/actions/runs/44819370180)
+at `68e7a080` completed the same task in 57m17s, down from 97m52s (41%).
+Reads fell 72% during tool preparation and 69% during tool result
+settlement. The original check went from exit 1 to exit 0, and reconnect,
+review, exact application, and the original stop and cleanup checks passed.
+
+The [real DeepSeek rerun](https://github.com/cogine-ai/cliq-agent/actions/runs/44828448298)
+at the same revision reached the original failing check, repair and
+reconnect. About 45 minutes into the Run, checkpoint retirement for a
+claimed tool returned `ERR_CLIQ_STATE_OWNER_NATIVE` and the Run waited for
+reconciliation. The retained diagnostic gives the retirement phase and
+error code. The specific native failure is still unknown. The repaired
+check, review, application and independent inspection of the model's
+changes remain pending. The original unit stop, writer and daemon joins,
+and cleanup passed. The temporary Actions secret was removed.
 
 **2026-11-21 complete mount-table reads.** The isolated real installed probe
 [44784315632](https://github.com/cogine-ai/cliq-agent/actions/runs/44784315632)

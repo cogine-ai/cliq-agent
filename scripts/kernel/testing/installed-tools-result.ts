@@ -45,7 +45,12 @@ export function installedReadOnlyGitCall(after: string) {
     "/usr/bin/git status --porcelain\n/usr/bin/git diff -- example.txt\n" +
     "if GIT_OPTIONAL_LOCKS=1 /usr/bin/git add -- example.txt; then printf '%s\\n' 'UNEXPECTED_GIT_WRITE'; exit 42; fi\n" +
     "printf '%s' 'temporary authorized worktree write' > example.txt\n" +
-    `printf '%s' ${quote(after)} > example.txt\n` + "printf '%s\\n' 'CLIQ_PRIVATE_GIT_READ_ONLY_OK'\n" } };
+    "/usr/bin/node --no-addons -e 'require(\"node:fs\").mkdirSync(\"cliq-write-probe\")'\n" +
+    `printf '%s' ${quote(after)} > cliq-write-probe/example.txt\n` +
+    "/usr/bin/node --no-addons -e 'const fs = require(\"node:fs\"); const directory = \"cliq-write-probe\"; " +
+    "console.log(\"CLIQ_PRIVATE_DIRECTORY_MODE=\" + (fs.statSync(directory).mode & 0o7777).toString(8)); " +
+    "fs.renameSync(directory + \"/example.txt\", \"example.txt\"); fs.rmdirSync(directory)'\n" +
+    "printf '%s\\n' 'CLIQ_PRIVATE_GIT_READ_ONLY_OK'\n" } };
 }
 export type InstalledToolsEvidence = {
   qualified: true; readCalls: 15; executedToolCalls: 17; deniedCalls: 1; inputReplies: 1;

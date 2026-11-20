@@ -975,6 +975,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             assert.equal(reply.length, 1); assert(reply[0].content.includes('CLIQ_PRIVATE_GIT_READ_ONLY_OK'));
             assert(reply[0].content.includes('CLIQ_SIGNED_NODE_FROM_BASH_OK'));
             assert(reply[0].content.includes('CLIQ_SIGNED_SHELL_UTILITIES_OK'));
+            assert(reply[0].content.includes('CLIQ_PRIVATE_DIRECTORY_MODE=755'));
           }
         }
         if (kind === 'required_repair' && ordinal === 3) {

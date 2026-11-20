@@ -162,6 +162,8 @@ static int builtin_namespace(struct cliq_worker_packet request, int passed[CLIQ_
         char go; ssize_t received;
         do { received = read(6, &go, 1); } while (received < 0 && errno == EINTR);
         if (close(6) != 0 || received != 1 || go != '1') _exit(70);
+        /* Ordinary Bash writes in /work must use the checkpoint's file and directory modes. */
+        if (bash) umask(0022);
         char *arguments[CLIQ_VERIFIER_MAX_ARGS + 1], *environment[CLIQ_VERIFIER_MAX_ENV + 1];
         for (uint32_t i = 0; i < config->argument_count; i++) arguments[i] = config->strings + config->arguments[i];
         arguments[config->argument_count] = NULL;
