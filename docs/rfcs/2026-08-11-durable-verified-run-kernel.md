@@ -125,6 +125,16 @@ The next query starts with fresh physical reads. Source/cut capacity, signal
 checks, scratch retirement and the original Stop2 boundary retain their values;
 cached bytes never become current StateOwner, grant or execution authority.
 
+Within one complete tool-history validation, distinct snapshots may name the
+same canonical workspace-entries content graph. Walk that graph's files once
+and await its complete original size/hash/root/stat/close checks before any
+snapshot using it can pass. Concurrent histories join that same in-flight
+walk. Every snapshot's Run, generation, Checkpoint, observation and retirement
+bindings still validate independently. A different entries reference gets its
+own walk, and every later history validation starts afresh. This consolidates
+visits to an identical immutable graph; it grants no current native execution
+or retirement authority and changes no byte-cache or physical-reader limit.
+
 Discard-only historical file checks may use those same complete small byte
 copies. A miss preserves the consumer's original streaming cadence, complete
 hash, exact length, metadata/root checks and descriptor joins. Explicit readers

@@ -5,6 +5,35 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 complete-task read amplification.** The exact `da244ec`
+[free task](https://github.com/cogine-ai/cliq-agent/actions/runs/44684447471)
+fails the original90-minute observation after36 settled tools. The stable
+nonterminal diagnostic retains all85 items; all13 genuine Bash operations exit0,
+including the marker append and its next-worker removal. Baseline check exits1;
+repaired check, review and application remain unqualified. Both original units
+stop successfully and installed writers, daemon and observers join. No paid
+call or complete corpus qualification is claimed.
+
+The actual process window records about156GB returned across34 tool-prepare
+entries; concurrent work contributes, so these are not exclusive per-Run costs.
+Historical mutating tools independently rewalk identical sealed workspace
+content graphs. Share one complete file walk for each canonical entries ref
+within that one history cut, while checking every original snapshot, Checkpoint,
+generation and retirement binding separately. The real SQLite/CAS regression
+uses repeated and distinct content graphs above the16MiB byte-cache threshold:
+RED repeats a shared file read, GREEN verifies each graph once, every physical
+handle joins, later cuts read afresh and actual corruption still refuses.
+All existing large-input fallback and native/current-owner checks remain.
+The complete installed task still needs a new actual result on this fix.
+
+The auxiliary [maximum-image verifier campaign](https://github.com/cogine-ai/cliq-agent/actions/runs/44685347150)
+also remains unqualified: its ordinary-tools case completes12 calls within the
+original90-second window and has one further claim. Preserve that assertion
+and failed report. The approved amendment keeps this broad maximum-image
+matrix outside the one-task preview gate. The normal daily workflow and signed
+Node/Bash jobs pass independently, with real Stop2, joined resources and complete
+clean corpus scans; they do not substitute for PR532 or maximum-image acceptance.
+
 **2026-11-20 next funded input.** The complete current local suite passes at
 `da244ec`:4142 tests,4110 passes and32 platform skips, zero failures. Its build
 passes with43 SDK declarations. The exact source is now running the complete
