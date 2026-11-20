@@ -5,7 +5,39 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
-**2026-11-19 current blocker.** The next [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44605509115)
+**2026-11-20 current blocker.** The exact `49a8349493253e2253f8ae1934cf8d011aa9957c`
+[free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44634845267)
+passes the full original task. It retains all21 read/edit calls plus13 real
+Bash retirements, seven model exchanges and37 charged tools. The original
+check fails1 then passes0, reconnect/review/exact application succeed, both
+original services pass Stop2 and all original writers/daemon/HTTPS owners join.
+The complete corpus covers5130 files and both databases; all241 streams close
+with zero matches, exceeded limits or retained needle/tail bytes. Latency
+remains poor, at87 minutes checking/repairing and35 minutes applying. The
+earlier precise received-retirement SIGTERM cut remains separately unverified.
+
+The subsequent [real DeepSeek task](https://github.com/cogine-ai/cliq-agent/actions/runs/44652661069)
+uses all five full model claims and stops with `budget_exhausted` after10
+charged tools, before verified repair/review/application. Both original
+services meet Stop2, all installed writers and the daemon join, and cleanup
+returns zero errors. Its complete corpus is absent. The matching owned CI
+secret was deleted and absence verified. Historical whole-lifetime maxima now
+cover90 possible requests, with a uniform peak upper198416880 CNY micros.
+Actual invoices remain unreconciled. The existing conservative rounded booking
+is CNY200. Additional funding has been selected, with its amount still pending.
+
+That failed report retained only the last eight items and numeric Bash exit1.
+It cannot establish the complete tool sequence, the command's actual failure
+or partial edit correctness. Terminal diagnosis now uses the existing stable,
+bounded public cut collector. It preserves the failed Run and all original
+assertions if that optional read fails. Failed Bash output may retain its
+complete model-visible views within a cumulative1MiB diagnostic budget, with
+native/model truncation flags preserved. The diagnostic byte ceiling omits
+whole views explicitly. Every report byte still passes the original credential scan before
+publication. Native execution, authority and qualification assertions retain
+their existing paths. This diagnosis cannot reconstruct the disposed trial.
+
+The preceding [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44605509115)
 at `25e0e01a2a4edf1af2c8ecaa87dd581288d4d4df` passes all231 Linux contract
 tests, then completes31 charged tools before the original90-minute observer.
 Its retained Bash outcomes have zero exits and durations275–390ms. The actual

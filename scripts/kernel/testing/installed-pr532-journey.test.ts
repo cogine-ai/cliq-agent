@@ -62,7 +62,7 @@ test('PR532 failure diagnosis preserves the closed context cause and original nu
     hardPromptTokens: 24576, protectedTokens: 16000, sourceInputTokenCap: 8192 });
 });
 
-test('Bash diagnosis binds the original model result and retains only termination, duration and exit code', () => {
+test('Bash diagnosis defaults to numeric outcomes and bounds terminal failure output with its original flags', () => {
   const model: ToolResultModelContentV1 = { schemaVersion: 1, format: 'cliq-tool-result-model-content-v1',
     callId: 'inert-call', index: 0, toolName: 'bash', outcome: 'executed',
     content: { tool: 'bash', terminationReason: 'exit', durationMs: 7, exitCode: 127,
@@ -80,6 +80,34 @@ test('Bash diagnosis binds the original model result and retains only terminatio
     { toolName: 'bash', outcome: 'executed', terminationReason: 'exit', durationMs: 7, exitCode: 127 });
   assert.throws(() => pr532ToolDiagnostic(item, payload));
   assert.throws(() => pr532ToolDiagnostic(item, payload, { ...model, callId: 'foreign' }));
+  const diagnose = (content: object, budget: number) => {
+    const replacement = { ...model, content };
+    replacement.contentDigest = digestOmitting(replacement, 'contentDigest');
+    const result = { ...payload, modelContentRef: canonicalSha256(replacement), modelContentDigest: replacement.contentDigest };
+    result.payloadDigest = digestOmitting(result, 'payloadDigest');
+    return pr532ToolDiagnostic({ ...item, resultRef: canonicalSha256(result) }, result, replacement, budget);
+  };
+  const stdout = { text: 'original test failure\n', encoding: 'utf8_lossy', byteCount: 100_000,
+    nativeTruncated: true, modelTruncated: true };
+  const stderr = { text: '', encoding: 'utf8_lossy', byteCount: 0, nativeTruncated: false, modelTruncated: false };
+  const content = { ...model.content as object, stdout, stderr };
+  const detailed = diagnose(content, 1_048_576);
+  assert('failureOutput' in detailed && detailed.failureOutput?.kind === 'observed');
+  assert.deepEqual(detailed.failureOutput.stdout, stdout); assert.deepEqual(detailed.failureOutput.stderr, stderr);
+  assert.notEqual(detailed.failureOutput.stdout, stdout);
+  assert.equal(detailed.failureOutput.byteCount, Buffer.byteLength(JSON.stringify({ stdout, stderr })));
+  for (const budget of [0, 1]) {
+    const omitted = diagnose(content, budget);
+    assert('failureOutput' in omitted);
+    assert.deepEqual(omitted.failureOutput, { kind: 'omitted', reason: 'diagnostic_byte_limit' });
+    assert(!JSON.stringify(omitted).includes(stdout.text.trim()));
+  }
+  const succeeded = diagnose({ ...content, exitCode: 0 }, 1_048_576);
+  assert(!('failureOutput' in succeeded));
+  for (const bad of [{ ...stdout, text: 'x'.repeat(65_537) }, { ...stdout, modelTruncated: false },
+    { ...stdout, encoding: 'untrusted' }, { ...stdout, nativeTruncated: 'yes' }, { ...stdout, extra: 'untrusted' }])
+    assert.throws(() => diagnose({ ...content, stdout: bad }, 1_048_576));
+  for (const budget of [-1, 1.5, 1_048_577]) assert.throws(() => diagnose(content, budget));
   for (const changed of [{ exitCode: 256 }, { terminationReason: 'untrusted text' }, { durationMs: -1 }]) {
     const replacement = { ...model, content: { ...model.content as object, ...changed } };
     replacement.contentDigest = digestOmitting(replacement, 'contentDigest');

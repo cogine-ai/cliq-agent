@@ -29,9 +29,13 @@ export const PR532_REGISTRY = 'mirrors.tencent.com';
 export const PR532_REGISTRY_BASE = '/npm';
 export const PR532_REGISTRY_ID = 'pr532-public-npm-registry';
 
-/** Fixed diagnostic data from the exact retained result. No arguments, file
- * contents, model text or execution authority enter this projection. */
-export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPayloadV1, model?: ToolResultModelContentV1) {
+/** Bound data from the original result. Terminal failure diagnosis may retain
+ * complete model-visible Bash output views within its explicit byte budget.
+ * The original report secret scan gates publication of every retained byte. */
+export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPayloadV1, model?: ToolResultModelContentV1,
+  failureOutputBytes?: number) {
+  if (failureOutputBytes !== undefined)
+    assert(Number.isSafeInteger(failureOutputBytes) && failureOutputBytes >= 0 && failureOutputBytes <= 1_048_576);
   assert.equal(item.schemaVersion, 1); assert.equal(payload.schemaVersion, 1);
   assert.equal(item.kind, 'tool_result');
   assert.equal(canonicalSha256(payload), item.resultRef);
@@ -54,10 +58,29 @@ export function pr532ToolDiagnostic(item: ToolResultItem, payload: ToolResultPay
     assert(terminationReason);
     const durationMs = content.durationMs;
     assert(typeof durationMs === 'number' && Number.isSafeInteger(durationMs) && durationMs >= 0);
-    if (terminationReason !== 'exit') return { toolName, outcome: payload.outcome, terminationReason, durationMs };
-    const exitCode = content.exitCode;
-    assert(typeof exitCode === 'number' && Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 255);
-    return { toolName, outcome: payload.outcome, terminationReason, durationMs, exitCode };
+    const exitCode = terminationReason === 'exit' ? content.exitCode : undefined;
+    if (terminationReason === 'exit') assert(typeof exitCode === 'number' && Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 255);
+    const numeric = { toolName, outcome: payload.outcome, terminationReason, durationMs,
+      ...(exitCode === undefined ? {} : { exitCode }) };
+    if (failureOutputBytes === undefined || exitCode === 0) return numeric;
+    if (failureOutputBytes === 0) return { ...numeric, failureOutput: { kind: 'omitted' as const, reason: 'diagnostic_byte_limit' as const } };
+    const copy = (value: unknown) => {
+      assert(value && typeof value === 'object' && !Array.isArray(value));
+      const view = value as Record<string, unknown>;
+      assert.equal(Object.keys(view).sort().join(','), 'byteCount,encoding,modelTruncated,nativeTruncated,text');
+      assert(typeof view.text === 'string' && view.text.length <= 65_536);
+      assert.equal(view.encoding, 'utf8_lossy');
+      assert(typeof view.byteCount === 'number' && Number.isSafeInteger(view.byteCount) && view.byteCount >= view.text.length);
+      assert(typeof view.nativeTruncated === 'boolean');
+      assert.equal(view.modelTruncated, view.byteCount > 65_536);
+      return { text: view.text, encoding: view.encoding, byteCount: view.byteCount,
+        nativeTruncated: view.nativeTruncated, modelTruncated: view.modelTruncated };
+    };
+    const output = { stdout: copy(content.stdout), stderr: copy(content.stderr) };
+    const byteCount = Buffer.byteLength(JSON.stringify(output));
+    return { ...numeric, failureOutput: byteCount <= failureOutputBytes
+      ? { kind: 'observed' as const, byteCount, ...output }
+      : { kind: 'omitted' as const, reason: 'diagnostic_byte_limit' as const } };
   }
   if (payload.outcome !== 'error') return { toolName, outcome: payload.outcome };
   const code = ['TOOL_NOT_FOUND', 'TOOL_INPUT_INVALID', 'TOOL_AUTHORITY_UNAVAILABLE',
@@ -212,8 +235,9 @@ export async function runInstalledPr532Journey(input: {
     assert(response.type === 'response' && response.response.ok);
     return response.response.result as Result<M>;
   };
-  const describeToolActivity = async (cut: Result<'run.get'>) => {
+  const describeToolActivity = async (cut: Result<'run.get'>, completeTerminalCut = false) => {
     const results = [];
+    let remaining = completeTerminalCut ? 1_048_576 : 0;
     for (const row of cut.items) {
       const item = await retained(row.payloadRef) as ContinuationItem;
       assert.equal(item.runId, cut.snapshot.run.id); assert.equal(item.itemId, row.itemId);
@@ -221,11 +245,13 @@ export async function runInstalledPr532Journey(input: {
       const payload = await retained(item.resultRef) as ToolResultPayloadV1;
       const model = payload.toolName === 'bash' && payload.outcome === 'executed'
         ? await retained(payload.modelContentRef) as ToolResultModelContentV1 : undefined;
-      results.push({ itemSeq: row.itemSeq, ...pr532ToolDiagnostic(item, payload, model) });
+      const diagnostic = pr532ToolDiagnostic(item, payload, model, completeTerminalCut ? remaining : undefined);
+      if ('failureOutput' in diagnostic && diagnostic.failureOutput?.kind === 'observed') remaining -= diagnostic.failureOutput.byteCount;
+      results.push({ itemSeq: row.itemSeq, ...diagnostic });
     }
     if (results.length) context.toolActivity({ diagnosticOnly: true,
       afterItemSeq: cut.items[0]!.itemSeq - 1, throughItemSeq: cut.nextItemSeq,
-      highWaterItemSeq: cut.highWaterItemSeq, results });
+      highWaterItemSeq: cut.highWaterItemSeq, completeTerminalCut, results });
   };
   const finish = async (runId: string) => {
     const deadline = Date.now() + input.budgets.wallTimeMs;
@@ -245,9 +271,14 @@ export async function runInstalledPr532Journey(input: {
       }
       const dependencyFailed = cut.journal.some(row => row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
       if (dependencyFailed || (run.status !== 'queued' && run.status !== 'running') || Date.now() >= deadline) {
-        const stopped = await read({ protocolVersion: 1, method: 'run.get', runId,
+        let stopped = await read({ protocolVersion: 1, method: 'run.get', runId,
           afterItemSeq: Math.max(0, cut.highWaterItemSeq - 8), itemLimit: 8, checkpointLimit: 1,
           afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
+        let completeTerminalCut = false;
+        if (stopped.snapshot.run.status === 'failed' || stopped.snapshot.run.status === 'cancelled') try {
+          stopped = await readInstalledTerminalCut(runId, request => read(request, 'run.get'));
+          completeTerminalCut = true;
+        } catch { /* Keep the original failure and last bounded page if the complete cut is unavailable. */ }
         context.progress(stopped);
         try {
           const original = stopped.snapshot.run;
@@ -255,7 +286,7 @@ export async function runInstalledPr532Journey(input: {
         } catch { /* Optional diagnosis preserves the original task failure. */ }
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
-        try { await describeToolActivity(stopped); }
+        try { await describeToolActivity(stopped, completeTerminalCut); }
         catch { /* Missing result diagnosis preserves the original task failure. */ }
         try {
           const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);

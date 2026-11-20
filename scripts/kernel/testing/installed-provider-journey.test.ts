@@ -301,6 +301,44 @@ test('PR532 observation stays within the original client frame budget through a 
   }
 });
 
+test('failed PR532 diagnosis collects the complete stable terminal cut and preserves failure if that cut changes', async () => {
+  const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
+  const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
+  let finish: ts.VariableStatement | undefined;
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+      ts.isIdentifier(declaration.name) && declaration.name.text === 'finish')) finish = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert(finish);
+  for (const changeCut of [false, true]) {
+    let frames = 0;
+    const observations: Array<{ items: number; complete: boolean }> = [];
+    const context = vm.createContext({ input: { budgets: { wallTimeMs: PR532_RUN_WALL_TIME_MS } }, Date: { now: () => 0 }, assert,
+      readInstalledTerminalCut, context: { progress() {} },
+      read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
+        assert(frames++ < 1024);
+        const itemAfter = request.afterItemSeq ?? 0, journalAfter = request.afterJournalSeq ?? 0;
+        const items = Array.from({ length: Math.min(request.itemLimit ?? 100, 132 - itemAfter) }, (_, index) =>
+          ({ itemSeq: itemAfter + index + 1, itemId: `inert-item-${itemAfter + index + 1}` }));
+        const journal = Array.from({ length: Math.min(request.journalLimit ?? 100, 132 - journalAfter) }, (_, index) =>
+          ({ seq: journalAfter + index + 1, opKind: 'tool' }));
+        return { snapshot: { run: { id: 'inert-run', status: 'failed', nextStep: null, latestCheckpointId: 'inert-checkpoint' } },
+          items, journal, nextItemSeq: itemAfter + items.length, nextJournalSeq: journalAfter + journal.length,
+          highWaterItemSeq: 132, highWaterJournalSeq: changeCut && journalAfter === 100 ? 133 : 132,
+          checkpoints: request.checkpointCursor ? [] : [{ id: 'inert-checkpoint' }],
+          highWaterCheckpointCursor: 'inert-checkpoint-cursor', nextCheckpointCursor: 'inert-checkpoint-cursor' };
+      },
+      describeDependencyFailure: async () => {},
+      describeToolActivity: async (cut: { items: unknown[] }, complete = false) => { observations.push({ items: cut.items.length, complete }); } });
+    vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
+    await assert.rejects(context.finish('inert-run'), /installed Run stopped at failed/u);
+    assert.deepEqual(observations.at(-1), { items: changeCut ? 8 : 132, complete: !changeCut });
+    assert(frames < 1024);
+  }
+});
+
 test('an authoritative admission refusal cannot become a replacement Run or an application', async () => {
   const f = fixture(() => ({ protocolVersion: 1, ok: false, method: 'run.submit',
     error: { schemaVersion: 1, code: 'MODEL_COST_UNKNOWN', retryable: false, messageCode: 'control.model_cost_unknown' } }));
