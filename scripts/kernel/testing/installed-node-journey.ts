@@ -1701,13 +1701,22 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         }
         return { sourceInspectionGrantId, ignoreReadGrantIds };
       };
+      const observationCost = { diagnosticOnly: true, settledRunGetReads: 0, clientWaitMs: 0 };
+      report.pr532ObservationCost = observationCost;
       report.pr532Preview = await runInstalledPr532Journey({ workspace, sessionId: session.id, alias: dailyAlias, originalBytes, testBytes, lockBytes,
         ...(options.provider ? { modelRequestCostMicros: calculateModelCostMicros(
           options.provider.definition.requestTokenCeiling, options.provider.definition.prices) } : {}),
         budgets: options.provider?.budgets ?? { wallTimeMs: PR532_RUN_WALL_TIME_MS, modelTokens: 20_000_000, costMicros: 5_000_000,
           toolCalls: 37, repairAttempts: 2, childDepth: 0, childConcurrency: 1 } }, {
         command: argv => dailyCommand(argv, argv[0] === 'run' ? 90_000 : 30_000),
-        send: async (request, timeoutMs) => { assert(client); return client.send(request, timeoutMs); },
+        send: async (request, timeoutMs) => {
+          assert(client); const started = performance.now();
+          try { return await client.send(request, timeoutMs); }
+          finally { if (request.method === 'run.get') {
+            observationCost.settledRunGetReads++;
+            observationCost.clientWaitMs += Math.round(performance.now() - started);
+          } }
+        },
         artifact: readPublicArtifact, retained: readCas, authorizeGitSource,
         dependencyFailure: value => { report.pr532DependencyFailure = value; },
         verifierObservation: value => { report.pr532VerifierObservation = value; },

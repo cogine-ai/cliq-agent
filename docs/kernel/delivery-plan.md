@@ -44,7 +44,10 @@ Host command-data execution is not Linux qualification. Successful task shutdown
 also reads the existing bounded process-window counters after the same original
 Stop/join/identity checks, so a successful free task retains useful cost evidence.
 The former failure-only selection left that diagnosis unavailable on success.
-No pause, new process authority or larger journal/read limit is introduced.
+No pause, new process authority or larger journal/read limit is introduced. The same
+fixture retains aggregate settled `run.get` count and actual client wait time,
+including refusals. These measure observer occupancy, not exclusive Run cost;
+poll cadence, authenticated checks and deadlines retain their existing values.
 
 **2026-11-20 preceding runtime evidence.** The exact `49a8349493253e2253f8ae1934cf8d011aa9957c`
 [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44634845267)
