@@ -20,8 +20,11 @@ Use one controlled-only V8 main-isolate sampling probe instead of another blind
 complete Run. It samples between original tool preparations four and six,
 disconnecting completed samples before Stop. An earlier Stop entry discards the
 incomplete sample and disconnects within the unchanged Stop2 boundary, without
-aggregating a profile. It emits only fixed numeric CPU buckets; no frame name, URL,
-source text or error string is exported. The observer deliberately stops after
+aggregating a profile. It emits fixed numeric CPU buckets and at most16 SHA-256
+function-name hashes with counts for otherwise unclassified samples. Raw frame
+names, URLs, source text and error strings are never exported. Hashes are matched
+against public repository/Node identifiers outside the installed process.
+The observer deliberately stops after
 eight accounted tools or fifteen minutes, preserves the actual original
 Stop2/joins and always leaves qualification false. It does not change the
 original Run90, full workload, READY5, Stop2 or paid journey. The exact current
@@ -29,6 +32,14 @@ production/native/package/core-test bytes remain `be65c99`; only this private
 measurement/CI path is added. The sample includes concurrent main-isolate work;
 it does not attribute a Run or background reader threads. These measurements
 and the existing process counters must select the next fix.
+
+The first [short diagnostic](https://github.com/cogine-ai/cliq-agent/actions/runs/44742185801)
+completes its intended unqualified stop with both original Stop2 observations,
+writer joins and zero cleanup errors. Its78460904µs main-isolate window records
+15249 samples: canonical9.81%, CAS23.03%, idle23.63%, other36.98%. This does not
+justify a canonical-cache change. A real SQLite/CAS four-tool history probe
+also observes no overlapping duplicate reads. Keep production unchanged while
+resolving the unclassified samples using bounded hashes; no paid call is made.
 
 **2026-11-20 retained guest-image amplification.** Exact `476c045`
 [free Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44704297995)

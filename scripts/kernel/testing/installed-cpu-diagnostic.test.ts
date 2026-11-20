@@ -20,9 +20,11 @@ test('the controlled sampler emits only fixed numeric buckets after actual V8 st
       setTimeout(()=>{d.publish({phase:'stop_entry'});console.log(accesses);},20);},20);`;
   const result = spawnSync(process.execPath, ['-e', source], { encoding: 'utf8', timeout: 10000 });
   assert.equal(result.status, 0, result.stderr); assert.equal(result.stdout.trim(), '0');
-  const sample = readInstalledCpuJournal(journal(result.stderr.trim()), expected);
+  const sample = readInstalledCpuJournal(result.stderr.trim().split('\n').map(journal).join('\n'), expected);
   assert(sample.samples! > 0); assert(sample.buckets.canonical! > 0);
   assert.equal(Object.values(sample.buckets).reduce((a,b) => a!+b!,0), sample.samples);
+  assert(sample.otherFunctionHashes.length <= 16);
+  for (const row of sample.otherFunctionHashes) assert.match(row.sha256!, /^[0-9a-f]{64}$/u);
 });
 
 test('an early close refuses the incomplete sample and never keeps an inspector session alive', () => {
@@ -37,8 +39,12 @@ test('an early close refuses the incomplete sample and never keeps an inspector 
 
 test('CPU observations retain original journal binding and closed cumulative counts', () => {
   const valid = 'CLIQ_CPU_SAMPLE_V1:2:5000:1:0:0:0:0:0:0:0:1';
-  assert.equal(readInstalledCpuJournal(journal(valid), expected).samples, 2);
+  const rows = (value: string, other = 'CLIQ_CPU_OTHER_V1:' + 'a'.repeat(64) + ',1') => journal(value) + '\n' + journal(other);
+  assert.equal(readInstalledCpuJournal(rows(valid), expected).samples, 2);
   for (const value of [valid.replace(':2:', ':3:'), valid + ':private', 'CLIQ_CPU_SAMPLE_V1:private',
-    valid.replace(':5000:', ':-1:')]) assert.throws(() => readInstalledCpuJournal(journal(value), expected));
-  assert.throws(() => readInstalledCpuJournal(journal(valid), { ...expected, pid: 5678 }));
+    valid.replace(':5000:', ':-1:')]) assert.throws(() => readInstalledCpuJournal(rows(value), expected));
+  assert.throws(() => readInstalledCpuJournal(rows(valid), { ...expected, pid: 5678 }));
+  for (const value of ['CLIQ_CPU_OTHER_V1:private,1', 'CLIQ_CPU_OTHER_V1:' + 'a'.repeat(64) + ',2',
+    'CLIQ_CPU_OTHER_V1:' + ['a'.repeat(64) + ',1', 'a'.repeat(64) + ',1'].join(';')])
+    assert.throws(() => readInstalledCpuJournal(rows(valid, value), expected));
 });

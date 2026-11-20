@@ -35,12 +35,13 @@ export const INSTALLED_CPU_DIAGNOSTIC_BANNER = `;(() => { try {
     // Process the sample before the observer can request the original Stop2.
     stopped = true;
     post('Profiler.stop', {}, result => { try {
-      const p = result.profile, nodes = new Map(), parents = new Map(), categories = new Map(), counts = Array(9).fill(0);
+      const p = result.profile, nodes = new Map(), parents = new Map(), categories = new Map(), counts = Array(9).fill(0), other = new Map();
       if (!Array.isArray(p.nodes) || p.nodes.length > 16384 || !Array.isArray(p.samples) ||
           !p.samples.length || p.samples.length > 200000) throw 0;
       for (const n of p.nodes) { nodes.set(n.id,n); for (const c of n.children || []) parents.set(c,n.id); }
       for (const id of p.samples) {
-        if (categories.has(id)) { counts[categories.get(id)]++; continue; }
+        if (categories.has(id)) { counts[categories.get(id)]++;
+          if (categories.get(id) === 8) other.set(id, (other.get(id) || 0) + 1); continue; }
         const flags = new Set(); let current = id;
         for (let depth = 0; current !== undefined && depth < 128; depth++) {
           const n = nodes.get(current); if (!n || typeof n.callFrame.functionName !== 'string') throw 0;
@@ -57,10 +58,22 @@ export const INSTALLED_CPU_DIAGNOSTIC_BANNER = `;(() => { try {
         }
         const category = [0,1,2,3,4,5,6,7].find(v => flags.has(v)) ?? 8;
         categories.set(id,category); counts[category]++;
+        if (category === 8) other.set(id, (other.get(id) || 0) + 1);
       }
       const duration = Math.round(p.endTime-p.startTime);
       if (!Number.isSafeInteger(duration) || duration <= 0) throw 0;
       session.disconnect();
+      // Hash only function names, never the frame URL (which embeds the full
+      // signed application), source, values or exception text. Keep a bounded
+      // top list so the public-code lookup happens outside this process.
+      const hashes = new Map(), hash = require('node:crypto').createHash;
+      for (const [id, count] of other) {
+        const name = nodes.get(id).callFrame.functionName;
+        if (typeof name !== 'string' || name.length > 128) continue;
+        const key = hash('sha256').update(name).digest('hex'); hashes.set(key, (hashes.get(key) || 0) + count);
+      }
+      const top = [...hashes].sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0])).slice(0,16);
+      write(2, 'CLIQ_CPU_OTHER_V1:' + top.map(([key,count]) => key + ',' + count).join(';') + '\\n');
       write(2, 'CLIQ_CPU_SAMPLE_V1:' + [p.samples.length,duration,...counts].join(':') + '\\n');
     } catch { try { session.disconnect(); } catch {} refuse(); } });
   } catch { try { session?.disconnect(); } catch {} refuse(); } });
@@ -76,7 +89,17 @@ export function readInstalledCpuJournal(text: string, expected: { uid: number; p
   const [samples, durationMicros, ...counts] = numbers;
   assert(samples! > 0 && samples! <= 200000 && durationMicros! > 0);
   assert.equal(counts.reduce((a,b) => a+b,0), samples);
+  const otherRows = originalJournalMessages(text, expected).filter(row => row.startsWith('CLIQ_CPU_OTHER_V1:'));
+  assert.equal(otherRows.length, 1);
+  const entries = otherRows[0]!.slice('CLIQ_CPU_OTHER_V1:'.length).split(';').filter(Boolean);
+  assert(entries.length <= 16); const seen = new Set<string>(); let otherTotal = 0;
+  const otherFunctionHashes = entries.map(entry => {
+    assert(/^[0-9a-f]{64},[1-9][0-9]{0,5}$/u.test(entry)); const [sha256, n] = entry.split(',');
+    assert(!seen.has(sha256!)); seen.add(sha256!); const count = Number(n); otherTotal += count;
+    return { sha256, samples: count };
+  });
+  assert(otherTotal <= counts[8]!);
   return { diagnosticOnly: true, sampler: 'v8-cpu-5000us', scope: 'original_supervisor_main_isolate',
     runAttribution: false, samples, durationMicros,
-    buckets: Object.fromEntries(CPU_BUCKETS.map((name,index) => [name,counts[index]])) };
+    buckets: Object.fromEntries(CPU_BUCKETS.map((name,index) => [name,counts[index]])), otherFunctionHashes };
 }
