@@ -93,12 +93,11 @@ type Journey = { kind: 'control'; input: InstalledProviderJourneyInput; context:
   { kind: 'daily'; input: InstalledDailyProviderJourneyInput; context: InstalledDailyProviderJourneyContext };
 const same = (a: unknown, b: unknown) => check(canonicalJsonBytes(a).equals(canonicalJsonBytes(b)));
 
-/** Collect the existing immutable terminal projection through its original
- * bounded pages. This data reader opens no connection or execution owner. */
-export async function readInstalledTerminalCut(runId: string,
+/** Collect a stable public projection through its original bounded pages.
+ * A live cut is diagnostic data, never terminal or recovery proof. */
+export async function readInstalledStableCut(runId: string,
   read: (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => Promise<Cut>): Promise<Cut> {
   const first = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100, checkpointLimit: 100 });
-  check(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(first.snapshot.run.status));
   const items = [...first.items], journal = [...first.journal], checkpoints = [...first.checkpoints];
   let page = first, pages = 1;
   while (page.nextItemSeq < first.highWaterItemSeq || page.nextJournalSeq < first.highWaterJournalSeq || page.nextCheckpointCursor !== first.highWaterCheckpointCursor) {
@@ -122,6 +121,16 @@ export async function readInstalledTerminalCut(runId: string,
   const { nextCheckpointCursor: _firstNext, ...captured } = first;
   return { ...captured, items, journal, checkpoints, nextItemSeq: page.nextItemSeq, nextJournalSeq: page.nextJournalSeq,
     ...(page.nextCheckpointCursor === undefined ? {} : { nextCheckpointCursor: page.nextCheckpointCursor }) };
+}
+
+/** Success/accounting still requires the original terminal-only contract. */
+export async function readInstalledTerminalCut(runId: string,
+  read: (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => Promise<Cut>): Promise<Cut> {
+  return readInstalledStableCut(runId, async request => {
+    const cut = await read(request);
+    check(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status));
+    return cut;
+  });
 }
 
 /** Run only after the owner has installed and registered the actual package,

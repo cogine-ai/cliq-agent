@@ -5,7 +5,37 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
-**2026-11-20 current blocker.** The exact `49a8349493253e2253f8ae1934cf8d011aa9957c`
+**2026-11-20 latest real task.** The fixed `bf1806d`
+[DeepSeek journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44661123122)
+fails the original90-minute observer after24 full model claims and36 settled
+tools; one tool remains claimed at the last cut. No repaired check, result
+review or application is qualified. The original Supervisor misses Stop2 and
+is killed by systemd; the independently bound stop-entry marker is
+`tool_release`. Installed-writer join and complete corpus qualification are
+absent. The keeper stops cleanly, daemon/observer pipes join, cleanup reports
+zero errors, and the matching owned CI secret is deleted with absence verified.
+The entire30-claim lifetime remains booked at CNY67, cumulative CNY267 within
+the approved CNY300 ceiling. Actual invoices remain unreconciled. No automatic
+paid retry is dispatched.
+
+A real SQLite/CAS regression confirms that the tool release gate lacks the
+separate cancellation already used by verifier release. Closing deliberately
+retains the original claimed producer, so its operation-wide signal cannot
+stop these read-only checks. Add the same narrower release-read lifetime to
+both ordinary close and committed Stop, join every issued read, and retain
+the permanent claim, original result custody and complete synchronous native
+release checks. The regression is RED on both separate cancellation phases
+and GREEN after the change. Physical Linux Stop2 still needs qualification.
+
+The timeout report is nonterminal, so the old terminal-only diagnosis loses
+the complete tool history. Reuse the same bounded stable-page collector for
+failure diagnostics, with complete snapshot/high-water/contiguous/unique checks.
+A moving cut retains the original last page and original failure. Live data is
+explicitly nonterminal and cannot satisfy success, accounting, retirement or
+recovery evidence. The original deadline and terminal-only success collector
+remain. This cannot reconstruct the disposed real task's missing sequence.
+
+**2026-11-20 preceding runtime evidence.** The exact `49a8349493253e2253f8ae1934cf8d011aa9957c`
 [free Linux journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44634845267)
 passes the full original task. It retains all21 read/edit calls plus13 real
 Bash retirements, seven model exchanges and37 charged tools. The original

@@ -14,7 +14,7 @@ import { parseClientInvocation } from '../../../src/client/commands.js';
 import { decodeInstalledControlResponse, type InstalledControlRequestV1 } from '../../../src/control/v1.js';
 import type { RunSnapshotV1 } from '../../../src/kernel/types.js';
 import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourneyError, runInstalledProviderJourney, runInstalledDailyProviderJourney,
-  readInstalledTerminalCut, type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
+  readInstalledTerminalCut, readInstalledStableCut, type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
 import { PR532_POLL_INTERVAL_MS, PR532_RUN_WALL_TIME_MS } from './provider-journey-input.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
 
@@ -277,7 +277,7 @@ test('PR532 observation stays within the original client frame budget through a 
     let now = 0, frames = 1, observations = 0;
     const wallTimeMs = PR532_RUN_WALL_TIME_MS;
     const context = vm.createContext({ input: { budgets: { wallTimeMs } }, Date: { now: () => now }, assert, PR532_POLL_INTERVAL_MS,
-      readInstalledTerminalCut,
+      readInstalledTerminalCut, readInstalledStableCut,
       context: { progress() {} }, read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
         assert(frames < 1024, 'original installed client frame budget exhausted'); frames++;
         if (late) now = wallTimeMs + 1;
@@ -301,7 +301,7 @@ test('PR532 observation stays within the original client frame budget through a 
   }
 });
 
-test('failed PR532 diagnosis collects the complete stable terminal cut and preserves failure if that cut changes', async () => {
+test('failed or over-deadline PR532 diagnosis collects only a complete stable cut and preserves the original failure', async () => {
   const source = readFileSync(new URL('./installed-pr532-journey.ts', import.meta.url), 'utf8');
   const parsed = ts.createSourceFile('pr532.ts', source, ts.ScriptTarget.Latest, true);
   let finish: ts.VariableStatement | undefined;
@@ -311,19 +311,20 @@ test('failed PR532 diagnosis collects the complete stable terminal cut and prese
     ts.forEachChild(node, visit);
   };
   visit(parsed); assert(finish);
-  for (const changeCut of [false, true]) {
-    let frames = 0;
+  for (const status of ['failed', 'running'] as const) for (const changeCut of [false, true]) {
+    let frames = 0, now = 0;
     const observations: Array<{ items: number; complete: boolean }> = [];
-    const context = vm.createContext({ input: { budgets: { wallTimeMs: PR532_RUN_WALL_TIME_MS } }, Date: { now: () => 0 }, assert,
-      readInstalledTerminalCut, context: { progress() {} },
+    const context = vm.createContext({ input: { budgets: { wallTimeMs: PR532_RUN_WALL_TIME_MS } }, Date: { now: () => now }, assert,
+      readInstalledTerminalCut, readInstalledStableCut, context: { progress() {} },
       read: async (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => {
         assert(frames++ < 1024);
+        if (status === 'running') now = PR532_RUN_WALL_TIME_MS + 1;
         const itemAfter = request.afterItemSeq ?? 0, journalAfter = request.afterJournalSeq ?? 0;
         const items = Array.from({ length: Math.min(request.itemLimit ?? 100, 132 - itemAfter) }, (_, index) =>
           ({ itemSeq: itemAfter + index + 1, itemId: `inert-item-${itemAfter + index + 1}` }));
         const journal = Array.from({ length: Math.min(request.journalLimit ?? 100, 132 - journalAfter) }, (_, index) =>
           ({ seq: journalAfter + index + 1, opKind: 'tool' }));
-        return { snapshot: { run: { id: 'inert-run', status: 'failed', nextStep: null, latestCheckpointId: 'inert-checkpoint' } },
+        return { snapshot: { run: { id: 'inert-run', status, nextStep: null, latestCheckpointId: 'inert-checkpoint' } },
           items, journal, nextItemSeq: itemAfter + items.length, nextJournalSeq: journalAfter + journal.length,
           highWaterItemSeq: 132, highWaterJournalSeq: changeCut && journalAfter === 100 ? 133 : 132,
           checkpoints: request.checkpointCursor ? [] : [{ id: 'inert-checkpoint' }],
@@ -333,7 +334,7 @@ test('failed PR532 diagnosis collects the complete stable terminal cut and prese
       describeToolActivity: async (cut: { items: unknown[] }, complete = false) => { observations.push({ items: cut.items.length, complete }); } });
     vm.runInContext(ts.transpileModule(`${finish.getText(parsed)}; globalThis.finish = finish;`,
       { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText, context);
-    await assert.rejects(context.finish('inert-run'), /installed Run stopped at failed/u);
+    await assert.rejects(context.finish('inert-run'), status === 'failed' ? /installed Run stopped at failed/u : /preview observation deadline/u);
     assert.deepEqual(observations.at(-1), { items: changeCut ? 8 : 132, complete: !changeCut });
     assert(frames < 1024);
   }

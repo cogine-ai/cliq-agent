@@ -134,7 +134,7 @@ test('builtin stage wiring keeps the original claim, release, result and unknown
     ["builtinPhase('tool_claim_live')", 'const launchClosure = claimed.launchClosure'],
     ["builtinPhase('tool_native_parent')", 'await currentWorker.createInvocation(launchClosure, onBuiltinPhase ? builtinPhase : undefined)'],
     ["builtinPhase('tool_process_observe')", 'await invocation.observeProcess()'],
-    ["builtinPhase('tool_release')", 'await claimed.release(invocation)'],
+    ["builtinPhase('tool_release')", 'await claimed.release(invocation, releaseReads.signal)'],
     ["builtinPhase('tool_result')", 'const result = await invocation.result()'],
     ["builtinPhase('tool_error_revoke')", 'await revokeOriginalWorker()'],
     ["builtinPhase('tool_error_history')", 'const history = readInvocationAttempt('],

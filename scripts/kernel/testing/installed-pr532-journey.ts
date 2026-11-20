@@ -19,7 +19,7 @@ import { decodeDependencyFailureItem } from '../../../src/kernel/dependency.js';
 import { decodeDependencyAcquisitionClosure } from '../../../src/kernel/dependency-acquisition.js';
 import { decodeDependencyProcessCapture } from '../../../src/state/dependency-capture.js';
 import { PR532_POLL_INTERVAL_MS } from './provider-journey-input.js';
-import { readInstalledTerminalCut } from './installed-provider-journey.js';
+import { readInstalledTerminalCut, readInstalledStableCut } from './installed-provider-journey.js';
 
 export const PR532_BASE = '9cce652c2a91d8484344e4794ae56576a915cc67';
 export const PR532_CHECK_SOURCE = '961658fcf80116b6ef13e39cf39d901276a48c3c';
@@ -235,9 +235,9 @@ export async function runInstalledPr532Journey(input: {
     assert(response.type === 'response' && response.response.ok);
     return response.response.result as Result<M>;
   };
-  const describeToolActivity = async (cut: Result<'run.get'>, completeTerminalCut = false) => {
+  const describeToolActivity = async (cut: Result<'run.get'>, completeCut = false) => {
     const results = [];
-    let remaining = completeTerminalCut ? 1_048_576 : 0;
+    let remaining = completeCut ? 1_048_576 : 0;
     for (const row of cut.items) {
       const item = await retained(row.payloadRef) as ContinuationItem;
       assert.equal(item.runId, cut.snapshot.run.id); assert.equal(item.itemId, row.itemId);
@@ -245,13 +245,14 @@ export async function runInstalledPr532Journey(input: {
       const payload = await retained(item.resultRef) as ToolResultPayloadV1;
       const model = payload.toolName === 'bash' && payload.outcome === 'executed'
         ? await retained(payload.modelContentRef) as ToolResultModelContentV1 : undefined;
-      const diagnostic = pr532ToolDiagnostic(item, payload, model, completeTerminalCut ? remaining : undefined);
+      const diagnostic = pr532ToolDiagnostic(item, payload, model, completeCut ? remaining : undefined);
       if ('failureOutput' in diagnostic && diagnostic.failureOutput?.kind === 'observed') remaining -= diagnostic.failureOutput.byteCount;
       results.push({ itemSeq: row.itemSeq, ...diagnostic });
     }
     if (results.length) context.toolActivity({ diagnosticOnly: true,
       afterItemSeq: cut.items[0]!.itemSeq - 1, throughItemSeq: cut.nextItemSeq,
-      highWaterItemSeq: cut.highWaterItemSeq, completeTerminalCut, results });
+      highWaterItemSeq: cut.highWaterItemSeq, completeStableCut: completeCut,
+      completeTerminalCut: completeCut && ['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status), results });
   };
   const finish = async (runId: string) => {
     const deadline = Date.now() + input.budgets.wallTimeMs;
@@ -274,10 +275,10 @@ export async function runInstalledPr532Journey(input: {
         let stopped = await read({ protocolVersion: 1, method: 'run.get', runId,
           afterItemSeq: Math.max(0, cut.highWaterItemSeq - 8), itemLimit: 8, checkpointLimit: 1,
           afterJournalSeq: Math.max(0, cut.highWaterJournalSeq - 8), journalLimit: 8 }, 'run.get');
-        let completeTerminalCut = false;
-        if (stopped.snapshot.run.status === 'failed' || stopped.snapshot.run.status === 'cancelled') try {
-          stopped = await readInstalledTerminalCut(runId, request => read(request, 'run.get'));
-          completeTerminalCut = true;
+        let completeCut = false;
+        try {
+          stopped = await readInstalledStableCut(runId, request => read(request, 'run.get'));
+          completeCut = true;
         } catch { /* Keep the original failure and last bounded page if the complete cut is unavailable. */ }
         context.progress(stopped);
         try {
@@ -286,7 +287,7 @@ export async function runInstalledPr532Journey(input: {
         } catch { /* Optional diagnosis preserves the original task failure. */ }
         try { await describeDependencyFailure(stopped); }
         catch { /* Unavailable optional diagnostics do not replace the original failed workflow. */ }
-        try { await describeToolActivity(stopped, completeTerminalCut); }
+        try { await describeToolActivity(stopped, completeCut); }
         catch { /* Missing result diagnosis preserves the original task failure. */ }
         try {
           const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);

@@ -563,6 +563,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   let pending: Promise<Run> | undefined, closed = false, cleanupFailure: unknown;
   let operationAbort: AbortController | undefined, revoking: Promise<void> | undefined, closing: Promise<void> | undefined;
   let verifierReleaseReadAbort: AbortController | undefined;
+  let toolReleaseReadAbort: AbortController | undefined;
   // Preflight reads do not own productive retirement, but still belong to this
   // genuine execution scope before an operation/probe can be registered.
   const preflightAbort = new AbortController(), preflightReads = artifacts.withReadSignal(preflightAbort.signal);
@@ -673,6 +674,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     closed = true;
     preflightAbort.abort(new KernelStorageError('LEASE_FENCED', 'execution read-only preflight is closing'));
     verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are closing'));
+    toolReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'tool release reads are closing'));
     revokePublications();
     publicationProjectionAbort?.abort(new KernelStorageError('LEASE_FENCED', 'publication read-only projection scope is closing'));
     if ((pending || receivedCompletion) && worker && activeWorker && (operationPhase === 'claimed' || operationPhase === 'received')) {
@@ -1723,6 +1725,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       assertActiveStateOwner(driver, owner);
       if (!current.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'productive revocation requires the committed StopIntent');
       verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are stopped'));
+      toolReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'tool release reads are stopped'));
       revokePublications();
       if (mcpStatusProbe) { mcpStatusProbe.task.cancel(); return mcpStatusProbe.task.close(); }
       if (mcpStatusRecovery) { mcpStatusRecovery.cancel(); return mcpStatusRecovery.close(); }
@@ -2743,9 +2746,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         await invocation.observeProcess();
         signal.throwIfAborted();
         refreshBuiltinLease();
+        const releaseReads = new AbortController(); toolReleaseReadAbort = releaseReads;
+        if (closed || isClosing()) releaseReads.abort(new KernelStorageError('LEASE_FENCED', 'tool release is closing'));
         builtinPhase('tool_release');
-        await claimed.release(invocation);
-        toolReleased = script;
+        try { await claimed.release(invocation, releaseReads.signal); toolReleased = script; }
+        finally { if (toolReleaseReadAbort === releaseReads) toolReleaseReadAbort = undefined; }
         builtinPhase('tool_result');
         const result = await invocation.result();
         const editSucceeded = result === 'ok';

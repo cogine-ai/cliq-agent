@@ -8,6 +8,47 @@ import { test } from 'node:test';
 import ts from 'typescript';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
+test('close and committed stop cancel tool release reads while retaining the original claimed producer', async () => {
+  // Execute the original shutdown decisions with inert callbacks only. Real
+  // SQLite/CAS tests own read joins; Linux independently owns native retirement.
+  const parsed = ts.createSourceFile('run-execution.ts', await readFile(new URL('./run-execution.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest, true);
+  const bodies: ts.Block[] = [];
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'beginClose' && node.body) bodies.push(node.body);
+    if (ts.isPropertyAssignment(node) && node.name.getText(parsed) === 'requestStop' &&
+        ts.isArrowFunction(node.initializer) && ts.isBlock(node.initializer.body)) bodies.push(node.initializer.body);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(bodies.length, 2);
+  for (const body of bodies) {
+    const statements = body.statements;
+    const native = statements.findIndex(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(declaration =>
+      declaration.name.getText(parsed) === 'joins' || declaration.name.getText(parsed) === 'joined'));
+    assert(native > 0);
+    const operationAbort = new AbortController(), toolReleaseReadAbort = new AbortController();
+    const context = { KernelStorageError, driver: {}, owner: {}, runId: 'inert-run', revoking: undefined, closed: false,
+      preflightAbort: new AbortController(), verifierReleaseReadAbort: undefined, toolReleaseReadAbort,
+      publicationProjectionAbort: undefined, operationAbort, operationPhase: 'claimed', pending: {}, receivedCompletion: undefined,
+      worker: {}, activeWorker: {}, closingCompletion: undefined, stopJoin: undefined, probe: undefined,
+      mcpStatusProbe: undefined, mcpStatusRecovery: undefined, publicationReconciliationTask: undefined,
+      continuation: { operation: 'agent' }, readRun: () => ({ stopIntentRef: 'inert-committed-intent' }),
+      assertActiveStateOwner() {}, revokePublications() {}, stop: undefined as undefined | (() => void) };
+    new Script(ts.transpileModule(`globalThis.stop = () => { ${statements.slice(0, native).map(node => node.getText(parsed)).join('\n')} };`,
+      { compilerOptions: { target: ts.ScriptTarget.ES2023 } }).outputText).runInNewContext(context);
+    context.stop!();
+    assert(toolReleaseReadAbort.signal.aborted, 'the release-only read must cancel before native joins');
+    assert.equal(operationAbort.signal.aborted, false, 'the claimed producer must retain custody of any real result');
+  }
+  const releases: ts.CallExpression[] = [];
+  const collect = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(parsed) === 'claimed.release' &&
+        node.arguments[1]?.getText(parsed) === 'releaseReads.signal') releases.push(node);
+    ts.forEachChild(node, collect);
+  };
+  collect(parsed); assert.equal(releases.length, 2, 'both verifier and builtin release bind their separately cancellable reads');
+});
+
 test('checkpoint retirement checks original owned state before revocation without reopening unrelated history', async () => {
   // Source wiring and inert values only. The real SQL/CAS identity regression
   // and installed Linux journey independently own their respective proofs.

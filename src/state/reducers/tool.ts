@@ -1259,20 +1259,21 @@ export async function loadToolContinuation(driver: SqliteDriver, artifacts: Arti
         },
         // Only the just-created claim has this one-use capability. Loading retained Journal bytes
         // cannot recreate it. The native bridge rejects structural or differently bound handles.
-        release: stateOperation('RECOVERY_REQUIRED', async (target: unknown): Promise<void> => {
+        release: stateOperation('RECOVERY_REQUIRED', async (target: unknown, releaseSignal?: AbortSignal): Promise<void> => {
           if (consumed) throw new KernelStorageError('LEASE_FENCED', 'tool release was already consumed');
           consumed = true;
-          // The original claim retains its read lifetime through the second
-          // gate. Stop must join these reads without ever releasing the tool.
-          reads.assertReadActive();
-          for (const ref of policyArtifactRefs) await reads.readBytes(ref);
-          const currentCut = await cut(input.expectedRunRevision, reads);
-          const currentProof = await verifyGrant(prepared.grantRef!, reads);
+          // Tighten only the release gate, preserving the original claim signal
+          // and the independent received-result producer. Every issued read joins.
+          const releaseReads = releaseSignal ? reads.withReadSignal(releaseSignal) : reads;
+          releaseReads.assertReadActive();
+          for (const ref of policyArtifactRefs) await releaseReads.readBytes(ref);
+          const currentCut = await cut(input.expectedRunRevision, releaseReads);
+          const currentProof = await verifyGrant(prepared.grantRef!, releaseReads);
           requireEqual(currentProof.request, expected.request, 'released current tool request');
-          reads.assertReadActive();
+          releaseReads.assertReadActive();
           refreshBuiltinLease?.();
-          const releasedExecution = await builtinLaunch(currentCut, prepared, currentProof, input, reads);
-          reads.assertReadActive();
+          const releasedExecution = await builtinLaunch(currentCut, prepared, currentProof, input, releaseReads);
+          releaseReads.assertReadActive();
           let outcome: TimeFenceAdvance | undefined;
           let workerLaunchId!: string;
           let parentWorkerContainmentRef!: string;

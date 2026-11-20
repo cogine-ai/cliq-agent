@@ -7,8 +7,8 @@ import { batch, prepareTool } from './testing/tool-calls.js';
 
 // Existing offline authority fixture and real SQLite/CAS reads only. No native
 // invocation is constructed; cancellation must stop before reaching release.
-for (const phase of ['before_read', 'during_read'] as const)
-  test(`claimed tool release keeps its original read cancellation ${phase}`, async t => {
+for (const lifetime of ['claim', 'release'] as const) for (const phase of ['before_read', 'during_read'] as const)
+  test(`claimed tool release keeps its ${lifetime} read cancellation ${phase}`, async t => {
     const fixture = await createAgentFixture(`tool-release-${phase}`, { wallTimeMs: 300_000 }, { mode: 'yolo' });
     let resume!: () => void;
     const gate = new Promise<void>(resolve => { resume = resolve; });
@@ -18,6 +18,7 @@ for (const phase of ['before_read', 'during_read'] as const)
       const prepared = await prepareTool(fixture), abort = new AbortController(), reason = new Error('original tool owner stopped');
       const claimed = await fixture.agent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: fixture.leaseEpoch,
         opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId: 'original-cancellable-release' }, abort.signal);
+      const releaseAbort = lifetime === 'claim' ? abort : new AbortController();
       const before = await fixture.store.readRecoveryClosure(fixture.runId);
       let enter!: () => void, reads = 0, settled = false;
       const entered = new Promise<void>(resolve => { enter = resolve; });
@@ -29,16 +30,18 @@ for (const phase of ['before_read', 'during_read'] as const)
         if (phase === 'during_read' && reads === 1) { enter(); await gate; }
         return bytes;
       });
-      if (phase === 'before_read') abort.abort(reason);
-      pending = claimed.release(Object.freeze({}));
+      if (phase === 'before_read') releaseAbort.abort(reason);
+      pending = claimed.release(Object.freeze({}), lifetime === 'release' ? releaseAbort.signal : undefined);
       void pending.then(() => { settled = true; }, () => { settled = true; });
       if (phase === 'during_read') {
-        await entered; abort.abort(reason);
+        await entered; releaseAbort.abort(reason);
         await new Promise<void>(resolve => setImmediate(resolve));
         assert.equal(settled, false, 'original pending read must join before release rejects');
         resume();
       }
       await assert.rejects(pending, error => error === reason);
+      if (lifetime === 'release') assert.equal(abort.signal.aborted, false,
+        'release-only cancellation cannot abort the original result producer');
       assert.equal(reads, phase === 'before_read' ? 0 : 1);
       await assert.rejects(claimed.release(Object.freeze({})), { code: 'LEASE_FENCED' });
       assert.equal(reads, phase === 'before_read' ? 0 : 1, 'cancelled one-use release cannot be restarted');

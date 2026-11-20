@@ -59,6 +59,12 @@ verifier's final read-only release validation has a separately cancellable
 lifetime. Stop cancels and joins those reads, then fences the original claim.
 The actual execution and received-result lifetime remains owned by its original
 producer, and the synchronous native release still follows the complete gate.
+A builtin tool release has the same separately cancellable read lifetime as a
+verifier release. Ordinary close or a committed Stop cancels and joins those
+reads while preserving the original claim signal and any actual result producer.
+Cancellation grants no release, settlement, refund or replay authority. Every
+original owner/grant/lease/history check and the synchronous native release
+boundary still apply.
 
 The explicit `run.apply` client waits at most five minutes for its original
 admission response, including complete verified-source history and live source
