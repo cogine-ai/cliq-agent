@@ -20,6 +20,13 @@ dispatch is allowed before the current free task passes; preparation alone
 does not book or send a new model call. This input change touches no production,
 native, package or core-test bytes.
 
+The verifier group's initial pure source check exposes a stale adjacent-field
+literal: ordinary4096-stream metadata is now the existing conditional branch
+beside the whole-project8192-stream metadata. Preserve both exact branches and
+the512MiB guard in the assertion. The original test is RED before the update
+and GREEN on Node22/24 afterwards. No scanner or runtime value changes; the
+installed required/advisory verifier journey still needs its real Linux result.
+
 **2026-11-20 measured read amplification.** The retained
 [real Linux budget-stop report](https://github.com/cogine-ai/cliq-agent/actions/runs/44652661069)
 from the current preceding runtime records1212609 CAS reads and97965344432

@@ -74,7 +74,9 @@ test('maximum native and full-corpus qualification retain their original workloa
   assert(journey.includes("runtime/bundles', bundleDigest, guestImageEntry[0]!.relativePath)), { code: 'ENOENT' }"));
   assert(journey.includes('imageCopies.length * signed.guestToolchain.manifest.guestImageByteCount'));
   assert(journey.includes('maxBytes: 512 * 1024 * 1024, maxStreams: 4096'));
-  assert(journey.includes('unchangedCorpusByteLimit: 512 * 1024 * 1024, unchangedCorpusStreamLimit: 4096'));
+  assert(journey.includes('unchangedCorpusByteLimit: 512 * 1024 * 1024,'));
+  assert(journey.includes('...(options.pr532 ? { wholeProjectCorpusStreamLimit: 8192 } : { unchangedCorpusStreamLimit: 4096 })'));
+  assert(journey.includes('if (options.pr532) secretScanLimits.maxStreams = 8192;'));
   assert(corpus.includes('fileLimit = 512 * 1024 * 1024'));
   assert(corpus.includes('const deadline = performance.now() + 60000'));
 });
