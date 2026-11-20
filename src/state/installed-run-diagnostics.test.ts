@@ -6,6 +6,24 @@ import { test } from 'node:test';
 import { KernelStorageError } from './errors.js';
 import { BUILTIN_EXECUTION_PHASES } from '../sandbox/builtin-tool-diagnostics.js';
 
+test('native Bash rejection emits only fixed numbers and never invokes exception accessors', async () => {
+  const { noteInstalledBuiltinNativeFailure } = await import('./installed-run-diagnostics.js');
+  const d = channel('cliq.installed.run.failures.v1'), rows: unknown[] = [];
+  const receive = (value: unknown) => { rows.push(value); }; d.subscribe(receive);
+  const message = 'native controller reply failed: request=42 requestScope=3 expected=8 expectedScope=3 received=42 receivedScope=3 status=1012 fds=0 receiveErrno=0 boundary=3 setupStage=4 setupPollResult=1 setupPollRevents=17 setupPollErrno=0 setupElapsedMs=12';
+  try {
+    noteInstalledBuiltinNativeFailure(new Error(message));
+    assert.deepEqual(rows, [{ kind: 'builtin_native_failure', status: 1012, stage: 4, pollResult: 1,
+      pollRevents: 17, pollErrno: 0, receiveErrno: 0, boundary: 3 }]);
+    let accessed = false; const accessor = new Error();
+    Object.defineProperty(accessor, 'message', { get() { accessed = true; throw new Error(); } });
+    for (const value of [accessor, new Proxy(new Error(), { getOwnPropertyDescriptor() { throw new Error(); } }),
+      new Error(message + ' secret'), new Error(message.replace('request=42', 'request=14')),
+      new Error(message.replace('setupPollRevents=17', 'setupPollRevents=65536'))]) noteInstalledBuiltinNativeFailure(value);
+    assert.equal(accessed, false); assert.equal(rows.length, 1);
+  } finally { d.unsubscribe(receive); }
+});
+
 test('builtin and original recovery phases reuse the same scheduler failure envelope with closed stages and redacted errors', async () => {
   const { beginInstalledSchedulerDiagnostic, INSTALLED_SCHEDULER_DIAGNOSTIC_PHASES } = await import('./installed-run-diagnostics.js');
   const records: unknown[] = [], diagnostic = channel('cliq.installed.run.failures.v1');

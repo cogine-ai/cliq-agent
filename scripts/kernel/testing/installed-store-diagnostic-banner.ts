@@ -21,6 +21,7 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
   const workNames = new Set(${JSON.stringify(INSTALLED_PUBLICATION_WORK_V2)}), workRuns = new Map();
   const monotonic = require('node:perf_hooks').performance;
   let workInvalid = false;
+  let builtinNativeWritten = false;
   const origins = new Set(${JSON.stringify(INSTALLED_SCHEDULER_DIAGNOSTIC_ORIGINS)});
   const classes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CLASSES)}), codes = new Set(${JSON.stringify(INSTALLED_RUN_DIAGNOSTIC_ERROR_CODES)});
   const prefix = 'CLIQ_STORE_DIAG_V1:';
@@ -67,6 +68,18 @@ export const INSTALLED_STORE_DIAGNOSTIC_BANNER = `;(() => { try {
     // An opaque Proxy cannot identify its kind and keeps the old refusal.
     if (value && typeof value === 'object' && !isProxy(value)) {
       const kind = Object.getOwnPropertyDescriptor(value, 'kind');
+      if (kind && Object.hasOwn(kind, 'value') && kind.value === 'builtin_native_failure') {
+        const keys = ['kind', 'status', 'stage', 'pollResult', 'pollRevents', 'pollErrno', 'receiveErrno', 'boundary'];
+        const row = own(value, keys);
+        if (!row || builtinNativeWritten || !keys.slice(1).every(key => Number.isSafeInteger(row[key])) ||
+            row.status !== 0 && (row.status < 1001 || row.status > 1014) || row.stage < 0 || row.stage > 5 ||
+            row.pollResult < -2 || row.pollResult > 1 || row.pollRevents < 0 || row.pollRevents > 65535 ||
+            row.pollErrno < 0 || row.pollErrno > 4095 || row.receiveErrno < 0 || row.receiveErrno > 4095 ||
+            row.boundary < 1 || row.boundary > 3) return;
+        builtinNativeWritten = true;
+        try { write(2, 'CLIQ_BUILTIN_NATIVE_V1:' + keys.slice(1).map(key => row[key]).join(':') + '\\n'); } catch {}
+        return;
+      }
       if (kind && Object.hasOwn(kind, 'value') && kind.value === 'publication_work_v2') {
         const row = own(value, ['kind', 'runId', 'span', 'work', 'event', 'origin', 'elapsedMs']);
         if (!row || typeof row.runId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(row.runId) ||

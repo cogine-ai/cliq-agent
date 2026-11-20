@@ -14,6 +14,27 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const all = Object.fromEntries(groups.map(group => [group, true]));
 function chosen(result) { return groups.filter(group => result.groups[group]); }
 
+test('the short builtin campaign is exact-source, non-funded and additive to every automatic gate', t => {
+  const { cwd, commit } = repository(t), head = commit('README.md', 'owned builtin diagnostic');
+  const inputs = { qualification_group: 'builtin', real_provider: 'false', diagnostic_cpu: 'false', expected_revision: head };
+  const result = routeEvent({ eventName: 'workflow_dispatch', event: { inputs }, cwd });
+  assert.deepEqual(chosen(result), []); assert.equal(result.reason, 'explicit-builtin-diagnostic-only');
+  for (const changed of [{ expected_revision: 'f'.repeat(40) }, { real_provider: 'true' }, { diagnostic_cpu: 'true' }])
+    assert.equal(routeEvent({ eventName: 'workflow_dispatch', event: { inputs: { ...inputs, ...changed } }, cwd }).full, true);
+  for (const eventName of ['push', 'pull_request', 'merge_group'])
+    assert.equal(routeEvent({ eventName, event: { inputs }, cwd }).full, true);
+  const source = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  const condition = source.split('  linux-installed-builtin-node:\n')[1].split('\n')[1].match(/\$\{\{ (.+) \}\}/u)[1]
+    .replaceAll('needs.ci-route', 'needs["ci-route"]');
+  const base = { real_provider: false, diagnostic_cpu: false, qualification_group: 'builtin', expected_revision: 'exact' };
+  const selected = changes => vm.runInNewContext(condition, { cancelled: () => false,
+    needs: { 'ci-route': { result: 'success', outputs: { verifier: 'false' } } },
+    github: { event_name: 'workflow_dispatch', sha: 'exact', repository: 'cogine-ai/cliq-agent' }, inputs: { ...base, ...changes } });
+  assert.equal(selected({}), true);
+  for (const changed of [{ real_provider: true }, { diagnostic_cpu: true }, { expected_revision: 'other' }, { qualification_group: 'pr532' }])
+    assert.equal(selected(changed), false);
+});
+
 test('a CPU diagnostic cannot select either funded workflow entry', () => {
   const source = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
   for (const job of ['real-provider', 'pr532-provider']) {

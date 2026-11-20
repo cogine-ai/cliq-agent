@@ -10,7 +10,7 @@ on:
       qualification_group:
         description: Manual free-runner diagnosis only; full remains the release gate
         type: choice
-        options: [full, verifier, pr532]
+        options: [full, verifier, pr532, builtin]
         default: full
       real_provider:
         description: Run only the explicitly funded, real-provider journey
@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'pr532' && 'pr532' || inputs.qualification_group == 'verifier' && 'verifier' || inputs.real_provider && 'provider' || 'checks' }}
+  group: kernel-foundation-${{ github.workflow }}-${{ github.ref }}-${{ inputs.qualification_group == 'pr532' && 'pr532' || inputs.qualification_group == 'verifier' && 'verifier' || inputs.qualification_group == 'builtin' && 'builtin' || inputs.real_provider && 'provider' || 'checks' }}
   cancel-in-progress: ${{ !inputs.real_provider }}
 
 jobs:
@@ -1181,7 +1181,7 @@ jobs:
 
   linux-installed-builtin-node:
     needs: ci-route
-    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false') }}
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.verifier != 'false' || (github.event_name == 'workflow_dispatch' && !inputs.real_provider && !inputs.diagnostic_cpu && inputs.qualification_group == 'builtin' && inputs.expected_revision == github.sha && github.repository == 'cogine-ai/cliq-agent')) }}
     name: Linux installed signed Node from Bash
     runs-on: ubuntu-22.04
     timeout-minutes: 10

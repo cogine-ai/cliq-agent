@@ -81,6 +81,13 @@ export function routeEvent({ eventName, ref, event, cwd }) {
           return selection(new Set(), 'explicit-pr532-preview-only', null);
       } catch { /* Keep all checks when the source cannot be bound. */ }
     }
+    if (group === 'builtin' && funded === 'false' && event.inputs.diagnostic_cpu === 'false' &&
+        typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected)) {
+      try {
+        if (git(cwd, ['rev-parse', 'HEAD']).trim() === expected)
+          return selection(new Set(), 'explicit-builtin-diagnostic-only', null);
+      } catch { /* Unknown source retains full qualification. */ }
+    }
     if (group === 'verifier' && funded === 'false' && typeof expected === 'string' && /^[a-f0-9]{40}$/u.test(expected)) {
       try {
         if (git(cwd, ['rev-parse', 'HEAD']).trim() === expected)

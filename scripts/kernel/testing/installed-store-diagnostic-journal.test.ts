@@ -10,6 +10,17 @@ const lines = ['CLIQ_STORE_DIAG_V1:begin:1:1',
 const journal = (messages = lines) => messages.map(MESSAGE => JSON.stringify({ _UID: '1000', _PID: '2000',
   _TRANSPORT: 'stdout', _SYSTEMD_INVOCATION_ID: sender.invocationId, MESSAGE })).join('\n') + '\n';
 
+test('native Bash rejection retains fixed numeric data only from the original journal sender', async () => {
+  const { readInstalledBuiltinNativeFailureJournal: read } = await import('./installed-store-diagnostic-journal.js');
+  const message = 'CLIQ_BUILTIN_NATIVE_V1:1012:4:1:17:0:0:3';
+  assert.deepEqual(read(journal([message]), sender), { status: 1012, stage: 4, pollResult: 1,
+    pollRevents: 17, pollErrno: 0, receiveErrno: 0, boundary: 3 });
+  assert.throws(() => read(journal([message, message]), sender));
+  assert.throws(() => read(journal([message + ':private']), sender));
+  assert.throws(() => read(journal([message.replace(':17:', ':65536:')]), sender));
+  assert.throws(() => read(journal([message]), { ...sender, pid: 2001 }));
+});
+
 test('failed startup diagnostics retain closed reasons without exporting private text or accepting another invocation', async () => {
   const { readInstalledStartupFailureJournal: read } = await import('./installed-store-diagnostic-journal.js');
   const message = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED',

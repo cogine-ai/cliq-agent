@@ -80,7 +80,7 @@ import { publicationEnvelopeLocations } from '../../../src/state/delivery-public
 import type { InstalledPublicationStopResult } from './installed-publication-stop-result.js';
 import { projectInstalledRunProgress } from './installed-run-progress.js';
 import { projectInstalledUnitStopObservation } from './installed-unit-stop-observation.js';
-import { readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledControlReadFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
+import { readInstalledBuiltinNativeFailureJournal, readInstalledStartupFailureJournal, readInstalledBuiltinWorkJournal, readInstalledAssemblyWorkJournal, readInstalledModelBrokerDiagnosticJournal, readInstalledPublicationStageJournal, readInstalledPublicationFailureJournal, readInstalledControlReadFailureJournal, readInstalledPublicationWorkJournal, readInstalledStoreDiagnosticJournal, readInstalledStoreStopPhaseJournal } from './installed-store-diagnostic-journal.js';
 import { readInstalledMcpAdminJournal } from './installed-mcp-admin-journal.js';
 import { installedReadOnlyGitCall, assertInstalledToolsOutcome, installedShellUtilitiesProbe } from './installed-tools-result.js';
 import { INSTALLED_SKILLS_PROFILE, installedSkillIds, installedBundledSkill, installedToolsAndSkillsCalls,
@@ -3044,6 +3044,10 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
                     preexistingProcessStartAndFullImageBound: true, originalInvocationBound: true, originalServerJoined: true,
                     ...readInstalledCpuJournal(text, { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId }) };
                 } catch { report.cpuDiagnostic = { diagnosticOnly: true, kind: 'unavailable' }; }
+                const nativeFailure = readInstalledBuiltinNativeFailureJournal(text,
+                  { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
+                if (nativeFailure) report.builtinNativeFailure = { diagnosticOnly: true,
+                  source: 'actual_joined_original_supervisor_journal', ...nativeFailure };
                 const broker = readInstalledModelBrokerDiagnosticJournal(text,
                   { uid: ledger.uid, pid: storeFailureBinding.pid, invocationId: storeFailureBinding.invocationId });
                 const summary = readInstalledStoreDiagnosticJournal(text,

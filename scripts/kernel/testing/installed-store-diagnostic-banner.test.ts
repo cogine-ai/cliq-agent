@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
+test('native rejection banner writes one fixed numeric marker without forwarding private fields', async () => {
+  const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
+  const child = spawnSync(process.execPath, ['--input-type=commonjs', '--eval', INSTALLED_STORE_DIAGNOSTIC_BANNER + `
+    const d=require('node:diagnostics_channel').channel('cliq.installed.run.failures.v1');
+    const row={kind:'builtin_native_failure',status:1012,stage:4,pollResult:1,pollRevents:17,pollErrno:0,receiveErrno:0,boundary:3};
+    d.publish({...row,private:'never-export'});d.publish(row);d.publish(row);
+  `], { encoding: 'utf8', timeout: 5000, maxBuffer: 65536 });
+  assert.equal(child.status, 0); assert.equal(child.stderr, 'CLIQ_BUILTIN_NATIVE_V1:1012:4:1:17:0:0:3\n');
+});
+
 test('the first fixed control-read failure survives actual child SIGKILL and validates fixed journal sender fields', async () => {
   const { INSTALLED_STORE_DIAGNOSTIC_BANNER } = await import('./installed-store-diagnostic-banner.js');
   const { readInstalledControlReadFailureJournal } = await import('./installed-store-diagnostic-journal.js');

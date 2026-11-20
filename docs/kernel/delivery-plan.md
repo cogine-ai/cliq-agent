@@ -5,6 +5,19 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-21 Bash native startup diagnosis.** The corrected private precheck
+and both Linux native data/seal tests pass. The complete controlled task
+[44771236701](https://github.com/cogine-ai/cliq-agent/actions/runs/44771236701)
+runs the original check (exit1), reads and edits, then the first Bash claim
+fails at native READY and correctly waits for reconciliation. Original Stop2
+conditions, writer joins and cleanup pass; this task remains unqualified.
+Retain fixed numeric native rejection/stage data in the existing private
+journal, with no raw error, path, payload or new execution/recovery authority.
+Use the existing short installed Node/Bash campaign through an exact-source,
+non-funded `builtin` manual route before repeating the complete project.
+The original automatic jobs, 64-FD floor, READY5, Stop2 and complete-task
+assertions remain. A successful short probe cannot qualify the full task.
+
 **2026-11-20 signed shell environment.** Exact `c280e598` completes the
 [free installed PR532 workflow](https://github.com/cogine-ai/cliq-agent/actions/runs/44749594974):
 37 tools, original check1→0, normal CLI, reconnect, review and explicit apply;

@@ -1,5 +1,6 @@
 import { SealedImages } from './sealed-images.js';
 import type { NativeBuiltinInvocationPhase } from './builtin-tool-diagnostics.js';
+import { noteInstalledBuiltinNativeFailure } from '../state/installed-run-diagnostics.js';
 import { installedResourcesObserved, noteInstalledResourceBoundary, type OriginalResourceSubject } from '../state/installed-resource-diagnostics.js';
 import type { ResourceBoundary } from '../state/installed-resource-kernel.js';
 import { KernelStorageError, ResourceRetirementError } from '../state/errors.js';
@@ -2265,6 +2266,7 @@ async function openWorkerLauncher(bundle: RuntimeBundleManifest, cgroupParent: s
                         return handle;
                       } catch (error) {
                         const failedNativePhase = currentNativePhase;
+                        noteInstalledBuiltinNativeFailure(error);
                         let failure: unknown, failedJoinPhase: NativeBuiltinInvocationPhase | undefined;
                         if (guest) try {
                           phase('tool_native_error_guest_join');

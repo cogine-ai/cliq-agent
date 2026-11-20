@@ -34,6 +34,17 @@ function failure(closing: string, errorClass: string, code: string, sqlite: stri
 }
 
 type OriginalJournalIdentity = Readonly<{ uid: number; pid: number; invocationId: string }>;
+export function readInstalledBuiltinNativeFailureJournal(text: string, expected: OriginalJournalIdentity) {
+  const messages = originalJournalMessages(text, expected).filter(message => message.startsWith('CLIQ_BUILTIN_NATIVE_V1:'));
+  if (!messages.length) return;
+  need(messages.length === 1);
+  const match = /^CLIQ_BUILTIN_NATIVE_V1:(0|100[1-9]|101[0-4]):([0-5]):(-2|-1|0|1):(0|[1-9][0-9]{0,4}):(0|[1-9][0-9]{0,3}):(0|[1-9][0-9]{0,3}):([1-3])$/u.exec(messages[0]!);
+  need(match);
+  const [status, stage, pollResult, pollRevents, pollErrno, receiveErrno, boundary] = match.slice(1).map(Number);
+  need(pollRevents! <= 65535 && pollErrno! <= 4095 && receiveErrno! <= 4095);
+  return Object.freeze({ status: status!, stage: stage!, pollResult: pollResult!, pollRevents: pollRevents!,
+    pollErrno: pollErrno!, receiveErrno: receiveErrno!, boundary: boundary! });
+}
 export function originalJournalMessages(text: string, expected: OriginalJournalIdentity) {
   need(typeof text === 'string' && Buffer.byteLength(text, 'utf8') <= 256 * 1024);
   need(expected && typeof expected === 'object' && !types.isProxy(expected) && !Array.isArray(expected) &&

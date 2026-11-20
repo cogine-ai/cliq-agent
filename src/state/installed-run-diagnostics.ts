@@ -151,6 +151,23 @@ export function beginInstalledSchedulerDiagnostic(origin: SchedulerOrigin) {
 
 export function installedRunDiagnosticsSubscribed(): boolean { return diagnostic.hasSubscribers; }
 
+/** Fixed numeric rejection metadata, not a native resource or recovery proof.
+ * Ordinary error classification above still never reads a message. */
+export function noteInstalledBuiltinNativeFailure(error: unknown): void {
+  if (!diagnostic.hasSubscribers) return;
+  try {
+    if (!error || typeof error !== 'object' || types.isProxy(error) || !types.isNativeError(error)) return;
+    const message = Object.getOwnPropertyDescriptor(error, 'message');
+    if (!message || !Object.hasOwn(message, 'value') || typeof message.value !== 'string' || message.value.length > 768) return;
+    const match = /^native controller reply failed: request=42 requestScope=(0|[1-9][0-9]?) expected=8 expectedScope=(0|[1-9][0-9]?) received=(0|42) receivedScope=(0|[1-9][0-9]?) status=(0|100[1-9]|101[0-4]) fds=(0|[1-9][0-9]?) receiveErrno=(0|[1-9][0-9]{0,3}) boundary=([1-3]) setupStage=([0-5]) setupPollResult=(-2|-1|0|1) setupPollRevents=(0|[1-9][0-9]{0,4}) setupPollErrno=(0|[1-9][0-9]{0,3}) setupElapsedMs=(0|[1-9][0-9]{0,9})$/u.exec(message.value);
+    if (!match) return;
+    const [scope, expectedScope, , receivedScope, status, fds, receiveErrno, boundary, stage, pollResult, pollRevents, pollErrno, elapsed] = match.slice(1).map(Number);
+    if (scope! >= 16 || expectedScope! >= 16 || receivedScope! >= 16 || fds! > 40 || receiveErrno! > 4095 ||
+        pollRevents! > 65535 || pollErrno! > 4095 || elapsed! > 0xffffffff) return;
+    diagnostic.publish(Object.freeze({ kind: 'builtin_native_failure', status, stage, pollResult, pollRevents, pollErrno, receiveErrno, boundary }));
+  } catch { /* Diagnostics cannot replace the original rejection or join. */ }
+}
+
 /** Live progress only, not a result, resource join or authority observation.
  * Ordinary images do not inspect input or sample a clock. The trusted image
  * subscriber owns the fixed per-process first-seen output bound. */

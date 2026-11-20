@@ -472,8 +472,8 @@ static int poll_failure(struct controller *controller, struct native_scope *scop
     char message[512];
     const struct cliq_verifier_setup_observation empty = {0};
     const struct cliq_verifier_setup_observation *setup = response && scope &&
-        controller->pending == CLIQ_CREATE_VERIFIER && expected == CLIQ_WORKER_READY &&
-        response->command == CLIQ_CREATE_VERIFIER && response->scope == scope->id &&
+        (controller->pending == CLIQ_CREATE_VERIFIER || controller->pending == CLIQ_CREATE_BUILTIN_BASH) &&
+        expected == CLIQ_WORKER_READY && response->command == controller->pending && response->scope == scope->id &&
         (response->status == 1011 || response->status == 1012) && cliq_verifier_setup_valid(&response->setup) ? &response->setup : &empty;
     int length = snprintf(message, sizeof(message),
         "native controller reply failed: request=%u requestScope=%u expected=%u expectedScope=%u "
