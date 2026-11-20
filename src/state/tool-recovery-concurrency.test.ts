@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { promises as fs } from 'node:fs';
+import { chmodSync, promises as fs, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
@@ -24,12 +24,14 @@ test('identical sealed workspace graphs verify once per tool history while every
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     const text = 'x'.repeat(16 * 1024 * 1024 + 1), refs: string[] = [], entryRefs: string[] = [];
-    await batch(fixture, [0, 1, 2].map(() => ({ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } })));
-    for (let index = 0; index < 3; index++) {
+    // Five identical graphs cross the existing four-reader batch; the sixth
+    // remains a distinct graph that needs its own complete file verification.
+    await batch(fixture, Array.from({ length: 6 }, () => ({ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } })));
+    for (let index = 0; index < 6; index++) {
       if (index) Object.assign(fixture, await activateFixtureWorker(fixture, `shared-workspace-${index}`));
       const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
       const result = await fixture.store.artifacts.readCanonical<ToolObservationV1>(await observation(fixture, claimed, { changed: true }));
-      const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, index < 2 ? text : 'y' + text.slice(1));
+      const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, index < 5 ? text : 'y' + text.slice(1));
       result.postEffect = proof.checkpoint; result.observationDigest = digestOmitting(result, 'observationDigest');
       const published = await fixture.store.artifacts.publishCanonical(result, result.format);
       await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
@@ -39,7 +41,7 @@ test('identical sealed workspace graphs verify once per tool history while every
       const file = entries.entries[0]!; assert(file.kind === 'file');
       refs.push(file.blobRef); entryRefs.push(state.entriesRef);
     }
-    assert.equal(entryRefs[0], entryRefs[1]); assert.notEqual(entryRefs[1], entryRefs[2]);
+    assert(entryRefs.slice(0, 5).every(ref => ref === entryRefs[0])); assert.notEqual(entryRefs[0], entryRefs[5]);
     const open = fs.open.bind(fs), opened = new Map<string, number>(); let inHistory = false, closed = 0;
     t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
       const handle = await open(...args), ref = refs.find(ref => String(args[0]).endsWith(path.sep + ref));
@@ -50,19 +52,27 @@ test('identical sealed workspace graphs verify once per tool history while every
       }
       return handle;
     });
-    const recover = () => readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId,
-      phase => { inHistory = phase === 'history_tool'; });
+    const filename = path.join(fixture.stateRoot, 'cas', refs[0]!);
+    let corruptHistory = false, corrupted = false;
+    const recover = () => readRecoveryClosure(driver, fixture.store.artifacts, fixture.runId, phase => {
+      inHistory = phase === 'history_tool';
+      if (inHistory && corruptHistory && !corrupted) {
+        // Earlier closure reachability has finished. Exercise the shared
+        // history walk itself, using only this test-owned real CAS file.
+        chmodSync(filename, 0o600); writeFileSync(filename, Buffer.alloc(Buffer.byteLength(text), 0x7a));
+        chmodSync(filename, 0o400); corrupted = true;
+      }
+    });
     for (let traversal = 1; traversal <= 2; traversal++) {
       await recover();
       assert.equal(opened.get(refs[0]!), traversal, 'the same immutable entries graph needs one complete original file verification');
-      assert.equal(opened.get(refs[2]!), traversal, 'a distinct entries graph must retain its own complete verification');
+      assert.equal(opened.get(refs[5]!), traversal, 'a distinct entries graph must retain its own complete verification');
       assert.equal(closed, traversal * 2);
     }
-    const filename = path.join(fixture.stateRoot, 'cas', refs[0]!);
-    inHistory = false;
-    await fs.chmod(filename, 0o600); await fs.writeFile(filename, Buffer.alloc(Buffer.byteLength(text), 0x7a));
-    await fs.chmod(filename, 0o400);
+    corruptHistory = true;
     await assert.rejects(recover(), { code: 'RECOVERY_REQUIRED' });
+    assert.equal(corrupted, true);
+    assert.equal(opened.get(refs[0]!), 3, 'corruption must reach the actual shared history reader');
     assert.equal(closed, [...opened.values()].reduce((sum, count) => sum + count, 0));
   } finally { t.mock.restoreAll(); driver.close(); await disposeFixture(fixture); }
 });
