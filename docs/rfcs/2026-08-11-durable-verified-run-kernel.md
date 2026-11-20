@@ -105,8 +105,12 @@ Exact-size discard uses rehash the complete owned bytes and check their exact
 length. On a small miss, exhaust the original exact-size stream and join both
 handles before retaining a copy. Explicit byte streams still perform their
 independent physical reads. Large discard inputs keep their existing joined
-reader. The temporary data cache holds at most 64 MiB, 8192 objects and 1 MiB
-per object. The earlier 16 MiB capacity was smaller than the unfixed project's
+reader. The temporary data cache holds at most 64 MiB, 8192 objects and 16 MiB
+per object. The former 1 MiB per-object eligibility excluded the actual locked
+compiler and dependency files (about 2–10 MiB). The total owned-byte budget and
+entry ceiling retain their values; inputs above 16 MiB keep the original complete
+discard/stream path. Artifact acceptance, raw/bounded/explicit-stream readers,
+per-use hashes and later-projection fresh physical reads retain their checks. The earlier 16 MiB capacity was smaller than the unfixed project's
 distinct eligible source and dependency bytes. This increases temporary reuse
 capacity. Artifact acceptance, workspace quotas and execution limits retain
 their existing values. Cache capacity

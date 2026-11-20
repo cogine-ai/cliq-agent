@@ -18,7 +18,7 @@ type ArtifactReadCache = {
 const artifactReadCache = new AsyncLocalStorage<ArtifactReadCache>();
 const MAX_READ_CACHE_BYTES = 64 * 1024 * 1024;
 const MAX_READ_CACHE_ENTRIES = 8192;
-const MAX_READ_CACHE_OBJECT_BYTES = 1024 * 1024;
+const MAX_READ_CACHE_OBJECT_BYTES = 16 * 1024 * 1024;
 
 /** One immutable graph traversal owns these verified byte copies.
  * A later traversal starts fresh. Every consumer still hashes and decodes its

@@ -5,6 +5,28 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 measured read amplification.** The retained
+[real Linux budget-stop report](https://github.com/cogine-ai/cliq-agent/actions/runs/44652661069)
+from the current preceding runtime records1212609 CAS reads and97965344432
+returned bytes in its658917622-microsecond process window. Those counters
+include concurrent work and are not exclusive Run costs. The owned original
+project contains compiler/dependency objects of roughly2–10MiB, outside the
+former1MiB per-object reuse ceiling. A nine-MiB owned-data prototype performs
+twelve complete verifications in547ms; one fully checked, joined original read
+plus eleven full copied-byte hashes takes103ms on this host. This is a local
+mechanism measurement, not installed Linux throughput qualification.
+
+Keep the total cache at64MiB/8192 entries and raise only per-object eligibility
+to16MiB. First reads retain full physical verification and joins; each reuse
+retains independent bytes, exact length, hashes, cancellation and decoding.
+Later and nested projections still read afresh. The fallback boundary moves
+to16MiB+1; the same no-retention/two-full-verification assertions remain. The
+original64MiB bounded-allocation/corruption/cancellation/close checks retain
+their physical-read requirements. Retained cache bytes stay globally
+bounded; individual transient copied views may now reach16MiB. Accepted
+artifacts, wire limits, native proofs and execution quotas retain their values. The real SQLite/CAS sealed-history regression now also uses
+a nine-MiB file. Actual installed gain still requires the complete free task.
+
 **2026-11-20 latest real task.** The fixed `bf1806d`
 [DeepSeek journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44661123122)
 fails the original90-minute observer after24 full model claims and36 settled

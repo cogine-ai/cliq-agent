@@ -197,9 +197,34 @@ test('exact-size discard reuse preserves full byte count, cancellation and fresh
   assert.equal(opened, 3); assert.equal(closed, opened);
 });
 
+test('medium dependency bytes reuse one complete joined read and retain fresh later verification', async t => {
+  const { root, cas, artifacts } = await files(t);
+  const bytes = Buffer.alloc(9 * 1024 * 1024, 0x81);
+  const { ref } = await artifacts.publishBytes(bytes, 'application/octet-stream', 'inert-dependency-binary');
+  const verify = cas.verify.bind(cas); let physical = 0;
+  t.mock.method(cas, 'verify', async (...args: Parameters<typeof cas.verify>) => { physical++; return verify(...args); });
+  await withArtifactReadCache(async () => {
+    await artifacts.verifyBytes(ref);
+    await artifacts.verifyBytes(ref);
+    await artifacts.verifyChunks(ref, bytes.length);
+    assert.equal(physical, 1, 'the original complete dependency verification is reusable inside this traversal');
+    await assert.rejects(artifacts.verifyChunks(ref, bytes.length + 1), /unexpected byte count/u);
+    const abort = new AbortController(), reason = new Error('medium cached read cancelled');
+    abort.abort(reason);
+    await assert.rejects(artifacts.withReadSignal(abort.signal).verifyBytes(ref), error => error === reason);
+    assert.equal(physical, 1);
+  });
+  await withArtifactReadCache(() => artifacts.verifyBytes(ref));
+  assert.equal(physical, 2, 'a separate projection still performs a complete fresh physical verification');
+  await chmod(path.join(root, ref), 0o600); await writeFile(path.join(root, ref), Buffer.from([0xfe]));
+  await chmod(path.join(root, ref), 0o400);
+  await assert.rejects(withArtifactReadCache(() => artifacts.verifyBytes(ref)), /corrupt/u);
+  assert.equal(physical, 3);
+});
+
 test('large verification inputs retain the complete discard path inside a recovery traversal', async t => {
   const { cas, artifacts } = await files(t);
-  const { ref } = await artifacts.publishBytes(Buffer.alloc(1024 * 1024 + 1, 0x81), 'application/octet-stream', 'inert-binary-data');
+  const { ref } = await artifacts.publishBytes(Buffer.alloc(16 * 1024 * 1024 + 1, 0x81), 'application/octet-stream', 'inert-binary-data');
   const verify = cas.verify.bind(cas);
   let verifications = 0;
   t.mock.method(cas, 'verify', async (...args: Parameters<typeof cas.verify>) => {
@@ -210,7 +235,7 @@ test('large verification inputs retain the complete discard path inside a recove
   assert.equal(verifications, 2);
 });
 
-test('large JSON objects keep full reads and their original accepted size', async t => {
+test('JSON objects above one MiB retain their accepted size and independent decoding', async t => {
   const { cas, artifacts } = await files(t);
   const value = { text: 'x'.repeat(1024 * 1024) };
   const { ref } = await artifacts.publishCanonical(value, 'inert-large-cache-data');
@@ -220,7 +245,7 @@ test('large JSON objects keep full reads and their original accepted size', asyn
     assert.deepEqual(await artifacts.readCanonical(ref), value);
     assert.deepEqual(await artifacts.readCanonical(ref), value);
   });
-  assert.equal(reads, 2);
+  assert.equal(reads, 1);
 });
 
 test('recovery existence checks and decoders share one complete original workspace-object read per traversal', async t => {
@@ -252,7 +277,7 @@ test('recovery existence checks and decoders share one complete original workspa
   } finally { await disposeFixture(fixture); }
 });
 
-test('sealed recovery shares verified small file bytes with exact-size discard checks', async t => {
+for (const medium of [false, true]) test(`sealed recovery shares verified ${medium ? 'medium dependency' : 'small file'} bytes with exact-size discard checks`, async t => {
   const clock = Date.now();
   t.mock.method(Date, 'now', () => clock);
   const fixture = await createAgentFixture('recovery-sealed-small-bytes', undefined, { mode: 'accept-edits', tools: ['edit'] });
@@ -261,7 +286,7 @@ test('sealed recovery shares verified small file bytes with exact-size discard c
     // not native retirement or installed execution.
     await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
     const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
-    const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, 'small complete file bytes');
+    const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, medium ? 'x'.repeat(9 * 1024 * 1024) : 'small complete file bytes');
     const result = await fixture.store.artifacts.readCanonical<ToolObservationV1>(await observation(fixture, claimed, { changed: true }));
     result.postEffect = proof.checkpoint; result.observationDigest = digestOmitting(result, 'observationDigest');
     const published = await fixture.store.artifacts.publishCanonical(result, result.format);
@@ -282,8 +307,8 @@ test('sealed recovery shares verified small file bytes with exact-size discard c
       return handle;
     });
     await fixture.store.readRecoveryClosure(fixture.runId);
-    t.diagnostic(`sealed small-file reads ${opened}, joined ${closed}`);
-    assert.equal(opened, 1, 'all discard-only sealed-history checks hash the same fully verified small byte copy');
+    t.diagnostic(`sealed ${medium ? 'medium' : 'small'}-file reads ${opened}, joined ${closed}`);
+    assert.equal(opened, 1, 'all discard-only sealed-history checks hash the same fully verified byte copy');
     assert.equal(closed, opened);
     await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(opened, 2, 'a later recovery projection must start with fresh physical reads');
