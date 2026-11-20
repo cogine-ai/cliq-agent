@@ -291,10 +291,11 @@ export class ArtifactCatalog {
     this.assertReadActive();
   }
 
-  /** Retained data only: one traversal may share a complete original content
-   * verification, including its actual closes. Each claim still checks its
-   * own metadata. Large image bytes and native/live authority are not cached. */
-  async verifyRetainedChunks(ref: ArtifactRef, expectedByteLength: number): Promise<void> {
+  /** Retained data only: one traversal may share complete content verification
+   * by CAS identity, digest and exact size, after both descriptors close. Each
+   * caller still checks its own metadata. The first read keeps its requested
+   * reading mode. No large bytes or live execution authority are retained. */
+  async verifyRetainedChunks(ref: ArtifactRef, expectedByteLength: number, reader: 'discard' | 'stream' = 'discard'): Promise<void> {
     this.assertReadActive();
     const cache = artifactReadCache.getStore(), entries = cache?.verifications.get(this.cas);
     const prior = entries?.get(ref);
@@ -303,7 +304,7 @@ export class ArtifactCatalog {
       await prior.complete; this.assertReadActive();
       return;
     }
-    const complete = this.verifyChunks(ref, expectedByteLength);
+    const complete = this.verifyChunks(ref, expectedByteLength, reader);
     if (cache && !entries?.has(ref) && cache.entries < MAX_READ_CACHE_ENTRIES) {
       const values = entries ?? new Map();
       values.set(ref, { byteCount: expectedByteLength, complete });

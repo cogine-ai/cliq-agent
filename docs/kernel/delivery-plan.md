@@ -5,6 +5,28 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-21 history-read amplification.** At `9ec5a919`, the [controlled
+Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44790976461)
+passed the original check, repair, reconnect, review and application with
+37 tool calls and all 13 Bash operations. The complete job took about 102
+minutes. In the [real DeepSeek task](https://github.com/cogine-ai/cliq-agent/actions/runs/44792716643),
+the original check exited 1 and 21 model requests completed in 91 seconds
+combined. The Run queued for its repaired check just before the original
+90-minute limit, with 30 charged tool calls. The repaired check, review and
+application were not reached. Original unit stop, writer and daemon joins,
+and cleanup passed. The owned Actions secret was removed.
+
+A local SQLite/CAS experiment counted four complete reads of the same file
+in one recovery traversal. The existing 64 MiB seal-history regression now
+observes one complete physical read with 64 KiB chunks and checks real
+cancellation, joined descriptors, corruption and close uncertainty. Workspace,
+result-source and sealed tool history share the completed reference and
+length checks within that cut. Candidate/verification history takes sole
+responsibility for the dependency acquisition audit in the Agent history.
+Each consumer retains its typed, SQL and native checks, and a separate
+traversal reads the original files again. The revised Linux performance
+and real DeepSeek gates remain pending.
+
 **2026-11-21 complete mount-table reads.** The isolated real installed probe
 [44784315632](https://github.com/cogine-ai/cliq-agent/actions/runs/44784315632)
 reproduces Bash startup rejection at confinement stage4, after the named

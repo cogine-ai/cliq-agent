@@ -138,22 +138,26 @@ The next query starts with fresh physical reads. Source/cut capacity, signal
 checks, scratch retirement and the original Stop2 boundary retain their values;
 cached bytes never become current StateOwner, grant or execution authority.
 
-Retained signed-toolchain discovery and private-script claim readers may share identical signed member
-content verification within one existing recovery traversal. The key binds the
-actual CAS instance, artifact reference and exact byte count. The first use
-performs the original complete size/hash/root/stat verification and joins every
-physical handle; concurrent uses await that same complete operation. Every
-selection still reads and authenticates its original manifest and signature;
-every claim independently validates its request, grant, launch, runtime and guest
-bindings. No large image bytes, live permission or native execution proof are
-cached. All verification records share the existing 8192-entry ceiling; capacity
-exhaustion selects the original complete reader. Failure remains failure for
-every consumer, and each consumer retains cancellation and a scheduling turn.
-Traversal exit closes and clears the records, including on failure. Later and
-nested traversals read afresh. Explicit raw, bounded and streaming reads,
-ordinary discard checks and original native activation/release checks retain
-their independent physical reads. This replaces the workspace-entries-only
-optimization, which did not reduce actual installed read amplification.
+Within one fresh recovery traversal, workspace, sealed tool result and
+dependency projections may share a complete verification of the same CAS
+instance, artifact reference and exact byte count. The first read uses its
+original joined discard or streaming reader. Each use checks its own typed
+manifest, provenance, requested length and row bindings. Each workspace state
+can share its checked descriptor fields with the generation rows that name it.
+The candidate/verification history owns the complete dependency acquisition
+audit once per cut and rejects orphaned dependency entries even if there are
+no candidates. The tool history still validates each ordinary tool and MCP
+request, claim and result.
+
+Retained signed toolchain, npm data and script members may share those exact
+byte verification records. Signature, command, physical process and permission
+checks stay with each owning operation. Verification records share the
+existing 8192-entry ceiling. Capacity overflow uses the original complete read
+path, and a failed original read cannot supply a successful result. A later or
+nested traversal starts fresh. Raw, bounded and byte-consuming streams retain
+their independent physical reads. Native activation and release retain their
+own checks. The traversal clears its records on exit, including on failure
+and cancellation.
 
 Discard-only historical file checks may use those same complete small byte
 copies. A miss preserves the consumer's original streaming cadence, complete

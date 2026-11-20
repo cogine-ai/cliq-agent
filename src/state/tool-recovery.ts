@@ -66,7 +66,6 @@ export async function validateToolRecovery(input: {
     const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
     await (await import('./mcp-server-history.js')).validateMcpServerHistory(input.driver, artifacts, run, spec, assembly, items, journal);
   }
-  let dependencyHistory: Promise<unknown> | undefined;
   const decisions = new Map<string, ToolPolicyDecisionItem>();
   const requests = new Map<string, ToolRequestV1>();
   const calls = [...items.values()].filter((item) => item.kind === 'assistant_tool_batch');
@@ -310,14 +309,6 @@ export async function validateToolRecovery(input: {
       throw new TypeError('direct skill read permission is not registered without its complete local effect');
   }
   async function validatePrepared(artifacts: ArtifactCatalog, prepared: InvocationJournalEntry): Promise<void> {
-    if (prepared.target === 'builtin:dependency-acquire') {
-      if (!input.driver || !spec.dependencyPolicyRef) throw new TypeError('dependency requires its complete original history');
-      dependencyHistory ??= (await import('./dependency-history.js')).readDependencyHistory(input.driver, artifacts, { run, runSpec: spec,
-        items: [...items.values()].map((item, index) => ({ schemaVersion: 1, itemId: item.itemId, itemSeq: index + 1,
-          payloadRef: canonicalSha256(item), payloadDigest: canonicalSha256(item), createdAt: item.createdAt })), journal,
-        workspaceGenerations: input.workspaceGenerations });
-      await dependencyHistory; return;
-    }
     const request = requests.get(prepared.requestRef);
     if (!request || !prepared.grantRef || !decisions.has(prepared.grantRef) || prepared.opId !== request.opId || prepared.target !== request.targetRef ||
         prepared.idempotencyKey !== request.idempotencyKey) throw new TypeError('tool Journal has no committed exact policy/grant owner');
@@ -551,9 +542,9 @@ export async function validateToolRecovery(input: {
         throw new TypeError('completed mutating tool cannot recover over its pre-effect workspace');
       }
       for (const entry of entries.entries) if (entry.kind === 'file') {
-        // Rehash complete owned small bytes. A miss preserves this original
-        // stream's size/hash/stat/root guards, cancellation cadence and joins.
-        await artifacts.verifyChunks(entry.blobRef, entry.size, 'stream');
+        // This original post-effect manifest still binds every file's exact
+        // size and digest. Another history projection may have read its bytes.
+        await artifacts.verifyRetainedChunks(entry.blobRef, entry.size, 'stream');
       }
       if (workspace.privateGitStateRef) await artifacts.readBytes(workspace.privateGitStateRef);
       await artifacts.readBytes(snapshot.generationRef);
@@ -565,14 +556,17 @@ export async function validateToolRecovery(input: {
       if (!prior || checkpoint.workspaceStateRef !== prior.workspaceStateRef) throw new TypeError('read-only completion replaced workspace state');
     }
   }
-  const prepared = journal.filter(entry => entry.phase === 'prepared' && (entry.opKind === 'tool' || entry.opKind === 'mcp'));
+  // Agent recovery validates the fixed dependency acquisition family before
+  // the verifier and tool histories. Only ordinary tool/MCP attempts use a ToolRequest.
+  const prepared = journal.filter(entry => entry.phase === 'prepared' &&
+    (entry.opKind === 'tool' && entry.target !== 'builtin:dependency-acquire' || entry.opKind === 'mcp'));
   for (let index = 0; index < prepared.length;) {
-    const ordinary = (entry: InvocationJournalEntry) => entry.opKind === 'tool' && entry.target !== 'builtin:dependency-acquire';
+    const ordinary = (entry: InvocationJournalEntry) => entry.opKind === 'tool';
     if (!ordinary(prepared[index]!)) { await validatePrepared(artifacts, prepared[index++]!); continue; }
     const start = index;
     while (index < prepared.length && ordinary(prepared[index]!)) index++;
     // Claims/results remain independently checked against the entire original
-    // cut. MCP/dependency histories keep their existing serial ordering; the
+    // cut. MCP history keeps its existing serial ordering; the
     // builtin histories share no mutable validation state or native authority.
     await artifacts.mapReadGroups(prepared.slice(start, index), validatePrepared);
   }

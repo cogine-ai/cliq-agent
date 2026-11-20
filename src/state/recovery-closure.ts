@@ -15,8 +15,7 @@ import type {
   FrozenIgnoreRulesV1,
   WorkerLaunch,
   WorkspaceEntryManifest,
-  WorkspaceGenerationStateV1,
-  WorkspaceStateManifest
+  WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import { withArtifactReadCache, type ArtifactCatalog } from './artifacts.js';
 import { closeAgentRecoveryData, validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInDeliveryResultEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
@@ -116,12 +115,23 @@ async function requireRecoveryArtifacts(
   );
 }
 
+async function requireRecoveryFiles(artifacts: ArtifactCatalog, manifest: WorkspaceEntryManifest, label: string): Promise<void> {
+  await artifacts.mapReads(manifest.entries, async (entry, index) => {
+    if (entry.kind !== 'file') return;
+    try {
+      await artifacts.verifyRetainedChunks(entry.blobRef, entry.size);
+    } catch (error) {
+      recoveryFailure(`${label}.entries[${index}].blobRef is not readable from CAS: ${(error as Error).message}`, error, artifacts);
+    }
+  });
+}
+
 async function validateWorkspaceStateArtifacts(
   artifacts: ArtifactCatalog,
   workspaceStateRef: string,
   label: string,
   frozen: FrozenSourceContext
-): Promise<{ state: WorkspaceStateManifest; entries: WorkspaceEntryManifest }> {
+) {
   await requireRecoveryArtifacts(artifacts, [[label, workspaceStateRef]]);
   const state = decodeWorkspaceState(await artifacts.readCanonical(workspaceStateRef));
   if (state.baseWorkspaceManifestRef !== frozen.baseRef || state.sourceProjectionDigest !== frozen.source.sourceProjectionDigest)
@@ -133,13 +143,11 @@ async function validateWorkspaceStateArtifacts(
   ]);
   const entries = decodeWorkspaceEntries(await artifacts.readCanonical(state.entriesRef));
   await loadFrozenPrivateGit(artifacts, frozen.source, state, frozen.rules, undefined, frozen.resources);
-  await requireRecoveryArtifacts(
-    artifacts,
-    entries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`${label}.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
-  return { state, entries };
+  await requireRecoveryFiles(artifacts, entries, label);
+  return {
+    runId: state.runId, baseWorkspaceManifestRef: state.baseWorkspaceManifestRef, stateDigest: state.stateDigest,
+    entriesRef: state.entriesRef, privateGitStateRef: state.privateGitStateRef, treeDigest: entries.treeDigest
+  };
 }
 
 async function validateRunSpecArtifacts(
@@ -215,12 +223,7 @@ async function validateRunSpecArtifacts(
   if (sourceEntries.treeDigest !== source.treeDigest) {
     recoveryFailure('SourceManifest entries do not match its tree digest');
   }
-  await requireRecoveryArtifacts(
-    artifacts,
-    sourceEntries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`SourceManifest.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
+  await requireRecoveryFiles(artifacts, sourceEntries, 'SourceManifest');
   return { baseRef: runSpec.baseWorkspaceManifestRef, source, rules, ...(resources ? { resources } : {}) };
 }
 
@@ -493,7 +496,7 @@ function budgetEqual(left: BudgetUsage, right: BudgetUsage): boolean {
 async function validateGenerationArtifacts(
   artifacts: ArtifactCatalog,
   generations: WorkspaceGenerationStateV1[],
-  frozen: FrozenSourceContext
+  readWorkspace: (ref: string, label: string) => ReturnType<typeof validateWorkspaceStateArtifacts>
 ): Promise<void> {
   for (const generation of generations) {
     await requireRecoveryArtifacts(artifacts, [
@@ -510,11 +513,7 @@ async function validateGenerationArtifacts(
     await requireRecoveryArtifacts(artifacts, [
       ['WorkspaceGenerationIdentity.locator.stateRootIdentityRef', identity.locator.stateRootIdentityRef]
     ]);
-    const sourceWorkspace = await validateWorkspaceStateArtifacts(
-      artifacts,
-      identity.sourceWorkspaceStateRef,
-      'WorkspaceGenerationIdentity.sourceWorkspaceStateRef', frozen
-    );
+    const sourceWorkspace = await readWorkspace(identity.sourceWorkspaceStateRef, 'WorkspaceGenerationIdentity.sourceWorkspaceStateRef');
     if (
       identity.generationId !== generation.generationId ||
       identity.runId !== generation.runId ||
@@ -522,8 +521,8 @@ async function validateGenerationArtifacts(
       identity.sourceCheckpointId !== generation.sourceCheckpointId ||
       identity.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
       identity.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest ||
-      sourceWorkspace.state.stateDigest !== identity.sourceWorkspaceStateDigest ||
-      sourceWorkspace.entries.treeDigest !== identity.sourceTreeDigest
+      sourceWorkspace.stateDigest !== identity.sourceWorkspaceStateDigest ||
+      sourceWorkspace.treeDigest !== identity.sourceTreeDigest
     ) recoveryFailure('workspace generation state does not match its immutable identity');
     if (generation.snapshotEvidenceRef !== undefined) {
       const evidence = decodeWorkspaceGenerationSnapshotEvidence(
@@ -531,17 +530,16 @@ async function validateGenerationArtifacts(
       );
       artifacts.assertReadActive();
       const evidenceWorkspace = evidence.workspaceStateRef === identity.sourceWorkspaceStateRef ? sourceWorkspace
-        : await validateWorkspaceStateArtifacts(artifacts, evidence.workspaceStateRef,
-          'WorkspaceGenerationSnapshotEvidence.workspaceStateRef', frozen);
+        : await readWorkspace(evidence.workspaceStateRef, 'WorkspaceGenerationSnapshotEvidence.workspaceStateRef');
       if (
         evidence.evidenceDigest !== generation.snapshotEvidenceDigest ||
         evidence.generationRef !== generation.generationRef ||
         evidence.generationIdentityDigest !== generation.generationIdentityDigest ||
         evidence.runId !== generation.runId ||
-        evidenceWorkspace.state.stateDigest !== evidence.workspaceStateDigest ||
-        evidenceWorkspace.state.entriesRef !== evidence.entriesRef ||
-        evidenceWorkspace.state.privateGitStateRef !== evidence.privateGitStateRef ||
-        evidenceWorkspace.entries.treeDigest !== evidence.treeDigest ||
+        evidenceWorkspace.stateDigest !== evidence.workspaceStateDigest ||
+        evidenceWorkspace.entriesRef !== evidence.entriesRef ||
+        evidenceWorkspace.privateGitStateRef !== evidence.privateGitStateRef ||
+        evidenceWorkspace.treeDigest !== evidence.treeDigest ||
         evidence.treeDigest !== generation.lastVerifiedTreeDigest ||
         (generation.phase === 'sealed'
           ? evidence.purpose !== 'sealed_to_checkpoint'
@@ -816,14 +814,21 @@ async function readRecoveryProjectionData(
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');
   }
   await validateContextArtifacts(artifacts, context, runSpec);
-  const latestWorkspace = await validateWorkspaceStateArtifacts(
-    artifacts,
-    latestCheckpoint.workspaceStateRef,
-    'Checkpoint.workspaceStateRef', frozenSource
-  );
+  // Each generation still compares its own identity and evidence to the
+  // verified workspace fields. Keep only those fields, never decoded inventories.
+  const workspaceStates = new Map<string, Awaited<ReturnType<typeof validateWorkspaceStateArtifacts>>>();
+  const readWorkspace = async (ref: string, label: string) => {
+    artifacts.assertReadActive();
+    const prior = workspaceStates.get(ref);
+    if (prior) return prior;
+    const verified = await validateWorkspaceStateArtifacts(artifacts, ref, label, frozenSource);
+    workspaceStates.set(ref, verified);
+    return verified;
+  };
+  const latestWorkspace = await readWorkspace(latestCheckpoint.workspaceStateRef, 'Checkpoint.workspaceStateRef');
   if (
-    latestWorkspace.state.runId !== run.id ||
-    latestWorkspace.state.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
+    latestWorkspace.runId !== run.id ||
+    latestWorkspace.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
   ) recoveryFailure('workspace state is not bound to the admitted RunSpec');
 
   phase('journal');
@@ -845,7 +850,8 @@ async function readRecoveryProjectionData(
         ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
     } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error, artifacts); }
   } else generationProofs.push(...workspaceGenerations);
-  await validateGenerationArtifacts(artifacts, generationProofs, frozenSource);
+  await validateGenerationArtifacts(artifacts, generationProofs, readWorkspace);
+  workspaceStates.clear();
   const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
   const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
   let agent: AgentResultReadData | undefined;

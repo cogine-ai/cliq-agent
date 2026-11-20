@@ -56,9 +56,7 @@ export async function readDerivedDependencyScriptSourceConditions(artifacts: Art
   // code, even when that file is absent from the projected FinalCandidate.
   await artifacts.mapReads(workspace!.entries.filter(entry => entry.kind === 'file'), async entry => {
     if (entry.kind !== 'file' || entry.size > input.resources.maxSingleFileBytes) fail();
-    let count = 0;
-    for await (const bytes of artifacts.readChunks(entry.blobRef, entry.size)) { artifacts.assertReadActive(); count += bytes.length; }
-    if (count !== entry.size) fail();
+    await artifacts.verifyRetainedChunks(entry.blobRef, entry.size, 'stream');
   });
   if ((source.git !== undefined) !== (input.privateGitStateRef !== undefined)) fail();
   if (source.git && input.privateGitStateRef) {

@@ -166,7 +166,7 @@ export async function readVerifierProgress(driver: SqliteDriver, artifacts: Arti
 export async function readVerifierProgressByCandidate(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: VerifierRecoveryCut,
   candidateIds: readonly string[]): Promise<ReadonlyMap<string, VerifierProgress>> {
   const result = new Map<string, VerifierProgress>();
-  if (!candidateIds.length) return result;
+  // A cut without candidates must still reject orphaned dependency records.
   const dependencies = cut.runSpec.dependencyPolicyRef
     ? await (await import('./dependency-history.js')).readDependencyHistory(driver, artifacts, cut) : undefined;
   for (const selectedId of candidateIds)

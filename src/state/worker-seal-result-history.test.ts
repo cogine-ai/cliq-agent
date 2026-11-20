@@ -53,9 +53,9 @@ test('completed mutating tool history consumes an existing large CAS file with b
       try { assert.equal((await held.write(Buffer.from([byte]), 0, 1, blobBytes - 1)).bytesWritten, 1); }
       finally { await held.close(); await fs.chmod(target, 0o400); }
     };
-    type Pass = { fd: number; historyTool: boolean; bytes: number; reads: number; stats: number; closed: boolean; rootChecks: number;
+    type Pass = { fd: number; bytes: number; reads: number; stats: number; closed: boolean; rootChecks: number;
       threadJoined?: boolean; closedBeforeThread?: boolean };
-    let historyTool = false, fault: 'none' | 'corrupt' | 'abort' | 'close' = 'none', injected = false;
+    let fault: 'none' | 'corrupt' | 'abort' | 'close' = 'none', injected = false;
     let controller = new AbortController(), rootChecks = 0, largestAllocation = 0, opened = 0, closed = 0, peak = 0;
     let passes: Pass[] = [];
     const active = new Set<object>(), cancellation = new Error('the original retained tool history read was cancelled');
@@ -67,7 +67,19 @@ test('completed mutating tool history consumes an existing large CAS file with b
     const observe = `{
       const d=require('node:worker_threads').workerData, c=new BigInt64Array(d.testReadCounters), fs=require('node:fs');
       const read=fs.readSync, stat=fs.fstatSync, root=fs.lstatSync, allocate=Buffer.allocUnsafe;
-      fs.readSync=(...a)=>{const n=Reflect.apply(read,fs,a);if(a[0]===d.fd){Atomics.add(c,0,BigInt(n));Atomics.add(c,1,1n);}return n;};
+      fs.readSync=(...a)=>{
+        const n=Reflect.apply(read,fs,a);
+        if(a[0]===d.fd){
+          Atomics.add(c,0,BigInt(n)); Atomics.add(c,1,1n);
+          if(d.testAbortPort && n>0 && Atomics.load(c,1)===1n){
+            const acknowledged=new Int32Array(d.testReadCounters,40,1);
+            d.testAbortPort.postMessage('first real chunk');
+            Atomics.wait(acknowledged,0,0,5000);
+            d.testAbortPort.close();
+          }
+        }
+        return n;
+      };
       fs.fstatSync=(...a)=>{const value=Reflect.apply(stat,fs,a);if(a[0]===d.fd)Atomics.add(c,2,1n);return value;};
       fs.lstatSync=(...a)=>{const value=Reflect.apply(root,fs,a);if(a[0]===d.rootPath)Atomics.add(c,3,1n);return value;};
       Buffer.allocUnsafe=size=>{if(BigInt(size)>Atomics.load(c,4))Atomics.store(c,4,BigInt(size));return allocate(size);};
@@ -76,8 +88,24 @@ test('completed mutating tool history consumes an existing large CAS file with b
       constructor(source: string | URL, options?: workerThreads.WorkerOptions) {
         const pass = typeof source === 'string' && options?.eval && options.workerData?.ref === blobRef
           ? passes.find(pass => !pass.closed && pass.fd === options.workerData.fd) : undefined;
-        const counters = pass ? new SharedArrayBuffer(5 * 8) : undefined;
-        super(pass ? observe + source : source, pass ? { ...options, workerData: { ...options!.workerData, testReadCounters: counters } } : options);
+        const counters = pass ? new SharedArrayBuffer(6 * 8) : undefined;
+        // Use a separate test port so the real worker protocol still emits
+        // only its original verdict. Cancel the original read after real I/O.
+        const cancel = pass && fault === 'abort' ? new workerThreads.MessageChannel() : undefined;
+        super(pass ? observe + source : source, pass ? {
+          ...options,
+          workerData: { ...options!.workerData, testReadCounters: counters, testAbortPort: cancel?.port2 },
+          ...(cancel ? { transferList: [cancel.port2] } : {})
+        } : options);
+        if (cancel) {
+          const acknowledged = new Int32Array(counters!, 40, 1);
+          cancel.port1.once('message', value => {
+            assert.equal(value, 'first real chunk');
+            injected = true; controller.abort(cancellation);
+            Atomics.store(acknowledged, 0, 1); Atomics.notify(acknowledged, 0);
+          });
+          this.once('exit', () => cancel.port1.close());
+        }
         if (pass) {
           pass.threadJoined = false;
           this.once('exit', () => {
@@ -97,7 +125,7 @@ test('completed mutating tool history consumes an existing large CAS file with b
       return Reflect.apply(lstat, fs, args);
     });
     t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
-      if (args[0] === target && historyTool && fault === 'corrupt' && !injected) {
+      if (args[0] === target && fault === 'corrupt' && !injected) {
         injected = true; restoreBlob = () => overwriteLastByte(0x70);
         await overwriteLastByte(0x21); // Same real inode/length; only full-byte hashing can accept/refuse its bytes.
       }
@@ -105,13 +133,12 @@ test('completed mutating tool history consumes an existing large CAS file with b
       if (args[0] !== root && !String(args[0]).startsWith(`${root}/`)) return held;
       active.add(held); opened++; peak = Math.max(peak, active.size);
       const close = held.close.bind(held), rootChecksAtOpen = rootChecks;
-      const pass: Pass | undefined = args[0] === target ? { fd: held.fd, historyTool, bytes: 0, reads: 0, stats: 0, closed: false, rootChecks: 0 } : undefined;
+      const pass: Pass | undefined = args[0] === target ? { fd: held.fd, bytes: 0, reads: 0, stats: 0, closed: false, rootChecks: 0 } : undefined;
       if (pass) {
         passes.push(pass);
         const read = held.read.bind(held), stat = held.stat.bind(held);
         t.mock.method(held, 'read', async (...values: Parameters<typeof read>) => {
           const result = await Reflect.apply(read, held, values); pass.bytes += result.bytesRead; pass.reads++;
-          if (pass.historyTool && fault === 'abort' && !injected) { injected = true; controller.abort(cancellation); }
           return result;
         });
         t.mock.method(held, 'stat', (...values: Parameters<typeof stat>) => { pass.stats++; return Reflect.apply(stat, held, values); });
@@ -123,14 +150,13 @@ test('completed mutating tool history consumes an existing large CAS file with b
           pass.closedBeforeThread = closedBeforeThread;
           pass.closed = true; pass.rootChecks += rootChecks - rootChecksAtOpen;
         }
-        if (pass?.historyTool && fault === 'close' && !injected) { injected = true; throw closeFailure; }
+        if (pass && fault === 'close' && !injected) { injected = true; throw closeFailure; }
       });
       return held;
     });
-    const recover = () => readRecoveryClosure(reader, fixture.store.artifacts.withReadSignal(controller.signal), fixture.runId,
-      phase => { historyTool = phase === 'history_tool'; });
+    const recover = () => readRecoveryClosure(reader, fixture.store.artifacts.withReadSignal(controller.signal), fixture.runId);
     const reset = (next: typeof fault) => {
-      fault = next; injected = false; historyTool = false; controller = new AbortController();
+      fault = next; injected = false; controller = new AbortController();
       passes = []; rootChecks = 0; largestAllocation = 0; opened = 0; closed = 0; peak = 0;
     };
     const joined = () => {
@@ -141,36 +167,37 @@ test('completed mutating tool history consumes an existing large CAS file with b
       reset('none');
       const recovered = await recover();
       assert.equal(recovered.run.budgetConsumed.toolCalls, 1); joined();
-      const history = passes.filter(pass => pass.historyTool);
-      assert.equal(history.length, 1); assert.ok(passes.length >= 4, 'every independent original workspace/history/seal consumer still reads');
-      assert(passes.some(pass => pass.threadJoined === true), 'the complete recovery must observe actual off-thread reads too');
-      assert(passes.every(pass => pass.bytes === blobBytes && pass.stats >= 2), 'each issued original file read exhausts its bytes and held-file stat guards');
+      assert.equal(passes.length, 1, 'all history consumers in this cut share one complete file read');
+      const [pass] = passes;
+      assert.equal(pass!.threadJoined, true, 'the actual hash worker exits before the read returns');
+      assert.equal(pass!.bytes, blobBytes);
+      assert(pass!.stats >= 2);
       assert.ok(largestAllocation <= ARTIFACT_CHUNK_BYTES, `retained recovery allocated ${largestAllocation} bytes for a ${blobBytes}-byte file`);
-      assert.ok(history[0]!.rootChecks >= history[0]!.reads, 'the named root remains current between bounded streamed reads');
+      assert.ok(pass!.rootChecks >= pass!.reads, 'the named root remains current between bounded streamed reads');
       t.diagnostic(JSON.stringify({ diagnosticOnly: true, existingBlobBytes: blobBytes, fullBytePasses: passes.length,
-        historyByteCount: history[0]!.bytes, largestAllocation, opened, closed, actualCasFdPeak: peak,
+        historyByteCount: pass!.bytes, largestAllocation, opened, closed, actualCasFdPeak: peak,
         successor30sQualified: false, physicalPlatformQualified: false }));
     });
-    await t.test('same-size corruption in the history consumer rejects after the actual last byte', async () => {
+    await t.test('same-size corruption in a fresh recovery rejects after the actual last byte', async () => {
       reset('corrupt');
       try {
-        await assert.rejects(recover(), /artifact [0-9a-f]{64} is corrupt/);
+        await assert.rejects(recover(), /CAS discard verification failed: digest/);
         assert.equal(injected, true); joined();
-        assert.equal(passes.find(pass => pass.historyTool)!.bytes, blobBytes);
+        assert.equal(passes.length, 1); assert.equal(passes[0]!.bytes, blobBytes);
       } finally { await restoreBlob?.(); restoreBlob = undefined; }
     });
     await t.test('cancellation stops the original history stream and joins its real descriptors', async () => {
       reset('abort');
       await assert.rejects(recover(), error => error === cancellation || (error as Error).cause === cancellation);
       assert.equal(injected, true); joined();
-      const history = passes.find(pass => pass.historyTool)!;
-      assert.ok(history.bytes > 0 && history.bytes <= ARTIFACT_CHUNK_BYTES, 'cancellation cannot consume another workspace-file chunk');
+      assert.equal(passes.length, 1);
+      assert.equal(passes[0]!.bytes, ARTIFACT_CHUNK_BYTES, 'cancellation stops after the first actual workspace-file chunk');
     });
     await t.test('actual history close uncertainty survives recovery and all issued descriptors still join', async () => {
       reset('close');
       await assert.rejects(recover(), error => error instanceof ResourceRetirementError && error.cause === closeFailure);
       assert.equal(injected, true); joined();
-      assert.equal(passes.find(pass => pass.historyTool)!.bytes, blobBytes);
+      assert.equal(passes.length, 1); assert.equal(passes[0]!.bytes, blobBytes);
     });
   } finally {
     try { await restoreBlob?.(); } finally { t.mock.restoreAll(); reader.close(); await disposeFixture(fixture); }

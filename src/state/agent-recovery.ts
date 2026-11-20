@@ -373,10 +373,16 @@ async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (p
   }
   phase('candidate');
   const candidateIds = input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate').map(row => row.itemId);
+  const hasDependencyHistory = journal.some(row => row.target === 'builtin:dependency-acquire') ||
+    [...items.values()].some(item => item.kind === 'dependency_ready' || item.kind === 'dependency_failure');
+  if (hasDependencyHistory && (!input.driver || !spec.dependencyPolicyRef))
+    throw new TypeError('dependency requires its complete original history');
   if (candidateIds.length && !input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
-  const verifierProgressByCandidate = input.driver ? await readVerifierProgressByCandidate(input.driver, artifacts, {
-    run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
-  }, candidateIds) : new Map<string, VerifierProgress>();
+  const verifierProgressByCandidate = input.driver && (candidateIds.length || hasDependencyHistory)
+    ? await readVerifierProgressByCandidate(input.driver, artifacts, {
+        run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
+      }, candidateIds)
+    : new Map<string, VerifierProgress>();
   await validateFinalCandidateRecovery({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
     checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate, deliveryMerges });
   phase('verifier');

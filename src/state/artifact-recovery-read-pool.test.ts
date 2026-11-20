@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 const groups = [
-  ['recovery-closure.ts', 'artifacts', ['[...unique]']],
+  ['recovery-closure.ts', 'artifacts', ['[...unique]', 'manifest.entries']],
   ['run-authority.ts', 'openingReads', ['manifest.entries']],
   ['resource-stop.ts', 'artifacts', ['manifest.entries', 'sourceItems', 'cut.items']],
   ['tool-cut.ts', 'artifacts', ['closure.items']],

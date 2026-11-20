@@ -66,7 +66,7 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
   // Each original file is still verified and joined, with a bounded read
   // group and the existing discard path for large files.
   await artifacts.mapReads(entries.entries, async entry => {
-    if (entry.kind === 'file') await artifacts.verifyChunks(entry.blobRef, entry.size);
+    if (entry.kind === 'file') await artifacts.verifyRetainedChunks(entry.blobRef, entry.size);
   });
   if (state.privateGitStateRef) await artifacts.readBytes(state.privateGitStateRef);
   const death = await readCanonicalArtifact<DeathEvidence>(artifacts, snapshot.quiescenceEvidenceRef);

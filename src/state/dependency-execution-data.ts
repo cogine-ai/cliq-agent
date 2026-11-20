@@ -23,7 +23,7 @@ export async function readDependencySignedAssets(artifacts: ArtifactCatalog, inp
   assertBuiltinScriptGuest(toolchain.manifest, input.allowScripts ? ['bash'] : []);
   assertBuiltinScriptResources(toolchain.manifest.guestImageByteCount, input.resources);
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
-  for (const entry of [adapter, image]) await reads.verifyChunks(entry.digest, entry.byteCount);
+  for (const entry of [adapter, image]) await reads.verifyRetainedChunks(entry.digest, entry.byteCount);
   artifacts.assertReadActive();
   return { adapter, image, toolchain, execution: {
     runtimeBundleRef: canonicalSha256(input.bundle), runtimeBundleManifestDigest: input.bundle.manifestDigest,

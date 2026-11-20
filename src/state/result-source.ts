@@ -30,7 +30,7 @@ type CandidateSourceGraph = {
 };
 type CandidateSourceLimit = { reason: 'changed_paths' | 'changed_bytes'; observed: number; limit: number };
 export type CandidateSourceReader = Pick<ArtifactCatalog, 'readCanonical' | 'readChunks'> &
-  Partial<SourceProjectionReader & Pick<ArtifactCatalog, 'mapReads'>>;
+  Partial<SourceProjectionReader & Pick<ArtifactCatalog, 'mapReads' | 'verifyRetainedChunks'>>;
 function completeReader(value: CandidateSourceReader): value is SourceProjectionReader {
   return typeof value.readBoundedBytes === 'function' && typeof value.withReadSignal === 'function' && typeof value.assertReadActive === 'function';
 }
@@ -115,9 +115,13 @@ async function planCandidateSource(artifacts: CandidateSourceReader, spec: RunSp
     if (prior !== undefined && prior !== entry.size) mismatch('candidate source file size conflicts for the same blob');
     files.set(entry.blobRef, entry.size);
   }
-  // Exhaustion rehashes every complete object with bounded memory. Identical
-  // base/current blobs are read once and never copied back into CAS.
   const verifyFile = async ([ref, byteLength]: readonly [string, number]) => {
+    // A history traversal may already have verified this exact content.
+    // A caller with a separate lifetime keeps its explicitly checked stream.
+    if (!signal && artifacts.verifyRetainedChunks) {
+      await artifacts.verifyRetainedChunks(ref, byteLength, 'stream');
+      return;
+    }
     signal?.throwIfAborted();
     for await (const _chunk of artifacts.readChunks(ref, byteLength)) { signal?.throwIfAborted(); }
   };

@@ -18,7 +18,7 @@ async function fixture(t: TestContext, same = true) {
   const artifacts = new ArtifactCatalog(new ContentAddressedStore(casRoot));
   const save = async (value: unknown) => (await artifacts.publishCanonical(value, 'inert-result-data')).ref;
   const rootRef = await save({ kind: 'inert-root-data' });
-  const workspace = { state: { stateDigest: 'inert-before' }, entries: { treeDigest: 'inert-tree' } };
+  const workspace = { stateDigest: 'inert-before', treeDigest: 'inert-tree' };
   const sourceRef = await save(workspace), snapshotRef = same ? sourceRef : await save({ ...workspace, different: true });
   const identity = { generationId: 'inert-generation', runId: 'inert-run', identityDigest: 'inert-identity',
     sourceCheckpointId: 'inert-checkpoint', sourceWorkspaceStateRef: sourceRef, sourceWorkspaceStateDigest: 'inert-before',
@@ -39,9 +39,6 @@ async function fixture(t: TestContext, same = true) {
     },
     decodeWorkspaceGenerationIdentity: (value: unknown) => value,
     decodeWorkspaceGenerationSnapshotEvidence: (value: unknown) => value,
-    validateWorkspaceStateArtifacts: async (reads: ArtifactCatalog, ref: string) => {
-      workspaceReads++; return reads.readCanonical(ref);
-    },
     recoveryFailure: (message: string): never => { throw new Error(message); }
   };
   const source = ts.createSourceFile('recovery-closure.ts', await readFile(new URL('./recovery-closure.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
@@ -51,30 +48,35 @@ async function fixture(t: TestContext, same = true) {
   const names = Object.keys(dependencies);
   const js = ts.transpileModule(declaration.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const factory = new Script(`(function(${names.join(',')}) { ${js}; return validateGenerationArtifacts; })`).runInThisContext();
-  const validate = factory(...Object.values(dependencies)) as (reads: ArtifactCatalog, generations: Data[], frozen: unknown) => Promise<void>;
+  const traversal = factory(...Object.values(dependencies)) as
+    (reads: ArtifactCatalog, generations: Data[], readWorkspace: (ref: string) => Promise<unknown>) => Promise<void>;
+  const validate = (reads: ArtifactCatalog, generations: Data[]) => traversal(reads, generations, async ref => {
+    workspaceReads++;
+    return reads.readCanonical(ref);
+  });
   return { artifacts, generation, validate, save, evidence, reads: () => workspaceReads };
 }
 
 test('one generation reuses the just-validated workspace only when both original references are exactly equal', async t => {
   const f = await fixture(t);
-  await f.validate(f.artifacts, [f.generation], {});
+  await f.validate(f.artifacts, [f.generation]);
   assert.equal(f.reads(), 1);
-  await f.validate(f.artifacts, [f.generation], {});
+  await f.validate(f.artifacts, [f.generation]);
   assert.equal(f.reads(), 2, 'a new traversal must read the original CAS node again');
 });
 
 test('different generation source and sealed snapshot references retain both independent complete reads', async t => {
   const f = await fixture(t, false);
-  await f.validate(f.artifacts, [f.generation], {});
+  await f.validate(f.artifacts, [f.generation]);
   assert.equal(f.reads(), 2);
 });
 
 test('sharing the same workspace does not skip original snapshot linkage checks or cancelled-read checks', async t => {
   const f = await fixture(t);
   f.generation.snapshotEvidenceRef = await f.save({ ...f.evidence, checkpointId: 'foreign-inert-checkpoint' });
-  await assert.rejects(f.validate(f.artifacts, [f.generation], {}), /snapshot evidence does not match/);
+  await assert.rejects(f.validate(f.artifacts, [f.generation]), /snapshot evidence does not match/);
   assert.equal(f.reads(), 1);
   const stop = new AbortController(), reason = new Error('inert read cancelled'); stop.abort(reason);
-  await assert.rejects(f.validate(f.artifacts.withReadSignal(stop.signal), [f.generation], {}), error => error === reason);
+  await assert.rejects(f.validate(f.artifacts.withReadSignal(stop.signal), [f.generation]), error => error === reason);
   assert.equal(f.reads(), 1);
 });
