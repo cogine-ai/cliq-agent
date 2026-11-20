@@ -17,8 +17,10 @@ exact local build and4146 tests pass (4114 pass,32 platform skips). No paid
 call or extra financial reservation is made.
 
 Use one controlled-only V8 main-isolate sampling probe instead of another blind
-complete Run. It samples between original tool preparations four and six, disconnects
-before Stop and emits only fixed numeric CPU buckets; no frame name, URL,
+complete Run. It samples between original tool preparations four and six,
+disconnecting completed samples before Stop. An earlier Stop entry discards the
+incomplete sample and disconnects within the unchanged Stop2 boundary, without
+aggregating a profile. It emits only fixed numeric CPU buckets; no frame name, URL,
 source text or error string is exported. The observer deliberately stops after
 eight accounted tools or fifteen minutes, preserves the actual original
 Stop2/joins and always leaves qualification false. It does not change the
