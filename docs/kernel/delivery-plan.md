@@ -5,6 +5,18 @@
 > reconnect, result review, and explicit application. The [RFC amendment](../rfcs/2026-08-11-durable-verified-run-kernel.md#approved-preview-delivery-amendment--2026-11-16)
 > defines the active scope. Earlier entries below record their original evidence.
 
+**2026-11-20 shared retained toolchain image.** The real CAS/Ed25519 signed
+toolchain reader still uses an ordinary image discard check, while private
+script history uses the existing traversal-owned joined verification. Their
+same-CAS/ref/size consumers therefore open one image three times in a single
+cut. The actual reader regression above16MiB is RED3→GREEN1 when discovery
+reuses that existing verification; each selection still physically reads and
+authenticates its original metadata. Wrong release trust refuses independently,
+a later cut reopens the image, and real later corruption refuses after joining
+the descriptor. This is one reader change, with no new cache or execution
+capability. Original raw/bounded/stream and native activation/release checks
+remain. Complete local and Linux task results for this candidate remain pending.
+
 **2026-11-20 CPU diagnosis before another acceptance run.** Exact `be65c99`
 [free Linux task](https://github.com/cogine-ai/cliq-agent/actions/runs/44722773294)
 reduces observed tool-prepare returned bytes from156366178761 to101130412012,

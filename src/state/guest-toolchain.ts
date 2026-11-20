@@ -149,8 +149,8 @@ async function readBounded(artifacts: ArtifactCatalog, reference: string, count:
   return Buffer.concat(chunks);
 }
 
-/** Selects only the pinned original signed discovery graph. Exhausting the
- * image stream proves its complete content hash, not ext4/ELF executability. */
+/** Selects only the pinned original signed discovery graph. One traversal may
+ * join an identical complete image check; this proves content, not executability. */
 export async function readRetainedVerifierToolchain(artifacts: ArtifactCatalog, input: {
   bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[];
   guestToolchainManifestId?: string; guestToolchainManifestRef?: string;
@@ -169,7 +169,7 @@ export async function readRetainedVerifierToolchain(artifacts: ArtifactCatalog, 
   const signature = await readBounded(artifacts, manifest.signatureRef, 64, 64, input.signal);
   const selected = validateGuestToolchainMetadata(input.bundle, root.artifactRef, bytes, signature, input.releaseKeys);
   await (input.signal ? artifacts.withReadSignal(input.signal) : artifacts)
-    .verifyChunks(manifest.guestImageRef, manifest.guestImageByteCount);
+    .verifyRetainedChunks(manifest.guestImageRef, manifest.guestImageByteCount);
   input.signal?.throwIfAborted();
   return selected;
 }

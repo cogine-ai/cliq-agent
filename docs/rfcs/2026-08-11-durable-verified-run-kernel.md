@@ -125,12 +125,13 @@ The next query starts with fresh physical reads. Source/cut capacity, signal
 checks, scratch retirement and the original Stop2 boundary retain their values;
 cached bytes never become current StateOwner, grant or execution authority.
 
-The retained private-script claim reader may share identical signed member
+Retained signed-toolchain discovery and private-script claim readers may share identical signed member
 content verification within one existing recovery traversal. The key binds the
 actual CAS instance, artifact reference and exact byte count. The first use
 performs the original complete size/hash/root/stat verification and joins every
-physical handle; concurrent uses await that same complete operation. Every claim
-still independently validates its request, grant, launch, runtime and guest
+physical handle; concurrent uses await that same complete operation. Every
+selection still reads and authenticates its original manifest and signature;
+every claim independently validates its request, grant, launch, runtime and guest
 bindings. No large image bytes, live permission or native execution proof are
 cached. All verification records share the existing 8192-entry ceiling; capacity
 exhaustion selects the original complete reader. Failure remains failure for

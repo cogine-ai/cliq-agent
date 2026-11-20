@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,7 +9,7 @@ import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import type { GuestToolchainManifest } from '../kernel/execution.js';
 import { identityHash, sha256Bytes } from '../kernel/identity.js';
 import { policyProfile, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
-import { ArtifactCatalog } from './artifacts.js';
+import { ArtifactCatalog, withArtifactReadCache } from './artifacts.js';
 import { ContentAddressedStore } from './cas.js';
 import { decodeGuestToolchainManifest, readRetainedVerifierToolchain, validateGuestToolchainMetadata } from './guest-toolchain.js';
 import { validateBundle, validateInstalledStructuredArtifacts } from './installed-artifacts.js';
@@ -153,4 +154,41 @@ for (const large of [false, true]) test(`retained ${large ? 'large' : 'small'} g
     await assert.rejects(readRetainedVerifierToolchain(artifacts, { bundle: value.bundle, releaseKeys: value.releaseKeys,
       guestToolchainManifestId: value.root.artifactId }));
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('signed retained selections join one large image check while keeping every signature and later cut fresh', async t => {
+  const value = fixture(Buffer.alloc(16 * 1024 * 1024 + 1, 0x73));
+  const root = await mkdtemp(path.join(os.tmpdir(), 'cliq-guest-shared-'));
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(root));
+  const image = path.join(root, value.manifest.guestImageRef), manifest = path.join(root, value.manifestRef);
+  try {
+    for (const bytes of [value.manifestBytes, value.signature, value.image])
+      await artifacts.publishBytes(bytes, 'application/octet-stream', 'guest-data-test');
+    const open = fs.open; let imagesOpened = 0, imagesClosed = 0, manifestsOpened = 0;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (args[0] === manifest) manifestsOpened++;
+      if (args[0] === image) {
+        imagesOpened++; const close = handle.close.bind(handle);
+        handle.close = async () => { await close(); imagesClosed++; };
+      }
+      return handle;
+    });
+    const input = { bundle: value.bundle, releaseKeys: value.releaseKeys, guestToolchainManifestRef: value.manifestRef };
+    await withArtifactReadCache(async () => {
+      await readRetainedVerifierToolchain(artifacts, input);
+      await readRetainedVerifierToolchain(artifacts, input);
+      await artifacts.verifyRetainedChunks(value.manifest.guestImageRef, value.image.length);
+      assert.equal(imagesOpened, 1, 'retained consumers must not re-read the same large signed image');
+      assert.equal(imagesClosed, 1);
+      assert.equal(manifestsOpened, 2, 'each selection still independently reads and authenticates its original metadata');
+      await assert.rejects(readRetainedVerifierToolchain(artifacts, { ...input, releaseKeys: [] }));
+      assert.equal(imagesOpened, 1, 'shared image content cannot supply signature trust');
+    });
+    await withArtifactReadCache(() => readRetainedVerifierToolchain(artifacts, input));
+    assert.equal(imagesOpened, 2); assert.equal(imagesClosed, 2);
+    await chmod(image, 0o600); await writeFile(image, Buffer.alloc(value.image.length)); await chmod(image, 0o400);
+    await assert.rejects(withArtifactReadCache(() => readRetainedVerifierToolchain(artifacts, input)));
+    assert.equal(imagesOpened, 3); assert.equal(imagesClosed, 3);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
