@@ -15,7 +15,7 @@ import { advanceTimeFence, readTimeFence } from './canonical-time.js';
 import { assertCurrentControlFrame, validateControlChannelClosure, type AuthenticatedControlIdentity } from './control-channel.js';
 import { decodeRetainedWorkspaceIdentity } from './decoders.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import type { ArtifactCatalog } from './artifacts.js';
+import { withArtifactReadCache, type ArtifactCatalog } from './artifacts.js';
 import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteConnection, SqliteDriver, SqliteInputValue, SqliteRow } from './sqlite-driver.js';
 
@@ -366,7 +366,8 @@ export async function readSessionList(driver: SqliteDriver, artifacts: ArtifactC
 }
 export async function readControlList(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   request: ControlListRequestV1, identity: AuthenticatedControlIdentity, signal?: AbortSignal) {
-  return decodeControlListResult(await readMaterializedList(driver, artifacts, owner, request, identity, signal), request.method);
+  return withArtifactReadCache(async () => decodeControlListResult(
+    await readMaterializedList(driver, artifacts, owner, request, identity, signal), request.method));
 }
 
 function sessionListSource(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, principalId: string,

@@ -118,6 +118,13 @@ selects the original complete read path for additional objects. These limits
 govern temporary reuse and preserve the supported artifact sizes. Callback exit
 clears the byte copies and closes their lifetime, including failure/cancellation.
 
+One complete control-list query may own that same bounded byte-cache lifetime.
+Repeated rows still independently decode their original RunSpec and retain the
+complete ordered source, row digests and final exact SQL equality checks.
+The next query starts with fresh physical reads. Source/cut capacity, signal
+checks, scratch retirement and the original Stop2 boundary retain their values;
+cached bytes never become current StateOwner, grant or execution authority.
+
 Discard-only historical file checks may use those same complete small byte
 copies. A miss preserves the consumer's original streaming cadence, complete
 hash, exact length, metadata/root checks and descriptor joins. Explicit readers

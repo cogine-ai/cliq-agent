@@ -27,6 +27,18 @@ bounded; individual transient copied views may now reach16MiB. Accepted
 artifacts, wire limits, native proofs and execution quotas retain their values. The real SQLite/CAS sealed-history regression now also uses
 a nine-MiB file. Actual installed gain still requires the complete free task.
 
+The local full baseline also exposes a separate list-preparation blocker:
+the `run.list` final-phase child does not reach its measured scope within the
+existing60-second fixture setup limit. Its preceding capture/prepare phases
+retain successful real SIGTERM joins within2 seconds. A129-row real SQL/CAS
+regression finds129 physical reads of one shared RunSpec. Each control-list
+traversal now owns the existing bounded artifact cache, retaining complete
+per-row decoding and final exact SQL source equality; a subsequent request
+starts with a fresh physical read. The100000-row/64MiB caps, setup60 and
+Stop2 are unchanged. Both original large-capacity cases pass locally: Run list
+finishes in113 seconds instead of664 seconds; all six actual SIGTERM attempts
+join within2 seconds. This is component evidence, not installed qualification.
+
 **2026-11-20 latest real task.** The fixed `bf1806d`
 [DeepSeek journey](https://github.com/cogine-ai/cliq-agent/actions/runs/44661123122)
 fails the original90-minute observer after24 full model claims and36 settled

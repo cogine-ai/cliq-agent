@@ -5,6 +5,7 @@ import { decodeListRunSnapshot } from '../kernel/control-list.js';
 import { decodeWireGrantSummary } from '../kernel/control-wire-data.js';
 import type { RunSnapshotV1, RunSpec } from '../kernel/types.js';
 import { insertArtifactMetadata } from './artifacts.js';
+import { ContentAddressedStore } from './cas.js';
 import { decodeAuthorizationGrant } from './authorization-artifacts.js';
 import { ListCutCapacityError } from './list-read-cut.js';
 import { DEFAULT_RUN_BUDGETS, ZERO_BUDGET } from './rows.js';
@@ -171,6 +172,21 @@ test('Run list applies row-count refusal before CAS reads, exact byte capacity a
       'display_fixture',printf('display-%06d',n),?,? FROM counter`)
       .run(from, through, session.id, spec.ref, checkpoint, zero, zero, absent, at, at, at, fixture.identity.principalId, absent, absent));
     addDisplayRuns(2, 129);
+    const physicalRead = ContentAddressedStore.prototype.read;
+    let sharedSpecReads = 0;
+    t.mock.method(ContentAddressedStore.prototype, 'read', async function (this: ContentAddressedStore,
+      ...args: Parameters<ContentAddressedStore['read']>) {
+      if (args[0] === spec.ref) sharedSpecReads++;
+      return Reflect.apply(physicalRead, this, args);
+    });
+    try {
+      for (let traversal = 1; traversal <= 2; traversal++) {
+        const shared = await fixture.store.listControl(request('run.list'), fixture.identity);
+        assert(shared.result.method === 'run.list' && shared.result.nextCursor);
+        completeCut(fixture.driver, shared.result.nextCursor, 129, minimalBytes * 129);
+        assert.equal(sharedSpecReads, traversal, 'one joined physical RunSpec read per complete fresh list traversal');
+      }
+    } finally { t.mock.restoreAll(); }
     await captureIntegrity(t, fixture, 'run.list', 129, minimalBytes * 129);
     addDisplayRuns(130, MAX_ROWS + 1);
     const beforeCount = cacheCounts(fixture.driver);
