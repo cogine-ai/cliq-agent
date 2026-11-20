@@ -14,6 +14,18 @@ const root = fileURLToPath(new URL('../../', import.meta.url));
 const all = Object.fromEntries(groups.map(group => [group, true]));
 function chosen(result) { return groups.filter(group => result.groups[group]); }
 
+test('a CPU diagnostic cannot select either funded workflow entry', () => {
+  const source = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  for (const job of ['real-provider', 'pr532-provider']) {
+    const condition = source.split(`  ${job}:\n`)[1].split('\n')[0].match(/\$\{\{ (.+) \}\}/u)[1];
+    for (const diagnostic_cpu of [false, true]) {
+      const selected = vm.runInNewContext(condition, { github: { event_name: 'workflow_dispatch', sha: 'exact', repository: 'cogine-ai/cliq-agent' },
+        inputs: { real_provider: true, diagnostic_cpu, expected_revision: 'exact', qualification_group: job === 'real-provider' ? 'full' : 'pr532' } });
+      assert.equal(selected, !diagnostic_cpu);
+    }
+  }
+});
+
 test('provider concurrency serializes every funded ref and independently schedules controlled refs', () => {
   const source = readFileSync(path.join(root, '.github/workflows/kernel-provider.yml'), 'utf8');
   const expression = source.match(/^  group: cliq-provider-qualification-\$\{\{ (.+) \}\}$/mu)?.[1];
