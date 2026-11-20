@@ -17,6 +17,7 @@ import { PROVIDER_JOURNEY_FILES, providerToolDiagnostic, InstalledProviderJourne
   readInstalledTerminalCut, readInstalledStableCut, type InstalledProviderJourneyContext, type InstalledProviderJourneyInput } from './installed-provider-journey.js';
 import { PR532_POLL_INTERVAL_MS, PR532_RUN_WALL_TIME_MS } from './provider-journey-input.js';
 import { parseJsonStrict } from '../../../src/kernel/json.js';
+import { installedShellUtilitiesProbe } from './installed-tools-result.js';
 
 // Public-protocol data and a fixed command-data check with an owned local
 // child/file. Installed authority and physical retirement require Linux.
@@ -188,7 +189,8 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
   };
   visit(parsed); assert(branch);
   const replies: any[] = [], observed = new Set<string>();
-  const context = vm.createContext({ assert, Buffer, JSON, parseJsonStrict, report: {}, pr532: true, postCount: 0, model: 'inert-model', expectedToolNames: ['read', 'edit', 'bash'],
+  const context = vm.createContext({ assert, Buffer, JSON, parseJsonStrict, installedShellUtilitiesProbe,
+    report: {}, pr532: true, postCount: 0, model: 'inert-model', expectedToolNames: ['read', 'edit', 'bash'],
     body: { tools: ['read', 'edit', 'bash'].map(name => ({ function: { name } })), messages: [{ content:
       'Verifier "node-tests" failed an assertion (exit 1) "original.test.ts" "lines":[1]' }] },
     PR532_FILE: 'original.ts', PR532_CHECK: 'original.test.ts', PR532_BASE: 'inert-base', PR532_CHECK_SOURCE: 'inert-reference',
@@ -235,8 +237,16 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
     if (index >= 2) assert.equal(JSON.parse(call.function.arguments).command, JSON.parse(bash[2].function.arguments).command);
   }
   // Command-data regression using the host Node and an owned file. The actual
-  // signed /usr/bin/node, private workspace and retirement require Linux.
-  const command = JSON.parse(bash[0].function.arguments).command as string;
+  // signed utilities, /usr/bin/node, private workspace and retirement require
+  // Linux. Assert the exact probe prefix, but never execute its /tmp paths on
+  // this host. The original thirteen Node mutations are all still executed.
+  const setup = `set -eu\n${installedShellUtilitiesProbe}\n`;
+  const nodeCommand = (call: any, index: number): string => {
+    const actual = JSON.parse(call.function.arguments).command as string;
+    if (index === 0) { assert(actual.startsWith(setup)); return actual.slice(setup.length); }
+    assert(!actual.includes(installedShellUtilitiesProbe)); return actual;
+  };
+  const command = nodeCommand(bash[0], 0);
   const prefix = '/usr/bin/node'; assert(command.startsWith(prefix + ' --no-addons -e '));
   const directory = mkdtempSync(path.join(os.tmpdir(), 'cliq-bash-command-'));
   try {
@@ -244,7 +254,7 @@ test('the controlled PR532 journey continues a rejected edit in the same batch b
     const hostNode = "'" + process.execPath.replaceAll("'", "'\\''") + "'";
     const marker = Buffer.from('\n// CLIQ_PR532_BASH_STATE_V1\n');
     for (const [index, call] of bash.entries()) {
-      const actual = JSON.parse(call.function.arguments).command as string;
+      const actual = nodeCommand(call, index);
       assert(actual.startsWith(prefix + ' --no-addons -e '));
       const executed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', hostNode + actual.slice(prefix.length)],
         { cwd: directory, timeout: 5000, encoding: 'utf8' });
