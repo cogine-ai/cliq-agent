@@ -6,6 +6,7 @@ const SHELL_INTERPRETER_HEADS = new Set([
   'dash',
   'fish',
   'ksh',
+  'mksh',
   'sh',
   'zsh'
 ]);
