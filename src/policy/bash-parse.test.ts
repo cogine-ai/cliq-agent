@@ -147,6 +147,7 @@ test('extractShellInlineScript returns the -c script for shell interpreters', ()
   assert.equal(extractShellInlineScript("bash --noprofile --norc -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript("busybox sh -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('sh -c "npm test"'), 'npm test');
+  assert.equal(extractShellInlineScript("mksh -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript('sudo bash -c "git pull"'), 'git pull');
   assert.equal(extractShellInlineScript("env FOO=bar -S bash -c 'git status'"), 'git status');
   assert.equal(extractShellInlineScript("env -u VAR -S bash -c 'git status'"), 'git status');
@@ -223,6 +224,7 @@ test('bashCommandHasUnsafeAllowSyntax treats shell delegation metacommands as un
 test('bashCommandHasUnsafeAllowSyntax treats nested builtin-deny heads and find -exec as unsafe for allow rules', () => {
   for (const command of [
     'bash -c "rm -rf /"',
+    "mksh -c 'rm -rf /'",
     'timeout 5 bash -c "rm -rf /"',
     'nohup bash -c "rm -rf /"',
     'timeout 5 rm -rf /',

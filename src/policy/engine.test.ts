@@ -374,6 +374,7 @@ test('decision table: builtin deny blocks nested rm inside bash -c even with bro
 
   for (const bash of [
     'bash -c "rm -rf /"',
+    "mksh -c 'rm -rf /'",
     'timeout 5 bash -c "rm -rf /"',
     'timeout 5 rm -rf /',
     'timeout -k 1s --preserve-status 5s rm -rf /',
