@@ -459,7 +459,8 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
       requireEqual(reservation.controller, originalController, 'MCP server actual reserved controller and first-prepared identity');
       const recipe = await originalRecipe(selected, native, reads);
       if (nativeRecipeRef !== recipe.data.recipeDigest) throw new TypeError('MCP server claim replaces its exact first-prepared native recipe');
-      requireEqual(await reads.readBytes(recipe.data.recipeDigest), recipe.bytes, 'MCP server original native recipe registered with preparation');
+      if (!(await reads.readBytes(recipe.data.recipeDigest)).equals(recipe.bytes))
+        throw new TypeError('MCP server original native recipe registered with preparation differs');
       const originalTool = readHighestPreparedAttempt(driver, runId, selected.effect.request.opId);
       if (!originalTool?.grantRef || originalTool.requestRef !== selected.request.toolRequestRef)
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP server claim lost its exact original owning tool preparation');

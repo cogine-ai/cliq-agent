@@ -62,7 +62,8 @@ export async function readMcpStatusProbePreparation(driver: SqliteDriver, artifa
     fail('MCP probe substitutes its exact acyclic original broker request or target');
   requireEqual(await readCanonicalArtifact(artifacts, preparation.brokerRequestRef), request.request, 'MCP complete original status broker request');
   requireEqual(await readCanonicalArtifact(artifacts, preparation.brokerTargetRef), request.target, 'MCP complete original signed status target');
-  requireEqual(await artifacts.readBytes(request.statusRequest.ref), request.statusRequest.bytes, 'MCP complete exact original read-only status frame');
+  if (!(await artifacts.readBytes(request.statusRequest.ref)).equals(request.statusRequest.bytes))
+    fail('MCP complete exact original read-only status frame differs');
   const history = await readRetainedStateOwnerHistory(driver, artifacts, preparation.inspectorStateOwnerEpoch);
   const original = history.entries.find(entry => entry.owner.ownerEpoch === preparation.inspectorStateOwnerEpoch);
   if (!original || original.owner.supervisorInstanceId !== preparation.inspectorSupervisorInstanceId || original.owner.acquiredAt > preparation.createdAt ||
