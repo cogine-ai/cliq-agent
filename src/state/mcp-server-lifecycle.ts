@@ -410,7 +410,8 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
         const live = assertLiveDispatchState(connection, owner, runId, input.expectedRunRevision, input.leaseEpoch, now);
         requireEqual(live.run, cut.run, 'MCP server original whole preparation Run cut');
         requireEqual(readInvocationJournal(connection, runId), cut.journal, 'MCP server original whole preparation Journal cut');
-        requireEqual(readHighestPreparedAttempt(connection, runId, selected.context.request.opId), highest, 'MCP server exact contiguous original attempt');
+        requireEqual(readHighestPreparedAttempt(connection, runId, selected.context.request.opId) ?? null, highest ?? null,
+          'MCP server exact contiguous original attempt');
         requireEqual(readHighestPreparedAttempt(connection, runId, expectedTool.opId), expectedTool, 'MCP server original unanswered prepared tool');
         requireEqual(live.launch, parent, 'MCP server actual original parent worker lease');
         original.assertCut(connection, live.run, cut); selected.context.registry.assertUnchanged(connection); selected.prior?.assertUnchanged(connection);
