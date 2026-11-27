@@ -674,12 +674,12 @@ for (const part of ['entry_name', 'file_bytes'] as const)
     });
   });
 
-test('actual Linux whole-project corpus scans all 1100 CAS files and detects the last object secret', linux, async () => {
+test('actual Linux large CAS corpus scans all 1100 files and detects the last object secret at the default stream limit', linux, async () => {
   await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
     const count = 1100, input = secret(), payload = Buffer.from('ordinary retained project object');
     for (let index = 0; index < count; index++)
       await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), payload, { flag: 'wx', mode: 0o400 });
-    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
     try {
       for (const invalid of [false, true, 'whole_project_v1', 'unbounded', 8192])
         await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
@@ -697,7 +697,7 @@ test('actual Linux whole-project corpus scans all 1100 CAS files and detects the
     const last = path.join(cas, (count - 1).toString(16).padStart(64, '0'));
     const lastBytes = Buffer.concat([Buffer.alloc(65530, 3), input]);
     await chmod(last, 0o600); await writeFile(last, lastBytes); await chmod(last, 0o400);
-    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
     try {
       await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: detecting,
         profile: 'whole_project_v2' }), { code: 'SECRET_DETECTED' });

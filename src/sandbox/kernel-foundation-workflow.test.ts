@@ -200,7 +200,8 @@ test('installed verifier uses its own free bounded manager journey without weake
   const project = options.properties[5]!; assert(ts.isSpreadAssignment(project));
   let projectSelection = project.expression;
   while (ts.isParenthesizedExpression(projectSelection)) projectSelection = projectSelection.expression;
-  assert(ts.isConditionalExpression(projectSelection)); assert.equal(projectSelection.condition.getText(parsed), 'options.pr532');
+  assert(ts.isConditionalExpression(projectSelection)); assert.equal(projectSelection.condition.getText(parsed), 'options.pr532 || mcpJourney');
+  assert.match(driver, /const mcpJourney = journeyKind === 'mcp' \|\| journeyKind === 'mcp-stdio' \|\| mcpRecoveryJourney;/u);
   assert(ts.isObjectLiteralExpression(projectSelection.whenTrue) && ts.isObjectLiteralExpression(projectSelection.whenFalse));
   assert.deepEqual(projectSelection.whenTrue.properties.map(property => property.getText(parsed)), ["profile: 'whole_project_v2' as const"]);
   assert.equal(projectSelection.whenFalse.properties.length, 0);

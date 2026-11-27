@@ -239,7 +239,10 @@ explicitly expands diagnostic work capacity for the larger real project; the
 selected capacity is retained in the report. Its CAS partition has one continuous
 byte projection containing each sorted name and that exact file's full bytes,
 retaining overlap across objects. This preserves every within-file match and
-also refuses matches across object boundaries. Separate raw databases, evidence
+also refuses matches across object boundaries. The installed MCP campaigns
+accumulate multiple Runs and their retained objects in one StateRoot. They
+reuse this profile's bounded inventory and continuous CAS projection with
+their original 4096-stream ceiling. Separate raw databases, evidence
 files and process output retain independent streams. All bytes remain in one scan,
 with the same detection, ownership, identity, stability and join checks. A copied
 SQLite database has one continuous logical byte stream for every schema name,
