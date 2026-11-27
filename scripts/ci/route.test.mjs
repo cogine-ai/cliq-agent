@@ -218,7 +218,7 @@ test('CLI writes only fixed boolean outputs and labels limited coverage honestly
 });
 
 const workflowHashes = {
-  foundation: ['kernel-foundation.yml', '85cdc704ce6b2e38d685ac54d0cf42d82fc63e8c1607756d609fb3dbff8108f2'],
+  foundation: ['kernel-foundation.yml', 'e2020c397594e8a4c9dec2b1261ecde067c7f19dae8167960c59b232d0122bc0'],
   permission: ['kernel-permission.yml', 'ade44fa27919c6d692b6a1c910933975c061cba8745a74d80df269fa6187952b'],
 };
 test('the independent Node probe cannot silently change its free runner, bounds or original entry', () => {

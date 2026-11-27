@@ -201,7 +201,7 @@ export async function runInstalledPr532Journey(input: {
     return data;
   };
   const describeDependencyFailure = async (cut: Result<'run.get'>) => {
-    const entry = cut.journal.findLast(row => row.opKind === 'tool' && row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
+    const entry = cut.journal.slice().reverse().find(row => row.opKind === 'tool' && row.target === 'builtin:dependency-acquire' && row.phase === 'failed');
     if (!entry?.evidenceRef) return;
     const source = cut.items.at(-1);
     if (!source) return;
@@ -296,7 +296,7 @@ export async function runInstalledPr532Journey(input: {
         try { await describeToolActivity(stopped, completeCut); }
         catch { /* Missing result diagnosis preserves the original task failure. */ }
         try {
-          const entry = stopped.journal.findLast(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);
+          const entry = stopped.journal.slice().reverse().find(row => row.opKind === 'verifier' && row.phase === 'completed' && row.receiptRef);
           if (entry?.receiptRef) {
             const receipt = decodeVerificationReceipt(await retained(entry.receiptRef));
             assert.equal(receipt.runId, entry.runId); assert.equal(receipt.attempt, entry.attempt);

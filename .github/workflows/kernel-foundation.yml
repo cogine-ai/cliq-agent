@@ -200,6 +200,17 @@ jobs:
         id: build
       - name: Install actual platform and worker build prerequisites
         run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build strace libext2fs-dev pkg-config
+      - name: Verify native credential authority under its disposable account
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          probe_node=$(realpath "$(command -v node)")
+          account=cliq-kernel-gate-test
+          sudo useradd --create-home --home-dir "/home/$account" --shell /usr/sbin/nologin "$account"
+          trap 'sudo userdel --remove "$account"' EXIT
+          sudo --user="$account" --set-home -- /usr/bin/env CLIQ_DISPOSABLE_ACCOUNT_QUALIFICATION=1 \
+            "$probe_node" --test --import tsx scripts/kernel/testing/credential-authority-native.test.ts
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -693,7 +704,6 @@ jobs:
           scripts/kernel/testing/credential-vfs-crash.test.ts
           scripts/kernel/testing/credential-vfs-retirement.test.ts
           scripts/kernel/testing/credential-vfs-storage.test.ts
-          scripts/kernel/testing/credential-authority-native.test.ts
           scripts/kernel/testing/credential-authority-bridge.test.ts
           scripts/kernel/testing/credential-authority-installed.test.ts
           scripts/kernel/testing/endpoint-authority-installed.test.ts
