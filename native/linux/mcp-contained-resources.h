@@ -126,7 +126,7 @@ mcp_contained_create_blocked(struct mcp_contained_resource *scope, struct cliq_w
         "linux-namespace-init:%ld:%.20s:monitor:%ld:%.20s", (long)process->init,
         ready.init_start_token + strlen("linux-proc-start-ticks:"), (long)process->monitor,
         process->monitor_start_token + strlen("linux-proc-start-ticks:"));
-    if (token_length <= 0 || (size_t)token_length >= sizeof(scope->identity.init_start_token))
+    if (token_length <= 0 || (size_t)token_length >= sizeof(scope->identity.init_start_token) || !stamp_observation(&scope->identity))
         return false;
     process->identity = scope->identity;
     process->created = true;
@@ -138,7 +138,7 @@ mcp_contained_create_blocked(struct mcp_contained_resource *scope, struct cliq_w
         return false;
     *response = scope->identity;
     response->command = scope->family == MCP_CONTAINED_HTTP_ADMIN ? CLIQ_MCP_ADMIN_CREATE_BLOCKED : CLIQ_MCP_STDIO_CREATE_BLOCKED;
-    return stamp_observation(response);
+    return true;
 }
 static bool
 mcp_contained_stop(struct mcp_contained_resource *scope, struct cliq_worker_packet *response, unsigned command)
@@ -216,12 +216,12 @@ mcp_contained_stop(struct mcp_contained_resource *scope, struct cliq_worker_pack
         scope->identity.init_reaped = scope->blocked ? 1 : 0;
         if (scope->family != MCP_CONTAINED_HTTP_ADMIN && scope->blocked && !scope->unreleased_stdio_shutdown &&
             (!scope->identity.stdio_owner_drained || !scope->monitor_success)) return false;
-        if (!mcp_contained_step(scope, 8))
+        if (!stamp_observation(&scope->identity) || !mcp_contained_step(scope, 8))
             return false;
     }
     *response = scope->identity;
     response->command = command;
-    return stamp_observation(response);
+    return true;
 }
 static bool
 mcp_contained_ack(struct mcp_contained_resource *scope, struct cliq_worker_packet *response, unsigned command)
@@ -239,16 +239,13 @@ mcp_contained_ack(struct mcp_contained_resource *scope, struct cliq_worker_packe
         if (!mcp_contained_root_current(scope) || !source_close_fd(&scope->cgroup) || unlinkat(scope->anchor, scope->identity.cgroup_name, AT_REMOVEDIR))
             return false;
         scope->created = false;
-        if (!mcp_contained_step(scope, 9))
+        if (!stamp_observation(&scope->identity) || !mcp_contained_step(scope, 9))
             return false;
         scope->acked = true;
     }
     *response = scope->identity;
     response->command = command;
-    bool            valid = stamp_observation(response);
-    if (!source_close_fd(&scope->birth) || !source_close_fd(&scope->anchor))
-        valid = false;
-    return valid;
+    return source_close_fd(&scope->birth) && source_close_fd(&scope->anchor);
 }
 #endif
 

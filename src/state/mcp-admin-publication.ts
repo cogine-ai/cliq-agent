@@ -72,6 +72,9 @@ export async function publishMcpAdminDiscovery(input: Readonly<{
   if (!lifecycleBytes.equals(physical.scope.lifecycleSnapshot())) invalid('MCP publication substitutes its original opaque native lifecycle bytes');
   requireEqual(lifecycle, physical.kind === 'http' ? decodeAdminMcpLifecycleData(lifecycleBytes) : decodeMcpStdioLifecycleData(lifecycleBytes),
     'MCP publication exact original native byte projection');
+  if (lifecycle.containment?.observedAtMs !== Date.parse(containment.createdAt) ||
+      lifecycle.retirement?.observedAtMs !== joined.observation.observedAtMs)
+    invalid('MCP publication does not reproduce its original READY and retirement observation times');
   const initialize = published.captures.get('initialize')!, listed = published.captures.get('tools_list')!;
   const rawDigest = (capture: Capture) => capture.descriptor.format === 'cliq-mcp-http-capture-v1'
     ? capture.descriptor.rawFinitePrefixDigest : capture.descriptor.rawResponseRef;

@@ -409,7 +409,7 @@ type InstalledRuntimeBinding = {
   sealMcpStdioServer(entryId: string, signal?: AbortSignal, role?: 'mcp_server' | 'mcp_recovery_adapter'): Promise<NativeMcpStdioServerImage>;
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   retainLocalInferenceRuntime(expectedBundleRef: string, signal?: AbortSignal): Promise<readonly PublishedArtifact[]>;
-  retainMcpAdminRecipe(signal?: AbortSignal): Promise<void>;
+  retainMcpAdminRecipe(transport: 'streamable_http' | 'stdio', signal?: AbortSignal): Promise<PublishedArtifact>;
   startGuestToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal; tsx?: boolean }): Promise<NativeGuestToolchain>;
   startSourceGitToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeSourceGitToolchain>;
   closeGuestToolchain(job: NativeGuestToolchain): Promise<void>;
@@ -687,9 +687,10 @@ export function retainInstalledSourceGitRecipe(selected: HeldInstalledRuntime, s
   if (!binding) mismatch('source recipe retention requires a genuine held installed selection');
   return binding.retainSourceGitRecipe(signal);
 }
-export function retainInstalledMcpAdminRecipe(selected:HeldInstalledRuntime,signal?:AbortSignal):Promise<void>{
+export function retainInstalledMcpAdminRecipe(selected: HeldInstalledRuntime, transport: 'streamable_http' | 'stdio',
+  signal?: AbortSignal): Promise<PublishedArtifact> {
   const binding=heldInstalledRuntimes.get(selected);if(!binding)mismatch('MCP Admin recipe retention requires a genuine held selection');
-  return binding.retainMcpAdminRecipe(signal);
+  return binding.retainMcpAdminRecipe(transport, signal);
 }
 
 /** Fixed signed data and its distinct native type; never a caller program. */
@@ -3255,16 +3256,21 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
             });
           },
-          retainMcpAdminRecipe(signal){
-            return enqueue(async()=>{
+          retainMcpAdminRecipe(transport, signal) {
+            return enqueue(async () => {
               await checkedRevalidate(signal);
-              const entry=signed.bundle.entries.find(value=>value.entryId===MCP_ADMIN_HELPER_ENTRY_ID),file=signed.entries.get(MCP_ADMIN_HELPER_ENTRY_ID);
-              if(!entry||!file||entry.role!=='platform_helper'||entry.version!=='1'||entry.executable!==false||
-                entry.relativePath!==MCP_ADMIN_HELPER_RELATIVE_PATH||entry.byteCount<1||entry.byteCount>SMALL_BYTES)mismatch('fixed MCP Admin recipe data is missing');
-              const cas=new ContentAddressedStore(childPath(casRoot,'.'));
-              const published=await cas.publishChunks(artifactChunks(file,signal),entry.byteCount);
-              if(published.ref!==entry.digest||published.byteLength!==entry.byteCount)mismatch('retained MCP Admin helper differs from its original signed bytes');
+              const stdio = transport === 'stdio', entryId = stdio ? 'linux_worker_controller' : MCP_ADMIN_HELPER_ENTRY_ID;
+              const entry = signed.bundle.entries.find(value => value.entryId === entryId), file = signed.entries.get(entryId);
+              if (!entry || !file || entry.role !== 'platform_helper' || entry.version !== '1' || entry.executable !== stdio ||
+                  !stdio && entry.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH ||
+                  entry.byteCount < 1 || entry.byteCount > (stdio ? TRUST_BYTES : SMALL_BYTES))
+                mismatch('fixed MCP Admin recipe data is missing');
+              const cas = new ContentAddressedStore(childPath(casRoot, '.'));
+              const published = await cas.publishChunks(artifactChunks(file, signal), entry.byteCount);
+              if (published.ref !== entry.digest || published.byteLength !== entry.byteCount)
+                mismatch('retained MCP Admin helper differs from its original signed bytes');
               await checkedRevalidate(signal);
+              return { ...published, mediaType: 'application/octet-stream', schemaKind: 'cliq-runtime-bundle-entry-v1' };
             });
           },
           retainSourceGitRecipe(signal) {

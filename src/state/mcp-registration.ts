@@ -1168,7 +1168,7 @@ export function combineMcpToolManifest(builtin: ToolContractManifestV1,
 /** Called before real Admin input creation. Only immutable artifacts and the
  * original prepared row are installed; no physical resource is inferred. */
 export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  request: McpMutationRequestV1, identity: AuthenticatedControlIdentity, value: AdminOperationV1,
+  request: McpMutationRequestV1, identity: AuthenticatedControlIdentity, value: AdminOperationV1, helper: PublishedArtifact,
   stdioPreparation?: Readonly<{ authorization?: PreparedMcpStdioAuthorization; recipe: PublishedArtifact }>) {
   const operation = decodeAdminOperation(value);
   const liveAuthorization = operation.attempt === 1 ? await validateControlChannelClosure(artifacts, owner, identity) : undefined;
@@ -1194,7 +1194,7 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
     target.registrationId, target.resolvedTransport as Extract<McpRegistryRevisionV1['transport'], { kind: 'stdio' }>) : undefined;
   const core = decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, operation.probePayloadCoreRef));
   if (target.ownerPrincipalId !== identity.principalId || target.registrationId !== request.registrationId || target.requestCoreDigest !== mcpMutationCoreDigest(request) ||
-      target.targetDigest !== operation.targetDigest || core.payloadCoreDigest !== operation.probePayloadCoreDigest)
+      target.targetDigest !== operation.targetDigest || core.payloadCoreDigest !== operation.probePayloadCoreDigest || helper.ref !== core.adapterExecutableDigest)
     throw new TypeError('MCP prepared intent substitutes target or static probe core');
   const members = [[operation.targetRef, target.format], [operation.probePayloadCoreRef, core.format],
     [operation.plannedContainmentRef, 'cliq-process-containment-plan-v1'], [operation.sandboxLaunchSpecRef, 'cliq-sandbox-launch-v1'],
@@ -1225,7 +1225,7 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
     }
     if (stdioPreparation?.authorization) consumeMcpStdioAuthorization(connection, owner, stdioPreparation.authorization, target,
       request.requestId, request.requestDigest, now);
-    for (const artifact of [...metadata, ...(liveAuthorization?.metadata ?? historicalAuthorization?.metadata ?? []),
+    for (const artifact of [...metadata, helper, ...(liveAuthorization?.metadata ?? historicalAuthorization?.metadata ?? []),
       ...(consentData?.metadata ?? []), ...(stdioPreparation ? [stdioPreparation.recipe] : [])]) insertArtifactMetadata(connection, artifact, now);
     connection.prepare('INSERT INTO admin_operations(principal_id,method,request_id,attempt,state,row_json) VALUES(?,?,?,?,?,?)')
       .run(identity.principalId, request.method, request.requestId, operation.attempt, 'prepared', canonicalJsonBytes(operation).toString('utf8'));
@@ -1238,12 +1238,12 @@ export async function persistPreparedMcpAdminOperation(driver: SqliteDriver, art
 async function executeMcpStdioAdminAttempt(input: Readonly<{
   driver: SqliteDriver; artifacts: ArtifactCatalog; owner: StateOwnerContext; selected: HeldInstalledRuntime; anchor: HeldInstalledAnchor;
   request: McpMutationRequestV1; identity: AuthenticatedControlIdentity; target: McpAdminProbeTargetV1; targetArtifact: PublishedArtifact;
-  core: AdminProbePayloadCoreV1; coreArtifact: PublishedArtifact; runtime: RuntimeBundleManifest; createdAt: string; deadlineAt: string;
+  core: AdminProbePayloadCoreV1; coreArtifact: PublishedArtifact; helperArtifact: PublishedArtifact; runtime: RuntimeBundleManifest; createdAt: string; deadlineAt: string;
   attempt: number; adminOperationId: string; nonce: string; original?: Awaited<ReturnType<typeof readMcpRegistry>>;
   priorClosure?: Awaited<ReturnType<typeof readAdminFailureHistory>>; authorization?: PreparedMcpStdioAuthorization;
   producer: { digest: string; task?: Promise<unknown>; resume?: () => Promise<unknown> }; key: string; signal: AbortSignal;
 }>) {
-  const { driver, artifacts, owner, selected, anchor, request, identity, target, targetArtifact, core, coreArtifact, runtime,
+  const { driver, artifacts, owner, selected, anchor, request, identity, target, targetArtifact, core, coreArtifact, helperArtifact, runtime,
     createdAt, deadlineAt, attempt, adminOperationId, nonce, original, priorClosure, authorization, producer, key, signal } = input;
   const transport = target.resolvedTransport;
   if (transport.kind !== 'stdio') throw new TypeError('MCP stdio Admin received another frozen transport');
@@ -1279,7 +1279,7 @@ async function executeMcpStdioAdminAttempt(input: Readonly<{
       targetDigest: target.targetDigest, probePayloadCoreRef: coreArtifact.ref, probePayloadCoreDigest: core.payloadCoreDigest,
       supervisorInstanceId: owner.supervisorInstanceId, plannedContainmentRef: launch.planArtifact.ref, plannedContainmentDigest: launch.plan.planDigest,
       sandboxLaunchSpecRef: launch.specArtifact.ref, sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, rowVersion: 1, createdAt, phase: 'prepared' };
-    await observeMcpAdminWork('stdio', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared,
+    await observeMcpAdminWork('stdio', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared, helperArtifact,
       { ...(authorization ? { authorization } : {}), recipe: nativePreparation.recipe }));
     priorClosure?.assertUnchanged(driver); consent?.assertUnchanged(driver);
     const current = assertActiveStateOwner(driver, owner), process = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, current.processIdentityRef));
@@ -1451,7 +1451,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
     const helper = runtime.entries.find(entry => entry.entryId === (transport.kind === 'stdio' ? 'linux_worker_controller' : MCP_ADMIN_HELPER_ENTRY_ID));
     if (!helper || helper.role !== 'platform_helper' || helper.version !== '1' || (transport.kind === 'stdio' ? !helper.executable : helper.executable || helper.relativePath !== MCP_ADMIN_HELPER_RELATIVE_PATH))
       throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed signed MCP Admin helper is unavailable');
-    if (transport.kind === 'streamable_http') await retainInstalledMcpAdminRecipe(selected, signal);
+    const helperArtifact = await retainInstalledMcpAdminRecipe(selected, transport.kind, signal);
     const core: AdminProbePayloadCoreV1 = previous ? decodeAdminProbePayloadCore(await readCanonicalArtifact(artifacts, previous.probePayloadCoreRef)) : { schemaVersion: 1, format: 'cliq-admin-probe-payload-core-v1', probeKind: transport.kind === 'stdio' ? 'mcp_stdio' : 'mcp_streamable_http',
       runtimeBundleRef: canonicalSha256(runtime), runtimeBundleManifestDigest: runtime.manifestDigest, adapterExecutableId: helper.entryId,
       adapterVersion: helper.version, adapterExecutableDigest: helper.digest, protocolRecipe: 'mcp-initialize-capabilities-tools-list-v1',
@@ -1463,7 +1463,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
     const coreArtifact = await artifacts.publishCanonical(core, core.format), nonce = randomBytes(32).toString('hex');
     const adminOperationId = identityHash('cliq-mcp-admin-operation-v1', identity.principalId, request.method, request.requestId, request.requestDigest, target.targetDigest);
     if (transport.kind === 'stdio') return executeMcpStdioAdminAttempt({ driver, artifacts, owner, selected, anchor, request, identity, target,
-      targetArtifact, core, coreArtifact, runtime, createdAt, deadlineAt, attempt, adminOperationId, nonce,
+      targetArtifact, core, coreArtifact, helperArtifact, runtime, createdAt, deadlineAt, attempt, adminOperationId, nonce,
       ...(original ? { original } : {}), ...(priorClosure ? { priorClosure } : {}), ...(stdioAuthorization ? { authorization: stdioAuthorization } : {}), producer, key, signal });
     signal.throwIfAborted();
     const launcher = await observeMcpAdminWork('http', 'launcher_open', () => openInstalledLinuxWorkerLauncher(selected, anchor, { signal }));
@@ -1502,7 +1502,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
         targetDigest: target.targetDigest, probePayloadCoreRef: coreArtifact.ref, probePayloadCoreDigest: core.payloadCoreDigest,
         supervisorInstanceId: owner.supervisorInstanceId, plannedContainmentRef: launch.planArtifact.ref, plannedContainmentDigest: launch.plan.planDigest,
         sandboxLaunchSpecRef: launch.specArtifact.ref, sandboxLaunchSpecDigest: launch.spec.launchSpecDigest, rowVersion: 1, createdAt, phase: 'prepared' };
-      await observeMcpAdminWork('http', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared));
+      await observeMcpAdminWork('http', 'prepared_write', () => persistPreparedMcpAdminOperation(driver, artifacts, owner, request, identity, prepared, helperArtifact));
       priorClosure?.assertUnchanged(driver);
       const inputBinding: AdminMcpInputBinding = { adminOperationId, attempt, principalId: identity.principalId, nonce,
         targetRef: prepared.targetRef, targetDigest: prepared.targetDigest, probePayloadCoreRef: prepared.probePayloadCoreRef,
