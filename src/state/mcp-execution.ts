@@ -534,6 +534,7 @@ export async function settleMcpRunUnknown(driver: SqliteDriver, artifacts: Artif
   return settleValidatedInvocation(driver, artifacts, context, { runId: claim.runId, opId: claim.opId, attempt: claim.attempt,
     expectedRunRevision: readRun(driver, claim.runId).revision }, { phase: 'unknown', evidenceRef: original.ref, evidenceDigest: prototype.evidenceDigest },
   async ({ run, settlement }) => {
+    const principalId = readSessionPrincipalId(driver, run.sessionId);
     const evidence: BrokerInvocationAmbiguityEvidenceV1 = { ...prototype, observedAt: settlement.settledAt, evidenceDigest: '' };
     evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest'); decodeBrokerInvocationAmbiguity(evidence);
     const artifact = await artifacts.publishCanonical(evidence, evidence.format);
@@ -544,7 +545,7 @@ export async function settleMcpRunUnknown(driver: SqliteDriver, artifacts: Artif
         requireEqual(readInvocationAttempt(connection, claim.runId, claim.opId, claim.attempt), [prepared, claim], 'MCP unknown original permanent claim at settlement');
         if (currentOwner.ownerEpoch !== claim.stateOwnerEpoch || currentOwner.supervisorInstanceId !== claim.supervisorInstanceId ||
             current.frontierRef !== request.frontierRef || current.specRef !== run.specRef || current.leaseEpoch !== claim.leaseEpoch ||
-            readSessionPrincipalId(connection, current.sessionId) !== readSessionPrincipalId(driver, run.sessionId) || committedAt < settlement.settledAt)
+            readSessionPrincipalId(connection, current.sessionId) !== principalId || committedAt < settlement.settledAt)
           throw new KernelStorageError('LEASE_FENCED', 'MCP unknown no longer owns its original Run/frontier/owner');
       } };
   });
