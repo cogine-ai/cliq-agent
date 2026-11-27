@@ -1,7 +1,7 @@
 #ifndef CLIQ_MCP_HTTP_OWNER_BRIDGE_H
 #define CLIQ_MCP_HTTP_OWNER_BRIDGE_H
 /* Private same-process friend ABI. Only the selected worker image publishes
- * the peer table. Tags, ABI, PID, environment and main thread precede unwrap;
+ * the peer table. The receiver verifies the tag, ABI, PID, Node loop and main thread;
  * JS never chooses a descriptor, callback, pointer or process observation. */
 #include <stdbool.h>
 #include <stdint.h>

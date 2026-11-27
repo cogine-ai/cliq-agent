@@ -1,6 +1,7 @@
 #ifndef CLIQ_MCP_HTTP_BROKER_H
 #define CLIQ_MCP_HTTP_BROKER_H
 #include "mcp-http-owner-bridge.h"
+#include "mcp-node-loop.h"
 #define BROKER_BODY_CAP 1048576
 #define BROKER_HEADER_CAP 65536
 #define BROKER_TRUST_CAP (16 * 1048576)
@@ -1583,7 +1584,7 @@ static napi_value mcp_attach_peer_call(napi_env env, napi_callback_info info) {
     bool            tagged = false;
     struct cliq_mcp_admin_peer_handle *peer = NULL;
     if (argc != 1 || !broker->admin || broker->peer || broker->bound || broker->closing || napi_check_object_type_tag(env, args[0], &CLIQ_MCP_ADMIN_PEER_TAG, &tagged) != napi_ok || !tagged ||
-        napi_unwrap(env, args[0], (void **)&peer) != napi_ok || !peer || peer->abi_version != CLIQ_MCP_OWNER_ABI || peer->creator_pid != getpid() || peer->environment != env ||
+        napi_unwrap(env, args[0], (void **)&peer) != napi_ok || !peer || peer->abi_version != CLIQ_MCP_OWNER_ABI || peer->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, peer->environment) ||
         peer->borrowed || !peer->assert_current || !peer->assert_current(peer) || !peer->peer.context || !peer->peer.cancel || !peer->peer.poll_joined || !peer->peer.release_recipe ||
         !peer->peer.poll_fixed_frame || !peer->peer.deliver_screened_message || !peer->peer.begin_output_ack || !peer->peer.poll_output_ack || !peer->peer.release ||
         napi_create_reference(env, args[0], 1, &broker->peer_ref) != napi_ok) {

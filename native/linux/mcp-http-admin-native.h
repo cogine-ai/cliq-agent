@@ -1,6 +1,7 @@
 #ifndef CLIQ_MCP_HTTP_ADMIN_NATIVE_H
 #define CLIQ_MCP_HTTP_ADMIN_NATIVE_H
 #include "mcp-http-admin-protocol.h"
+#include "mcp-node-loop.h"
 static const    napi_type_tag MCP_ADMIN_CLEANUP_TAG = {UINT64_C(0xb1ce94ba56dc623f), UINT64_C(0xd559268dd2ab4a2f)};
 static const    napi_type_tag MCP_ADMIN_CLEANUP_OBSERVATION_TAG = {UINT64_C(0xf3ce4f3a1575065b), UINT64_C(0xaaf1098e780bd716)};
 static const    napi_type_tag MCP_ADMIN_JOINED_TAG = {UINT64_C(0x629f1cec934f2d1d), UINT64_C(0xfba90121ee20cff9)};
@@ -749,7 +750,7 @@ static napi_value reserve_mcp_admin(napi_env env, napi_callback_info info) {
     size_t          recipe_size;
     if (napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != 6 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->env != env || controller->creator_pid != getpid() || syscall(SYS_gettid) != getpid() ||
         controller->closed || !controller->ready || controller->pending || controller->mcp_admin || (controller->source_requested && !controller->preparation_finished) || controller->retained_requested ||
-        !tagged(env, args[0], &CLIQ_MCP_ADMIN_INPUT_TAG, (void **)&input) || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || input->environment != env || !input->assert_current || !input->assert_current(input) || !input->retire ||
+        !tagged(env, args[0], &CLIQ_MCP_ADMIN_INPUT_TAG, (void **)&input) || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, input->environment) || !input->assert_current || !input->assert_current(input) || !input->retire ||
         atomic_load(&input->closed) || atomic_load(&input->execution_claimed) || !tagged(env, args[1], &IMAGE_TAG, (void **)&helper) || helper->fd < 0 || !tagged(env, args[2], &IMAGE_TAG, (void **)&bwrap) || bwrap->fd < 0 ||
         !tagged(env, args[3], &CLIQ_GUEST_TOOLCHAIN_TAG, (void **)&guest) || guest->abi_version != CLIQ_GUEST_ABI_VERSION || !atomic_load(&guest->ready) || atomic_load(&guest->revoked) || !guest->file_count || guest->file_count > CLIQ_VERIFIER_MAX_FILES || strcmp(guest->node_path, "/usr/bin/node") ||
         !tagged(env, args[4], &MCP_ADMIN_SCRIPT_TAG, (void **)&script) || script->fd < 0 || !script->byte_count || script->byte_count > CLIQ_MCP_ADMIN_MAX_MESSAGE || !cliq_mcp_admin_digest(script->digest) ||
@@ -998,7 +999,7 @@ static napi_value cleanup_retained_mcp_admin(napi_env env, napi_callback_info in
     struct controller *controller;
     struct cliq_mcp_admin_input *input;
     if (napi_get_cb_info(env, info, &argc, args, &self, NULL) != napi_ok || argc != 2 || !tagged(env, self, &CONTROLLER_TAG, (void **)&controller) || controller->creator_pid != getpid() || controller->env != env || syscall(SYS_gettid) != getpid() ||
-        controller->closed || !controller->ready || controller->pending || controller->mcp_admin || !tagged(env, args[0], &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG, (void **)&input) || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || input->environment != env ||
+        controller->closed || !controller->ready || controller->pending || controller->mcp_admin || !tagged(env, args[0], &CLIQ_MCP_ADMIN_RETAINED_INPUT_TAG, (void **)&input) || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, input->environment) ||
         !input->assert_current || !input->assert_current(input) || !input->retire || atomic_load(&input->closed) || atomic_load(&input->execution_claimed))
         return failure(env, "Admin MCP cleanup requires exact retained original input and current checker");
     struct mcp_admin_native_scope *scope = calloc(1, sizeof(*scope));

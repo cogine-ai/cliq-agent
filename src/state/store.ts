@@ -2046,7 +2046,7 @@ export class StateStore {
       signal.throwIfAborted();
       const { createAuthorization } = await import('./authorization.js');
       signal.throwIfAborted();
-      return createAuthorization(this.driver, this.artifacts, this.owner, this.runtimeAuthority, request, identity, signal);
+      return createAuthorization(this.driver, this.artifacts, this.owner, this.runtimeAuthority, request, identity, signal, this.installedRuntime);
     });
   }
 

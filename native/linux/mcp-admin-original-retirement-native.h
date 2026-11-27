@@ -1,6 +1,7 @@
 #ifndef CLIQ_MCP_ADMIN_ORIGINAL_RETIREMENT_NATIVE_H
 #define CLIQ_MCP_ADMIN_ORIGINAL_RETIREMENT_NATIVE_H
 #include "mcp-admin-original-retirement.h"
+#include "mcp-node-loop.h"
 static const napi_type_tag MCP_ADMIN_ORIGINAL_HTTP_TAG = {UINT64_C(0x5f6d4a9d4fd14912), UINT64_C(0xabc48633b198a9ad)};
 static const napi_type_tag MCP_ADMIN_ORIGINAL_STDIO_TAG = {UINT64_C(0x34ff7d287bb04d35), UINT64_C(0xb2c7a6bcb782e990)};
 struct mcp_admin_original_receipt {
@@ -40,7 +41,7 @@ static bool mcp_admin_original_observe(struct controller *c, struct cliq_mcp_adm
     struct cliq_mcp_admin_original_source source;
     if (c->creator_pid != getpid() || syscall(SYS_gettid) != getpid() || !c->closed || !c->cleanup_done || !c->reaped ||
         !c->controller_leaf_retired || c->retirement_failed || atomic_load(&native_retirement_failed) ||
-        !input || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || input->environment != c->env ||
+        !input || input->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || input->creator_pid != getpid() || !cliq_mcp_same_node_loop(c->env, input->environment) ||
         !input->assert_retired_snapshot || !binding->owner_epoch || binding->owner_epoch > UINT64_C(9007199254740991) ||
         !cliq_mcp_stdio_text(binding->supervisor, sizeof(binding->supervisor)) ||
         !cliq_mcp_admin_original_source(bytes, size, transport, &source) ||

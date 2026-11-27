@@ -6,7 +6,7 @@ import { addCanonicalDuration, digestOmitting, parseCanonicalTime } from '../ker
 import { immutableSnapshot } from '../model/immutable.js';
 import { verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { insertArtifactMetadata, type ArtifactCatalog } from './artifacts.js';
+import { insertArtifactMetadata, type ArtifactCatalog, type PublishedArtifact } from './artifacts.js';
 import { authorizationGrantCore, authorizationGrantId, authorizationSummary, decodeAuthorizationConsumptionReceipt,
   decodeAuthorizationRevokeRequest, decodeAuthorizationCreateRequest, decodeVerifierIdentityCreateRequest, VerifierAuthorizationError } from './authorization-artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow } from './canonical-time.js';
@@ -22,6 +22,7 @@ import { requireHealthyFence } from './reducers/invocation.js';
 import { decodeRunSpec, decodeVerifierSpec, decodeWorkspaceIdentity } from './decoders.js';
 import { decodeRepositoryIdentity } from './repository-identity.js';
 import { beginInstalledAuthorizationDiagnostic } from './installed-run-diagnostics.js';
+import { readInstalledMcpStdioServerBytes, type HeldInstalledRuntime } from './installed-runtime.js';
 import { normalizeSourceReadScopePath } from '../kernel/source-read-scope.js';
 import { isNpmAdapterEntry, isNpmDataEntry, NPM_DEPENDENCY_RECIPE } from '../sandbox/dependency-recipe.js';
 import { inspectMcpStaticLinuxExecutable, MCP_STDIO_EXECUTABLE_BYTES, MCP_STDIO_EXECUTION_PATH } from '../sandbox/mcp-stdio-executable.js';
@@ -55,7 +56,7 @@ function sourceInspectorEntry(bundle: RuntimeBundleManifest) {
 /** Select only this fully verified bundle. The public digest is a selector,
  * never a request to fetch a caller-chosen artifact or retained old runtime. */
 async function selectMcpStdioIdentity(artifacts: ArtifactCatalog, runtime: AuthorizationRuntime,
-  request: McpIdentityCreateRequest, signal?: AbortSignal) {
+  request: McpIdentityCreateRequest, signal?: AbortSignal, installed?: HeldInstalledRuntime) {
   signal?.throwIfAborted();
   const selected = request.decision.target;
   if (selected.kind !== 'runtime_bundle_executable')
@@ -67,14 +68,16 @@ async function selectMcpStdioIdentity(artifacts: ArtifactCatalog, runtime: Autho
       entry.byteCount < 1 || entry.byteCount > MCP_STDIO_EXECUTABLE_BYTES)
     throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP identity is not an exact signed server in the selected runtime');
   const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
-  const bytes = await reads.readBoundedBytes(entry.digest, entry.byteCount);
+  const bytes = installed ? await readInstalledMcpStdioServerBytes(installed, bundleRef, entry.entryId, signal)
+    : await reads.readBoundedBytes(entry.digest, entry.byteCount);
   if (bytes.length !== entry.byteCount) throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP server differs from its signed byte count');
   try { inspectMcpStaticLinuxExecutable(bytes); }
   catch (cause) { throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP server has no complete supported static executable closure', { cause }); }
   signal?.throwIfAborted();
-  return { kind: 'execution_identity_read' as const, purpose: 'mcp_stdio' as const, identity: {
+  const target = { kind: 'execution_identity_read' as const, purpose: 'mcp_stdio' as const, identity: {
     kind: 'runtime_bundle_executable' as const, runtimeBundleRef: bundleRef, runtimeBundleManifestDigest: runtime.bundle.manifestDigest,
     executableId: entry.entryId, executionPath: MCP_STDIO_EXECUTION_PATH, executableDigest: entry.digest } };
+  return { target, bytes };
 }
 /** Descriptor artifacts only. This consent selection never opens config,
  * refs, index or objects, and is not the later fresh capture/release fence. */
@@ -332,7 +335,7 @@ export async function readMcpStdioAuthorizationHistory(driver: SqliteDriver, art
       !same(await readCanonicalArtifact(reads, row.responseRef), createResponse(grant)))
     throw new TypeError('MCP identity has no exact original authenticated creation');
   const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(reads, grant.target.identity.runtimeBundleRef);
-  const reproduced = await selectMcpStdioIdentity(reads, { bundle, releaseKeys }, request as McpIdentityCreateRequest, signal);
+  const { target: reproduced } = await selectMcpStdioIdentity(reads, { bundle, releaseKeys }, request as McpIdentityCreateRequest, signal);
   if (!same(reproduced, grant.target) || ![...authorizationOwnersDuring(driver, grant.createdAt, row.committedAt)].some(historical =>
     historical.runtimeBundleRef === reproduced.identity.runtimeBundleRef && historical.runtimeBundleManifestDigest === bundle.manifestDigest))
     throw new TypeError('MCP identity differs from its original owner and signed selection');
@@ -554,7 +557,8 @@ export async function validateAuthorizationHistory(driver: SqliteDriver, artifac
   }
 }
 export const createAuthorization = stateOperation('INVALID_REQUEST', async (driver: SqliteDriver, artifacts: ArtifactCatalog,
-  owner: StateOwnerContext, runtime: AuthorizationRuntime | undefined, value: unknown, identity: AuthenticatedControlIdentity, signal?: AbortSignal) => {
+  owner: StateOwnerContext, runtime: AuthorizationRuntime | undefined, value: unknown, identity: AuthenticatedControlIdentity,
+  signal?: AbortSignal, installed?: HeldInstalledRuntime) => {
   const diagnosis = beginInstalledAuthorizationDiagnostic();
   try {
     signal?.throwIfAborted();
@@ -584,6 +588,8 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       ? await selectSourceReadTarget(driver, artifacts, identity.principalId, request as SourceReadScopeCreateRequest, signal) : undefined;
     const dependency = decision.kind === 'dependency_install_scripts'
       ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;
+    const mcpStdio = decision.kind === 'execution_identity_read' && decision.purpose === 'mcp_stdio'
+      ? await selectMcpStdioIdentity(artifacts, runtime, request as McpIdentityCreateRequest, signal, installed) : undefined;
     const executionIdentity = decision.kind === 'verifier_execution' ? readAuthorizationGrant(driver, decision.executionIdentityGrantId) : undefined;
     let executionCreationAt: string | undefined;
     if (decision.kind === 'verifier_execution') {
@@ -598,7 +604,7 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
       maxCandidateGenerations: decision.maxCandidateGenerations, maxAttemptsPerCandidate: decision.maxAttemptsPerCandidate
     } : decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'
       ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)
-      : decision.purpose === 'mcp_stdio' ? await selectMcpStdioIdentity(artifacts, runtime, request as McpIdentityCreateRequest, signal)
+      : decision.purpose === 'mcp_stdio' ? mcpStdio!.target
       : await (async () => {
         const selected = await readRetainedVerifierToolchain(artifacts, { ...runtime, guestToolchainManifestId: decision.target.guestToolchainManifestId, signal });
         signal?.throwIfAborted(); const node = selected.manifest.node;
@@ -607,6 +613,12 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
           guestToolchainManifestRef: selected.manifestRef, manifestDigest: selected.manifest.manifestDigest,
           toolId: node.logicalName, executionPath: node.canonicalGuestPath, executableDigest: node.digest } };
       })();
+    let mcpServerArtifact: PublishedArtifact | undefined;
+    if (installed && mcpStdio) {
+      mcpServerArtifact = await artifacts.publishBytes(mcpStdio.bytes, 'application/octet-stream', 'cliq-runtime-bundle-entry-v1');
+      if (mcpServerArtifact.ref !== mcpStdio.target.identity.executableDigest)
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained MCP server differs from its exact signed bytes');
+    }
     // Preparation fixes the original response bytes and TTL. Only the later
     // transaction's fresh sample may register that grant and advance its fence.
     const createdAt = sampleCanonicalNow(), base = { schemaVersion: 1 as const,
@@ -666,6 +678,7 @@ export const createAuthorization = stateOperation('INVALID_REQUEST', async (driv
           throw new VerifierAuthorizationError('AUTHORIZATION_REQUIRED');
       }
       for (const metadata of [...channel.metadata, requestArtifact, published]) insertArtifactMetadata(connection, metadata, now);
+      if (mcpServerArtifact) insertArtifactMetadata(connection, mcpServerArtifact, now);
       insertAuthorizationGrant(connection, grant);
       insertControlRequest(connection, { ...identity, method: 'authorization.create', requestId: request.requestId,
         requestDigest: request.requestDigest, responseRef: published.ref, committedAt: now }); committed = true;

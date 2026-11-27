@@ -3,6 +3,7 @@
 /* Distinct signed stdio image. Fixed frames and all received bytes stay in
  * this original process. JS never owns a server pipe or raw IPC frame. */
 #include "mcp-stdio-owner-bridge.h"
+#include "mcp-node-loop.h"
 #include <sys/mman.h>
 #include "mcp-protocol-data.h"
 _Static_assert(CLIQ_MCP_STDIO_MAX_MESSAGE == MCP_PROTOCOL_BODY_CAP, "same original MCP protocol body bound");
@@ -785,7 +786,7 @@ static bool stdio_register_peer(struct cliq_mcp_stdio_recipe *recipe, struct cli
     struct broker *broker = recipe->owner;
     if (!stdio_current(broker, recipe->environment) || broker->closing || broker->peer || recipe->consumed ||
         peer->abi_version != CLIQ_MCP_STDIO_OWNER_ABI || peer->recipe != recipe || peer->purpose != recipe->purpose ||
-        peer->creator_pid != getpid() || peer->environment != broker->env || !peer->assert_current || !peer->assert_current(peer) ||
+        peer->creator_pid != getpid() || !cliq_mcp_same_node_loop(broker->env, peer->environment) || !peer->assert_current || !peer->assert_current(peer) ||
         napi_create_reference(broker->env, (napi_value)value, 1, &broker->peer_ref) != napi_ok) return false;
     broker->peer = peer; return true;
 }

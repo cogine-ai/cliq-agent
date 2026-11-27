@@ -22,6 +22,24 @@ function compile(args: string[]): void {
   assert.equal(result.signal, null); assert.equal(result.status, 0, result.stderr);
 }
 
+test('two actual native addons bind the same Node loop without sharing an addon receiver', { skip: !linux }, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-mcp-node-loop-'));
+  try {
+    const headers = path.resolve(path.dirname(realpathSync(process.execPath)), '../include/node');
+    const require = createRequire(import.meta.url);
+    const bindings = ['origin', 'receiver'].map(name => {
+      const binary = path.join(directory, name + '.node');
+      compile(['-std=c11', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC', '-I', headers,
+        'native/linux/mcp-node-loop-fixture.c', '-o', binary]);
+      return require(binary) as { capture(): unknown; compare(peer: unknown): { sameAddon: boolean; sameLoop: boolean } };
+    });
+    const [origin, receiver] = bindings;
+    const peer = origin!.capture();
+    assert.deepEqual(origin!.compare(peer), { sameAddon: true, sameLoop: true });
+    assert.deepEqual(receiver!.compare(peer), { sameAddon: false, sameLoop: true });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test('actual C Admin lifecycle data rejects truncated, foreign and substituted binary chains', { skip: !linux }, async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-mcp-admin-data-'));
   try {

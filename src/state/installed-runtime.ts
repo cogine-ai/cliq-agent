@@ -17,6 +17,7 @@ import { sampleCanonicalNow } from './canonical-time.js';
 import { signedKernelSchemaProfile, decodeSignedKernelSchema, schemaConversionProfile, decodeSchemaConversion, kernelSchemaEntries } from './signed-schema.js';
 import { BUILTIN_SCRIPT_RECIPE } from '../sandbox/builtin-tool-data.js';
 import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
+import { MCP_STDIO_EXECUTABLE_BYTES } from '../sandbox/mcp-stdio-executable.js';
 import type { NativeBuiltinBashToolchain } from '../sandbox/guest-toolchain.js';
 import { waitForGuestToolchainReady } from '../sandbox/guest-toolchain-wait.js';
 import type { NativeBuiltinToolScriptImage, NativeDependencyNpmScriptImage, NativeDependencyNpmDataImage } from '../sandbox/linux-worker.js';
@@ -403,6 +404,7 @@ type InstalledRuntimeBinding = {
   startBuiltinBashToolchain(toolchain: RetainedVerifierToolchain, options: { signal?: AbortSignal }): Promise<NativeBuiltinBashToolchain>;
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   sealMcpAdminProbe(signal?: AbortSignal): Promise<NativeMcpAdminProbeImage>;
+  readMcpStdioServerBytes(bundleRef: string, entryId: string, signal?: AbortSignal): Promise<Buffer>;
   sealMcpStdioServer(entryId: string, signal?: AbortSignal, role?: 'mcp_server' | 'mcp_recovery_adapter'): Promise<NativeMcpStdioServerImage>;
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   retainLocalInferenceRuntime(expectedBundleRef: string, signal?: AbortSignal): Promise<readonly PublishedArtifact[]>;
@@ -650,6 +652,13 @@ export function sealInstalledMcpAdminProbe(selected: HeldInstalledRuntime, signa
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('MCP Admin probing requires a genuine held installed selection');
   return binding.sealMcpAdminProbe(signal);
+}
+/** Audit bytes of the exact signed server. Only the native seal can execute it. */
+export function readInstalledMcpStdioServerBytes(selected: HeldInstalledRuntime, bundleRef: string, entryId: string,
+  signal?: AbortSignal): Promise<Buffer> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('MCP identity requires a genuine held installed selection');
+  return binding.readMcpStdioServerBytes(bundleRef, entryId, signal);
 }
 /** The entry id selects only a held member of the current verified bundle.
  * The purpose-specific native seal repeats the complete static ELF check. */
@@ -3306,6 +3315,18 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               }
               await checkedRevalidate(signal);
               return Object.freeze(metadata);
+            });
+          },
+          readMcpStdioServerBytes(bundleRef, entryId, signal) {
+            return enqueue(async () => {
+              await checkedRevalidate(signal);
+              const entry = signed.bundle.entries.find(value => value.entryId === entryId), file = signed.entries.get(entryId);
+              if (signed.bundleDigest !== bundleRef || !entry || !file || entry.role !== 'mcp_server' ||
+                  !entry.executable || entry.byteCount < 1 || entry.byteCount > MCP_STDIO_EXECUTABLE_BYTES)
+                mismatch('MCP identity differs from its exact current signed server');
+              const bytes = await readSmall(file, MCP_STDIO_EXECUTABLE_BYTES, signal);
+              await checkedRevalidate(signal);
+              return bytes;
             });
           },
           sealMcpStdioServer(entryId, signal, role = 'mcp_server') {

@@ -1,6 +1,7 @@
 #ifndef CLIQ_MCP_STDIO_NATIVE_H
 #define CLIQ_MCP_STDIO_NATIVE_H
 #include "mcp-stdio-owner-bridge.h"
+#include "mcp-node-loop.h"
 #include <sys/mman.h>
 static const napi_type_tag MCP_STDIO_ADMIN_CLEANUP_TAG = {UINT64_C(0xb917fa69c342fb4a), UINT64_C(0x1507d59b73bad66a)};
 static const napi_type_tag MCP_STDIO_RECOVERY_CLEANUP_TAG = {UINT64_C(0xc468d2eaf4b37e2f), UINT64_C(0x1a4ded3a5ef1dedb)};
@@ -472,25 +473,25 @@ static napi_value reserve_mcp_stdio(napi_env env, napi_callback_info info, unsig
         !tagged(env, args[2], &IMAGE_TAG, (void **)&bwrap) || bwrap->fd < 0 ||
         !tagged(env, args[3], purpose == CLIQ_MCP_STDIO_ADMIN ? &CLIQ_MCP_STDIO_ADMIN_RECIPE_TAG : purpose == CLIQ_MCP_STDIO_RECOVERY ? &CLIQ_MCP_STDIO_RECOVERY_RECIPE_TAG : &CLIQ_MCP_STDIO_RUN_RECIPE_TAG, (void **)&recipe) ||
         recipe->abi_version != CLIQ_MCP_STDIO_OWNER_ABI || recipe->purpose != purpose || recipe->creator_pid != getpid() ||
-        recipe->environment != env || recipe->fd < 0 || recipe->consumed || !recipe->register_peer || !recipe->owner_value ||
+        !cliq_mcp_same_node_loop(env, recipe->environment) || recipe->fd < 0 || recipe->consumed || !recipe->register_peer || !recipe->owner_value ||
         !tagged(env, args[4], &CLIQ_MCP_STDIO_SERVER_TAG, (void **)&server) || !mcp_stdio_server_current(env, server) || server->fd < 0 ||
         server->byte_count != recipe->header.server_bytes || strcmp(server->digest, recipe->header.server_digest) ||
         napi_is_buffer(env, args[5], &buffer) != napi_ok || !buffer || napi_get_buffer_info(env, args[5], &bytes, &size) != napi_ok ||
         size != sizeof(struct cliq_mcp_stdio_limits)) return failure(env, "MCP stdio requires exact original purpose inputs and signed images");
     if (purpose == CLIQ_MCP_STDIO_ADMIN) {
         if (!tagged(env, args[0], &CLIQ_MCP_STDIO_ADMIN_INPUT_TAG, (void **)&admin) ||
-            admin->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || admin->creator_pid != getpid() || admin->environment != env ||
+            admin->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || admin->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, admin->environment) ||
             !admin->assert_current || !admin->assert_current(admin) || !admin->retire ||
             admin->binding.magic != CLIQ_MCP_STDIO_ADMIN_BIRTH_MAGIC || atomic_load(&admin->closed) || atomic_load(&admin->execution_claimed))
             return failure(env, "MCP stdio Admin input is not its original execution custody");
     } else if (purpose == CLIQ_MCP_STDIO_RECOVERY) {
         if (!tagged(env, args[0], &CLIQ_MCP_STDIO_RECOVERY_INPUT_TAG, (void **)&recovery) ||
-            recovery->abi_version != CLIQ_MCP_STDIO_RECOVERY_INPUT_ABI || recovery->creator_pid != getpid() || recovery->environment != env ||
+            recovery->abi_version != CLIQ_MCP_STDIO_RECOVERY_INPUT_ABI || recovery->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, recovery->environment) ||
             !recovery->assert_current || !recovery->assert_current(recovery) || !recovery->retire ||
             recovery->binding.magic != CLIQ_MCP_STDIO_RECOVERY_BIRTH_MAGIC || atomic_load(&recovery->closed) || atomic_load(&recovery->execution_claimed))
             return failure(env, "MCP stdio recovery input is not its original probe custody");
     } else if (purpose != CLIQ_MCP_STDIO_RUN || !tagged(env, args[0], &CLIQ_MCP_STDIO_RUN_INPUT_TAG, (void **)&run) ||
-        run->abi_version != CLIQ_MCP_STDIO_RUN_INPUT_ABI || run->creator_pid != getpid() || run->environment != env ||
+        run->abi_version != CLIQ_MCP_STDIO_RUN_INPUT_ABI || run->creator_pid != getpid() || !cliq_mcp_same_node_loop(env, run->environment) ||
         !run->assert_current || !run->assert_current(run) || !run->retire ||
         run->binding.magic != CLIQ_MCP_STDIO_RUN_BIRTH_MAGIC || atomic_load(&run->closed) || atomic_load(&run->execution_claimed))
         return failure(env, "MCP stdio Run input is not its original execution custody");
@@ -653,17 +654,17 @@ static napi_value cleanup_mcp_stdio(napi_env env, napi_callback_info info, unsig
         return failure(env, "MCP stdio cleanup requires the exact current dedicated checker");
     if (purpose == CLIQ_MCP_STDIO_ADMIN) {
         if (!tagged(env, args[0], &CLIQ_MCP_STDIO_ADMIN_RETAINED_INPUT_TAG, (void **)&admin) ||
-            admin->creator_pid != getpid() || admin->environment != env || admin->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI ||
+            admin->creator_pid != getpid() || admin->abi_version != CLIQ_MCP_ADMIN_INPUT_ABI || !cliq_mcp_same_node_loop(env, admin->environment) ||
             !admin->assert_current || !admin->assert_current(admin) || !admin->retire || atomic_load(&admin->execution_claimed))
             return failure(env, "MCP stdio original retained Admin custody refused");
     } else if (purpose == CLIQ_MCP_STDIO_RECOVERY) {
         if (!tagged(env, args[0], &CLIQ_MCP_STDIO_RECOVERY_RETAINED_INPUT_TAG, (void **)&recovery) ||
-            recovery->creator_pid != getpid() || recovery->environment != env || recovery->abi_version != CLIQ_MCP_STDIO_RECOVERY_INPUT_ABI ||
+            recovery->creator_pid != getpid() || recovery->abi_version != CLIQ_MCP_STDIO_RECOVERY_INPUT_ABI || !cliq_mcp_same_node_loop(env, recovery->environment) ||
             !recovery->assert_current || !recovery->assert_current(recovery) || !recovery->retire || atomic_load(&recovery->execution_claimed) ||
             epoch <= recovery->binding.identity.inspectorStateOwnerEpoch || !strcmp(supervisor, recovery->binding.identity.inspectorSupervisorInstanceId))
             return failure(env, "MCP stdio original retained recovery custody refused");
     } else if (purpose != CLIQ_MCP_STDIO_RUN || !tagged(env, args[0], &CLIQ_MCP_STDIO_RUN_RETAINED_INPUT_TAG, (void **)&run) ||
-        run->creator_pid != getpid() || run->environment != env || run->abi_version != CLIQ_MCP_STDIO_RUN_INPUT_ABI ||
+        run->creator_pid != getpid() || run->abi_version != CLIQ_MCP_STDIO_RUN_INPUT_ABI || !cliq_mcp_same_node_loop(env, run->environment) ||
         !run->assert_current || !run->assert_current(run) || !run->retire || atomic_load(&run->execution_claimed))
         return failure(env, "MCP stdio original retained Run custody refused");
     struct mcp_stdio_native_scope *scope = calloc(1, sizeof(*scope));
