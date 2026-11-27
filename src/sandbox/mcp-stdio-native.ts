@@ -147,6 +147,8 @@ function prepare(input: Construction, physical: Input, binding: AdminMcpStdioInp
     try {
       for (;;) {
         joined = native.pollJoined() ?? joined;
+        // A cancelled pre-READY controller can already have persisted and joined its own ACK.
+        if (joined?.outputCustodyRetired) break;
         if (joined?.deathJoined) {
           if (!acknowledging) { native.beginOutputAck(); acknowledging = true; }
           native.pollOutputAck(); joined = native.pollJoined() ?? joined;

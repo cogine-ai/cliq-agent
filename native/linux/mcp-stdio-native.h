@@ -36,7 +36,7 @@ static bool mcp_stdio_native_current(struct mcp_stdio_native_scope *scope) {
     struct controller *c = scope ? scope->controller : NULL;
     return c && scope->bridge.creator_pid == getpid() && scope->bridge.environment == c->env && syscall(SYS_gettid) == getpid() &&
         !c->retirement_failed && !atomic_load(&native_retirement_failed) &&
-        (scope->acked || (c->closed && c->cleanup_queued && !c->cleanup_done) || (!c->closed && anchor_current(c) && controller_placement(c, c->token) &&
+        ((c->closed && c->cleanup_queued && !c->cleanup_done) || scope->acked || (!c->closed && anchor_current(c) && controller_placement(c, c->token) &&
         (scope->admin ? scope->admin->assert_current && scope->admin->assert_current(scope->admin) :
         scope->recovery ? scope->recovery->assert_current && scope->recovery->assert_current(scope->recovery) :
         scope->run && scope->run->assert_current && scope->run->assert_current(scope->run))));
@@ -54,7 +54,9 @@ static void mcp_stdio_mark_failure(struct mcp_stdio_native_scope *scope) {
     scope->controller->retirement_failed = true; atomic_store(&native_retirement_failed, true);
 }
 static int mcp_stdio_poll_pending(struct mcp_stdio_native_scope *scope) {
-    if (scope->controller->closed) return scope->acked ? 1 : scope->controller->cleanup_done ? -1 : 0;
+    /* The close worker can find the original durable ACK before the main
+     * thread has joined input and output custody. Observe it only afterwards. */
+    if (scope->controller->closed) return !scope->controller->cleanup_done ? 0 : scope->acked ? 1 : -1;
     if (!scope->pending) return 1;
     struct controller *c = scope->controller;
     if (!mcp_stdio_native_current(scope) || c->pending != scope->pending || c->pending_scope) return -1;
