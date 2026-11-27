@@ -1,14 +1,20 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef } from '../kernel/identity.js';
+import { mcpExposedToolName, mcpExposedToolDescription } from '../kernel/mcp.js';
 import type { PolicyEngineProfileV1, RunPolicySnapshotV1 } from '../kernel/tool-authorization.js';
 import type { RunAssemblyV1, ToolContractManifestV1 } from '../kernel/types.js';
+import type { RetainedVerifierToolchain } from '../state/guest-toolchain.js';
+import { BUILTIN_SCRIPT_TOOL_NAMES, decodeToolExecutionIdentity, assertBuiltinScriptGuest } from '../tools/execution-identity.js';
+import { MCP_STDIO_EXECUTION_PATH } from '../sandbox/mcp-stdio-executable.js';
 
 /** Supplied by trusted Supervisor composition, never by a Run, repository, worker or control request. */
 export type ReleaseTrustKey = { keyId: string; publicKeyPem: string };
 
-export type RuntimeBundleManifest = {
-  schemaVersion: 1; bundleVersion: string;
+export const SINGLE_CAS_STREAMS_LAYOUT = 'single_cas_streams_v1' as const;
+
+type RuntimeBundleContents = {
+  bundleVersion: string;
   controlProtocolRange: { min: 1; max: 1 };
   headlessSchemaRange: { min: number; max: number };
   stateSchemaRange: { min: number; max: number };
@@ -20,6 +26,13 @@ export type RuntimeBundleManifest = {
   guestToolchainManifestRefs: string[];
   publisherKeyId: string; manifestDigest: string; signature: string;
 };
+
+/** Version 1 remains readable as original signed history. New installed
+ * execution requires the explicitly signed version 2 custody contract. */
+export type RuntimeBundleManifest = RuntimeBundleContents & (
+  { schemaVersion: 1; installedLayout?: never } |
+  { schemaVersion: 2; installedLayout: typeof SINGLE_CAS_STREAMS_LAYOUT }
+);
 
 export function exactKeys(value: object, keys: readonly string[]): boolean {
   return value !== null && typeof value === 'object' && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
@@ -41,7 +54,8 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
   const { signature: _signature, manifestDigest: _digest, ...bundleCore } = bundle;
   if (!exactKeys(bundle, ['schemaVersion', 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
     'stateSchemaRange', 'workerProtocolRange', 'entries', 'structuredArtifacts', 'guestToolchainManifestRefs',
-    'publisherKeyId', 'manifestDigest', 'signature']) || bundle.schemaVersion !== 1 ||
+    'publisherKeyId', 'manifestDigest', 'signature', ...(bundle.schemaVersion === 2 ? ['installedLayout'] : [])]) ||
+      !(bundle.schemaVersion === 1 || bundle.schemaVersion === 2 && bundle.installedLayout === SINGLE_CAS_STREAMS_LAYOUT) ||
       typeof bundle.bundleVersion !== 'string' || !bundle.bundleVersion || canonicalJsonBytes(bundle).byteLength > 1_048_576 ||
       canonicalSha256(bundleCore) !== bundle.manifestDigest) throw new TypeError('RuntimeBundle identity mismatch');
   for (const range of [bundle.controlProtocolRange, bundle.headlessSchemaRange, bundle.stateSchemaRange, bundle.workerProtocolRange]) {
@@ -84,6 +98,8 @@ export function verifyRuntimeBundle(bundle: RuntimeBundleManifest, releaseKeys: 
 export function verifyToolRuntimeAuthority(input: {
   assembly: RunAssemblyV1; policy: RunPolicySnapshotV1; bundle: RuntimeBundleManifest;
   profile: PolicyEngineProfileV1; tools: ToolContractManifestV1['entries']; releaseKeys: readonly ReleaseTrustKey[];
+  guestToolchain?: RetainedVerifierToolchain;
+  mcpRegistries?: readonly Readonly<{ ref: string; registry: import('../kernel/mcp.js').McpRegistryRevisionV1 }>[];
 }): void {
   const { assembly, policy, bundle, profile, tools, releaseKeys } = input;
   verifyRuntimeBundle(bundle, releaseKeys);
@@ -113,7 +129,89 @@ export function verifyToolRuntimeAuthority(input: {
   };
   executable(assembly.runtime.workerExecutableId, assembly.runtime.workerExecutableDigest, 'worker');
   executable(assembly.provider.adapter.adapterId, assembly.provider.adapter.codeDigest, 'provider_adapter', assembly.provider.adapter.version);
-  for (const tool of tools) if (tool.execution.kind === 'builtin') {
-    executable(tool.execution.adapterId, tool.execution.adapterCodeDigest, 'tool_adapter', tool.execution.adapterVersion);
+  const mcp = input.mcpRegistries ?? [];
+  if (mcp.length !== assembly.mcpServers.length || new Set(mcp.map(item => item.registry.registrationId)).size !== mcp.length)
+    throw new TypeError('tool authority lacks the exact complete frozen MCP registry set');
+  for (const selected of assembly.mcpServers) {
+    const retained = mcp.find(item => item.registry.registrationId === selected.registrationId);
+    if (!retained || retained.ref !== selected.registryRevisionRef || canonicalSha256(retained.registry) !== retained.ref ||
+        retained.registry.manifestDigest !== selected.manifestDigest || retained.registry.registryRevision !== selected.registryRevision ||
+        retained.registry.ownerPrincipalId !== policy.principalId || retained.registry.stateModel !== 'stateless_per_call' ||
+        (retained.registry.transport.kind === 'streamable_http' && retained.registry.transport.credentialGrantRefs.length > 1))
+      throw new TypeError('MCP tool authority substitutes its principal, frozen registry or supported recovery');
+    for (const { recovery } of retained.registry.tools) {
+      if (recovery.kind === 'manual' || recovery.kind === 'retry') continue;
+      if (recovery.kind !== 'reconcile' || retained.registry.transport.kind !== 'stdio' ||
+          bundle.structuredArtifacts.filter(root => root.kind === 'mcp_recovery_adapter' &&
+            root.artifactRef === recovery.adapterRef && root.semanticDigest === recovery.adapterDigest).length !== 1)
+        throw new TypeError('MCP reconcile requires the original signed stdio recovery adapter');
+    }
+    if (retained.registry.transport.kind === 'stdio') {
+      const identity = retained.registry.transport.executable;
+      if (identity.kind !== 'runtime_bundle' || identity.runtimeBundleRef !== assembly.runtime.runtimeBundleRef ||
+          identity.runtimeBundleRef !== canonicalSha256(bundle))
+        throw new TypeError('MCP stdio requires its exact current signed runtime executable closure');
+      executable(identity.executableId, identity.executableDigest, 'mcp_server');
+      const server = bundle.entries.find(entry => entry.entryId === identity.executableId)!;
+      if (identity.executionPath !== MCP_STDIO_EXECUTION_PATH || server.byteCount < 1 || server.byteCount > 268_435_456)
+        throw new TypeError('MCP stdio executable differs from its exact signed path or supported file bound');
+      assertMcpStdioRuntimeRecipe(bundle);
+    }
   }
+  for (const tool of tools) {
+    const execution = decodeToolExecutionIdentity(tool.execution);
+    if (execution.kind === 'builtin') {
+      if (tool.access === 'control') throw new TypeError('a Supervisor control handler cannot be an executable tool adapter');
+      executable(execution.adapterId, execution.adapterCodeDigest, 'tool_adapter', execution.adapterVersion);
+    } else if (execution.kind === 'builtin_script') {
+      const entry = bundle.entries.find(entry => entry.entryId === execution.adapterId), guest = input.guestToolchain;
+      if (!BUILTIN_SCRIPT_TOOL_NAMES.some(name => name === tool.name) || tool.access !== (tool.name === 'bash' ? 'exec' : 'read') ||
+          tool.replayClass !== (tool.name === 'bash' ? 'manual' : 'retry') || !entry || entry.role !== 'tool_adapter' || entry.executable ||
+          entry.version !== execution.adapterVersion || entry.digest !== execution.adapterCodeDigest ||
+          entry.relativePath !== 'adapters/builtin-tools.mjs' || entry.byteCount < 1 || entry.byteCount > 1_048_576 || !guest ||
+          canonicalSha256(guest.manifest) !== guest.manifestRef || guest.manifestRef !== execution.guestToolchainManifestRef ||
+          guest.manifest.manifestDigest !== execution.guestToolchainManifestDigest ||
+          guest.manifestRef !== assembly.runtime.guestToolchainManifestRef ||
+          guest.manifest.manifestDigest !== assembly.runtime.guestToolchainManifestDigest ||
+          guest.manifest.node.logicalName !== execution.toolId || guest.manifest.node.canonicalGuestPath !== execution.executionPath ||
+          guest.manifest.node.digest !== execution.executableDigest || bundle.structuredArtifacts.filter(root => root.kind === 'guest_toolchain' &&
+            root.artifactRef === guest.manifestRef && root.semanticDigest === guest.manifest.manifestDigest).length !== 1)
+        throw new TypeError('builtin script differs from its signed data and complete guest Node identity');
+      assertBuiltinScriptGuest(guest.manifest, [tool.name]);
+    } else if (execution.kind === 'supervisor_control') {
+      if (tool.name !== execution.handlerId || !['request_input', 'await_children'].includes(tool.name) || tool.access !== 'control' || tool.replayClass !== 'manual' ||
+          tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
+        throw new TypeError('unsupported compiled Supervisor control handler');
+      executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
+    } else if (execution.kind === 'supervisor_operation') {
+      if (!['delegate', 'skill_resource'].includes(tool.name) || execution.handlerId !== tool.name ||
+          tool.access !== (tool.name === 'skill_resource' ? 'read' : 'exec') || tool.replayClass !== 'retry' ||
+          tool.outputSchemaRef !== undefined || tool.outputSchemaDigest !== undefined)
+        throw new TypeError('unsupported signed Supervisor local operation');
+      executable(execution.supervisorEntryId, execution.supervisorExecutableDigest, 'supervisor', execution.supervisorEntryVersion);
+    } else if (execution.kind === 'mcp') {
+      const retained = mcp.find(item => item.registry.registrationId === execution.registrationId);
+      const contract = retained?.registry.tools.find(item => item.name === execution.serverToolName);
+      if (!retained || !contract || retained.ref !== execution.registryRevisionRef ||
+          retained.registry.manifestDigest !== execution.registryManifestDigest || contract.toolContractDigest !== execution.toolContractDigest ||
+          tool.name !== mcpExposedToolName(execution.registrationId, execution.serverToolName) || tool.version !== contract.version ||
+          tool.description !== mcpExposedToolDescription(execution.registrationId, execution.serverToolName, contract.description) || tool.access !== 'exec' ||
+          tool.replayClass !== contract.recovery.kind || tool.inputSchemaRef !== contract.inputSchemaRef || tool.inputSchemaDigest !== contract.inputSchemaDigest ||
+          tool.outputSchemaRef !== contract.outputSchemaRef || tool.outputSchemaDigest !== contract.outputSchemaDigest)
+        throw new TypeError('MCP tool differs from its exact frozen recovery contract');
+    }
+  }
+}
+/** Signed data recipe support only. The genuine installed factories still
+ * enforce actual native image/purpose, static ELF, custody and release gates. */
+export function assertMcpStdioRuntimeRecipe(bundle: RuntimeBundleManifest): void {
+  const exact = (id: string, relativePath?: string) => bundle.entries.filter(entry => entry.entryId === id &&
+    entry.role === 'platform_helper' && entry.executable === true && entry.byteCount > 0 && entry.byteCount <= 268_435_456 &&
+    (relativePath === undefined || entry.relativePath === relativePath));
+  if (exact('mcp-stdio-broker-v1', 'native/linux-x64/linux-mcp-stdio-broker.node').filter(entry => entry.version === '1').length !== 1 ||
+      exact('linux_worker_controller').length !== 1 || exact('linux_bubblewrap').length !== 1)
+    throw new TypeError('MCP stdio complete fixed signed platform recipe is unavailable');
+  const roots = bundle.entries.filter(entry => entry.entryId === 'installed-empty-root' && entry.role === 'sandbox_root_profile' &&
+    entry.executable === false && entry.byteCount > 0);
+  if (roots.length !== 1) throw new TypeError('MCP stdio exact signed empty root is unavailable');
 }

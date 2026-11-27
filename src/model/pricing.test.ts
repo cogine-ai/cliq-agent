@@ -8,6 +8,7 @@ import {
   calculateModelCostMicros,
   ceilTokenPriceMicros,
   createModelRequestReservation,
+  decodeLocalZeroCostProvenanceData,
   priceTableDigest,
   validateModelPricing,
   type LocalZeroCostProvenanceV1,
@@ -19,6 +20,17 @@ import {
 const ENDPOINT_DIGEST = '1'.repeat(64);
 const CREDENTIAL_REF = '2'.repeat(64);
 const AUTHORITY_REF = '3'.repeat(64);
+
+test('retained local zero-cost provenance requires its original registration ref and semantic digest', () => {
+  const original = localProvenance();
+  assert.deepEqual(decodeLocalZeroCostProvenanceData(original), original);
+  const { localModelRegistrationRef: _reference, localModelRegistrationDigest: _digest, provenanceDigest: _self, ...missing } = original;
+  assert.throws(() => decodeLocalZeroCostProvenanceData({ ...missing, provenanceDigest: canonicalSha256(missing) }));
+  for (const field of ['localModelRegistrationRef', 'localModelRegistrationDigest'] as const) {
+    const { provenanceDigest: _old, ...core } = { ...original, [field]: 'not-an-artifact' };
+    assert.throws(() => decodeLocalZeroCostProvenanceData({ ...core, provenanceDigest: canonicalSha256(core) }));
+  }
+});
 
 function priceTable(): ModelPriceTableV1 {
   const withoutDigest = {
@@ -85,6 +97,8 @@ function localProvenance(): LocalZeroCostProvenanceV1 {
     ownerPrincipalId: 'principal-1',
     provider: 'ollama' as const,
     model: 'qwen-test',
+    localModelRegistrationRef: 'c'.repeat(64),
+    localModelRegistrationDigest: 'd'.repeat(64),
     serviceSpecRef: '5'.repeat(64),
     serviceSpecDigest: '6'.repeat(64),
     stableServiceIdentityDigest: '7'.repeat(64),

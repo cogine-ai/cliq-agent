@@ -9,7 +9,8 @@ import { immutableSnapshot } from '../model/immutable.js';
 import { decodeCredentialPlatformUser, decodeUserManagerObservation, type CredentialPlatformUser,
   type InstalledUnitObservation, type NativeCredentialPlatformBinding, type UserManagerObservation } from './credential-platform.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { loadInstalledCredentialPlatform, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import { assertInstalledManagerObservationAvailable, loadInstalledCredentialPlatform, loadInstalledManagerObserver, withHeldInstalledRuntime,
+  type HeldInstalledRuntime, type InstalledManagerObserver } from './installed-runtime.js';
 import { stateRootIdentityFromDescriptor } from './native-owner.js';
 
 // The initial ELF must not consume these loading inputs before the signed
@@ -196,15 +197,20 @@ function checkEffectiveUnit(observation: UserManagerObservation, profile: Profil
   return unit;
 }
 
-async function withProfiles<T>(selected: HeldInstalledRuntime, create: boolean,
-  operation: (input: { platform: NativeCredentialPlatformBinding; user: CredentialPlatformUser; profiles: Profiles;
+async function withProfiles<T, P extends NativeCredentialPlatformBinding | InstalledManagerObserver>(selected: HeldInstalledRuntime,
+  create: boolean, platform: P,
+  operation: (input: { platform: P; user: CredentialPlatformUser; profiles: Profiles;
     scope: ProfileScope; directory: Directory; directoryPath: string; stateRoot: string }) => Promise<T>): Promise<T> {
-  // Genuine selection lookup precedes currentUser or any caller property.
-  const platform = await loadInstalledCredentialPlatform(selected); healthy();
-  const user = decodeCredentialPlatformUser(platform.currentUser());
-  if (process.platform !== 'linux' || user.uid !== process.geteuid!() || user.gid !== process.getegid!() || normalizeAbsolutePath(user.home) !== user.home)
-    refuse('installed service setup requires the actual same-user Linux passwd home');
+  // Both fixed loaders look up the genuine selection before observing caller
+  // properties. The ordinary client supplies no mutating platform capability.
+  healthy();
+  assertInstalledManagerObservationAvailable(selected);
   return withHeldInstalledRuntime(selected, async installed => {
+    // A cached native capability still observes the user anew, only after this
+    // borrow's full-byte entry revalidation. Metadata is never its substitute.
+    const user = decodeCredentialPlatformUser(platform.currentUser());
+    if (process.platform !== 'linux' || user.uid !== process.geteuid!() || user.gid !== process.getegid!() || normalizeAbsolutePath(user.home) !== user.home)
+      refuse('installed service setup requires the actual same-user Linux passwd home');
     if (installed.stateRoot.ownerUid !== user.uid) refuse('installed service root owner differs from the actual user');
     const root = stateRootIdentityFromDescriptor(installed.stateRoot.canonicalPath, installed.stateRoot);
     const profiles = installedServiceProfiles(root.canonicalAbsolutePath, root.identityDigest), scope = new ProfileScope(user.uid);
@@ -218,7 +224,10 @@ async function withProfiles<T>(selected: HeldInstalledRuntime, create: boolean,
         if (!present[0]) await scope.create(directory, profiles.keeper);
         if (!present[1]) await scope.create(directory, profiles.supervisor);
       }
-      await installed.revalidate();
+      // A readonly observation stays inside this borrow's full-byte entry and
+      // exit checks; each native call also checks the held selection. Mutating
+      // capabilities retain their additional check before any manager action.
+      if (create || !('inspect' in platform)) await installed.revalidate();
       const result = await operation({ platform, user, profiles, scope, directory,
         directoryPath: path.join(user.home, '.config/systemd/user'), stateRoot: root.canonicalAbsolutePath });
       await scope.assertHeld(); await installed.revalidate(); return result;
@@ -232,7 +241,7 @@ async function withProfiles<T>(selected: HeldInstalledRuntime, create: boolean,
 /** Explicit same-user setup only: create missing fixed bytes, fsync, reload.
  * It never overwrites edited profiles, enables units or starts the manager. */
 export async function installServices(selected: HeldInstalledRuntime): Promise<Readonly<{ keeperUnit: string; supervisorUnit: string }>> {
-  return withProfiles(selected, true, async ({ platform, user, profiles, scope, directoryPath }) => {
+  return withProfiles(selected, true, await loadInstalledCredentialPlatform(selected), async ({ platform, user, profiles, scope, directoryPath }) => {
     checkedManager(await platform.userManager({ kind: 'reload' }), 'reload', user); await scope.assertHeld();
     for (const profile of [profiles.keeper, profiles.supervisor])
       checkEffectiveUnit(checkedManager(await platform.userManager({ kind: 'inspect', unit: profile.unit }), 'inspect', user), profile, profiles, directoryPath);
@@ -260,18 +269,22 @@ async function keeperReadyHint(stateRoot: string, uid: number): Promise<boolean>
 }
 
 /** Fixed internal friend: callers cannot choose a unit, manager, PID or profile.
- * Ordinary auth only starts already-compatible profiles, never installs/reloads. */
-export async function observeInstalledCredentialSupervisor(selected: HeldInstalledRuntime, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
-  return withProfiles(selected, false, async ({ platform, user, profiles, scope, directoryPath, stateRoot }) => {
+ * Ordinary clients observe only; explicit credential ensure may start already
+ * compatible profiles, never install or reload them. */
+async function observeSupervisor(selected: HeldInstalledRuntime, platform: NativeCredentialPlatformBinding | InstalledManagerObserver,
+  credentialPlatform?: NativeCredentialPlatformBinding): Promise<InstalledCredentialSupervisorObservation> {
+  return withProfiles(selected, false, platform, async ({ platform, user, profiles, scope, directoryPath, stateRoot }) => {
     const inspect = async (profile: Profile) => {
-      const observation = checkedManager(await platform.userManager({ kind: 'inspect', unit: profile.unit }), 'inspect', user);
+      const result = 'inspect' in platform ? await platform.inspect(profile.unit)
+        : await platform.userManager({ kind: 'inspect', unit: profile.unit });
+      const observation = checkedManager(result, 'inspect', user);
       return { observation, unit: checkEffectiveUnit(observation, profile, profiles, directoryPath) };
     };
     let keeper = await inspect(profiles.keeper), supervisor = await inspect(profiles.supervisor);
-    if (startIfNeeded && supervisor.unit.ActiveState !== 'active' && supervisor.unit.ActiveState !== 'activating') {
+    if (credentialPlatform && supervisor.unit.ActiveState !== 'active' && supervisor.unit.ActiveState !== 'activating') {
       if (keeper.unit.ActiveState === 'failed') refuse('installed keeper failed; explicit containment recovery is required');
       if (keeper.unit.ActiveState !== 'active' && keeper.unit.ActiveState !== 'activating') {
-        checkedManager(await platform.userManager({ kind: 'start', unit: profiles.keeper.unit }), 'start', user);
+        checkedManager(await credentialPlatform.userManager({ kind: 'start', unit: profiles.keeper.unit }), 'start', user);
         keeper = await inspect(profiles.keeper);
       }
       // Type=exec orders only initial ELF startup, not keeper publication.
@@ -293,7 +306,7 @@ export async function observeInstalledCredentialSupervisor(selected: HeldInstall
           keeper.unit.ExecMainPID !== readyKeeper.ExecMainPID || keeper.unit.InvocationID !== readyKeeper.InvocationID ||
           keeper.unit.ControlGroup !== readyKeeper.ControlGroup)
         refuse('installed keeper invocation changed after its startup scheduling hint');
-      checkedManager(await platform.userManager({ kind: 'start', unit: profiles.supervisor.unit }), 'start', user);
+      checkedManager(await credentialPlatform.userManager({ kind: 'start', unit: profiles.supervisor.unit }), 'start', user);
       keeper = await inspect(profiles.keeper); supervisor = await inspect(profiles.supervisor);
     }
     if (!canonicalJsonBytes(keeper.observation.bus).equals(canonicalJsonBytes(supervisor.observation.bus)) ||
@@ -302,4 +315,37 @@ export async function observeInstalledCredentialSupervisor(selected: HeldInstall
     return immutableSnapshot({ stateRoot, uid: user.uid, gid: user.gid, supervisor: supervisor.unit, keeper: keeper.unit,
       manager: supervisor.observation.manager, bus: supervisor.observation.bus });
   });
+}
+
+/** One connection reuses only its original loaded platform. Each observation
+ * opens, reads in full and joins a new ProfileScope; no profile inode, manager
+ * observation, user identity or full-byte validation result is cached. */
+export async function loadInstalledSupervisorObserver(selected: HeldInstalledRuntime, purpose: 'control' | 'credential') {
+  if (purpose !== 'control' && purpose !== 'credential') throw new TypeError('invalid installed service observation purpose');
+  const credentialPlatform = purpose === 'credential' ? await loadInstalledCredentialPlatform(selected) : undefined;
+  let managerObserver = purpose === 'control' ? await loadInstalledManagerObserver(selected) : undefined;
+  const observer = Object.freeze({
+    observe(this: unknown, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
+      if (this !== observer || typeof startIfNeeded !== 'boolean' || startIfNeeded && !credentialPlatform)
+        return Promise.reject(new TypeError('installed observation requires its original fixed-purpose connection'));
+      // These synchronous original gates precede enqueue. The real manager
+      // operation below uses its existing direct native job registry, never
+      // another load/borrow that would wait on this cut's own selection tail.
+      assertInstalledManagerObservationAvailable(selected);
+      if (startIfNeeded && credentialPlatform) return observeSupervisor(selected, credentialPlatform, credentialPlatform);
+      // A readonly cut retains the original readonly facade's per-call Busy
+      // checks; a previously loaded credential capability is not its substitute.
+      if (managerObserver) return observeSupervisor(selected, managerObserver);
+      return loadInstalledManagerObserver(selected).then(platform => {
+        managerObserver = platform;
+        return observeSupervisor(selected, platform);
+      });
+    },
+  });
+  return observer;
+}
+
+export async function observeInstalledCredentialSupervisor(selected: HeldInstalledRuntime, startIfNeeded = false): Promise<InstalledCredentialSupervisorObservation> {
+  const observer = await loadInstalledSupervisorObserver(selected, startIfNeeded ? 'credential' : 'control');
+  return observer.observe(!!startIfNeeded);
 }

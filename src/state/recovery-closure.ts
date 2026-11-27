@@ -1,3 +1,6 @@
+import { observeInstalledPublicationWork } from './installed-run-diagnostics.js';
+import { readChildAdmission } from './child-admission.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 import { assertArtifactRef, parseCanonicalTime } from '../kernel/identity.js';
 import type {
   BudgetUsage,
@@ -8,14 +11,16 @@ import type {
   RunAssemblyV1,
   RunItemReferenceV1,
   RunSpec,
+  SourceManifest,
+  FrozenIgnoreRulesV1,
   WorkerLaunch,
   WorkspaceEntryManifest,
-  WorkspaceGenerationStateV1,
-  WorkspaceStateManifest
+  WorkspaceGenerationStateV1
 } from '../kernel/types.js';
-import type { ArtifactCatalog } from './artifacts.js';
-import { validateAgentRecovery } from './agent-recovery.js';
-import { validateStopRecovery } from './stop-recovery.js';
+import { withArtifactReadCache, type ArtifactCatalog } from './artifacts.js';
+import { closeAgentRecoveryData, validateAgentRecovery, validateAgentRecoveryInDeliveryEpoch, validateAgentRecoveryInDeliveryResultEpoch, validateAgentRecoveryInResultEpoch } from './agent-recovery.js';
+import { closeDeliveryReadData, completeDeliveryRecoveryHistory, createDeliveryReadData } from './delivery-read-data.js';
+import { validateStopRecovery, validateStopRecoveryInDeliveryEpoch } from './stop-recovery.js';
 import {
   decodeAdmittedContext,
   decodeBudgetSettlement,
@@ -32,9 +37,10 @@ import {
   decodeWorkspaceGenerationSnapshotEvidence,
   decodeWorkspaceState
 } from './decoders.js';
-import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
-import { validateWorkerRecoveryWait } from './worker-recovery.js';
-import { addBudget, decodeBudgetUsage, isZeroBudget } from './invariants.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { validateWorkerRecoveryWait, validateRetainedWorkerQuarantines } from './worker-recovery.js';
+import { validateManualInvocationWait } from './manual-reconciliation.js';
+import { addBudget, childAllocationBudgetFacts, decodeBudgetUsage, isZeroBudget } from './invariants.js';
 import { readChildAllocationsForRun } from './repositories/child-allocations.js';
 import { readInvocationJournal } from './repositories/journal.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
@@ -45,7 +51,20 @@ import { validateRetainedWorkerSeal } from './tool-checkpoint.js';
 import { readRetiredGenerationSource } from './generation-retirement.js';
 import { validateInstalledBrokerAmbiguityHistory } from './broker-ambiguity.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
-import { validateWorkerPreparationHistory } from './worker-preparation.js';
+import { assertWorkerPreparationCleanupContext, validateWorkerPreparationHistory, type WorkerPreparationCleanupContext } from './worker-preparation.js';
+import { closeAgentResultReadData, createAgentResultReadData, readAgentResultData, readResultBasis, readResultBasisInDeliveryEpoch, validateRunResultRecovery, validateRunResultRecoveryInAgentEpoch,
+  validateRunResultRecoveryInDeliveryEpoch, type AgentResultReadData } from './run-result-recovery.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
+import type { SandboxResourceSpec } from '../kernel/execution.js';
+import { readFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
+import { loadFrozenPrivateGit } from '../workspace/run-workspace/private-git.js';
+import { readSourceProjectionData } from './source-projection-data.js';
+import { decodeSandboxProfile } from './execution-closure.js';
+import { checkSourceManifest } from './source-validation.js';
+import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
+import { readAssemblySkills } from './skill-data.js';
+
+type FrozenSourceContext = Readonly<{ baseRef: string; source: SourceManifest; rules: FrozenIgnoreRulesV1; resources?: SandboxResourceSpec }>;
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -54,8 +73,8 @@ const ZERO_BUDGET: BudgetUsage = {
   repairAttempts: 0
 };
 
-function recoveryFailure(message: string, cause?: unknown): never {
-  if (cause instanceof ResourceRetirementError) throw cause;
+function recoveryFailure(message: string, cause?: unknown, artifacts?: ArtifactCatalog): never {
+  if (cause instanceof ResourceRetirementError || artifacts?.isReadCancellation(cause)) throw cause;
   throw new KernelStorageError('RECOVERY_REQUIRED', message, { cause });
 }
 
@@ -85,43 +104,56 @@ async function requireRecoveryArtifacts(
     requireRecoveryArtifactRef(ref, label);
     if (!unique.has(ref)) unique.set(ref, label);
   }
-  await joinResourceOperations(
-    [...unique].map(async ([ref, label]) => {
+  await artifacts.mapReads(
+    [...unique], async ([ref, label]) => {
       try {
-        await artifacts.readBytes(ref);
+        await artifacts.verifyBytes(ref);
       } catch (error) {
-        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error);
+        recoveryFailure(`${label} is not readable from CAS: ${(error as Error).message}`, error, artifacts);
       }
-    })
+    }
   );
+}
+
+async function requireRecoveryFiles(artifacts: ArtifactCatalog, manifest: WorkspaceEntryManifest, label: string): Promise<void> {
+  await artifacts.mapReads(manifest.entries, async (entry, index) => {
+    if (entry.kind !== 'file') return;
+    try {
+      await artifacts.verifyRetainedChunks(entry.blobRef, entry.size);
+    } catch (error) {
+      recoveryFailure(`${label}.entries[${index}].blobRef is not readable from CAS: ${(error as Error).message}`, error, artifacts);
+    }
+  });
 }
 
 async function validateWorkspaceStateArtifacts(
   artifacts: ArtifactCatalog,
   workspaceStateRef: string,
-  label: string
-): Promise<{ state: WorkspaceStateManifest; entries: WorkspaceEntryManifest }> {
+  label: string,
+  frozen: FrozenSourceContext
+) {
   await requireRecoveryArtifacts(artifacts, [[label, workspaceStateRef]]);
   const state = decodeWorkspaceState(await artifacts.readCanonical(workspaceStateRef));
+  if (state.baseWorkspaceManifestRef !== frozen.baseRef || state.sourceProjectionDigest !== frozen.source.sourceProjectionDigest)
+    recoveryFailure('workspace state substitutes its original admitted base or projection');
   await requireRecoveryArtifacts(artifacts, [
     [`${label}.baseWorkspaceManifestRef`, state.baseWorkspaceManifestRef],
     [`${label}.entriesRef`, state.entriesRef],
     [`${label}.privateGitStateRef`, state.privateGitStateRef]
   ]);
   const entries = decodeWorkspaceEntries(await artifacts.readCanonical(state.entriesRef));
-  await requireRecoveryArtifacts(
-    artifacts,
-    entries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`${label}.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
-  return { state, entries };
+  await loadFrozenPrivateGit(artifacts, frozen.source, state, frozen.rules, undefined, frozen.resources);
+  await requireRecoveryFiles(artifacts, entries, label);
+  return {
+    runId: state.runId, baseWorkspaceManifestRef: state.baseWorkspaceManifestRef, stateDigest: state.stateDigest,
+    entriesRef: state.entriesRef, privateGitStateRef: state.privateGitStateRef, treeDigest: entries.treeDigest
+  };
 }
 
 async function validateRunSpecArtifacts(
   artifacts: ArtifactCatalog,
   runSpec: RunSpec
-): Promise<void> {
+): Promise<FrozenSourceContext> {
   await requireRecoveryArtifacts(artifacts, [
     ['RunSpec.objectiveRef', runSpec.objectiveRef],
     ['RunSpec.admittedContextRef', runSpec.admittedContextRef],
@@ -156,21 +188,25 @@ async function validateRunSpecArtifacts(
   const source = decodeSourceManifest(
     await artifacts.readCanonical(runSpec.baseWorkspaceManifestRef)
   );
+  checkSourceManifest(source);
   const projection = decodeSourceProjection(
     await artifacts.readCanonical(runSpec.sourceProjectionRef)
   );
+  if (!source.git && projection.classificationIndexRef !== undefined) recoveryFailure('non-Git Run has a Git classification index');
   await requireRecoveryArtifacts(artifacts, [
     ['SourceManifest.entriesRef', source.entriesRef],
     ['SourceManifest.sourceProjectionRef', source.sourceProjectionRef],
     ['SourceManifest.frozenIgnoreRulesRef', source.frozenIgnoreRulesRef],
     ['SourceManifest.git.indexRef', source.git?.indexRef],
+    ['SourceProjection.classificationIndexRef', projection.classificationIndexRef],
     ...projection.explicitIncludes.map((include, index) =>
       [`SourceProjection.explicitIncludes[${index}].authorizationRef`, include.authorizationRef] as const
     )
   ]);
-  const rules = decodeFrozenIgnoreRules(
-    await artifacts.readCanonical(source.frozenIgnoreRulesRef)
-  );
+  const resources = source.git || projection.explicitIncludes.length
+    ? decodeSandboxProfile(await artifacts.readCanonical(runSpec.sandboxProfileRef)).resources : undefined;
+  const classification = resources ? await readSourceProjectionData(artifacts, source, projection, resources) : undefined;
+  const rules = classification?.rules ?? await readFrozenIgnoreRules(artifacts, source.frozenIgnoreRulesRef);
   await requireRecoveryArtifacts(
     artifacts,
     rules.sources.map((ruleSource, index) =>
@@ -187,12 +223,8 @@ async function validateRunSpecArtifacts(
   if (sourceEntries.treeDigest !== source.treeDigest) {
     recoveryFailure('SourceManifest entries do not match its tree digest');
   }
-  await requireRecoveryArtifacts(
-    artifacts,
-    sourceEntries.entries
-      .filter((entry) => entry.kind === 'file')
-      .map((entry, index) => [`SourceManifest.entries[${index}].blobRef`, entry.blobRef] as const)
-  );
+  await requireRecoveryFiles(artifacts, sourceEntries, 'SourceManifest');
+  return { baseRef: runSpec.baseWorkspaceManifestRef, source, rules, ...(resources ? { resources } : {}) };
 }
 
 async function validateContextArtifacts(
@@ -230,11 +262,20 @@ async function validateContextArtifacts(
 }
 
 async function validateChildAllocationArtifacts(
+  driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  allocations: ChildAllocationV1[]
+  allocations: ChildAllocationV1[], run: RecoveryClosureV1['run']
 ): Promise<void> {
+  const children = driver.prepare('SELECT id FROM runs WHERE parent_run_id=? ORDER BY id').all<{ id: string }>(run.id).map(row => row.id);
+  const outgoing = allocations.filter(row => row.parentRunId === run.id).map(row => row.childRunId).sort();
+  if (canonicalSha256(children) !== canonicalSha256(outgoing)) recoveryFailure('direct child Runs and allocation ownership are not all-and-only');
+  const incoming = allocations.filter(row => row.childRunId === run.id);
+  if (run.parentRunId ? incoming.length !== 1 || incoming[0]!.parentRunId !== run.parentRunId : incoming.length !== 0)
+    recoveryFailure('Run parent identity has no exact unique original incoming allocation');
   const refs: Array<readonly [string, string | undefined]> = [];
   for (const [index, allocation] of allocations.entries()) {
+    const original = await readChildAdmission(driver, artifacts, allocation.childRunId);
+    if (canonicalSha256(original.allocation) !== canonicalSha256(allocation)) recoveryFailure('child allocation source differs from the original consistent cut');
     refs.push(
       [`ChildAllocation[${index}].delegateOperationGrantRef`, allocation.delegateOperationGrantRef],
       [`ChildAllocation[${index}].capabilityGrantRef`, allocation.capabilityGrantRef]
@@ -354,6 +395,11 @@ function validateJournalGraph(journal: InvocationJournalEntry[]): Map<string, At
 
   for (const group of groups.values()) {
     const phases = group.entries.map((entry) => entry.phase);
+    if (group.prepared.opKind === 'child_admission' || group.prepared.opKind === 'child_merge' || group.prepared.opKind === 'child_await' || group.prepared.opKind === 'skill_resource') {
+      if (phases.join(',') !== 'prepared,dispatch_claimed,completed' || group.entries.some(entry =>
+          entry.localCommittedAt !== group.prepared.localCommittedAt || entry.timestamp !== group.prepared.timestamp))
+        recoveryFailure('local child Journal must be one complete original atomic triplet');
+    }
     if (phases[0] !== 'prepared') recoveryFailure('Run Journal attempt does not begin prepared');
     const claim = group.entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (claim !== undefined) {
@@ -428,6 +474,12 @@ async function validateJournalArtifactsAndBudgets(
   return { reserved, consumed };
 }
 
+/** Complete original Journal data checks without entering Run recovery or
+ * authorization readers. This confers no claim, retry or native authority. */
+export function readRetainedJournalData(artifacts: ArtifactCatalog, journal: InvocationJournalEntry[]) {
+  return validateJournalArtifactsAndBudgets(artifacts, validateJournalGraph(journal));
+}
+
 function budgetLessThanOrEqual(left: BudgetUsage, right: BudgetUsage): boolean {
   return (
     left.modelTokens <= right.modelTokens &&
@@ -443,7 +495,8 @@ function budgetEqual(left: BudgetUsage, right: BudgetUsage): boolean {
 
 async function validateGenerationArtifacts(
   artifacts: ArtifactCatalog,
-  generations: WorkspaceGenerationStateV1[]
+  generations: WorkspaceGenerationStateV1[],
+  readWorkspace: (ref: string, label: string) => ReturnType<typeof validateWorkspaceStateArtifacts>
 ): Promise<void> {
   for (const generation of generations) {
     await requireRecoveryArtifacts(artifacts, [
@@ -460,11 +513,7 @@ async function validateGenerationArtifacts(
     await requireRecoveryArtifacts(artifacts, [
       ['WorkspaceGenerationIdentity.locator.stateRootIdentityRef', identity.locator.stateRootIdentityRef]
     ]);
-    const sourceWorkspace = await validateWorkspaceStateArtifacts(
-      artifacts,
-      identity.sourceWorkspaceStateRef,
-      'WorkspaceGenerationIdentity.sourceWorkspaceStateRef'
-    );
+    const sourceWorkspace = await readWorkspace(identity.sourceWorkspaceStateRef, 'WorkspaceGenerationIdentity.sourceWorkspaceStateRef');
     if (
       identity.generationId !== generation.generationId ||
       identity.runId !== generation.runId ||
@@ -472,27 +521,25 @@ async function validateGenerationArtifacts(
       identity.sourceCheckpointId !== generation.sourceCheckpointId ||
       identity.sourceWorkspaceStateRef !== generation.sourceWorkspaceStateRef ||
       identity.sourceWorkspaceStateDigest !== generation.sourceWorkspaceStateDigest ||
-      sourceWorkspace.state.stateDigest !== identity.sourceWorkspaceStateDigest ||
-      sourceWorkspace.entries.treeDigest !== identity.sourceTreeDigest
+      sourceWorkspace.stateDigest !== identity.sourceWorkspaceStateDigest ||
+      sourceWorkspace.treeDigest !== identity.sourceTreeDigest
     ) recoveryFailure('workspace generation state does not match its immutable identity');
     if (generation.snapshotEvidenceRef !== undefined) {
       const evidence = decodeWorkspaceGenerationSnapshotEvidence(
         await artifacts.readCanonical(generation.snapshotEvidenceRef)
       );
-      const evidenceWorkspace = await validateWorkspaceStateArtifacts(
-        artifacts,
-        evidence.workspaceStateRef,
-        'WorkspaceGenerationSnapshotEvidence.workspaceStateRef'
-      );
+      artifacts.assertReadActive();
+      const evidenceWorkspace = evidence.workspaceStateRef === identity.sourceWorkspaceStateRef ? sourceWorkspace
+        : await readWorkspace(evidence.workspaceStateRef, 'WorkspaceGenerationSnapshotEvidence.workspaceStateRef');
       if (
         evidence.evidenceDigest !== generation.snapshotEvidenceDigest ||
         evidence.generationRef !== generation.generationRef ||
         evidence.generationIdentityDigest !== generation.generationIdentityDigest ||
         evidence.runId !== generation.runId ||
-        evidenceWorkspace.state.stateDigest !== evidence.workspaceStateDigest ||
-        evidenceWorkspace.state.entriesRef !== evidence.entriesRef ||
-        evidenceWorkspace.state.privateGitStateRef !== evidence.privateGitStateRef ||
-        evidenceWorkspace.entries.treeDigest !== evidence.treeDigest ||
+        evidenceWorkspace.stateDigest !== evidence.workspaceStateDigest ||
+        evidenceWorkspace.entriesRef !== evidence.entriesRef ||
+        evidenceWorkspace.privateGitStateRef !== evidence.privateGitStateRef ||
+        evidenceWorkspace.treeDigest !== evidence.treeDigest ||
         evidence.treeDigest !== generation.lastVerifiedTreeDigest ||
         (generation.phase === 'sealed'
           ? evidence.purpose !== 'sealed_to_checkpoint'
@@ -564,16 +611,98 @@ async function validateLaunchGraph(
   } else if (run.activeWorkerLaunchId !== undefined) {
     recoveryFailure('non-running Run retains an active WorkerLaunch pointer');
   }
-  if (run.status === 'waiting' && (run.waitingReason === 'approval' || run.waitingReason === 'input') && launches.some((launch) => launch.phase !== 'retired')) {
+  if (run.status === 'waiting' && (run.waitingReason === 'approval' || run.waitingReason === 'input' || run.waitingReason === 'child') && launches.some((launch) => launch.phase !== 'retired')) {
     recoveryFailure('control wait retains an unretired WorkerLaunch');
   }
 }
 
+/** Fixed, inert progress only: no refs, timing, authority or retry decisions. */
+export type RecoveryClosurePhase = 'cut' | 'preparation' | 'spec' | 'context' | 'journal' | 'generations' | 'history' |
+  `history_${import('./agent-recovery.js').AgentRecoveryPhase}` | 'history_broker' | 'seals' | 'terminal';
+
+type PublicationPrefix = Awaited<ReturnType<typeof import('./delivery-publication-progress.js')['readPublicationPrefix']>>;
+
 export async function readRecoveryClosure(
   driver: SqliteDriver,
   artifacts: ArtifactCatalog,
-  runId: string
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void
 ): Promise<RecoveryClosureV1> {
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+  if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent);
+  return result.cut;
+}
+
+/** One fresh recovery walk, including the current verifier projection it
+ * already validated. No caller-supplied projection can replace that walk. */
+export async function readVerifierRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string) {
+  let verifierProgress: ReadonlyMap<string, import('./verifier-recovery.js').VerifierProgress> | undefined;
+  const result = await readRecoveryProjection(driver, artifacts, runId, undefined, undefined, false, progress => { verifierProgress = progress; });
+  try {
+    const candidateId = result.cut.run.nextStep === 'verify'
+      ? await (await import('./verifier-recovery.js')).readCurrentVerifierCandidate(artifacts, result.cut) : undefined;
+    const progress = candidateId ? verifierProgress?.get(candidateId) : undefined;
+    artifacts.assertReadActive();
+    return { cut: result.cut, progress };
+  } finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
+}
+
+/** Internal completion reader. It opens the same full fresh recovery entry;
+ * only its actual completed data family can supply the terminal basis. */
+export async function readResultRecoveryClosure(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void) {
+  const result = await readRecoveryProjection(driver, artifacts, runId, onPhase, undefined, true);
+  try {
+    const basis = result.basis ?? (result.agent ? await readAgentResultData(driver, artifacts, result.cut, result.agent).basis()
+      : await readResultBasis(driver, artifacts, result.cut));
+    artifacts.assertReadActive();
+    return { cut: result.cut, basis };
+  } finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
+}
+
+/** One exact dead preparation may be inspected by its genuine successor.
+ * This does not resume the original producer or grant execution/retirement. */
+export async function readPreparingCleanupClosure(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  runId: string, context: WorkerPreparationCleanupContext): Promise<RecoveryClosureV1> {
+  assertWorkerPreparationCleanupContext(driver, context, runId);
+  const result = await readRecoveryProjection(driver, artifacts, runId, undefined, context);
+  try { assertWorkerPreparationCleanupContext(driver, context, runId); return result.cut; }
+  finally { if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent); }
+}
+
+/** One complete fresh recovery traversal and its publication projection.
+ * Returned data grants no task, dispatch, settlement or terminal authority. */
+export async function readDeliveryPublicationClosure(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void
+): Promise<{ cut: RecoveryClosureV1; prefix: PublicationPrefix }> {
+  return observeInstalledPublicationWork(runId, 'publication_recovery', async () => {
+    const result = await readRecoveryProjection(driver, artifacts, runId, onPhase);
+    if (result.agent) closeAgentResultReadData(driver, artifacts, result.cut, result.agent);
+    if (result.cut.runSpec.operation !== 'delivery' || !result.prefix)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure requires a delivery Run');
+    return { cut: result.cut, prefix: result.prefix };
+  });
+}
+
+async function readRecoveryProjection(...args: Parameters<typeof readRecoveryProjectionData>) {
+  return withArtifactReadCache(() => readRecoveryProjectionData(...args));
+}
+
+async function readRecoveryProjectionData(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  runId: string,
+  onPhase?: (phase: RecoveryClosurePhase) => void,
+  preparationCleanup?: WorkerPreparationCleanupContext,
+  resultBasisRequested = false,
+  onVerifierProgress?: (progress: ReadonlyMap<string, import('./verifier-recovery.js').VerifierProgress>) => void
+): Promise<{ cut: RecoveryClosureV1; prefix?: PublicationPrefix; agent?: AgentResultReadData;
+  basis?: Awaited<ReturnType<typeof readResultBasis>> }> {
+  const phase = (value: RecoveryClosurePhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
+  phase('cut');
   const databaseCut = driver.transaction((connection) => {
     const run = readRun(connection, runId);
     const principalId = connection.prepare('SELECT principal_id FROM runs WHERE id = ?').get<{ principal_id: string }>(run.id)?.principal_id;
@@ -611,10 +740,12 @@ export async function readRecoveryClosure(
     workspaceGenerations,
     childAllocations
   } = databaseCut;
+  phase('preparation');
   try {
     await validateWorkerPreparationHistory(driver, artifacts, { run, launches: databaseCut.allWorkerLaunches,
-      generations: workspaceGenerations });
-  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error); }
+      generations: workspaceGenerations }, preparationCleanup);
+  } catch (error) { recoveryFailure(`worker preparation history is invalid: ${(error as Error).message}`, error, artifacts); }
+  phase('spec');
   requireRecoveryArtifactRef(run.specRef, 'Run.specRef');
   for (const [label, ref] of [
     ['Run.frontierRef', run.frontierRef],
@@ -667,22 +798,40 @@ export async function readRecoveryClosure(
   }
 
   const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
-  await validateRunSpecArtifacts(artifacts, runSpec);
+  if (runSpec.operation === 'delivery') assertDeliveryModelFreeCut({ run, runSpec, journal, childAllocations });
+  const frozenSource = await validateRunSpecArtifacts(artifacts, runSpec);
+  const assemblyData = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+  if (assemblyData?.format === 'cliq-run-assembly-v1' && assemblyData.instructions?.skills?.length) {
+    try {
+      await readAssemblySkills(artifacts, decodeRetainedRunAssembly(assemblyData), {
+        workspaceIdentityRef: databaseCut.workspaceIdentityRef, ownerPrincipalId: databaseCut.principalId
+      });
+    } catch (error) { recoveryFailure('Run skill closure is not its complete original immutable source', error, artifacts); }
+  }
+  phase('context');
   const context = decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef));
   if (context.runId !== run.id || context.throughItemSeq !== latestCheckpoint.runItemSeq) {
     recoveryFailure('Checkpoint ContextManifest does not match its Run cut');
   }
   await validateContextArtifacts(artifacts, context, runSpec);
-  const latestWorkspace = await validateWorkspaceStateArtifacts(
-    artifacts,
-    latestCheckpoint.workspaceStateRef,
-    'Checkpoint.workspaceStateRef'
-  );
+  // Each generation still compares its own identity and evidence to the
+  // verified workspace fields. Keep only those fields, never decoded inventories.
+  const workspaceStates = new Map<string, Awaited<ReturnType<typeof validateWorkspaceStateArtifacts>>>();
+  const readWorkspace = async (ref: string, label: string) => {
+    artifacts.assertReadActive();
+    const prior = workspaceStates.get(ref);
+    if (prior) return prior;
+    const verified = await validateWorkspaceStateArtifacts(artifacts, ref, label, frozenSource);
+    workspaceStates.set(ref, verified);
+    return verified;
+  };
+  const latestWorkspace = await readWorkspace(latestCheckpoint.workspaceStateRef, 'Checkpoint.workspaceStateRef');
   if (
-    latestWorkspace.state.runId !== run.id ||
-    latestWorkspace.state.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
+    latestWorkspace.runId !== run.id ||
+    latestWorkspace.baseWorkspaceManifestRef !== runSpec.baseWorkspaceManifestRef
   ) recoveryFailure('workspace state is not bound to the admitted RunSpec');
 
+  phase('journal');
   if (latestCheckpoint.runItemSeq > items.length) recoveryFailure('Checkpoint item cursor exceeds recovery items');
   if (latestCheckpoint.journalSeq > journal.length) recoveryFailure('Checkpoint Journal cursor exceeds recovery Journal');
   await requireRecoveryArtifacts(
@@ -691,6 +840,7 @@ export async function readRecoveryClosure(
   );
   const groups = validateJournalGraph(journal);
   const journalBudgets = await validateJournalArtifactsAndBudgets(artifacts, groups);
+  phase('generations');
   const generationProofs: WorkspaceGenerationStateV1[] = [];
   if (workspaceGenerations.some(generation => generation.phase === 'retired')) {
     try {
@@ -698,73 +848,113 @@ export async function readRecoveryClosure(
       if (assembly.format !== 'cliq-run-assembly-v1') throw new TypeError('generation retirement requires its typed historical runtime');
       for (const generation of workspaceGenerations) generationProofs.push(generation.phase === 'retired'
         ? (await readRetiredGenerationSource(driver, artifacts, { run, spec: runSpec, assembly, generation })).source : generation);
-    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error); }
+    } catch (error) { recoveryFailure(`generation retirement history is invalid: ${(error as Error).message}`, error, artifacts); }
   } else generationProofs.push(...workspaceGenerations);
-  await validateGenerationArtifacts(artifacts, generationProofs);
-  if (journal.some((entry) => entry.opKind === 'model')) {
-    try {
-      await validateAgentRecovery({ artifacts, run, spec: runSpec, items, journal,
-        principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
-        checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
-        context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) });
-      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-      if (assembly.format === 'cliq-run-assembly-v1') await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
-        run, spec: runSpec, assembly, journal, principalId: databaseCut.principalId });
-    } catch (error) {
-      recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error);
-    }
-  }
-  if (
-    !budgetLessThanOrEqual(journalBudgets.reserved, run.budgetReserved) ||
-    !budgetLessThanOrEqual(journalBudgets.consumed, run.budgetConsumed)
-  ) recoveryFailure('Run budget counters are below their durable Journal facts');
-  if (childAllocations.length === 0) {
-    if (
-      !budgetEqual(journalBudgets.reserved, run.budgetReserved) ||
-      !budgetEqual(journalBudgets.consumed, run.budgetConsumed)
-    ) recoveryFailure('Run budget counters do not equal the Journal closure');
-  }
-  if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
-    recoveryFailure('lease-free Run has an unexplained budget reservation');
-  }
-  const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
-  const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
-  if (sealedGenerations.length || sealedLaunches.length) {
-    const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
-    if (assembly.format === 'cliq-run-assembly-v1') {
+  await validateGenerationArtifacts(artifacts, generationProofs, readWorkspace);
+  workspaceStates.clear();
+  const closure: RecoveryClosureV1 = { runSpec, run, latestCheckpoint, items, journal, workerLaunches, workspaceGenerations, childAllocations };
+  const delivery = runSpec.operation === 'delivery' ? createDeliveryReadData(driver, artifacts, closure) : undefined;
+  let agent: AgentResultReadData | undefined;
+  try {
+    phase('history');
+    if (journal.some((entry) => entry.opKind === 'model' || entry.opKind === 'verifier') || run.repairCount !== 0 ||
+        runSpec.operation === 'agent' && items.length > 0 || runSpec.operation === 'delivery') {
       try {
-        for (const generation of sealedGenerations) {
-          const matches = sealedLaunches.filter(launch => launch.workspaceGenerationRef === generation.generationRef);
-          if (matches.length !== 1 || !matches[0]!.activatedAt) throw new TypeError('sealed generation has no unique retired activated worker');
-          await validateRetainedWorkerSeal(driver, artifacts, { run, spec: runSpec, assembly, launch: matches[0]!, generation });
-        }
-        if (sealedLaunches.some(launch => !sealedGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef))) {
-          throw new TypeError('retired sealed worker has no matching sealed generation');
+        const input = { driver, artifacts, run, spec: runSpec, items, journal,
+          principalId: databaseCut.principalId, workspaceIdentityRef: databaseCut.workspaceIdentityRef,
+          checkpoints: databaseCut.checkpoints, workspaceGenerations: generationProofs,
+          onVerifierProgress,
+          context: decodeContextManifest(await artifacts.readCanonical(latestCheckpoint.contextManifestRef)) };
+        let history: { repairAttempts: number };
+        if (delivery) {
+          if (!run.activeWorkerLaunchId && workerLaunches.length === 0) {
+            const recovered = await validateAgentRecoveryInDeliveryResultEpoch(input, closure, delivery, value => phase(`history_${value}`));
+            try { completeDeliveryRecoveryHistory(driver, artifacts, closure, delivery, recovered.data); }
+            catch (error) { closeAgentRecoveryData(driver, artifacts, closure, recovered.data); throw error; }
+            history = recovered;
+          } else history = await validateAgentRecoveryInDeliveryEpoch(input, delivery, value => phase(`history_${value}`));
+        } else if (!run.activeWorkerLaunchId && workerLaunches.length === 0 &&
+            (run.nextStep === 'verify' || run.nextStep === 'finalize' || run.resultRef !== undefined)) {
+          const recovered = await validateAgentRecoveryInResultEpoch(input, closure, value => phase(`history_${value}`));
+          agent = createAgentResultReadData(driver, artifacts, closure, recovered.data);
+          history = recovered;
+        } else history = await validateAgentRecovery(input, value => phase(`history_${value}`));
+        journalBudgets.consumed = addBudget(journalBudgets.consumed,
+          { ...ZERO_BUDGET, repairAttempts: history.repairAttempts }, 'recovery authorized repair budget');
+        const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+        if (assembly.format === 'cliq-run-assembly-v1') {
+          phase('history_broker');
+          await validateInstalledBrokerAmbiguityHistory({ driver, artifacts,
+            run, spec: runSpec, assembly, journal, childAllocations, principalId: databaseCut.principalId });
         }
       } catch (error) {
-        recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error);
+        recoveryFailure(`typed agent recovery closure is invalid: ${(error as Error).message}`, error, artifacts);
       }
     }
-  }
-  await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
-  try { await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver); }
-  catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error); }
-  await validateChildAllocationArtifacts(artifacts, childAllocations);
+    const childBudgets = childAllocationBudgetFacts(run.id, childAllocations);
+    if (!budgetEqual(addBudget(journalBudgets.reserved, childBudgets.reserved), run.budgetReserved) ||
+        !budgetEqual(addBudget(journalBudgets.consumed, childBudgets.consumed), run.budgetConsumed))
+      recoveryFailure('Run budget counters do not equal their complete own-Journal and direct inclusive child closure');
+    if (run.status !== 'running' && !isZeroBudget(run.budgetReserved) && journal.length === 0) {
+      recoveryFailure('lease-free Run has an unexplained budget reservation');
+    }
+    phase('seals');
+    const sealedGenerations = generationProofs.filter(generation => generation.phase === 'sealed');
+    const sealedLaunches = databaseCut.allWorkerLaunches.filter(launch => launch.phase === 'retired' && launch.generationWriteState === 'sealed');
+    if (sealedGenerations.length || sealedLaunches.length) {
+      const assembly = await artifacts.readCanonical<RunAssemblyV1>(runSpec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1') {
+        try {
+          for (const generation of sealedGenerations) {
+            const matches = sealedLaunches.filter(launch => launch.workspaceGenerationRef === generation.generationRef);
+            if (matches.length !== 1 || !matches[0]!.activatedAt) throw new TypeError('sealed generation has no unique retired activated worker');
+            await validateRetainedWorkerSeal(driver, artifacts, { run, spec: runSpec, assembly, launch: matches[0]!, generation });
+          }
+          if (sealedLaunches.some(launch => !sealedGenerations.some(generation => generation.generationRef === launch.workspaceGenerationRef))) {
+            throw new TypeError('retired sealed worker has no matching sealed generation');
+          }
+        } catch (error) {
+          recoveryFailure(`worker seal history is invalid: ${(error as Error).message}`, error, artifacts);
+        }
+      }
+    }
+    await validateLaunchGraph(artifacts, run, workerLaunches, workspaceGenerations);
+    try {
+      const waiting=run.status==='waiting'&&run.waitingReason==='reconciliation'&&run.waitingOnRef
+        ?await artifacts.readCanonical<{subject?:{kind?:string;recovery?:string}}>(run.waitingOnRef):undefined;
+      if(waiting?.subject?.kind==='invocation'){
+        if (waiting.subject.recovery === 'mcp_reconcile')
+          await (await import('./mcp-status-state.js')).validateMcpInvocationWait(driver, artifacts, closure);
+        else await validateManualInvocationWait(driver,artifacts,closure);
+        await validateRetainedWorkerQuarantines(artifacts,{...databaseCut,workspaceGenerations:generationProofs},driver);
+      }else await validateWorkerRecoveryWait(artifacts, { ...databaseCut, workspaceGenerations: generationProofs }, driver);
+    }
+    catch (error) { recoveryFailure(`worker recovery closure is invalid: ${(error as Error).message}`, error, artifacts); }
+    await validateChildAllocationArtifacts(driver, artifacts, childAllocations, run);
 
-  const closure: RecoveryClosureV1 = {
-    runSpec,
-    run,
-    latestCheckpoint,
-    items,
-    journal,
-    workerLaunches,
-    workspaceGenerations,
-    childAllocations
-  };
-  try {
-    await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
-    await validateStopRecovery(driver, artifacts, closure);
-  }
-  catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error); }
-  return closure;
+    phase('terminal');
+    let publicationPrefix: PublicationPrefix | undefined;
+    try {
+      if (runSpec.operation === 'delivery') {
+        // Use the complete actual cut, not a filled-in verifier/agent subset.
+        // Reverse coverage requires the unique policy + delivery decision and
+        // their original wait/control/Checkpoint graph even if a later stop
+        // outranks the decision. No pure decoder result grants publication.
+        publicationPrefix = await delivery!.prefix();
+      }
+      await validateInstalledModelNoReleaseHistory(driver, artifacts, closure);
+      if (delivery) await validateStopRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+      else await validateStopRecovery(driver, artifacts, closure);
+      if (delivery) await validateRunResultRecoveryInDeliveryEpoch(driver, artifacts, closure, delivery);
+      else if (agent) await validateRunResultRecoveryInAgentEpoch(driver, artifacts, closure, agent);
+      else await validateRunResultRecovery(driver, artifacts, closure);
+      if (delivery) await delivery.prefix();
+    }
+    catch (error) { recoveryFailure(`stop recovery closure is invalid: ${(error as Error).message}`, error, artifacts); }
+    // Only the completion reader asks for this ordinary result data. Other
+    // recovery entries may legally precede their first Delivery candidate.
+    const basis = resultBasisRequested && delivery ? await readResultBasisInDeliveryEpoch(driver, artifacts, closure, delivery) : undefined;
+    return { cut: closure, ...(publicationPrefix ? { prefix: publicationPrefix } : {}), ...(agent ? { agent } : {}),
+      ...(basis ? { basis } : {}) };
+  } finally { if (delivery) closeDeliveryReadData(driver, artifacts, closure, delivery); }
 }

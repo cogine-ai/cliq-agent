@@ -70,6 +70,7 @@ test('a frozen real unborn Git checkpoint restores independent canonical private
   rules.rulesDigest = digestOmitting(rules, 'rulesDigest');
   const rulesRef = (await artifacts.publishCanonical(rules, rules.format)).ref;
   const projection: SourceProjectionSpec = { schemaVersion: 1, matcherVersion: 'cliq-exact-path-v1', frozenIgnoreRulesRef: rulesRef,
+    classificationIndexRef: indexRef,
     frozenIgnoreRulesDigest: rules.rulesDigest, explicitIncludes: [], explicitExcludes: [], maxChangedPaths: 1000,
     maxChangedBytes: 1024 * 1024, projectionDigest: '' };
   projection.projectionDigest = digestOmitting(projection, 'projectionDigest');

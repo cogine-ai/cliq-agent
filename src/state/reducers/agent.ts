@@ -1,13 +1,12 @@
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { planArtifactBytes, planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
-import { assertArtifactRef, digestOmitting, identityHash, modelOperationId as modelOpId, sha256Bytes } from '../../kernel/identity.js';
+import { digestOmitting, identityHash, modelOperationId as modelOpId, sha256Bytes } from '../../kernel/identity.js';
 import type {
-  Run, RunAssemblyV1, RunFrontier, ContextManifest, ContinuationItem, ToolContractManifestV1, RunContextCompactionPlan, ToolBatchItem
+  Run, RunFrontier, ContextManifest, ContinuationItem, RunContextCompactionPlan, ToolBatchItem
 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import type { ModelAttemptResult } from '../../model/model-session.js';
 import type { ModelUnusableResponseV1 } from '../../protocol/agent-ir.js';
-import { loadToolContracts } from '../../tools/input-contract.js';
 import { validateRunAssembly, type RunAssemblyValidationMaterial } from '../../model/run-assembly.js';
 import { estimatePromptTokens, projectModelVisiblePrompt, type ModelRequestV1, type NormalPromptProjectionV1 } from '../../model/request.js';
 import { planModelContinuation, validateModelTurn, validateUnusableModelResponse, type ModelContinuationPlan } from '../../runtime/continuation.js';
@@ -15,12 +14,13 @@ import { assertSameModelOperation, modelRetryState, type ModelRetryState } from 
 import { contextSourceDigest, planContextCompaction, replaceCompactedPrefix, validateContextItems, type ContextItem } from '../../runtime/context-compaction.js';
 import { loadInstructionText, projectNormalContext, readCanonicalArtifact, readModelContext, readModelTurnMaterial } from '../agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
-import { decodeContextManifest, decodeRunSpec } from '../decoders.js';
+import { decodeContextManifest } from '../decoders.js';
 import { joinResourceOperations, KernelStorageError, ModelRetryPendingError, stateOperation } from '../errors.js';
 import { sampleCanonicalNow } from '../canonical-time.js';
 import { readHighestPreparedAttempt, readInvocationAttempt, readOperationJournal } from '../repositories/journal.js';
-import { readRecoveryClosure } from '../recovery-closure.js';
-import { readCheckpoint, readRun, ZERO_BUDGET } from '../rows.js';
+import { readRecoveryClosure, type RecoveryClosurePhase } from '../recovery-closure.js';
+import { readCheckpoint, readRun, readSessionPrincipalId, ZERO_BUDGET } from '../rows.js';
+import { frozenSessionCompactionIndex } from '../session-context.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import type { StateOwnerContext } from '../state-owner.js';
 import { prepareValidatedInvocation, readModelRetryHistory, settleValidatedInvocation, type SettleInvocationInput } from './invocation.js';
@@ -31,6 +31,11 @@ import type { NativeWorkerRetirement } from '../tool-checkpoint.js';
 import { planModelOperationGrant } from '../../kernel/model-grant.js';
 import { readModelGrantClosure, readModelTarget } from '../model-grant.js';
 import type { HeldInstalledRuntime } from '../installed-runtime.js';
+import { loadFinalCandidate } from '../final-candidate.js';
+import { loadRunResult, type RunResultPhase } from '../run-result.js';
+import { loadVerifierRepair } from '../verifier-repair.js';
+import { readRunAuthority, type RunAuthority } from '../run-authority.js';
+import { loadRunContinuation } from '../run-continuation.js';
 
 export type LoadAgentRunInput = {
   runId: string;
@@ -43,9 +48,10 @@ export type LoadAgentRunInput = {
   releaseKeys?: readonly ReleaseTrustKey[];
 };
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;
+export type ModelAttemptReadPhase = `recovery_${RecoveryClosurePhase}` | 'request' | 'grant';
 
 async function publishPlans(artifacts: ArtifactCatalog, plans: readonly PlannedArtifact[]): Promise<PublishedArtifact[]> {
-  return Promise.all(plans.map(async (plan) => {
+  return joinResourceOperations(plans.map(async (plan) => {
     const bytes = plan.bytes;
     if (sha256Bytes(bytes) !== plan.ref) throw new TypeError('planned artifact bytes do not rehash');
     return artifacts.publishBytes(bytes, plan.mediaType, plan.schemaKind);
@@ -82,11 +88,11 @@ const agentCut = stateOperation('RECOVERY_REQUIRED', async (driver: SqliteDriver
 async function readContextItems(driver: SqliteDriver, artifacts: ArtifactCatalog, runId: string, through: number): Promise<ContextItem[]> {
   const rows = driver.prepare('SELECT item_seq, item_id, kind, payload_ref FROM items WHERE run_id = ? AND item_seq <= ? ORDER BY item_seq')
     .all<{ item_seq: unknown; item_id: string; kind: string; payload_ref: string }>(runId, BigInt(through));
-  return joinResourceOperations(rows.map(async (row) => {
+  return artifacts.mapReads(rows, async (row) => {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payload_ref);
     if (item.itemId !== row.item_id || item.kind !== row.kind) throw new TypeError('context item does not match its owner row');
     return { itemSeq: Number(row.item_seq), itemRef: row.payload_ref, item };
-  }));
+  });
 }
 
 export class AgentContextExhaustedError extends KernelStorageError {
@@ -100,6 +106,22 @@ export class AgentHandoffPendingError extends KernelStorageError {
     readonly reason?: 'model_retry_exhausted') {
     super('AGENT_HANDOFF_PENDING', `${reason ?? 'completed model observation'} requires ${disposition}`);
   }
+}
+
+/** Same complete static assembly validation for execution and inert terminal
+ * cancellation. This does not reproduce a prepared request or open a producer. */
+export function validateAgentRunAssembly(authority: Pick<RunAuthority, 'run' | 'spec' | 'assembly' | 'contracts'>, material: RunAssemblyValidationMaterial) {
+  const { run, spec, assembly, contracts } = authority;
+  const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
+    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
+  const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: run.createdAt,
+    deadlineAt: run.deadlineAt, maxRunCostMicros: spec.budgets.costMicros, runSpecCredentialGrantRefs: spec.credentialGrantRefs,
+    material: { ...material, resolveVerifiedTools: (reference) => {
+      const verified = material.resolveVerifiedTools(reference);
+      return verified !== null && canonicalSha256(verified) === canonicalSha256(tools) ? tools : null;
+    } } });
+  if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
+  return { model: validated.model, tools };
 }
 
 function requireRetryReady(retry: ModelRetryState): number {
@@ -118,71 +140,31 @@ function appendItems(connection: SqliteConnection, run: Run, items: Continuation
 /** A loaded authority handle only: every mutable Run/frontier/Journal value is read from SQLite on each operation. */
 export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function loadAgentRun(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: LoadAgentRunInput,
-  reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime
+  reobserve?: NativeWorkerRetirement, installedRuntime?: HeldInstalledRuntime, signal?: AbortSignal,
+  onResultPhase?: (phase: RunResultPhase) => void, resultPreparationSignal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
+  // Opening history is cancellable, but it must not replace the catalog
+  // captured by received-result reducers after the handle has been retained.
+  const openingReads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const runId = input.runId;
-  const releaseKeys = input.releaseKeys === undefined ? undefined : immutableSnapshot(input.releaseKeys);
   const material = Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
     [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial;
-  const recovered = await readRecoveryClosure(driver, artifacts, runId);
-  const admittedRun = recovered.run;
-  const spec = immutableSnapshot(decodeRunSpec(await readCanonicalArtifact(artifacts, admittedRun.specRef)));
-  if (spec.operation !== 'agent') throw new TypeError('delivery Runs cannot load a model');
-  const assembly = immutableSnapshot(await readCanonicalArtifact<RunAssemblyV1>(artifacts, spec.assemblyRef));
-  const manifest = await readCanonicalArtifact<ToolContractManifestV1>(artifacts, assembly.tools.manifestRef);
-  const exactKeys = (value: object, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-  if (manifest.schemaVersion !== 1 || manifest.format !== 'cliq-tool-contracts-v1' ||
-      !exactKeys(manifest, ['schemaVersion', 'format', 'entries', 'manifestDigest']) ||
-      manifest.manifestDigest !== assembly.tools.manifestDigest || digestOmitting(manifest, 'manifestDigest') !== manifest.manifestDigest ||
-      new Set(manifest.entries.map((entry) => entry.name)).size !== manifest.entries.length) {
-    throw new TypeError('Run tool manifest does not match its retained assembly');
-  }
-  const contracts = immutableSnapshot(await joinResourceOperations(manifest.entries.map(async (entry) => {
-    const output = entry.outputSchemaRef !== undefined;
-    if (!exactKeys(entry, ['name', 'version', 'description', 'access', 'inputSchemaRef', 'inputSchemaDigest', 'replayClass', 'execution',
-      ...(output ? ['outputSchemaRef', 'outputSchemaDigest'] : [])]) || typeof entry.version !== 'string' || !entry.version ||
-        !['read', 'write', 'exec', 'plan', 'control'].includes(entry.access)) throw new TypeError('invalid frozen tool contract schema');
-    const execution = entry.execution;
-    if (execution.kind === 'builtin') {
-      if (!exactKeys(execution, ['kind', 'adapterId', 'adapterVersion', 'adapterCodeDigest']) ||
-          !['manual', 'retry'].includes(entry.replayClass) || typeof execution.adapterId !== 'string' || !execution.adapterId ||
-          typeof execution.adapterVersion !== 'string' || !execution.adapterVersion) throw new TypeError('invalid builtin execution contract');
-      assertArtifactRef(execution.adapterCodeDigest);
-    } else if (execution.kind === 'mcp') {
-      if (!exactKeys(execution, ['kind', 'registrationId', 'registryRevisionRef', 'registryManifestDigest', 'serverToolName', 'toolContractDigest']) ||
-          typeof execution.serverToolName !== 'string' || !execution.serverToolName || !assembly.mcpServers.some((server) =>
-            server.registrationId === execution.registrationId && server.registryRevisionRef === execution.registryRevisionRef &&
-            server.manifestDigest === execution.registryManifestDigest)) throw new TypeError('tool contract differs from the frozen MCP registration');
-      assertArtifactRef(execution.toolContractDigest);
-    } else throw new TypeError('unknown tool execution contract');
-    const schema = await readCanonicalArtifact(artifacts, entry.inputSchemaRef);
-    if (canonicalSha256(schema) !== entry.inputSchemaDigest) throw new TypeError('tool input schema digest mismatch');
-    if (output && canonicalSha256(await readCanonicalArtifact(artifacts, entry.outputSchemaRef!)) !== entry.outputSchemaDigest) {
-      throw new TypeError('tool output schema digest mismatch');
-    }
-    return { ...entry, inputSchema: schema };
-  })));
-  const tools = contracts.map((entry) => ({ name: entry.name, description: entry.description, inputSchemaRef: entry.inputSchemaRef,
-    inputSchemaDigest: entry.inputSchemaDigest, inputSchema: entry.inputSchema, replayClass: entry.replayClass }));
-  const validated = validateRunAssembly({ assemblyRef: spec.assemblyRef, assembly, admittedAt: admittedRun.createdAt,
-    deadlineAt: admittedRun.deadlineAt, maxRunCostMicros: spec.budgets.costMicros, runSpecCredentialGrantRefs: spec.credentialGrantRefs,
-    material: { ...material, resolveVerifiedTools: (reference) => {
-      const verified = material.resolveVerifiedTools(reference);
-      return verified !== null && canonicalSha256(verified) === canonicalSha256(tools) ? tools : null;
-    } } });
-  if (!validated.ok) throw new TypeError(`${validated.code}: ${validated.reason}`);
-  const { model } = validated;
-  const systemInstruction = await loadInstructionText(artifacts, assembly);
-  const toolContracts = loadToolContracts(contracts);
+  const authority = await readRunAuthority(driver, artifacts, owner, { runId, operation: 'agent', releaseKeys: input.releaseKeys }, signal);
+  const { recovered, run: admittedRun, spec, assembly, releaseKeys, contracts, toolContracts } = authority;
+  const { model, tools } = validateAgentRunAssembly(authority, material);
+  const systemInstruction = await loadInstructionText(openingReads, assembly);
   const { resolveToolInput } = toolContracts;
-  const project = (run: Run, context: ContextManifest, contextRef: string) => projectNormalContext({
-    artifacts, run, spec, assembly, context, contextRef, systemInstruction, tools
+  const sessionCompactionIndex = (projection: import('../../kernel/session-context-pages.js').SessionContextHead) => frozenSessionCompactionIndex(driver,
+    admittedRun.sessionId, projection.throughItemSeq);
+  const project = (run: Run, context: ContextManifest, contextRef: string, reads = artifacts) => projectNormalContext({
+    artifacts: reads, run, spec, assembly, context, contextRef, systemInstruction, tools, sessionCompactionIndex
   });
-  const compactionSource = stateOperation('RECOVERY_REQUIRED', async (run: Run, planRef: string) => {
-    const plan = await readCanonicalArtifact<RunContextCompactionPlan>(artifacts, planRef);
-    const context = decodeContextManifest(await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef));
-    const items = await readContextItems(driver, artifacts, runId, context.throughItemSeq);
-    const projection = await readModelContext({ artifacts, run, spec, assembly, context, systemInstruction, tools });
+  const compactionSource = stateOperation('RECOVERY_REQUIRED', async (run: Run, planRef: string, reads: ArtifactCatalog = artifacts) => {
+    const plan = await readCanonicalArtifact<RunContextCompactionPlan>(reads, planRef);
+    const context = decodeContextManifest(await readCanonicalArtifact(reads, plan.sourceContextManifestRef));
+    const items = await readContextItems(driver, reads, runId, context.throughItemSeq);
+    const projection = await readModelContext({ artifacts: reads, run, spec, assembly, context, systemInstruction, tools, sessionCompactionIndex });
     const reproduced = planContextCompaction({ context, contextRef: plan.sourceContextManifestRef, items, projection,
       policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope, createdAt: plan.createdAt });
     if (reproduced.kind !== 'compact' || canonicalSha256(reproduced.plan) !== planRef) {
@@ -190,44 +172,44 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     }
     return reproduced;
   });
-  const reproduceRequest = stateOperation('RECOVERY_REQUIRED', async (run: Run, request: ModelRequestV1) => {
+  const reproduceRequest = stateOperation('RECOVERY_REQUIRED', async (run: Run, request: ModelRequestV1, reads: ArtifactCatalog = artifacts) => {
     if (run.specRef !== admittedRun.specRef || run.deadlineAt !== admittedRun.deadlineAt || run.createdAt !== admittedRun.createdAt) {
       throw new TypeError('loaded model authority no longer belongs to this Run');
     }
     const invocation = { runId, opId: request.opId, attempt: request.attempt };
     if (request.kind === 'context_compaction') {
       if (!request.compactionPlanRef) throw new TypeError('compaction request requires a retained plan');
-      const source = await compactionSource(run, request.compactionPlanRef);
+      const source = await compactionSource(run, request.compactionPlanRef, reads);
       return model.prepare({ kind: 'context_compaction', invocation, compactionPlanRef: request.compactionPlanRef,
         sourceContextUtf8: source.sourceContextUtf8 });
     }
-    const projection = await readCanonicalArtifact<NormalPromptProjectionV1>(artifacts, request.promptProjectionRef);
-    const context = decodeContextManifest(await readCanonicalArtifact(artifacts, projection.contextManifestRef));
-    validateContextItems(context, await readContextItems(driver, artifacts, runId, context.throughItemSeq));
-    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, projection.frontierDigest);
+    const projection = await readCanonicalArtifact<NormalPromptProjectionV1>(reads, request.promptProjectionRef);
+    const context = decodeContextManifest(await readCanonicalArtifact(reads, projection.contextManifestRef));
+    validateContextItems(context, await readContextItems(driver, reads, runId, context.throughItemSeq));
+    const frontier = await readCanonicalArtifact<RunFrontier>(reads, projection.frontierDigest);
     if (frontier.kind !== 'agent' || frontier.phase !== 'model_turn' || frontier.contextItemSeq !== context.throughItemSeq ||
         request.opId !== modelOpId(runId, frontier)) throw new TypeError('retained projection differs from its model frontier');
     const reproduced = await project({ ...run, revision: projection.basedOnRunRevision, frontierRef: projection.frontierDigest },
-      context, projection.contextManifestRef);
+      context, projection.contextManifestRef, reads);
     if (canonicalSha256(reproduced) !== request.promptProjectionRef) throw new TypeError('retained projection differs from its durable sources');
     return model.prepare({ kind: 'normal', invocation, projectionRef: request.promptProjectionRef, projection });
   });
   for (const entry of recovered.journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
-    const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
-    const reproduced = await reproduceRequest(admittedRun, request);
+    const request = await readCanonicalArtifact<ModelRequestV1>(openingReads, entry.requestRef);
+    const reproduced = await reproduceRequest(admittedRun, request, openingReads);
     if (reproduced.requestRef !== entry.requestRef) throw new TypeError('retained native request cannot be reproduced');
     if (!entry.grantRef) throw new TypeError('retained model preparation has no operation grant');
-    const retainedGrant = await readCanonicalArtifact<import('../../kernel/model-grant.js').ModelOperationGrantV1>(artifacts, entry.grantRef);
-    const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, retainedGrant.frontierRef);
+    const retainedGrant = await readCanonicalArtifact<import('../../kernel/model-grant.js').ModelOperationGrantV1>(openingReads, entry.grantRef);
+    const frontier = await readCanonicalArtifact<RunFrontier>(openingReads, retainedGrant.frontierRef);
     if (frontier.kind !== 'agent') throw new TypeError('retained model grant has no model frontier');
-    const closure = await readModelGrantClosure(driver, artifacts, { run: admittedRun, spec, assembly, frontier,
+    const closure = await readModelGrantClosure(driver, openingReads, { run: admittedRun, spec, assembly, frontier,
       frontierRef: retainedGrant.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
     if (entry.target !== closure.targetRef || entry.timestamp < closure.grant.issuedAt) throw new TypeError('retained model preparation differs from its grant');
     const completed = recovered.journal.find((result) => result.opId === entry.opId && result.attempt === entry.attempt && result.phase === 'completed');
     if (completed?.resultRef) {
-      const root = await readCanonicalArtifact<{ format: string }>(artifacts, completed.resultRef);
+      const root = await readCanonicalArtifact<{ format: string }>(openingReads, completed.resultRef);
       if (root.format === 'cliq-agent-model-turn-v1') {
-        const material = await readModelTurnMaterial(artifacts, completed.resultRef);
+        const material = await readModelTurnMaterial(openingReads, completed.resultRef);
         validateModelTurn(request, material, resolveToolInput);
         if (request.kind === 'normal') {
           const modelItemId = identityHash('cliq-model-turn-item-v1', runId, entry.opId, String(entry.attempt));
@@ -245,57 +227,78 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
     }
   }
 
-  const toolContinuation = await loadToolContinuation(driver, artifacts, owner, {
-    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys
-  }, reobserve, installedRuntime);
+  const { controlAuthority, ...toolContinuation } = await loadToolContinuation(driver, artifacts, owner, {
+    run: admittedRun, spec, assembly, contracts, resolveToolInput, releaseKeys, recoveredItems: recovered.items, installedRuntime
+  }, reobserve, signal);
+  const continuation = await loadRunContinuation(driver, artifacts, owner, authority, reobserve, installedRuntime, controlAuthority);
   return Object.freeze({
+    operation: 'agent' as const,
     ...toolContinuation,
+    ...continuation.shared,
+    ...continuation.agentOnly,
+    ...loadVerifierRepair(driver, artifacts, owner, { run: admittedRun, spec }),
+    ...loadFinalCandidate(driver, artifacts, owner, { run: admittedRun, spec, assembly, resolveToolInput,
+      expireRun: continuation.shared.expireRun, stopForResourceFailure: continuation.shared.stopForResourceFailure }, reobserve),
+    ...loadRunResult(driver, artifacts, owner, { run: admittedRun, spec, principalId: readSessionPrincipalId(driver, admittedRun.sessionId) }, onResultPhase, resultPreparationSignal),
     model,
     resolveToolInput,
-    /** Read the current durable call. This projection is neither a grant nor permission to dispatch it. */
-    readToolInvocation: stateOperation('RECOVERY_REQUIRED', async () => {
-      const selected = await readToolCut(driver, artifacts, runId, resolveToolInput);
+    /** One immutable planning cut, including the original history and Checkpoint.
+     * This projection is neither a grant nor permission to dispatch it. */
+    readToolInvocation: stateOperation('RECOVERY_REQUIRED', async (readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
+      const selected = await readToolCut(driver, reads, runId, resolveToolInput);
       if (selected.run.specRef !== admittedRun.specRef || selected.run.deadlineAt !== admittedRun.deadlineAt ||
           selected.run.createdAt !== admittedRun.createdAt) throw new TypeError('loaded tool authority no longer belongs to this Run');
       const input = selected.call;
-      return immutableSnapshot({ run: selected.run, frontier: selected.frontier, batchItemId: selected.batch.itemId,
+      reads.assertReadActive();
+      return immutableSnapshot({ run: selected.run, checkpoint: selected.checkpoint, journal: selected.journal,
+        frontier: selected.frontier, batchItemId: selected.batch.itemId,
         ...toolContracts.projectInvocation({ callId: input.callId, index: input.index, toolName: input.toolName, input: input.value! }) });
     }),
     /** Rehydrate the exact durable attempt; a dispatch_claimed/settled entry is never permission to resend it. */
-    readModelAttempt: stateOperation('RECOVERY_REQUIRED', async () => {
-      const closure = await readRecoveryClosure(driver, artifacts, runId);
+    readModelAttempt: stateOperation('RECOVERY_REQUIRED', async (readSignal?: AbortSignal,
+      onPhase?: (phase: ModelAttemptReadPhase) => void) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
+      const phase = (value: ModelAttemptReadPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide a read. */ } };
+      const closure = await readRecoveryClosure(driver, reads, runId, value => phase(`recovery_${value}`));
       if (!closure.run.frontierRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal Run has no model frontier');
-      const frontier = await readCanonicalArtifact<RunFrontier>(artifacts, closure.run.frontierRef!);
+      const frontier = await readCanonicalArtifact<RunFrontier>(reads, closure.run.frontierRef!);
       if (frontier.kind !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run is not at a model frontier');
       const opId = modelOpId(runId, frontier);
       const entry = closure.journal.filter((entry) => entry.opId === opId && entry.phase === 'prepared').at(-1);
       if (!entry) return undefined;
       const state = closure.journal.filter((next) => next.opId === opId && next.attempt === entry.attempt).at(-1)!;
       const retry = modelRetryState(assembly.retry.model, closure.journal.filter((next) => next.opId === opId), sampleCanonicalNow());
-      const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, entry.requestRef);
-      const prepared = await reproduceRequest(closure.run, request);
+      phase('request');
+      const request = await readCanonicalArtifact<ModelRequestV1>(reads, entry.requestRef);
+      const prepared = await reproduceRequest(closure.run, request, reads);
       if (prepared.requestRef !== entry.requestRef) throw new TypeError('retained model request cannot be reproduced');
       if (!entry.grantRef || frontier.kind !== 'agent') throw new TypeError('model attempt has no exact model operation grant');
-      const authority = await readModelGrantClosure(driver, artifacts, { run: closure.run, spec, assembly, frontier,
+      phase('grant');
+      const authority = await readModelGrantClosure(driver, reads, { run: closure.run, spec, assembly, frontier,
         frontierRef: closure.run.frontierRef, request, requestRef: entry.requestRef, grantRef: entry.grantRef });
       if (entry.target !== authority.targetRef) throw new TypeError('model attempt target differs from its operation grant');
       let disposition: 'candidate_required' | 'stop_required' | undefined;
       if (state.phase === 'completed') {
-        const root = await readCanonicalArtifact<{ format: string; stopReason?: string }>(artifacts, state.resultRef!);
+        const root = await readCanonicalArtifact<{ format: string; stopReason?: string }>(reads, state.resultRef!);
         disposition = request.kind === 'normal' && root.format === 'cliq-agent-model-turn-v1' && root.stopReason === 'end'
           ? 'candidate_required' : 'stop_required';
       }
       if (retry.kind === 'exhausted') disposition = 'stop_required';
       return { run: closure.run, entry, state, prepared, disposition, retry: immutableSnapshot(retry) };
     }),
-    prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }) => {
+    prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
+      const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
+      reads.assertReadActive();
       const { expectedRunRevision, leaseEpoch } = input;
-      const cut = await agentCut(driver, artifacts, runId, expectedRunRevision);
+      const cut = await agentCut(driver, reads, runId, expectedRunRevision);
       if (cut.run.specRef !== admittedRun.specRef || cut.run.deadlineAt !== admittedRun.deadlineAt || cut.run.createdAt !== admittedRun.createdAt) {
         throw new TypeError('loaded model authority no longer belongs to this Run');
       }
-      const projection = await project(cut.run, cut.context, cut.checkpoint.contextManifestRef);
-      const selection = cut.frontier.phase === 'context_compaction' ? await compactionSource(cut.run, cut.frontier.compactionPlanRef!)
+      const projection = await project(cut.run, cut.context, cut.checkpoint.contextManifestRef, reads);
+      const selection = cut.frontier.phase === 'context_compaction' ? await compactionSource(cut.run, cut.frontier.compactionPlanRef!, reads)
         : planContextCompaction({ context: cut.context, contextRef: cut.checkpoint.contextManifestRef, items: cut.items,
           projection, policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope,
           createdAt: sampleCanonicalNow() });
@@ -313,14 +316,14 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         ? { ...cut.frontier, phase: 'context_compaction', compactionPlanRef: planArtifact.ref } : cut.frontier;
       const frontierPlan = planCanonicalArtifact(frontier, 'cliq-run-frontier-v1');
       const opId = modelOpId(runId, frontier);
-      const history = await readModelRetryHistory(driver, artifacts, runId, opId);
+      const history = await readModelRetryHistory(driver, reads, runId, opId);
       const attempt = requireRetryReady(modelRetryState(assembly.retry.model, history, sampleCanonicalNow()));
       const projectionArtifact = planCanonicalArtifact(projection, projection.format);
       const prepared = compaction ? model.prepare({ kind: 'context_compaction', invocation: { runId, opId, attempt },
         compactionPlanRef: planArtifact!.ref, sourceContextUtf8: compaction.sourceContextUtf8 })
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
-      if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(artifacts, history[0]!.requestRef), prepared.request);
-      const target = await readModelTarget(driver, artifacts, { run: cut.run, spec, assembly });
+      if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(reads, history[0]!.requestRef), prepared.request);
+      const target = await readModelTarget(driver, reads, { run: cut.run, spec, assembly });
       const grantIssuedAt = sampleCanonicalNow();
       if (grantIssuedAt >= cut.run.deadlineAt) {
         throw new KernelStorageError('LEASE_FENCED', 'Run deadline elapsed before model grant preparation');
@@ -328,11 +331,22 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const grant = planModelOperationGrant({ ...target, run: cut.run, spec, assembly, frontier, frontierRef: frontierPlan.ref,
         request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, grantIssuedAt, cut.run.deadlineAt);
       const grantPlan = planCanonicalArtifact(grant, grant.format);
-      const targetMetadata = await artifacts.describe(target.targetRef, 'application/json',
+      const targetMetadata = await reads.describe(target.targetRef, 'application/json',
         target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');
-      const metadata = [...await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan,
-        ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]), targetMetadata];
-      const admitted = await prepareValidatedInvocation(driver, artifacts, owner, {
+      let published: PublishedArtifact[];
+      if (planArtifact) {
+        published = await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan, planArtifact, ...prepared.artifacts]);
+      } else {
+        const [body, request] = prepared.artifacts;
+        if (!body || !request || prepared.artifacts.length !== 2 || frontierPlan.ref !== cut.run.frontierRef)
+          throw new TypeError('normal model preparation substitutes its frontier or exact artifact group');
+        const existingFrontier = await reads.describe(frontierPlan.ref, frontierPlan.mediaType, frontierPlan.schemaKind);
+        reads.assertReadActive();
+        const durable = await artifacts.publishPlannedFour([projectionArtifact, grantPlan, body, request]);
+        published = [durable[0]!, existingFrontier, ...durable.slice(1)];
+      }
+      const metadata = [...published, targetMetadata];
+      const admitted = await prepareValidatedInvocation(driver, reads, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
         target: target.targetRef, requestRef: prepared.requestRef, replayClass: 'retry', grantRef: grantPlan.ref,
         reservation: { modelTokens: prepared.request.reservation.modelTokens, costMicros: prepared.request.reservation.costMicros,
@@ -365,7 +379,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (originalRun.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'model completion started at a stale Run revision');
       const originalJournal = readInvocationAttempt(driver, runId, opId, attempt);
       const completionSubject = (run: Run) => {
-        const { revision: _revision, updatedAt: _updatedAt, stopIntentRef: _stopIntentRef, cancelRequested: _cancelRequested, ...subject } = run;
+        const { revision: _revision, updatedAt: _updatedAt, stopIntentRef: _stopIntentRef, cancelRequested: _cancelRequested, parentCancellationRef: _parentCancellationRef, ...subject } = run;
         return canonicalSha256(subject);
       };
       for (let retry = 0; retry < 8; retry++) {

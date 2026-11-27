@@ -6,20 +6,58 @@ import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { ProcessContainment, SourceManifest, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1 } from '../kernel/types.js';
 import { publishInProcessChannel } from './store.js';
-import { openSqliteDriver } from './sqlite-driver.js';
-import { readActiveStateOwner } from './state-owner.js';
-import { assertBuiltinEditLaunchClosure, assertWorkerLaunchClosure, readBuiltinEditLaunchClosure, readRetainedWorkerLaunchClosure, readWorkerLaunchClosure } from './execution-closure.js';
+import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import { readActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertBuiltinEditLaunchClosure, assertVerifierLaunchClosure, assertWorkerLaunchClosure, readBuiltinEditLaunchClosure, readRetainedWorkerLaunchClosure, readWorkerLaunchClosure } from './execution-closure.js';
 import type { ToolOperationGrantV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
-import { createQueuedFixture, prepareFixtureGeneration, disposeFixture, digest, uuidv7, admissionKey } from './testing/fixtures.js';
+import { createQueuedFixture, activateFixtureWorker, prepareFixtureGeneration, disposeFixture, digest, uuidv7, admissionKey } from './testing/fixtures.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { batch, prepareTool } from './testing/tool-calls.js';
 import { publishFixtureEditLaunch, publishFixtureWorkerLaunch } from './testing/worker-launch.js';
+import { fenceOwnedWorkerOnShutdown, readOwnedWorkerRetirementCut } from './reducers/worker-recovery.js';
 
 function retainedOwner(stateRoot: string) {
   const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
   try { return readActiveStateOwner(driver)!; } finally { driver.close(); }
 }
+
+test('owned retirement reads fresh original activation state across renewals and quiescence without granting execution', async () => {
+  // Actual SQLite/CAS/StateOwner with the existing offline launch fixture.
+  // This read supplies no native death, snapshot or installed proof.
+  const fixture = await createQueuedFixture('owned-retirement-cut');
+  try {
+    const queued = fixture.store.getRun(fixture.runId);
+    await activateFixtureWorker(fixture, 'owned-retirement-cut', 30_000);
+    const initial = await fixture.store.readRecoveryClosure(fixture.runId), launch = initial.workerLaunches[0]!;
+    if (launch.phase !== 'activated') assert.fail('fixture requires its actual active launch');
+    const closure = await readWorkerLaunchClosure(fixture.store.artifacts, retainedOwner(fixture.stateRoot), { ...launch, run: queued });
+    const original = { run: initial.run, launch };
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const read = () => readOwnedWorkerRetirementCut(held.driver, held.owner, original, closure);
+    assert.deepEqual(read().run, initial.run);
+    const renewed = fixture.store.renewWorkerLease({ runId: fixture.runId, launchId: launch.launchId,
+      expectedLeaseVersion: launch.leaseVersion, leaseEpoch: initial.run.leaseEpoch,
+      workerIdentityDigest: launch.workerIdentityDigest!, newLeaseExpiresAt: new Date(Date.parse(launch.leaseExpiresAt!) + 1000).toISOString() });
+    assert.deepEqual(read().workerLaunches, [renewed]);
+    const generation = initial.workspaceGenerations.find(row => row.generationRef === launch.workspaceGenerationRef)!;
+    const revoking = fixture.store.beginGenerationRevocation({ launchId: launch.launchId, expectedLeaseVersion: renewed.leaseVersion,
+      expectedGenerationRowVersion: generation.rowVersion, quiesceId: 'original-retirement' });
+    assert.deepEqual(read().workspaceGenerations, [revoking.generation]);
+    const checkpointing = fixture.store.beginGenerationCheckpoint({ launchId: launch.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
+      expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId: 'original-retirement' });
+    assert.deepEqual(read().workspaceGenerations, [checkpointing.generation]);
+    for (const changed of [
+      { run: { ...original.run, specRef: digest('another-spec') }, launch },
+      { run: { ...original.run, deadlineAt: new Date(Date.parse(original.run.deadlineAt) + 1).toISOString() }, launch },
+      { run: original.run, launch: { ...launch, workerIdentityDigest: digest('another-worker') } },
+      { run: original.run, launch: { ...launch, spawnNonceDigest: digest('another-birth') } }
+    ]) assert.throws(() => readOwnedWorkerRetirementCut(held.driver, held.owner, changed, closure), { code: 'LEASE_FENCED' });
+    assert.throws(() => readOwnedWorkerRetirementCut(held.driver, held.owner, original, structuredClone(closure)), { code: 'ARTIFACT_MISMATCH' });
+    assert.equal(fixture.store.getRun(fixture.runId).activeWorkerLaunchId, launch.launchId);
+    assert.equal(fixture.store.getRun(fixture.runId).revision, initial.run.revision);
+  } finally { await disposeFixture(fixture); }
+});
 
 test('worker reservation rejects a canonical launch closed over another Run without changing authority', async () => {
   const fixture = await createQueuedFixture('closed-launch');
@@ -47,6 +85,10 @@ test('worker reservation rejects a canonical launch closed over another Run with
     const execution = await readWorkerLaunchClosure(store.artifacts, retainedOwner(fixture.stateRoot), { ...launch.input, run: store.getRun(runId) });
     assert.throws(() => assertWorkerLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
     assert.doesNotThrow(() => assertWorkerLaunchClosure(execution));
+    await assert.rejects(fenceOwnedWorkerOnShutdown(undefined as never, store.artifacts, undefined as never, undefined as never,
+      structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
+    assert.throws(() => assertVerifierLaunchClosure(execution), { code: 'ARTIFACT_MISMATCH' }, 'a worker closure is not verifier execution authority');
+    assert.throws(() => assertVerifierLaunchClosure(structuredClone(execution)), { code: 'ARTIFACT_MISMATCH' });
   } finally { await disposeFixture(fixture); }
 });
 

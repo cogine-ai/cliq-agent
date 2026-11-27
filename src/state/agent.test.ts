@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { sha256Bytes } from '../kernel/identity.js';
+import { ContentAddressedStore } from './cas.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import type { ContinuationItem, RunFrontier, RunContextCompactionPlan } from '../kernel/types.js';
 import { AgentContextExhaustedError, AgentHandoffPendingError } from './reducers/agent.js';
@@ -21,6 +23,24 @@ async function prepare(fixture: Awaited<ReturnType<typeof createAgentFixture>>) 
   return prepared;
 }
 
+test('model attempt read phases are inert and preserve the original complete read and request', async () => {
+  const fixture = await createAgentFixture('model-read-phase');
+  try {
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), phases: string[] = [];
+    const observe = (phase: string) => { phases.push(phase); throw new Error('observer failure'); };
+    assert.equal(await fixture.agent.readModelAttempt(undefined, observe), undefined);
+    assert.equal(phases[0], 'recovery_cut');
+    assert(phases.includes('recovery_terminal'));
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const prepared = await prepare(fixture), retained = await fixture.store.readRecoveryClosure(fixture.runId);
+    phases.length = 0;
+    const attempt = await fixture.agent.readModelAttempt(undefined, observe);
+    assert.equal(attempt?.prepared.requestRef, prepared.prepared.requestRef);
+    assert.deepEqual(phases.slice(-2), ['request', 'grant']);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), retained);
+  } finally { await disposeFixture(fixture); }
+});
+
 function response(fixture: Awaited<ReturnType<typeof createAgentFixture>>, prepared: Awaited<ReturnType<typeof prepare>>,
   calls: Array<{ id: string; name?: string; arguments: string }>, text = '') {
   const reader = fixture.agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
@@ -33,10 +53,20 @@ function response(fixture: Awaited<ReturnType<typeof createAgentFixture>>, prepa
   return reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput);
 }
 
-test('real model admission binds zero-based identity, native bytes and the full signed reservation', async () => {
+test('real model admission binds zero-based identity, native bytes and the full signed reservation', async t => {
   const fixture = await createAgentFixture('typed-model');
   try {
+    const frontierRef = fixture.store.getRun(fixture.runId).frontierRef;
+    const group: string[][] = [], publish = ContentAddressedStore.prototype.publishFour;
+    const spy = t.mock.method(ContentAddressedStore.prototype, 'publishFour', function (this: ContentAddressedStore,
+      sources: Parameters<ContentAddressedStore['publishFour']>[0]) {
+      group.push(sources.map(sha256Bytes)); return publish.call(this, sources);
+    });
     const admitted = await prepare(fixture);
+    spy.mock.restore();
+    assert.deepEqual(group, [[admitted.prepared.request.promptProjectionRef, admitted.entry.grantRef,
+      admitted.prepared.request.bodyBytesRef, admitted.prepared.requestRef]]);
+    assert.equal(admitted.run.frontierRef, frontierRef);
     assert.equal(admitted.entry.attempt, 0);
     assert.equal(admitted.entry.requestRef, admitted.prepared.requestRef);
     assert.deepEqual(admitted.entry.budgetDelta, { modelTokens: 40_960, costMicros: 114_688, toolCalls: 0, repairAttempts: 0 });

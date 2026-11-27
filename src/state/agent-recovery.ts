@@ -1,7 +1,9 @@
+import { readChildAdmission, validateChildAdmissionHistory } from './child-admission.js';
+import { validateChildWaitHistory } from './child-wait-history.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
-  ContextManifest, ContinuationItem, InvocationJournalEntry, Run, RunItemReferenceV1, RunSpec,
+  ContextManifest, ContinuationItem, InvocationJournalEntry, RecoveryClosureV1, Run, RunItemReferenceV1, RunSpec,
   ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan, RunAssemblyV1, WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import type { ModelUnusableResponseV1 } from '../protocol/agent-ir.js';
@@ -20,14 +22,148 @@ import { decodeModelOperationGrant } from '../kernel/model-grant.js';
 import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { readModelGrantData } from './model-grant.js';
 import { decodeAdmittedContext, decodeContextManifest, decodeSourceManifest, decodeWorkspaceIdentity } from './decoders.js';
+import { validateFinalCandidateRecovery } from './final-candidate-recovery.js';
+import type { SqliteDriver } from './sqlite-driver.js';
+import { readVerifierProgressByCandidate, type VerifierProgress } from './verifier-recovery.js';
+import { validateVerifierHistory } from './verifier-history.js';
+import { validateDeliveryRecovery } from './delivery-recovery.js';
+import { assertDeliveryReadData, type DeliveryReadData } from './delivery-read-data.js';
+import { readInvocationJournal } from './repositories/journal.js';
+import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
+import { readWorkspaceGenerationsForRun } from './repositories/workspace-generations.js';
+import { readChildAllocationsForRun } from './repositories/child-allocations.js';
+import { readCheckpoint, readRun, readSession, readSessionPrincipalId } from './rows.js';
+import { requireEqual } from '../policy/runtime-authority.js';
+import { immutableSnapshot } from '../model/immutable.js';
+import { decodeToolAbandonedItem } from '../kernel/mcp.js';
+
+/** Data restriction only. Each permitted subject still requires its complete
+ * subject-specific retained policy/control/Journal history below. */
+export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], subjectKind: unknown): void {
+  if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' && subjectKind !== 'dependency_install_scripts' &&
+      !(operation === 'agent' && (subjectKind === 'tool_call' || subjectKind === 'child_merge' || subjectKind === 'mcp_server_launch')) &&
+      !(operation === 'delivery' && subjectKind === 'delivery_plan'))
+    throw new TypeError('policy decision has an unsupported subject for its Run operation');
+}
+
+/** Fixed inert boundaries only, never refs, timing or execution authority. */
+export type AgentRecoveryPhase = 'model' | 'items' | 'candidate' | 'verifier' | 'tool' | 'input';
 
 /** Recovery checks retained reachability/identity; loading the agent additionally reproduces native requests and validates schemas. */
-export async function validateAgentRecovery(input: {
+type AgentRecoveryInput = {
+  driver?: SqliteDriver;
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; items: RunItemReferenceV1[];
   journal: InvocationJournalEntry[]; context: ContextManifest;
   checkpoints: Checkpoint[]; workspaceGenerations: WorkspaceGenerationStateV1[];
   principalId: string; workspaceIdentityRef: string;
-}): Promise<void> {
+  onVerifierProgress?: (progress: ReadonlyMap<string, VerifierProgress>) => void;
+};
+export async function validateAgentRecovery(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+  const { repairAttempts } = await validateAgentRecoveryData(input, onPhase);
+  return { repairAttempts };
+}
+/** Reader-family data only; the public independent reader stays fresh. */
+export async function validateAgentRecoveryInDeliveryEpoch(input: AgentRecoveryInput, data: DeliveryReadData,
+  onPhase?: (phase: AgentRecoveryPhase) => void): Promise<{ repairAttempts: number }> {
+  const { repairAttempts } = await validateAgentRecoveryData(input, onPhase, data);
+  return { repairAttempts };
+}
+
+// Completed data from this one actual recovery traversal. Neither a Map nor
+// an object with the same fields can stand in for that traversal. No token is
+// retained by the Store, exported on the wire or transferred to a new cut.
+const agentReadBrand: unique symbol = Symbol('AgentRecoveryReadData');
+export type AgentRecoveryReadData = Readonly<{ readonly [agentReadBrand]: true }>;
+const agentReadData = new WeakMap<object, { driver: SqliteDriver; artifacts: ArtifactCatalog;
+  cut: RecoveryClosureV1; cutDigest: string; sqlDigest: string;
+  decodedItems: ReadonlyMap<string, ContinuationItem>; verifierProgressByCandidate: ReadonlyMap<string, VerifierProgress>;
+  delivery?: DeliveryReadData }>();
+
+function agentRecoverySqlCut(driver: SqliteDriver, cut: RecoveryClosureV1) {
+  const run = readRun(driver, cut.run.id), session = readSession(driver, run.sessionId);
+  const items = driver.prepare('SELECT item_id,item_seq,payload_ref,created_at FROM items WHERE run_id=? ORDER BY item_seq')
+    .all<{ item_id: string; item_seq: bigint; payload_ref: string; created_at: string }>(run.id)
+    .map(row => ({ schemaVersion: 1, itemId: row.item_id, itemSeq: Number(row.item_seq), payloadRef: row.payload_ref,
+      payloadDigest: row.payload_ref, createdAt: row.created_at }));
+  const launches = readWorkerLaunchesForRun(driver, run.id), generations = readWorkspaceGenerationsForRun(driver, run.id);
+  const journal = readInvocationJournal(driver, run.id), checkpoint = readCheckpoint(driver, run.latestCheckpointId);
+  const allocations = readChildAllocationsForRun(driver, run.id);
+  requireEqual(run, cut.run, 'Agent recovery exact Run cut');
+  requireEqual(checkpoint, cut.latestCheckpoint, 'Agent recovery exact current Checkpoint');
+  requireEqual(items, cut.items, 'Agent recovery exact item cut');
+  requireEqual(journal, cut.journal, 'Agent recovery exact Journal cut');
+  requireEqual(launches.filter(row => row.phase !== 'retired'), cut.workerLaunches, 'Agent recovery exact live launch cut');
+  requireEqual(generations, cut.workspaceGenerations, 'Agent recovery exact original generation cut');
+  requireEqual(allocations, cut.childAllocations, 'Agent recovery exact child allocation cut');
+  const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id=? ORDER BY rowid')
+    .all<{ id: string }>(run.id).map(row => readCheckpoint(driver, row.id));
+  const admission = driver.prepare('SELECT principal_id,admission_method,admission_key,admission_intent_digest,admission_request_id FROM runs WHERE id=?').get(run.id);
+  return { run, checkpoint, items, journal, launches, generations, allocations, checkpoints, admission,
+    principalId: readSessionPrincipalId(driver, session.id), workspaceIdentityRef: session.workspaceIdentityRef };
+}
+
+/** Internal friend: produce sharing data only after the complete original
+ * history has joined. Public independent validation keeps its original shape. */
+export async function validateAgentRecoveryInResultEpoch(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  onPhase?: (phase: AgentRecoveryPhase) => void) {
+  if (cut.runSpec.operation !== 'agent') throw new TypeError('Agent result data requires its original recovery operation');
+  return validateCompletedRecoveryHistory(input, cut, onPhase);
+}
+
+/** Same complete history, only for this actual worker-free Delivery family.
+ * A structurally compatible factory or unfinished Map cannot supply it. */
+export async function validateAgentRecoveryInDeliveryResultEpoch(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  delivery: DeliveryReadData, onPhase?: (phase: AgentRecoveryPhase) => void) {
+  if (cut.runSpec.operation !== 'delivery') throw new TypeError('Delivery result data requires its original recovery operation');
+  return validateCompletedRecoveryHistory(input, cut, onPhase, delivery);
+}
+
+async function validateCompletedRecoveryHistory(input: AgentRecoveryInput, cut: RecoveryClosureV1,
+  onPhase?: (phase: AgentRecoveryPhase) => void, delivery?: DeliveryReadData) {
+  if (!input.driver || input.run !== cut.run || input.spec !== cut.runSpec || input.items !== cut.items ||
+      input.journal !== cut.journal || cut.run.activeWorkerLaunchId || cut.workerLaunches.length)
+    throw new TypeError('Agent result data requires its original recovery cut');
+  input.artifacts.assertReadActive();
+  const cutDigest = canonicalSha256(cut), sqlDigest = canonicalSha256(agentRecoverySqlCut(input.driver, cut));
+  if (delivery) assertDeliveryReadData(input.driver, input.artifacts, cut, delivery);
+  const result = await validateAgentRecoveryData(input, onPhase, delivery);
+  if (delivery) assertDeliveryReadData(input.driver, input.artifacts, cut, delivery);
+  input.artifacts.assertReadActive();
+  requireEqual(canonicalSha256(agentRecoverySqlCut(input.driver, cut)), sqlDigest, 'Agent recovery SQL changed during validation');
+  if (canonicalSha256(cut) !== cutDigest) throw new TypeError('Agent recovery data cut changed during validation');
+  const data = Object.freeze({ [agentReadBrand]: true as const });
+  agentReadData.set(data, { driver: input.driver, artifacts: input.artifacts, cut, cutDigest, sqlDigest,
+    decodedItems: new Map([...result.decodedItems].map(([id, item]) => [id, immutableSnapshot(item)])),
+    verifierProgressByCandidate: new Map([...result.verifierProgressByCandidate].map(([id, progress]) => [id, immutableSnapshot(progress)])), ...(delivery ? { delivery } : {}) });
+  return { repairAttempts: result.repairAttempts, data };
+}
+
+/** A token is data, never authority. Every reuse still checks the same read
+ * lifetime and the complete original SQL cut, including retired launch rows. */
+export function readAgentRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentRecoveryReadData) {
+  artifacts.assertReadActive();
+  const original = data !== null && typeof data === 'object' ? agentReadData.get(data) : undefined;
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut ||
+      canonicalSha256(cut) !== original.cutDigest)
+    throw new TypeError('Agent recovery data is not from this exact completed read');
+  requireEqual(canonicalSha256(agentRecoverySqlCut(driver, cut)), original.sqlDigest, 'Agent recovery SQL changed before reuse');
+  artifacts.assertReadActive(); return original;
+}
+
+/** Closing a data scope invalidates reuse even when the underlying read was
+ * cancelled. It does not close a descriptor or manufacture retirement. */
+export function closeAgentRecoveryData(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1,
+  data: AgentRecoveryReadData): void {
+  const original = agentReadData.get(data);
+  if (!original || original.driver !== driver || original.artifacts !== artifacts || original.cut !== cut)
+    throw new TypeError('cannot close another Agent recovery read');
+  agentReadData.delete(data);
+}
+
+async function validateAgentRecoveryData(input: AgentRecoveryInput, onPhase?: (phase: AgentRecoveryPhase) => void,
+  delivery?: DeliveryReadData) {
+  const phase = (value: AgentRecoveryPhase) => { try { onPhase?.(value); } catch { /* Diagnosis cannot decide recovery. */ } };
   const { artifacts, run, spec, journal } = input;
   const workspace = decodeWorkspaceIdentity(await readCanonicalArtifact(artifacts, input.workspaceIdentityRef));
   const source = decodeSourceManifest(await readCanonicalArtifact(artifacts, spec.baseWorkspaceManifestRef));
@@ -39,6 +175,7 @@ export async function validateAgentRecovery(input: {
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   const requests = new Map<string, ModelRequestV1>();
   const operationRequests = new Map<string, ModelRequestV1>();
+  phase('model');
   for (const prepared of journal.filter((entry) => entry.opKind === 'model' && entry.phase === 'prepared')) {
     const request = await readCanonicalArtifact<ModelRequestV1>(artifacts, prepared.requestRef);
     if (request.schemaVersion !== 1 || request.format !== 'cliq-model-request-v1' ||
@@ -109,13 +246,19 @@ export async function validateAgentRecovery(input: {
       turns.set(entry.resultRef, material);
     } else throw new TypeError('model completion has an untyped result');
   }
+  phase('items');
   const items = new Map<string, ContinuationItem>();
+  let hasChildWaitResult = false;
   for (const row of input.items) {
     const item = await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef);
     if (item.runId !== run.id || item.itemId !== row.itemId || item.createdAt !== row.createdAt) {
       throw new TypeError('Run item differs from its durable owner row');
     }
     items.set(item.itemId, item);
+    if (spec.operation === 'delivery' && !['delivery_merge', 'delivery_merge_conflict', 'dependency_ready', 'dependency_failure', 'final_candidate', 'verifier_result',
+      'verifier_stop', 'policy_decision', 'delivery_decision', 'publication_path_progress', 'publication_path_result', 'publication_late_observation'].includes(item.kind))
+      throw new TypeError('delivery history acquired an agentic continuation item');
+    if (item.kind === 'policy_decision') assertRunPolicyDecisionSubject(spec.operation, item.subjectKind);
     if (item.kind === 'model_turn' || item.kind === 'assistant_tool_batch') {
       const turn = turns.get(item.modelTurnRef)?.turn;
       const completion = journal.find((entry) => entry.opKind === 'model' && entry.phase === 'completed' &&
@@ -141,6 +284,11 @@ export async function validateAgentRecovery(input: {
         throw new TypeError('context summary is not owned by the matching completed compaction attempt');
       }
       await readCanonicalArtifact(artifacts, plan.sourceContextManifestRef);
+    } else if(item.kind==='tool_abandoned'){
+      decodeToolAbandonedItem(item);
+      if(!['failed','cancelled'].includes(run.status)||!journal.some(entry=>entry.phase==='abandoned'&&entry.opId===item.opId&&
+        entry.attempt===item.attempt&&entry.seq===item.abandonedJournalSeq&&entry.attestationRef===item.attestationRef))
+        throw new TypeError('terminal-only abandonment has no exact original abandoned Journal row');
     } else if (item.kind === 'tool_result') {
       const batch = items.get(item.batchItemId);
       const call = batch?.kind === 'assistant_tool_batch' ? batch.calls[item.index] : undefined;
@@ -154,19 +302,106 @@ export async function validateAgentRecovery(input: {
         throw new TypeError('tool result is not owned by its retained batch call');
       }
       if (payload.outcome === 'executed') {
+        hasChildWaitResult ||= payload.source === 'child_results';
         if (payload.source === 'invocation') {
           if (item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
               !journal.some((entry) => (entry.opKind === 'tool' || entry.opKind === 'mcp') &&
               entry.phase === 'completed' && entry.opId === payload.opId && entry.attempt === payload.attempt &&
               entry.resultRef === payload.journalResultRef)) throw new TypeError('executed invocation result has no completed Journal owner');
-        } else if (payload.source !== 'user_input') throw new TypeError('executed tool result has an unknown source');
+        } else if (payload.source === 'skill_resource') {
+          if (call.toolName !== 'skill_resource' || item.opId !== payload.opId || payload.opId !== toolOperationId(run.id, item.batchItemId, item.callId) ||
+              !journal.some(entry => entry.opKind === 'skill_resource' && entry.phase === 'completed' && entry.opId === payload.opId && entry.resultRef === payload.journalResultRef))
+            throw new TypeError('skill resource result has no unique original local Journal owner');
+        } else if (payload.source === 'child_admission') {
+          const handle = await readCanonicalArtifact<import('../kernel/children.js').ChildHandleItem>(artifacts, payload.childHandleItemRef);
+          if (!input.driver || call.toolName !== 'delegate' || item.opId !== payload.opId || handle.kind !== 'child_handle')
+            throw new TypeError('local child result has no exact owned delegate subject');
+          const admitted = await readChildAdmission(input.driver, artifacts, handle.childRunId);
+          if (admitted.parent.id !== run.id || admitted.receipt.childHandleItemRef !== payload.childHandleItemRef ||
+              admitted.journal[2]!.resultRef !== payload.journalResultRef || admitted.receipt.receiptDigest !== payload.journalResultDigest ||
+              admitted.allocation.delegateOpId !== payload.opId) throw new TypeError('child result substitutes its original local admission');
+        } else if (payload.source === 'child_admission_refusal') {
+          const receipt = await readCanonicalArtifact<import('../kernel/child-admission-refusal.js').ChildAdmissionRefusalReceiptV1>(artifacts, payload.journalResultRef);
+          if (!input.driver || call.toolName !== 'delegate' || item.opId !== payload.opId || receipt.format !== 'cliq-child-admission-refusal-v1' ||
+              receipt.runId !== run.id || receipt.opId !== payload.opId || receipt.receiptDigest !== payload.journalResultDigest ||
+              !journal.some(row => row.opKind === 'child_admission' && row.opId === payload.opId && row.phase === 'completed' && row.resultRef === payload.journalResultRef))
+            throw new TypeError('no-child result has no exact original local attempt');
+        } else if (payload.source !== 'user_input' && payload.source !== 'child_results') throw new TypeError('executed tool result has an unknown source');
       }
       if (payload.outcome === 'error') await artifacts.readBytes(payload.diagnosticRef);
     }
   }
-  await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations });
-  await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  if (journal.some(row => row.opKind === 'child_admission') || [...items.values()].some(item => item.kind === 'child_handle')) {
+    if (!input.driver) throw new TypeError('child admission history requires its real retained SQLite source');
+    await validateChildAdmissionHistory(input.driver, artifacts, { run, items, journal, checkpoints: input.checkpoints });
+  }
+  if (journal.some(row => row.opKind === 'child_await') || hasChildWaitResult || run.waitingReason === 'child') {
+    if (!input.driver) throw new TypeError('child await history requires its actual retained SQLite source');
+    await (await import('./child-await-history.js')).validateChildAwaitHistory(input.driver, artifacts,
+      { run, spec, items, journal, checkpoints: input.checkpoints });
+  }
+  if (spec.operation === 'delivery' && !input.driver) throw new TypeError('delivery history requires its owning retained SQLite cut');
+  const deliveryMerges = delivery ? await delivery.merges() : input.driver ? await validateDeliveryRecovery(input.driver, artifacts, {
+    run, runSpec: spec, items: input.items, journal, checkpoints: input.checkpoints, decodedItems: items
+  }) : undefined;
+  let mergedAwaitResults: ReadonlyMap<string, string> | undefined;
+  if (journal.some(row => row.opKind === 'child_merge') || [...items.values()].some(item => item.kind === 'child_merge_result' || item.kind === 'child_merge_batch')) {
+    if (!input.driver) throw new TypeError('child merge effect history requires its actual retained SQLite source');
+    mergedAwaitResults = await (await import('./child-merge-history.js')).validateChildMergeHistory(input.driver, artifacts,
+      { run, items, journal, checkpoints: input.checkpoints });
+  }
+  const excludedFinal = input.context.segments.some(segment => segment.kind === 'excluded_control' &&
+    [...items.values()].slice(segment.fromItemSeq - 1, segment.throughItemSeq).some(item => item.kind === 'model_turn'));
+  if (hasChildWaitResult || excludedFinal || [...items.values()].some(item => item.kind === 'child_result' || item.kind === 'child_merge_batch') || run.waitingReason === 'child') {
+    if (!input.driver) throw new TypeError('child wait history requires its real retained SQLite source');
+    await validateChildWaitHistory(input.driver, artifacts, { run, spec, items, journal, checkpoints: input.checkpoints, mergedAwaitResults,
+      context: input.context, workspaceGenerations: input.workspaceGenerations });
+  }
+  const mergePolicy = [...items.values()].some(item => item.kind === 'policy_decision' && item.subjectKind === 'child_merge');
+  const mergeWaiting = run.waitingReason === 'approval' && run.waitingOnRef &&
+    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'child_merge';
+  if (mergePolicy || mergeWaiting) {
+    if (!input.driver) throw new TypeError('child merge permission history requires its actual retained SQLite source');
+    await (await import('./child-merge-authorization.js')).validateChildMergeAuthorizationHistory(input.driver, artifacts, { run, items });
+  }
+  const scriptsPolicy = [...items.values()].some(item => item.kind === 'policy_decision' && item.subjectKind === 'dependency_install_scripts');
+  const scriptsWaiting = run.waitingReason === 'approval' && run.waitingOnRef &&
+    (await readCanonicalArtifact<{ subject?: { kind?: string } }>(artifacts, run.waitingOnRef)).subject?.kind === 'dependency_install_scripts';
+  if (scriptsPolicy || scriptsWaiting) {
+    if (!input.driver) throw new TypeError('dependency source consent requires its actual retained SQLite source');
+    await (await import('./dependency-script-approval.js')).validateDependencyScriptApprovalHistory(input.driver, artifacts, { run, items });
+  }
+  phase('candidate');
+  const candidateIds = input.items.filter(row => items.get(row.itemId)?.kind === 'final_candidate').map(row => row.itemId);
+  const hasDependencyHistory = journal.some(row => row.target === 'builtin:dependency-acquire') ||
+    [...items.values()].some(item => item.kind === 'dependency_ready' || item.kind === 'dependency_failure');
+  if (hasDependencyHistory && (!input.driver || !spec.dependencyPolicyRef))
+    throw new TypeError('dependency requires its complete original history');
+  if (candidateIds.length && !input.driver) throw new TypeError('candidate recovery requires its owning retained SQLite cut');
+  const verifierProgressByCandidate = input.driver && (candidateIds.length || hasDependencyHistory)
+    ? await readVerifierProgressByCandidate(input.driver, artifacts, {
+        run, runSpec: spec, items: input.items, journal, workspaceGenerations: input.workspaceGenerations
+      }, candidateIds)
+    : new Map<string, VerifierProgress>();
+  await validateFinalCandidateRecovery({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate, deliveryMerges });
+  phase('verifier');
+  let repairAttempts = 0;
+  if (input.driver) ({ repairAttempts } = await validateVerifierHistory({ driver: input.driver, artifacts, run, spec, items: input.items, journal,
+    checkpoints: input.checkpoints, workspaceGenerations: input.workspaceGenerations, decodedItems: items, verifierProgressByCandidate }));
+  else if ([...items.values()].some(item => ['final_candidate', 'verifier_result', 'verifier_stop', 'repair_diagnostic'].includes(item.kind)) ||
+    journal.some(entry => entry.opKind === 'verifier') || run.repairCount || run.budgetConsumed.repairAttempts)
+    throw new TypeError('verifier history requires its original retained SQLite cut');
+  if (spec.operation === 'agent') {
+    phase('tool');
+    await validateToolRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints,
+      workspaceGenerations: input.workspaceGenerations, driver: input.driver,itemRows:input.items });
+    phase('input');
+    await validateUserInputRecovery({ artifacts, run, spec, items, journal, checkpoints: input.checkpoints });
+  }
   validateContextItems(input.context, input.items.map((row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: items.get(row.itemId)!
   })));
+  input.onVerifierProgress?.(verifierProgressByCandidate);
+  return { repairAttempts, decodedItems: items, verifierProgressByCandidate };
 }

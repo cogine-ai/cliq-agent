@@ -4,7 +4,7 @@ import path from 'node:path';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
-import type { ContinuationItem, LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, RunCancel, SessionContextProjection, StateRootIdentityV1, StopIntent, TerminalDetail, ToolResultModelContentV1, ToolResultPayloadV1, WorkerLaunch } from '../kernel/types.js';
+import type { ContinuationItem, LocalControlChannelIdentityV1, LocalPrincipalIdentityV1, RunCancel, StateRootIdentityV1, StopIntent, TerminalDetail, ToolResultModelContentV1, ToolResultPayloadV1, WorkerLaunch } from '../kernel/types.js';
 import { RunTerminalError } from './errors.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { readWorkerLaunchesForRun } from './repositories/worker-launches.js';
@@ -12,7 +12,11 @@ import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
+import { fixtureSessionContextSegments } from './testing/session-context.js';
+import { readRetainedAgentStop } from './stop-recovery.js';
+import type { StateOwnerContext } from './state-owner.js';
+import type { SqliteDriver } from './sqlite-driver.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -63,8 +67,8 @@ test('cancel fences a prepared model, replays authenticated requests, and atomic
     const session = fixture.store.getSession(stopped.run.sessionId);
     assert.equal(session.contextRevision, sessionBefore.contextRevision + 1);
     assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + 1);
-    const projection = await fixture.store.artifacts.readCanonical<SessionContextProjection>(session.contextProjectionRef);
-    assert.equal(projection.segments.at(-1)?.kind, 'raw');
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, session.contextProjectionRef);
+    assert.equal(segments.at(-1)?.kind, 'raw');
     const detail = await fixture.store.artifacts.readCanonical<TerminalDetail>(terminal.run.terminalDetailRef!);
     assert.deepEqual(detail.reasonDetail, { kind: 'cancelled', stopIntentRef: stopped.run.stopIntentRef });
     await reopen(fixture);
@@ -149,10 +153,14 @@ for (const waiting of ['input', 'approval'] as const) test(`cancel closes a work
   try {
     await batch(fixture, waiting === 'input' ? [{ name: 'request_input', input: { prompt: 'Which name?', responseKind: 'text', maximumResponseBytes: 20 } },
       { name: 'read', input: { path: 'a' } }] : [{ name: 'bash', input: { command: 'pwd' } }]);
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+    assert.ok(selection.disposition === 'retirement_required');
+    assert.equal(selection.reason, waiting);
+    await retireFixtureToolSelection(fixture, selection);
     const plan = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
     assert.ok(plan.disposition === 'input_required' || plan.disposition === 'approval_required');
-    const proof = await quiescedToolCheckpoint(fixture, plan.checkpointId);
-    const wait = { expectedRunRevision: revision(fixture), waitingOnRef: plan.waitingOnRef, checkpoint: proof.checkpoint };
+    assert.equal(plan.run.activeWorkerLaunchId, undefined);
+    const wait = { expectedRunRevision: revision(fixture), waitingOnRef: plan.waitingOnRef };
     if (waiting === 'input') await fixture.agent.waitForInput(wait); else await fixture.agent.waitForToolApproval(wait);
     await reopen(fixture);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
@@ -209,6 +217,17 @@ test('deadline uses canonical time and user cancellation wins without resetting 
     assert.equal((await fixture.store.artifacts.readCanonical<StopIntent>(deadline.run.stopIntentRef!)).origin, 'deadline');
     const first = await fixture.agent.cancelRun(await cancelCommand(fixture));
     assert.notEqual(first.run.stopIntentRef, deadline.run.stopIntentRef);
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const actual = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.equal((await readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, deadline.run.stopIntentRef!)).origin, 'deadline');
+    assert.equal((await readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, first.run.stopIntentRef!)).origin, 'user_cancel');
+    assert.equal(actual.run.stopIntentRef, first.run.stopIntentRef, 'history reads never replace the actual winning SQL cut');
+    const originalCancel = await fixture.store.artifacts.readCanonical<StopIntent>(first.run.stopIntentRef!);
+    if (originalCancel.origin !== 'user_cancel') assert.fail('the actual control call must own its cancellation');
+    const substituted = await fixture.store.artifacts.publishCanonical({ ...originalCancel, requestId: 'never-issued-control-request' }, 'inert-stop-data');
+    await assert.rejects(readRetainedAgentStop(held.driver, fixture.store.artifacts, actual, substituted.ref),
+      /cancellation|control|request/u);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), actual.run, 'a rejected historical ref cannot write the current Run');
     now++;
     const second = await fixture.agent.cancelRun(await cancelCommand(fixture));
     assert.equal(second.run.stopIntentRef, first.run.stopIntentRef);
@@ -402,9 +421,9 @@ test('concurrent root stops append separate Session segments in commit order wit
     const session = fixture.store.getSession(run.sessionId);
     assert.equal(session.latestItemSeq, 2);
     assert.equal(session.contextRevision, 3);
-    const projection = await fixture.store.artifacts.readCanonical<SessionContextProjection>(session.contextProjectionRef);
-    assert.deepEqual(projection.segments.map((segment) => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
-    const terminalItems = await Promise.all(projection.segments.map(segment => {
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, session.contextProjectionRef);
+    assert.deepEqual(segments.map((segment) => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
+    const terminalItems = await Promise.all(segments.map(segment => {
       assert.ok(segment.kind === 'raw');
       return fixture.store.artifacts.readCanonical<{ runId: string }>(segment.items[0]!.payloadRef);
     }));

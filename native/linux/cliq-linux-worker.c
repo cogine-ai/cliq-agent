@@ -67,8 +67,8 @@ int main(int argc, char **argv) {
     (void)argv;
     if (argc != 1 || getpid() != 2 || getppid() != 1 || !deny_child_and_network_creation()) return 70;
     struct cliq_worker_packet initial;
-    int fds[5]; size_t count;
-    if (!cliq_receive(CLIQ_WORKER_CHANNEL_FD, &initial, fds, &count) || count != 0 ||
+    size_t count;
+    if (!cliq_receive(CLIQ_WORKER_CHANNEL_FD, &initial, NULL, 0, &count) ||
         initial.command != CLIQ_CREATE_WORKER || !cliq_hex_digest(initial.nonce)) return 70;
     struct cliq_worker_packet ready = cliq_packet(CLIQ_WORKER_READY);
     ready.pid = (int64_t)getpid();
@@ -77,8 +77,7 @@ int main(int argc, char **argv) {
     bool active = false;
     for (;;) {
         struct cliq_worker_packet request;
-        if (!cliq_receive(CLIQ_WORKER_CHANNEL_FD, &request, fds, &count)) return 0;
-        if (count != 0) { for (size_t i = 0; i < count; i++) close(fds[i]); return 70; }
+        if (!cliq_receive(CLIQ_WORKER_CHANNEL_FD, &request, NULL, 0, &count)) return errno == EPROTO ? 70 : 0;
         if (request.command == CLIQ_ACTIVATE_WORKER && !active &&
             strcmp(request.nonce, initial.nonce) == 0) {
             active = true;

@@ -2,9 +2,21 @@
 
 [![npm version](https://img.shields.io/npm/v/@cogineai/cliq.svg)](https://www.npmjs.com/package/@cogineai/cliq)
 
-Every team has their own agent. This is ours.
+Cliq is a local-first, provider-neutral coding agent for developers and small
+teams. Work interactively or delegate a repository task, review the code changes
+and actual check results, then explicitly apply the result.
 
-Cliq is a local coding-agent CLI built around a small, provider-agnostic JSON action protocol. It runs in your current workspace, keeps sessions on your machine, and works with local or hosted model providers.
+The default CLI currently uses the existing interactive runtime. The installed
+durable execution path is a qualification preview: its model, verification,
+review and Delivery integration is still being completed. It has not replaced
+the default CLI or passed the complete release gate.
+
+The first installed preview targets Linux and one active repository task:
+real-model code changes in a private workspace, required checks and bounded
+repair, result review, and explicit application. Reconnection, cancellation and
+Supervisor restart belong to the same workflow. Complete MCP coverage, managed
+local inference, automatic legacy migration and macOS execution are deferred.
+This scope describes the delivery in progress, not a completed qualification.
 
 ## Install
 
@@ -48,6 +60,40 @@ cliq run --jsonl "inspect this repo"
 ```
 
 `cliq "prompt"` still works as a shorthand, but scripts should prefer `cliq run`.
+
+## Installed client SDK (qualification preview)
+
+The ESM package exports `openCliqClient` and its TypeScript declarations from
+`@cogineai/cliq`, and the canonical control types from
+`@cogineai/cliq/control/v1`. A trusted installed host must supply its genuine,
+already held installation handle from the same package instance. A path, key,
+socket callback or lookalike object cannot create that handle through this API.
+
+```ts
+import { openCliqClient } from '@cogineai/cliq';
+
+// `installation` is borrowed from the trusted installed host.
+const client = await openCliqClient(installation, update => {
+  if (update.kind === 'response') console.log(update.response);
+});
+try {
+  await client.execute({ kind: 'request', request: {
+    protocolVersion: 1, method: 'run.get', runId
+  } });
+} finally {
+  await client.close(); // Detaches and joins the client; does not cancel the Run.
+}
+```
+
+The host retains its installation until client close completes. The output
+callback is borrowed and awaited. A lost mutation response remains in
+`client.pendingRequest`; reconnect does not resend it. Explicit `client.replay()`
+uses the original request, rather than submitting a replacement.
+
+The signed Linux application also has a client-only entry assembled from its
+embedded release roots. This preview does not change the default `cliq` command
+or claim complete installed/Linux, upgrade, ecosystem or release qualification.
+The full release gate remains required before default cutover.
 
 ## Model Setup
 

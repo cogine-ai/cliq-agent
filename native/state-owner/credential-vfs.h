@@ -19,16 +19,18 @@
 #include <sys/syscall.h>
 #endif
 #include <unistd.h>
+#include "fixed-fd-sqlite-io.h"
 
 enum credential_role {
   CREDENTIAL_ROOT, CREDENTIAL_CREDENTIALS, CREDENTIAL_LOCK, CREDENTIAL_MAIN,
-  CREDENTIAL_WAL, CREDENTIAL_JOURNAL, CREDENTIAL_RUNTIME, CREDENTIAL_GLOBAL,
+  CREDENTIAL_WAL, CREDENTIAL_JOURNAL, CREDENTIAL_RUNTIME,
   CREDENTIAL_ROLE_COUNT
 };
 static const char *const credential_leaves[CREDENTIAL_ROLE_COUNT] = {
   NULL, "credentials", "authority.lock", "authority.sqlite", "authority.sqlite-wal",
-  "authority.sqlite-journal", "runtime", "kernel-global.lock"
+  "authority.sqlite-journal", "runtime"
 };
+struct credential_global_guard;
 typedef struct credential_context {
   int descriptors[CREDENTIAL_ROLE_COUNT];
   struct stat identities[CREDENTIAL_ROLE_COUNT];
@@ -45,6 +47,9 @@ typedef struct credential_context {
   pthread_t owner_thread;
   uint64_t generation;
   napi_ref owner_reference;
+  /* Production's separate account-domain owner. Descriptor-I/O conformance
+   * adapters supply no account authority and cannot qualify this lifecycle. */
+  struct credential_global_guard *global_guard;
   char root_path[PATH_MAX], process_start[128];
 } credential_context;
 
@@ -158,8 +163,7 @@ static int credential_check_bindings(credential_context *ctx) {
           !credential_valid_directory(&held) : !credential_valid_file(&held))) goto changed;
     if (role == CREDENTIAL_ROOT) continue;
     int parent = role == CREDENTIAL_CREDENTIALS || role == CREDENTIAL_RUNTIME ?
-                 ctx->descriptors[CREDENTIAL_ROOT] : role == CREDENTIAL_GLOBAL ?
-                 ctx->descriptors[CREDENTIAL_RUNTIME] : ctx->descriptors[CREDENTIAL_CREDENTIALS];
+                 ctx->descriptors[CREDENTIAL_ROOT] : ctx->descriptors[CREDENTIAL_CREDENTIALS];
     if (fstatat(parent, credential_leaves[role], &named, AT_SYMLINK_NOFOLLOW) != 0 ||
         !credential_same_object(&held, &named) ||
         ((role == CREDENTIAL_CREDENTIALS || role == CREDENTIAL_RUNTIME) ?
@@ -181,8 +185,7 @@ static int credential_hold_directory(credential_context *ctx, int parent,
          credential_valid_directory(&ctx->identities[role]) ? 0 : -1;
 }
 static int credential_hold_file(credential_context *ctx, enum credential_role role) {
-  int parent = role == CREDENTIAL_GLOBAL ? ctx->descriptors[CREDENTIAL_RUNTIME] :
-               ctx->descriptors[CREDENTIAL_CREDENTIALS];
+  int parent = ctx->descriptors[CREDENTIAL_CREDENTIALS];
   int created = 1;
   int fd = openat(parent, credential_leaves[role],
                   O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -224,7 +227,7 @@ static int credential_consume_close(credential_context *ctx, enum credential_rol
 static int credential_retire_resources(credential_context *ctx) {
   static const enum credential_role order[] = {
     CREDENTIAL_JOURNAL, CREDENTIAL_WAL, CREDENTIAL_CREDENTIALS, CREDENTIAL_ROOT,
-    CREDENTIAL_MAIN, CREDENTIAL_LOCK, CREDENTIAL_RUNTIME, CREDENTIAL_GLOBAL
+    CREDENTIAL_MAIN, CREDENTIAL_LOCK, CREDENTIAL_RUNTIME
   };
   if (ctx->live_files != 0 || ctx->uncertain || ctx->fenced) return -1;
   for (size_t index = 0; index < sizeof(order) / sizeof(order[0]); ++index) {
@@ -251,31 +254,13 @@ static int credential_file_ready(credential_file *file) {
          ctx->leases[file->role] == 1 && credential_check_bindings(ctx) == 0;
 }
 
-static int credential_valid_range(sqlite3_int64 offset, int amount) {
-  return amount >= 0 && offset >= 0 && offset <= INT64_MAX - amount &&
-         (sqlite3_int64)(off_t)offset == offset &&
-         (sqlite3_int64)(off_t)(offset + amount) == offset + amount;
-}
-
 static int credential_sync_descriptor(credential_context *ctx, int descriptor, int flags) {
-  int result;
-#if defined(__APPLE__) && defined(F_FULLFSYNC)
-  if ((flags & 0x0f) == SQLITE_SYNC_FULL) {
-    do { ctx->counts.syncs++; result = fcntl(descriptor, F_FULLFSYNC); } while (result < 0 && errno == EINTR);
-    return result == 0 ? SQLITE_OK : credential_io_failure(ctx, SQLITE_IOERR_FSYNC);
-  }
-#else
-  (void)flags;
-#endif
-  do { ctx->counts.syncs++; result = fsync(descriptor); } while (result < 0 && errno == EINTR);
-  return result == 0 ? SQLITE_OK : credential_io_failure(ctx, SQLITE_IOERR_FSYNC);
+  int result = cliq_fd_sqlite_sync(descriptor, flags, &ctx->counts.syncs);
+  return result == SQLITE_OK ? result : credential_io_failure(ctx, result);
 }
-
 static int credential_truncate_descriptor(credential_context *ctx, int descriptor, sqlite3_int64 size) {
-  int result;
-  if (size < 0 || (sqlite3_int64)(off_t)size != size) return credential_io_failure(ctx, SQLITE_IOERR_TRUNCATE);
-  do { ctx->counts.truncates++; result = ftruncate(descriptor, (off_t)size); } while (result < 0 && errno == EINTR);
-  return result == 0 ? SQLITE_OK : credential_io_failure(ctx, SQLITE_IOERR_TRUNCATE);
+  int result = cliq_fd_sqlite_truncate(descriptor, size, &ctx->counts.truncates);
+  return result == SQLITE_OK ? result : credential_io_failure(ctx, result);
 }
 
 /* SQLite leases never close physical descriptors or release the native gate. */
@@ -298,43 +283,16 @@ static int credential_io_close(sqlite3_file *base) {
 static int credential_io_read(sqlite3_file *base, void *buffer, int amount, sqlite3_int64 offset) {
   credential_file *file = (credential_file *)base;
   credential_context *ctx = file->context;
-  int consumed = 0;
   if (!credential_file_ready(file)) return SQLITE_IOERR_READ;
-  if (!credential_valid_range(offset, amount)) return credential_io_failure(ctx, SQLITE_IOERR_READ);
-  while (consumed < amount) {
-    ssize_t result;
-    do {
-      ctx->counts.reads++;
-      result = pread(ctx->descriptors[file->role], (char *)buffer + consumed,
-                     (size_t)(amount - consumed), (off_t)(offset + consumed));
-    } while (result < 0 && errno == EINTR);
-    if (result < 0) return credential_io_failure(ctx, SQLITE_IOERR_READ);
-    if (result == 0) {
-      memset((char *)buffer + consumed, 0, (size_t)(amount - consumed));
-      return SQLITE_IOERR_SHORT_READ;
-    }
-    consumed += (int)result;
-  }
-  return SQLITE_OK;
+  int result = cliq_fd_sqlite_read(ctx->descriptors[file->role], buffer, amount, offset, &ctx->counts.reads);
+  return result == SQLITE_OK || result == SQLITE_IOERR_SHORT_READ ? result : credential_io_failure(ctx, result);
 }
-
 static int credential_io_write(sqlite3_file *base, const void *buffer, int amount, sqlite3_int64 offset) {
   credential_file *file = (credential_file *)base;
   credential_context *ctx = file->context;
-  int consumed = 0;
   if (!credential_file_ready(file)) return SQLITE_IOERR_WRITE;
-  if (!credential_valid_range(offset, amount)) return credential_io_failure(ctx, SQLITE_IOERR_WRITE);
-  while (consumed < amount) {
-    ssize_t result;
-    do {
-      ctx->counts.writes++;
-      result = pwrite(ctx->descriptors[file->role], (const char *)buffer + consumed,
-                      (size_t)(amount - consumed), (off_t)(offset + consumed));
-    } while (result < 0 && errno == EINTR);
-    if (result <= 0) return credential_io_failure(ctx, SQLITE_IOERR_WRITE);
-    consumed += (int)result;
-  }
-  return SQLITE_OK;
+  int result = cliq_fd_sqlite_write(ctx->descriptors[file->role], buffer, amount, offset, &ctx->counts.writes);
+  return result == SQLITE_OK ? result : credential_io_failure(ctx, result);
 }
 
 static int credential_io_truncate(sqlite3_file *base, sqlite3_int64 size) {

@@ -174,7 +174,7 @@ int main(int argc, char **argv) {
     struct cliq_worker_packet request;
     int descriptors[5]; size_t count;
     struct text path = {0}, old = {0}, replacement = {0};
-    if (!cliq_receive(3, &request, descriptors, &count) || count != 1 || request.command != CLIQ_CREATE_WRITE ||
+    if (!cliq_receive(3, &request, descriptors, sizeof(descriptors) / sizeof(descriptors[0]), &count) || count != 1 || request.command != CLIQ_CREATE_WRITE ||
         !cliq_hex_digest(request.nonce)) return 70;
     bool decoded = decode_input(descriptors[0], &path, &old, &replacement); close(descriptors[0]);
     if (!decoded) { free(path.bytes); free(old.bytes); free(replacement.bytes); return 70; }
@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
     ready.pid = 2;
     if (!cliq_process_token(2, ready.start_token) || !cliq_send(3, &ready, NULL, 0)) return 70;
     struct cliq_worker_packet release;
-    if (!cliq_receive(3, &release, descriptors, &count) || count != 0 || release.command != CLIQ_RELEASE_WRITE ||
+    if (!cliq_receive(3, &release, NULL, 0, &count) || release.command != CLIQ_RELEASE_WRITE ||
         strcmp(release.nonce, request.nonce) != 0) return 70;
     size_t maximum = request.max_file_bytes > MAX_EDIT_FILE_BYTES ? MAX_EDIT_FILE_BYTES : (size_t)request.max_file_bytes;
     int outcome = edit_target(&path, &old, &replacement, maximum);

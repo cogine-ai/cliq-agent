@@ -286,7 +286,7 @@ function parseOpenAiToolCalls(value: unknown): ObservedToolCall[] {
   });
 }
 
-function parseOpenAiJson(rootValue: unknown, expectedModel: string): ParsedProviderResponse {
+function parseOpenAiJson(rootValue: unknown, expectedModel: string, retainReasoningContent: boolean): ParsedProviderResponse {
   if (!isRecord(rootValue)) throw new TypeError('OpenAI response must be an object');
   if (hasOwn(rootValue, 'error')) throw new ProviderRejection('OpenAI returned an error response');
   assertExpectedModel(rootValue.model, expectedModel);
@@ -313,6 +313,10 @@ function parseOpenAiJson(rootValue: unknown, expectedModel: string): ParsedProvi
     stopReason: hasRefusal ? 'content_filter' : openAiStopReason(choice.finish_reason),
     text: content,
     ...(typeof reasoningValue === 'string' ? { reasoning: reasoningValue } : {}),
+    ...(retainReasoningContent && hasOwn(message, 'reasoning_content') ? { continuation: {
+      provider: 'openai-compatible' as const, model: expectedModel,
+      items: [{ type: 'reasoning_content', reasoning_content: message.reasoning_content }]
+    } } : {}),
     toolCalls: parseOpenAiToolCalls(message.tool_calls),
     ...(usage === undefined ? {} : { usage })
   };
@@ -327,10 +331,11 @@ function appendOptionalFragment(current: string | undefined, value: unknown, lab
   return `${current ?? ''}${value}`;
 }
 
-function createOpenAiStream(expectedModel: string): StreamParser<SseMessage> {
+function createOpenAiStream(expectedModel: string, retainReasoningContent: boolean): StreamParser<SseMessage> {
   let responseId: string | undefined;
   let text = '';
   let reasoning = '';
+  let reasoningContent: string | null | undefined;
   let stopReason: ProviderObservedStopReason = 'unknown';
   let usage: ObservedUsage | undefined;
   const calls = new Map<number, MutableToolCall>();
@@ -387,6 +392,11 @@ function createOpenAiStream(expectedModel: string): StreamParser<SseMessage> {
         events.push({ type: 'text_delta', text: delta.content });
       }
       const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
+      if (retainReasoningContent && hasOwn(delta, 'reasoning_content')) {
+        if (typeof delta.reasoning_content === 'string') reasoningContent = (reasoningContent ?? '') + delta.reasoning_content;
+        else if (delta.reasoning_content === null && reasoningContent === undefined) reasoningContent = null;
+        else if (delta.reasoning_content !== null) throw new TypeError('OpenAI reasoning content delta must be a string or null');
+      }
       if (reasoningDelta !== undefined && reasoningDelta !== null) {
         if (typeof reasoningDelta !== 'string') throw new TypeError('OpenAI reasoning delta must be a string');
         reasoning += reasoningDelta;
@@ -458,6 +468,10 @@ function createOpenAiStream(expectedModel: string): StreamParser<SseMessage> {
           stopReason,
           text,
           ...(reasoning.length === 0 ? {} : { reasoning }),
+          ...(reasoningContent === undefined ? {} : { continuation: {
+            provider: 'openai-compatible' as const, model: expectedModel,
+            items: [{ type: 'reasoning_content', reasoning_content: reasoningContent }]
+          } }),
           toolCalls,
           ...(usage === undefined ? {} : { usage })
         },
@@ -1095,7 +1109,7 @@ export function createProviderResponseObserver(head: ProviderResponseHead): Prov
         ? createResponsesStream(input.model)
         : input.provider === 'anthropic'
           ? createAnthropicStream(input.model)
-          : createOpenAiStream(input.model);
+          : createOpenAiStream(input.model, input.provider === 'openai-compatible');
   } else if (mediaType === 'application/x-ndjson' && input.provider === 'ollama') {
     ndjson = createOllamaStream(input.model);
   } else if (mediaType !== 'application/json') error = 'malformed';
@@ -1218,7 +1232,7 @@ export function createProviderResponseObserver(head: ProviderResponseHead): Prov
                 ? parseAnthropicJson(root, input.model)
                 : input.provider === 'ollama'
                   ? parseOllamaJson(root, input.model)
-                  : parseOpenAiJson(root, input.model);
+                  : parseOpenAiJson(root, input.model, input.provider === 'openai-compatible');
         }
         return {
           observation: {

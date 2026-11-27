@@ -1,0 +1,226 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { LEGACY_UPGRADE_SOURCE } from './legacy-upgrade-source-data.js';
+import { decodeInstalledUpgradeReport, INSTALLED_UPGRADE_PROFILE, readInstalledUpgradeCredentialFailure } from './installed-upgrade-result.js';
+import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
+import { CredentialSecretScanError } from './credential-secret-scan.js';
+import { readInstalledRuntimeUpgradeFailureMarker, installedRuntimeUpgradeFailureMarker } from '../../../src/state/installed-upgrade-diagnostics.js';
+
+// Deliberately inert report data. These tests prove only the closed evidence
+// decoder; they do not supply any Store, native receipt or installed authority.
+function complete(): Record<string, any> {
+  return { diagnosticOnly: true, qualified: true, schemaVersion: 1, format: 'cliq-installed-runtime-upgrade-qualification-v1',
+    fixtureProfile: INSTALLED_UPGRADE_PROFILE, phase: 'complete', scope: 'signed_schema7_to8_two_unverified_edit_runs',
+    officialReleaseQualified: false, wholeI4Qualified: false, legacy43ErrorReceipt: { kind: 'not_exercised' }, originalSource: LEGACY_UPGRADE_SOURCE,
+    packages: { sourceBundleRef: '1'.repeat(64), targetBundleRef: '2'.repeat(64), sourceManifestDigest: '3'.repeat(64), targetManifestDigest: '4'.repeat(64),
+      sameActualPublisher: true, schemaConversionDigest: '5'.repeat(64) },
+    cases: [7, 8].map((schemaVersion, index) => ({ schemaVersion, runId: (index ? 'b' : 'a').repeat(43), status: 'completed_unverified',
+      resultRef: (index ? '7' : '6').repeat(64), firstResponseSha256: (index ? 'c' : '8').repeat(64), modelPosts: 2, toolCalls: 1, launchCount: 1,
+      retirementRefs: [(index ? 'a' : '9').repeat(64)], hostSourceUnchanged: true, publicRecoveryRead: true, actualWorkerLifetimesAbsent: true })),
+    oldCredentialNewRuntimeRefusal: { code: 'ARTIFACT_MISMATCH', noNewRun: true, noModelDispatch: true },
+    upgrade: { receiptRef: 'b'.repeat(64), originalSupervisorAndKeeperLifetimesAbsent: true, realTargetHello: true,
+      oldFirstResponseUnchanged: true, originalCasBytesAndInodesUnchanged: true, oldEndpointAndCredentialReadable: true, oldCredentialRevocable: true,
+      explicitNewRuntimeEndpointAndCredential: true, sameReceiptRecovery: true, pagedRetirementGraphFullyRead: true, retirementResourceRowCount: 3 },
+    servicesStoppedAndJoined: true, secretServiceJoined: true, httpsJoined: true,
+    transport: { postCount: 4, acceptedTcp: 4, acceptedTls: 4, providerHealthy: true },
+    secretCorpus: { diagnosticOnly: true, qualified: true, filesScanned: 1, fileBytesScanned: 1, sqliteDatabasesScanned: 2,
+      logicalRowsScanned: 1, logicalValuesScanned: 1, logicalBytesScanned: 1, evidenceDirectoriesScanned: 0 },
+    secretOutputScan: { bytesScanned: 1, chunksScanned: 1, streamsOpened: 1, streamsClosed: 1, needleCount: 1,
+      retainedNeedleBytes: 0, retainedTailBytes: 0, matched: false, limitExceeded: false, closed: true } };
+}
+test('the independent upgrade profile requires both original and target unverified Runs, exact joins and unchanged caps', () => {
+  assert.equal(decodeInstalledUpgradeReport(complete()).qualified, true);
+  const corruptions: Array<(row: Record<string, any>) => void> = [
+    row => { row.fixtureProfile = 'new_unreviewed_profile'; }, row => { row.cases.pop(); }, row => { row.cases.reverse(); },
+    row => { row.cases[1].runId = row.cases[0].runId; }, row => { row.cases[1].status = 'succeeded'; },
+    row => { row.cases[1].toolCalls = 0; }, row => { row.cases[0].retirementRefs = []; }, row => { row.upgrade.originalCasBytesAndInodesUnchanged = false; },
+    row => { row.upgrade.oldFirstResponseUnchanged = false; }, row => { row.upgrade.sameReceiptRecovery = false; },
+    row => { row.oldCredentialNewRuntimeRefusal.noModelDispatch = false; }, row => { delete row.oldCredentialNewRuntimeRefusal; },
+    row => { row.secretServiceJoined = false; }, row => { row.transport.postCount = 5; }, row => { row.secretOutputScan.streamsOpened = 4097; row.secretOutputScan.streamsClosed = 4097; },
+    row => { row.secretOutputScan.bytesScanned = 512 * 1024 * 1024 + 1; }, row => { row.wholeI4Qualified = true; },
+    row => { row.error = { diagnosticOnly: true, kind: 'installed_runtime_upgrade_failed', sourceFrames: [] }; },
+  ];
+  for (const corrupt of corruptions) { const row = complete(); corrupt(row); assert.throws(() => decodeInstalledUpgradeReport(row)); }
+});
+test('partial upgrade failures stay failures and hostile data cannot execute getters or proxy traps', () => {
+  const row = complete(); row.qualified = false; row.phase = 'formal_signed_upgrade_and_real_ready'; row.cases.pop(); delete row.upgrade;
+  row.error = { diagnosticOnly: true, kind: 'installed_runtime_upgrade_failed', sourceFrames: [{ file: 'installed-upgrade-journey.ts', line: 1, column: 1 }] };
+  assert.equal(decodeInstalledUpgradeReport(row).qualified, false);
+  let reads = 0;
+  assert.throws(() => decodeInstalledUpgradeReport(new Proxy({}, { ownKeys() { reads++; return []; } })));
+  const getter = complete(); Object.defineProperty(getter, 'qualified', { get() { reads++; return true; }, enumerable: true });
+  assert.throws(() => decodeInstalledUpgradeReport(getter)); assert.equal(reads, 0);
+  const extra = complete(); extra.error = { diagnosticOnly: true, kind: 'installed_runtime_upgrade_failed', sourceFrames: [], rawError: 'not permitted' };
+  assert.throws(() => decodeInstalledUpgradeReport(extra));
+  const corpus = complete(); corpus.qualified = false; corpus.phase = 'secret_scan_or_report_failure';
+  corpus.secretScanFailure = { diagnosticOnly: true, firstFailureStage: 'corpus', beforeCorpus: { streamsOpened: 1, bytesScanned: 1 }, corpusScanFailureCode: 'LIMIT_EXCEEDED' };
+  corpus.secretCorpusScanProgress = { diagnosticOnly: true, source: { kind: 'database_logical', database: 'kernel', tableBucket: 'workspace_generations',
+    part: 'cell', logicalRowsObserved: 1, logicalValuesAttempted: 2, logicalBytesObserved: 3 } };
+  assert.equal(decodeInstalledUpgradeReport(corpus).qualified, false);
+  corpus.secretCorpusScanProgress.source.rawPath = '/not-allowed'; assert.throws(() => decodeInstalledUpgradeReport(corpus));
+});
+
+test('credential command refusal retains only a fixed action, status and original code after scanned output', () => {
+  const privateText = 'synthetic-private-key-path-and-error';
+  const original = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED', message: privateText, path: privateText };
+  const bytes = Buffer.from('CLIQ_CREDENTIAL_PHASE_V1:history\n' + JSON.stringify(original) + '\n');
+  const failure = readInstalledUpgradeCredentialFailure(bytes, 'revoke', 1);
+  assert.deepEqual(failure, { diagnosticOnly: true, kind: 'credential_command_failed', action: 'revoke', status: 1, code: 'RECOVERY_REQUIRED' });
+  assert(!JSON.stringify(failure).includes(privateText)); assert(Object.isFrozen(failure));
+  const report = complete(); report.qualified = false; report.phase = 'explicit_schema8_new_authorization_and_run'; delete report.upgrade;
+  report.credentialCommandFailure = failure;
+  assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+  for (const bad of [
+    { ...failure, code: privateText }, { ...failure, action: privateText }, { ...failure, status: 0 },
+    { ...failure, status: 256 }, { ...failure, rawError: privateText }
+  ]) { report.credentialCommandFailure = bad; assert.throws(() => decodeInstalledUpgradeReport(report)); }
+  const qualified = complete(); qualified.credentialCommandFailure = failure;
+  assert.throws(() => decodeInstalledUpgradeReport(qualified));
+});
+
+test('unknown, malformed, contradictory or oversized stderr cannot invent a credential refusal code', () => {
+  const row = { diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED' };
+  for (const bytes of [Buffer.from(JSON.stringify({ ...row, code: 'private-unrecognized-code' })),
+    Buffer.from(JSON.stringify({ ...row, scope: 'foreign' })), Buffer.from('{invalid'), Buffer.from([255]), Buffer.alloc(65537, 32),
+    Buffer.from(JSON.stringify(row) + '\n' + JSON.stringify({ ...row, code: 'INVALID_REQUEST' })),
+    Buffer.from(JSON.stringify({ ...row, privateField: 'do-not-retain' }))])
+    assert.equal(readInstalledUpgradeCredentialFailure(bytes, 'revoke', 1).code, null);
+  assert.throws(() => readInstalledUpgradeCredentialFailure(Buffer.alloc(0), 'revoke', 0));
+});
+
+test('upgrade credential failure diagnosis follows original process and output joins without changing command limits or refusal', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const command = source.slice(source.indexOf('  const command = '), source.indexOf('  const acceptedCommand = '));
+  assert(command.includes('scan(result.stdout); scan(result.stderr);'));
+  assert(command.includes("assert.equal(result.error, undefined, 'owned upgrade command must join'); assert.equal(result.signal, null);"));
+  const accepted = source.slice(source.indexOf('  const acceptedCommand = '), source.indexOf('  const show = '));
+  const joined = accepted.indexOf('const result = command(executable, args, input, timeout);');
+  const diagnosed = accepted.indexOf('readInstalledUpgradeCredentialFailure(result.stderr, credentialAction, result.status);');
+  const refused = accepted.indexOf("assert.equal(result.status, 0, 'same-user upgrade command refused');");
+  assert(joined >= 0 && diagnosed > joined && refused > diagnosed);
+  assert(accepted.includes('report.credentialCommandFailure ??='), 'a later refusal cannot replace the original failed command');
+  assert(accepted.includes('input, 60000, action)'));
+  assert(!/\.message|\.stack|\.path|writeFile|setTimeout/u.test(accepted));
+});
+
+
+test('already-scanned credential failures expose only exact fixed internal reasons', () => {
+  const cases = [
+    ['credential authority history is not contiguous', 'credential_history'],
+    ['credential cleanup receipt differs from its observation', 'credential_revoke_history'],
+    ['credential preparation provenance differs', 'credential_original_source'],
+    ['retained current producer differs from its exact original signed bundle', 'credential_current_source'],
+    ['retained credential producer differs from its original signed source', 'credential_producer_source'],
+    ['endpoint retained object is missing or does not rehash', 'credential_retained_object'],
+    ['credential authority database did not retire', 'credential_retirement'],
+    ['ordinary credential entry cannot be called while a scope is acquiring, active or draining', 'credential_scope_busy'],
+  ];
+  const privateText = 'synthetic-private-key-path-and-ref';
+  const bytes = (message: string) => Buffer.from(JSON.stringify({ diagnosticOnly: true, scope: 'installed-read-startup',
+    message, path: privateText }));
+  for (const [message, reason] of cases) {
+    const failure = readInstalledUpgradeCredentialFailure(bytes(message!), 'read', 1);
+    assert.deepEqual(failure, { diagnosticOnly: true, kind: 'credential_command_failed', action: 'read', status: 1, code: null, reason });
+    assert(!JSON.stringify(failure).includes(message!)); assert(!JSON.stringify(failure).includes(privateText));
+    const report = complete(); report.qualified = false; report.phase = 'explicit_schema8_new_authorization_and_run';
+    report.credentialCommandFailure = failure; delete report.upgrade;
+    assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+    for (const input of [bytes(message! + privateText), bytes(privateText + message),
+      Buffer.concat([bytes(message!), Buffer.from('\n'), bytes(message!)])])
+      assert(!Object.hasOwn(readInstalledUpgradeCredentialFailure(input, 'read', 1), 'reason'));
+    report.credentialCommandFailure = { ...failure, reason: privateText };
+    assert.throws(() => decodeInstalledUpgradeReport(report));
+  }
+});
+
+test('cleanup corpus scanning preserves an original failure phase and cannot qualify that failure', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const begin = source.indexOf('    if (report.servicesStoppedAndJoined && report.secretServiceJoined && report.httpsJoined) {');
+  const end = source.indexOf('    if (primary) report.error', begin);
+  assert(begin >= 0 && end > begin);
+  // Execute only the source's report/corpus composition over inert data. No
+  // campaign, process, filesystem scan, installed role or authority is created.
+  const fragment = source.slice(begin, end);
+  for (const failedBeforeScan of [false, true]) for (const scanFails of [false, true]) {
+    const original = failedBeforeScan ? new Error('inert business refusal') : undefined;
+    const scanFailure = new Error('inert corpus refusal'), report = { phase: 'explicit_schema8_new_authorization_and_run',
+      servicesStoppedAndJoined: true, secretServiceJoined: true, httpsJoined: true };
+    let scans = 0;
+    const context = vm.createContext({ primary: original, report, scanner: { stats: () => ({ streamsOpened: 7, bytesScanned: 11 }) },
+      scanStage: 'runtime', beforeCorpus: null, CredentialSecretScanError,
+      scanCredentialSecretCorpus: async () => { scans++; if (scanFails) throw scanFailure; return { qualified: true }; },
+      recipe: { stateRoot: 'inert' }, ledger: { uid: 1 }, mark: (phase: string) => { report.phase = phase; } });
+    await vm.runInContext(`(async () => { ${fragment} })()`, context);
+    assert.equal(scans, 1); assert.equal(context.scanStage, 'corpus');
+    assert.equal(context.beforeCorpus.streamsOpened, 7); assert.equal(context.beforeCorpus.bytesScanned, 11);
+    assert.equal(context.primary, original ?? (scanFails ? scanFailure : undefined));
+    assert.equal(context.report.qualified, !failedBeforeScan && !scanFails);
+    assert.equal(context.report.phase, failedBeforeScan ? 'explicit_schema8_new_authorization_and_run' : scanFails ? 'secret_corpus' : 'complete');
+  }
+});
+
+
+test('failed upgrade commands retain only their first scanned fixed marker and actual exit status', async () => {
+  const source = await readFile(new URL('./installed-upgrade-journey.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('  const acceptedCommand = '), begin = source.indexOf('    const result = command(', start);
+  const end = source.indexOf('\n  };', begin); assert(start >= 0 && begin > start && end > begin);
+  const body = source.slice(begin, end), first = installedRuntimeUpgradeFailureMarker('recover_selection', { code: 'RECOVERY_REQUIRED' }),
+    second = installedRuntimeUpgradeFailureMarker('target_control', { code: 'ARTIFACT_MISMATCH' });
+  const privateText = 'inert-private-error-path-and-ref';
+  function composition(status: number | null, stderr: Buffer, report: Record<string, any> = {}) {
+    const events: string[] = [], stdout = Buffer.from('inert-output'); let result = { status, stderr, stdout };
+    // Execute only the original post-command report/refusal composition. The
+    // command seam denotes already-joined/scanned inert bytes, not a process.
+    const accepted = vm.runInNewContext(`(executable, args, input, timeout, credentialAction) => { ${body} }`, {
+      assert, report, command: () => { events.push('joined_and_scanned'); return result; },
+      readInstalledUpgradeCredentialFailure,
+      readInstalledRuntimeUpgradeFailureMarker: (bytes: Buffer) => { events.push('decoded'); return readInstalledRuntimeUpgradeFailureMarker(bytes); },
+      writeSync: () => { events.push('forwarded'); }
+    }) as (executable: string, args: string[], input?: Buffer, timeout?: number, credentialAction?: 'read') => Buffer;
+    return { report, events, stdout, accepted,
+      next(nextStatus: number | null, nextStderr: Buffer) { result = { status: nextStatus, stderr: nextStderr, stdout }; } };
+  }
+  const credential = { original: true }, fixture = composition(1, Buffer.from(privateText + '\n' + first), { credentialCommandFailure: credential });
+  assert.throws(() => fixture.accepted('inert', ['--upgrade-runtime'], undefined, 30000));
+  assert(Object.hasOwn(fixture.report, 'upgradeCommandFailure'), 'the original failed upgrade command must retain its fixed diagnostic');
+  assert.deepEqual(JSON.parse(JSON.stringify(fixture.report.upgradeCommandFailure)), { exitStatus: 1, marker: first });
+  assert.equal(fixture.report.credentialCommandFailure, credential); assert.deepEqual(fixture.events, ['joined_and_scanned', 'decoded', 'forwarded']);
+  assert(!JSON.stringify(fixture.report.upgradeCommandFailure).includes(privateText));
+  const original = fixture.report.upgradeCommandFailure;
+  fixture.next(2, Buffer.from(second)); assert.throws(() => fixture.accepted('inert', ['--upgrade-runtime']));
+  assert.equal(fixture.report.upgradeCommandFailure, original);
+  for (const bytes of [Buffer.alloc(0), Buffer.from(privateText), Buffer.from(first + first),
+    Buffer.from(first.replace('RECOVERY_REQUIRED', privateText)), Buffer.from('prefix-' + first)]) {
+    const unavailable = composition(null, bytes);
+    assert.throws(() => unavailable.accepted('inert', ['--upgrade-runtime']));
+    assert.deepEqual(JSON.parse(JSON.stringify(unavailable.report.upgradeCommandFailure)), { exitStatus: null, marker: null });
+    assert(!JSON.stringify(unavailable.report).includes(privateText));
+    unavailable.next(3, Buffer.from(second)); assert.throws(() => unavailable.accepted('inert', ['--upgrade-runtime']));
+    assert.equal(unavailable.report.upgradeCommandFailure.marker, null, 'a later marker cannot replace an unavailable first failure');
+  }
+  const success = composition(0, Buffer.from(first));
+  assert.equal(success.accepted('inert', ['--upgrade-runtime']), success.stdout);
+  assert(!Object.hasOwn(success.report, 'upgradeCommandFailure')); assert.deepEqual(success.events, ['joined_and_scanned']);
+  const historical = composition(1, Buffer.from(JSON.stringify({ diagnosticOnly: true, scope: 'installed-read-startup', code: 'RECOVERY_REQUIRED' })));
+  assert.throws(() => historical.accepted('inert', ['--bootstrap-credential'], undefined, 60000, 'read'));
+  assert(!Object.hasOwn(historical.report, 'upgradeCommandFailure')); assert.equal(historical.report.credentialCommandFailure.action, 'read');
+  assert.equal(historical.report.credentialCommandFailure.code, 'RECOVERY_REQUIRED');
+  const other = composition(1, Buffer.from(first)); assert.throws(() => other.accepted('inert', ['inert', '--upgrade-runtime']));
+  assert(!Object.hasOwn(other.report, 'upgradeCommandFailure'));
+});
+
+test('upgrade command failure reports accept only unavailable or one exact original marker and a failed exit status', () => {
+  const marker = installedRuntimeUpgradeFailureMarker('recover_selection', { code: 'RECOVERY_REQUIRED' });
+  const report = complete(); report.qualified = false; report.phase = 'same_receipt_recovery_and_old_first_response'; delete report.upgrade;
+  for (const exitStatus of [null, 1, 255]) for (const value of [null, marker]) {
+    report.upgradeCommandFailure = { exitStatus, marker: value }; assert.equal(decodeInstalledUpgradeReport(report).qualified, false);
+  }
+  for (const bad of [
+    { exitStatus: 0, marker }, { exitStatus: -1, marker }, { exitStatus: 256, marker }, { exitStatus: '1', marker },
+    { exitStatus: 1, marker: 'private-unrecognized-text' }, { exitStatus: 1, marker: marker + marker },
+    { exitStatus: 1, marker: 'prefix-' + marker }, { exitStatus: 1, marker: marker + 'private-tail' },
+    { exitStatus: 1, marker: null, rawError: 'private-unrecognized-text' }
+  ]) { report.upgradeCommandFailure = bad; assert.throws(() => decodeInstalledUpgradeReport(report)); }
+  const success = complete(); success.upgradeCommandFailure = { exitStatus: 1, marker }; assert.throws(() => decodeInstalledUpgradeReport(success));
+});

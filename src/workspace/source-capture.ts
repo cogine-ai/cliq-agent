@@ -1,5 +1,5 @@
 import { setImmediate } from 'node:timers/promises';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { sha256Bytes } from '../kernel/identity.js';
 import type { WorkspaceEntry, WorkspaceEntryManifest } from '../kernel/types.js';
 import type { ArtifactCatalog, PublishedArtifact } from '../state/artifacts.js';
@@ -10,6 +10,10 @@ export type SourceCaptureSelection = Readonly<{
   /** Exact policy-resolved leaves/empty directories, never a recursive glob or
    * a permission grant. The caller must establish Trust and read permission. */
   selectedPaths: readonly string[];
+  /** Explicit entry-only directory metadata, including a nonempty directory.
+   * This never authorizes its children or removes the ordinary empty-directory
+   * assertion for any other selected leaf. */
+  directoryMetadataPaths?: readonly string[];
   /** Bounds all visited ordinary metadata, including excluded siblings. */
   maxEntries: number;
   maxBytes: number;
@@ -74,7 +78,18 @@ function retire(resources: readonly { close(): void }[], operationError?: unknow
  * claim that a concurrently writable source was atomically snapshotted. */
 export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
   selection: SourceCaptureSelection): Promise<PublishedArtifact> {
+  return captureWorkspaceEntriesWithManifestPublication(root, artifacts, selection,
+    manifest => artifacts.publishCanonical(manifest, 'cliq-workspace-entries-v1'));
+}
+
+/** Internal data-publication scope, never a capture or execution authority.
+ * The trusted publisher receives only the immutable native-read manifest
+ * manifest; all original readers/cursors/entries remain held through its full
+ * join. It must return that exact manifest's completed artifact metadata. */
+export async function captureWorkspaceEntriesWithManifestPublication(root: HeldWorkspaceRoot, artifacts: ArtifactCatalog,
+  selection: SourceCaptureSelection, publishManifest: (manifest: WorkspaceEntryManifest) => Promise<PublishedArtifact>): Promise<PublishedArtifact> {
   assertHeldWorkspaceRoot(root);
+  if (typeof publishManifest !== 'function') invalid('source manifest requires its internal data publisher');
   if (!Array.isArray(selection.selectedPaths) || !Number.isSafeInteger(selection.maxEntries) || selection.maxEntries < 1 ||
       !Number.isSafeInteger(selection.maxBytes) || selection.maxBytes < 0) invalid('source capture requires an explicit bounded selection');
   const { maxEntries, maxBytes, signal } = selection, maxSingleFileBytes = selection.maxSingleFileBytes ?? maxBytes;
@@ -87,6 +102,10 @@ export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts
     for (let slash = path.indexOf('/'); slash >= 0; slash = path.indexOf('/', slash + 1)) needed.add(path.slice(0, slash));
   }
   if (new Set([...selected, ...needed]).size > maxEntries) invalid('source selection exceeds the entry limit');
+  const directoryMetadata = new Set(selection.directoryMetadataPaths ?? []);
+  if (directoryMetadata.size !== (selection.directoryMetadataPaths?.length ?? 0) ||
+      [...directoryMetadata].some(path => !selected.has(checkedPath(path))))
+    invalid('source directory metadata must be a unique exact selected entry');
   const cursors: HeldWorkspaceCursor[] = [], heldEntries: HeldWorkspaceEntry[] = [], entries: WorkspaceEntry[] = [];
   const observedPaths = new Set<string>(), observedFolded = new Set<string>();
   let byteCount = 0, inventoryCount = 0, operationError: unknown;
@@ -112,8 +131,10 @@ export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts
       if (observedPaths.has(entry.path) || observedFolded.has(entry.path.toLowerCase())) invalid('selected source entries collide');
       observedPaths.add(entry.path); observedFolded.add(entry.path.toLowerCase());
       if (needed.has(entry.path) && entry.kind !== 'directory') invalid('source selection ancestor is not a directory');
+      if (directoryMetadata.has(entry.path) && entry.kind !== 'directory') invalid('source directory metadata target changed its kind');
       if (entry.kind === 'directory') {
         entries.push({ path: entry.path, kind: 'directory', mode: 0o755 });
+        if (directoryMetadata.has(entry.path) && !needed.has(entry.path)) continue;
         const child = entry.openDirectory(); cursors.push(child);
         stack.push({ cursor: child, selectedEmpty: selected.has(entry.path) && !needed.has(entry.path) });
       } else if (entry.kind === 'file') {
@@ -156,7 +177,15 @@ export async function captureWorkspaceEntries(root: HeldWorkspaceRoot, artifacts
       for (const entry of heldEntries) entry.assertHeld();
     };
     assertComplete();
-    const result = await artifacts.publishCanonical(manifest, 'cliq-workspace-entries-v1');
+    const expectedRef = canonicalSha256(manifest), expectedLength = canonicalJsonBytes(manifest).length;
+    // Every entry is freshly constructed here from primitive native-read
+    // fields. Freeze this private value rather than clone a potentially large
+    // complete manifest or expose a mutable alias to the publisher.
+    for (const entry of manifest.entries) Object.freeze(entry);
+    Object.freeze(manifest.entries); Object.freeze(manifest);
+    const result = await publishManifest(manifest);
+    if (result.ref !== expectedRef || result.byteLength !== expectedLength || result.mediaType !== 'application/json' ||
+        result.schemaKind !== 'cliq-workspace-entries-v1') invalid('source manifest publication differs from its native-read bytes');
     assertComplete();
     return result;
   } catch (error) { operationError = error; throw error; }

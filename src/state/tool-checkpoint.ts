@@ -63,11 +63,11 @@ export async function readWorkerCheckpointProof(artifacts: ArtifactCatalog, owne
       snapshot.generationIdentityDigest !== generation.generationIdentityDigest || snapshot.observedAt < observedAt) {
     throw new TypeError('post-effect snapshot differs from its result, generation or workspace closure');
   }
-  for (const entry of entries.entries) if (entry.kind === 'file') {
-    // Exhaustion verifies the exact size, retained inode and content hash. Do
-    // not retain a full workspace file merely to validate a ready Checkpoint.
-    for await (const _chunk of artifacts.readChunks(entry.blobRef, entry.size)) { /* bounded verification */ }
-  }
+  // Each original file is still verified and joined, with a bounded read
+  // group and the existing discard path for large files.
+  await artifacts.mapReads(entries.entries, async entry => {
+    if (entry.kind === 'file') await artifacts.verifyRetainedChunks(entry.blobRef, entry.size);
+  });
   if (state.privateGitStateRef) await artifacts.readBytes(state.privateGitStateRef);
   const death = await readCanonicalArtifact<DeathEvidence>(artifacts, snapshot.quiescenceEvidenceRef);
   if (!exactKeys(death, ['schemaVersion', 'kind', 'containmentRef', 'planRef', 'sandboxLaunchSpecRef', 'sandboxLaunchSpecDigest', 'owner',
@@ -186,16 +186,19 @@ export async function prepareToolCheckpoint(driver: SqliteDriver, artifacts: Art
         canonicalSha256(readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef)) !== canonicalSha256(generation)) {
       throw new KernelStorageError('REVISION_CONFLICT', 'post-effect generation changed before atomic completion');
     }
-    updateWorkspaceGeneration(connection, generation, {
+    const sealedGeneration: WorkspaceGenerationStateV1 = {
       schemaVersion: 1, generationId: generation.generationId, runId: run.id, generationRef: generation.generationRef,
       generationIdentityDigest: generation.generationIdentityDigest, rowVersion: generation.rowVersion + 1,
       sourceCheckpointId: generation.sourceCheckpointId, sourceWorkspaceStateRef: generation.sourceWorkspaceStateRef,
       sourceWorkspaceStateDigest: generation.sourceWorkspaceStateDigest, lastVerifiedTreeDigest: snapshot.treeDigest,
       updatedAt: createdAt, phase: 'sealed', snapshotEvidenceRef: postEffect.snapshotEvidenceRef, snapshotEvidenceDigest: snapshot.evidenceDigest
-    });
-    updateWorkerLaunch(connection, launch, { ...launch, phase: 'retired', generationWriteState: 'sealed',
-      retiredAt: createdAt, retirementEvidenceRef: retirement.retirementEvidenceRef });
+    };
+    const retiredLaunch: WorkerLaunch = { ...launch, phase: 'retired', generationWriteState: 'sealed',
+      retiredAt: createdAt, retirementEvidenceRef: retirement.retirementEvidenceRef };
+    updateWorkspaceGeneration(connection, generation, sealedGeneration);
+    updateWorkerLaunch(connection, launch, retiredLaunch);
     connection.prepare("UPDATE runs SET status = 'queued', active_worker_launch_id = NULL WHERE id = ?").run(run.id);
+    return { generation: sealedGeneration, launch: retiredLaunch };
   } };
 }
 

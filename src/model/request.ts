@@ -46,6 +46,13 @@ export type NormalPromptMessageV1 =
     }
   | {
       index: number;
+      role: 'user';
+      sourceKind: 'session_legacy';
+      sourceId: string;
+      contentUtf8: string;
+    }
+  | {
+      index: number;
       role: 'assistant';
       sourceItemId: string;
       contentUtf8: string;
@@ -244,6 +251,7 @@ const NORMAL_PROMPT_SOURCE_KINDS = new Set<string>([
   'assembly_instructions',
   'session_terminal',
   'session_summary',
+  'session_legacy',
   'parent_context',
   'additional_context',
   'run_objective',
@@ -348,7 +356,19 @@ function validateNormalMessageSequence(messages: readonly ModelVisibleMessage[])
   }
 }
 
-function openAiMessages(messages: readonly ModelVisibleMessage[]): unknown[] {
+function compatibleReasoningFields(continuation: ProviderContinuation | undefined, provider: ProviderName, model: string):
+  { reasoning_content?: string | null } {
+  if (continuation === undefined) return {};
+  if (provider !== 'openai-compatible' || continuation.provider !== provider || continuation.model !== model ||
+      continuation.items.length !== 1) throw new TypeError('compatible reasoning continuation identity or count differs');
+  const item = continuation.items[0];
+  if (!isRecord(item) || !hasExactKeys(item, ['type', 'reasoning_content']) || item.type !== 'reasoning_content' ||
+      item.reasoning_content !== null && typeof item.reasoning_content !== 'string')
+    throw new TypeError('compatible reasoning continuation has an invalid closed shape');
+  return { reasoning_content: item.reasoning_content };
+}
+
+function openAiMessages(messages: readonly ModelVisibleMessage[], provider: ProviderName, model: string): unknown[] {
   return messages.map((message) => {
     if (message.role === 'system' || message.role === 'user') {
       return { role: message.role, content: message.contentUtf8 };
@@ -360,6 +380,7 @@ function openAiMessages(messages: readonly ModelVisibleMessage[]): unknown[] {
     return {
       role: 'assistant',
       content: message.contentUtf8,
+      ...compatibleReasoningFields(message.continuation, provider, model),
       ...(message.toolCalls.length === 0
         ? {}
         : {
@@ -476,6 +497,19 @@ function anthropicInput(messages: readonly ModelVisibleMessage[]): { system?: st
   return { ...(system.length === 0 ? {} : { system: system.join('\n\n') }), messages: result };
 }
 
+/** Additive lower bound for an immutable historical user entry. Each fixed
+ * adapter retains this exact string representation. Anthropic may merge user
+ * messages, so count only the text block, never its enclosing user container.
+ * Delimiters/headers/tools/system/model/output fields add bytes; none subtract.
+ * This is rejection-only data, never a dispatch/token/cost acceptance test. */
+export function sessionContextUserWireByteLowerBound(provider: ProviderName, model: string, contentUtf8: string): number {
+  const message: ModelVisibleMessage = { role: 'user', contentUtf8 };
+  if (provider === 'openai') return canonicalJsonBytes(responsesInput([message])[0]).length;
+  if (provider === 'anthropic') return canonicalJsonBytes(anthropicInput([message]).messages[0]!.content[0]).length;
+  if (provider === 'ollama') return canonicalJsonBytes(ollamaMessages([message])[0]).length;
+  return canonicalJsonBytes(openAiMessages([message], provider, model)[0]).length;
+}
+
 /** This is a context-management estimate, never token or cost settlement authority. */
 export function estimateTextTokens(text: string): number {
   return Math.ceil(Buffer.byteLength(text, 'utf8') / 3);
@@ -587,7 +621,7 @@ export function buildModelRequestWire(
     requestPath = '/chat/completions';
     body = {
       model,
-      messages: openAiMessages(prompt.messages),
+      messages: openAiMessages(prompt.messages, provider, model),
       stream,
       ...(provider === 'openrouter' ? { max_completion_tokens: output } : { max_tokens: output }),
       ...(stream ? { stream_options: { include_usage: true } } : {}),
@@ -649,6 +683,7 @@ function validateProjection(input: PrepareNormalModelAttemptInput): void {
       if (
         !hasExactKeys(message, TEXT_MESSAGE_KEYS) ||
         !NORMAL_PROMPT_SOURCE_KINDS.has(message.sourceKind as string) ||
+        (message.sourceKind === 'session_legacy' && message.role !== 'user') ||
         !nonempty(message.sourceId) ||
         !canonicalText(message.contentUtf8)
       ) {
@@ -679,7 +714,9 @@ function validateProjection(input: PrepareNormalModelAttemptInput): void {
         )
           throw new TypeError('continuation identity mismatch');
         assertBoundedJsonValue(continuation.items, 'provider continuation');
-        if (
+        if (input.authority.provider === 'openai-compatible') {
+          compatibleReasoningFields(continuation, input.authority.provider, input.authority.model);
+        } else if (
           continuation.items.some(
             (item: unknown) =>
               !isRecord(item) ||
@@ -772,6 +809,8 @@ export function projectModelVisiblePrompt(
 ): ModelVisiblePromptV1 {
   const messages: ModelVisibleMessage[] = projection.messages.map((message) => {
     if (message.role === 'system' || message.role === 'user') {
+      if (message.sourceKind === 'session_legacy' && message.role !== 'user')
+        throw new TypeError('legacy Session context must remain user history');
       return { role: message.role, contentUtf8: message.contentUtf8 };
     }
     if (message.role === 'tool') {

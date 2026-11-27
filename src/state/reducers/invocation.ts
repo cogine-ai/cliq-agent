@@ -1,3 +1,7 @@
+import { assertChildAncestryRelease } from '../child-ancestry.js';
+import { canonicalSha256 } from '../../kernel/canonical.js';
+import { decodeMcpRetryDispatchClosure } from '../../kernel/mcp-retry.js';
+import { mcpRetryAdmissionData, type McpRetryAdmission } from '../mcp-retry-admission.js';
 import { digestOmitting, modelOperationId, parseCanonicalTime } from '../../kernel/identity.js';
 import { planCanonicalArtifact, type PlannedArtifact } from '../../kernel/artifact-plan.js';
 import type {
@@ -16,7 +20,7 @@ import type {
 import type { ArtifactCatalog, PublishedArtifact } from '../artifacts.js';
 import { insertArtifactMetadata } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
-import { KernelStorageError, stateOperation } from '../errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
 import {
   addBudget,
   assertBudgetWithin,
@@ -45,6 +49,9 @@ import { assertModelGrantDispatch, readModelGrantClosure } from '../model-grant.
 import { prepareInstalledBrokerAmbiguity } from '../broker-ambiguity.js';
 import { MODEL_BROKER_ENTRY_ID } from '../model-broker-native.js';
 import { readWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import type { OwnedPublicationInitialAmbiguity, OwnedPublicationReconciliationResult, PublicationInvocationOwner } from '../publication-invocation.js';
+import type { OwnedPublicationReceivedResult } from '../publication-finalization.js';
+import type { DependencyInvocationOwner } from '../dependency-invocation-owner.js';
 
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
@@ -119,6 +126,7 @@ export function assertLiveDispatchState(
   expectedLeaseEpoch: number,
   now: string
 ): LiveDispatchState {
+  assertChildAncestryRelease(connection, runId, now);
   const run = readRun(connection, runId);
   if (run.revision !== expectedRunRevision) {
     throw new KernelStorageError('REVISION_CONFLICT', 'Run revision changed before invocation transition');
@@ -193,6 +201,9 @@ export async function prepareInvocation(
   if (input.opKind === 'model') {
     throw new KernelStorageError('INVALID_REQUEST', 'model invocations require the typed model admission path');
   }
+  if (input.opKind === 'publish') {
+    throw new KernelStorageError('INVALID_REQUEST', 'publication requires its typed original path owner');
+  }
   const run = readRun(driver, input.runId);
   const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
   const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -212,20 +223,35 @@ export async function prepareValidatedInvocation(
     metadata: PublishedArtifact[];
     validate: (connection: SqliteConnection, run: Run, attempt: number, now: string) => void;
     commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry) => void;
+    /** Only the verifier owner may reproduce a completed infrastructure
+     * receipt's positive death and frozen same-candidate retry allowance. */
+    retryCompletedVerifier?: (connection: SqliteConnection, entries: InvocationJournalEntry[]) => void;
+    /** Original opaque owner only, never a caller-supplied evidence pair or
+     * callback pretending to observe the previous native dispatch. */
+    mcpRetryAdmission?: McpRetryAdmission;
   }
 ): Promise<{ entry: InvocationJournalEntry; run: Run }> {
+  if (input.opKind === 'mcp-server') throw new KernelStorageError('INVALID_REQUEST', 'MCP server preparation requires its original stdio lifecycle writer');
   decodeBudgetUsage(input.reservation, 'invocation reservation');
   if (isZeroBudget(input.reservation)) {
     throw new KernelStorageError('INVALID_REQUEST', 'ordinary invocation reservation must be nonzero');
   }
   await artifacts.readBytes(input.requestRef);
   if (input.grantRef !== undefined) await artifacts.readBytes(input.grantRef);
-  const invocationMetadata = typed?.metadata ?? await Promise.all([
+  const retryAdmission = typed?.mcpRetryAdmission && mcpRetryAdmissionData(driver, owner, typed.mcpRetryAdmission);
+  const retryReference = retryAdmission?.reference;
+  const retryClosure = retryReference && decodeMcpRetryDispatchClosure(await artifacts.readCanonical(retryReference.ref));
+  if (retryClosure && (input.opKind !== 'mcp' || input.replayClass !== 'retry' || retryClosure.runId !== input.runId || retryClosure.opId !== input.opId ||
+      retryClosure.requestRef !== input.requestRef || retryClosure.targetRef !== input.target ||
+      canonicalSha256(retryClosure) !== retryReference?.ref || retryClosure.evidenceDigest !== retryReference?.digest))
+    throw new KernelStorageError('INVALID_REQUEST', 'MCP retry preparation substitutes its original dispatch closure');
+  const invocationMetadata = [...(typed?.metadata ?? await joinResourceOperations([
     artifacts.describe(input.requestRef, 'application/json', 'cliq-invocation-request-v1'),
     ...(input.grantRef === undefined
       ? []
       : [artifacts.describe(input.grantRef, 'application/json', 'cliq-operation-grant-v1')])
-  ]);
+  ]))];
+  if (retryAdmission) invocationMetadata.push(...retryAdmission.metadata);
   const initialRun = readRun(driver, input.runId);
   const runSpec = decodeRunSpec(await artifacts.readCanonical(initialRun.specRef));
   const ceilings: BudgetUsage = {
@@ -239,6 +265,7 @@ export async function prepareValidatedInvocation(
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    retryAdmission?.reobserve(connection);
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
@@ -252,13 +279,25 @@ export async function prepareValidatedInvocation(
     );
     const highest = readHighestPreparedAttempt(connection, input.runId, input.opId);
     const attempt = highest === undefined ? 0 : highest.attempt + 1;
+    retryAdmission?.assertCurrent(connection, run, attempt, now);
     typed?.validate(connection, run, attempt, now);
     if (highest !== undefined) {
       const previous = readInvocationAttempt(connection, input.runId, input.opId, highest.attempt);
-      if (!previousAttemptAllowsRetry(previous)) {
+      const originalUnknown = previous.at(-1);
+      if (input.opKind === 'mcp' && input.replayClass === 'retry' && originalUnknown?.phase === 'unknown' &&
+          (!retryClosure || retryClosure.attempt !== highest.attempt || retryClosure.nextAttempt !== attempt ||
+            retryClosure.preparedJournalSeq !== highest.seq || retryClosure.unknownJournalSeq !== originalUnknown.seq ||
+            retryClosure.dispatchId !== originalUnknown.dispatchId || retryClosure.brokerFenceTokenDigest !== originalUnknown.brokerFenceTokenDigest ||
+            retryClosure.unknownEvidenceRef !== originalUnknown.evidenceRef || retryClosure.unknownEvidenceDigest !== originalUnknown.evidenceDigest ||
+            retryClosure.budgetSettlementRef !== originalUnknown.budgetSettlementRef))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP retry lacks its exact wholly settled previous UNKNOWN and original dispatch closure');
+      if (retryClosure && (originalUnknown?.phase !== 'unknown' || retryClosure.nextAttempt !== attempt))
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP original retry closure cannot be borrowed by another preparation');
+      if (!previousAttemptAllowsRetry(previous) && !(input.opKind === 'verifier' && previous.at(-1)?.phase === 'completed' && typed?.retryCompletedVerifier)) {
         throw new KernelStorageError('STATE_TRANSITION_INVALID', 'prior invocation attempt is not retryable and settled');
       }
-    }
+      if (previous.at(-1)?.phase === 'completed') typed?.retryCompletedVerifier?.(connection, previous);
+    } else if (retryClosure) throw new KernelStorageError('INVALID_REQUEST', 'first MCP preparation has no previous UNKNOWN dispatch to close');
     assertBudgetWithin(run.budgetConsumed, run.budgetReserved, input.reservation, ceilings);
     const nextReserved = addBudget(run.budgetReserved, input.reservation, 'Run budget reservation');
     const entry: InvocationJournalEntry = {
@@ -277,6 +316,10 @@ export async function prepareValidatedInvocation(
     };
     if (input.idempotencyKey !== undefined) entry.idempotencyKey = input.idempotencyKey;
     if (input.grantRef !== undefined) entry.grantRef = input.grantRef;
+    if (retryClosure) {
+      if (!retryReference) throw new TypeError('MCP retry closure lost its exact reference');
+      entry.evidenceRef = retryReference.ref; entry.evidenceDigest = retryClosure.evidenceDigest;
+    }
     for (const artifact of invocationMetadata) insertArtifactMetadata(connection, artifact, now);
     appendInvocationJournalEntry(connection, entry);
     const update = connection
@@ -393,7 +436,7 @@ export async function claimInvocationDispatch(
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
   const prepared = readHighestPreparedAttempt(driver, input.runId, input.opId);
-  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+  if (prepared && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'mcp-server' || prepared.opKind === 'verifier' || prepared.opKind === 'publish')) {
     const run = readRun(driver, input.runId);
     const spec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
     const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
@@ -407,10 +450,28 @@ export async function claimInvocationDispatch(
 /** Internal claim seam. Only the typed reducer supplies its independently reproduced authority check. */
 export async function claimValidatedInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: ClaimInvocationDispatchInput,
-  validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void
+  validate?: (connection: SqliteConnection, run: Run, prepared: InvocationJournalEntry, now: string) => void,
+  publicationOwner?: PublicationInvocationOwner,
+  dependencyOwner?: DependencyInvocationOwner,
+  mcpOwner?: import('./tool.js').McpToolClaimOwner
 ): Promise<InvocationJournalEntry> {
   input = { ...input };
+  // The attachment is an original same-Store native owner, not caller metadata
+  // or an injectable authority callback. Its module owns the only issuer.
+  const publication = publicationOwner === undefined ? undefined :
+    (await import('../publication-invocation.js')).assertPublicationClaimForInvocation(driver, owner, publicationOwner, input);
+  const dependency = dependencyOwner === undefined ? undefined :
+    (await import('../dependency-invocation-owner.js')).assertDependencyClaimForInvocation(driver, owner, dependencyOwner, input);
   const preparedSnapshot = readHighestPreparedAttempt(driver, input.runId, input.opId);
+  if ((preparedSnapshot?.opKind === 'mcp') !== (mcpOwner !== undefined))
+    throw new KernelStorageError('INVALID_REQUEST', 'MCP claims require their original typed policy/native owner');
+  const assertMcp = mcpOwner === undefined ? undefined : (await import('./tool.js')).assertMcpToolClaimOwner;
+  const mcpEvidence = assertMcp?.(driver, owner, mcpOwner!, input);
+  if ((preparedSnapshot?.opKind === 'publish') !== (publication !== undefined))
+    throw new KernelStorageError('INVALID_REQUEST', 'publication claims require their original typed native owner');
+  if ((preparedSnapshot?.opKind === 'tool' && preparedSnapshot.target === 'builtin:dependency-acquire') !== (dependency !== undefined) ||
+      dependency !== undefined && publication !== undefined)
+    throw new KernelStorageError('INVALID_REQUEST', 'dependency claims require their original same-operation native owner');
   const modelCut = preparedSnapshot?.opKind === 'model' ? await readModelClaimCut(driver, artifacts, preparedSnapshot) : undefined;
   if (input.sandboxLaunchSpecRef !== undefined) await artifacts.readBytes(input.sandboxLaunchSpecRef);
   const launchSpecMetadata = input.sandboxLaunchSpecRef === undefined
@@ -428,6 +489,9 @@ export async function claimValidatedInvocation(
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    const currentMcpEvidence = assertMcp?.(driver, owner, mcpOwner!, input);
+    if (currentMcpEvidence?.evidenceRef !== mcpEvidence?.evidenceRef || currentMcpEvidence?.evidenceDigest !== mcpEvidence?.evidenceDigest)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'MCP original native instance claim attachment changed');
     const now = sampleCanonicalNow();
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
@@ -457,6 +521,8 @@ export async function claimValidatedInvocation(
     if (modelCut) assertModelGrantDispatch(modelCut.authority.grant, { run, prepared: highest,
       history: readOperationJournal(connection, run.id, highest.opId), now });
     validate?.(connection, run, highest, now);
+    publication?.validate(connection, run, highest, now);
+    dependency?.validate(connection, run, highest, now);
     claimed = {
       ...highest,
       seq: nextJournalSequence(connection, input.runId),
@@ -471,7 +537,26 @@ export async function claimValidatedInvocation(
     if (input.brokerFenceTokenDigest !== undefined) {
       claimed.brokerFenceTokenDigest = input.brokerFenceTokenDigest;
     }
+    // Prepared evidence closes the previous UNKNOWN, never the new claim.
+    // A stdio claim independently installs its own initialized instance below.
+    if (highest.opKind === 'mcp' && highest.replayClass === 'retry' && highest.attempt > 0) {
+      delete claimed.evidenceRef; delete claimed.evidenceDigest;
+    }
+    if (publication) {
+      claimed.evidenceRef = publication.evidenceRef;
+      claimed.evidenceDigest = publication.evidenceDigest;
+      for (const artifact of publication.metadata) insertArtifactMetadata(connection, artifact, now);
+    }
+    if (dependency) {
+      claimed.evidenceRef = dependency.evidenceRef;
+      claimed.evidenceDigest = dependency.evidenceDigest;
+      for (const artifact of dependency.metadata) insertArtifactMetadata(connection, artifact, now);
+    }
     if (modelCut) modelRetryState(modelCut.retryPolicy, [...readOperationJournal(connection, run.id, highest.opId), claimed], now);
+    if (mcpEvidence) {
+      claimed.evidenceRef = mcpEvidence.evidenceRef;
+      claimed.evidenceDigest = mcpEvidence.evidenceDigest;
+    }
     if (launchSpecMetadata !== undefined) insertArtifactMetadata(connection, launchSpecMetadata, now);
     appendInvocationJournalEntry(connection, claimed);
   });
@@ -480,7 +565,7 @@ export async function claimValidatedInvocation(
 }
 
 type InitialSettlementKind =
-  | { phase: 'completed'; resultRef?: string; receiptRef?: string; consumed: BudgetUsage }
+  | { phase: 'completed'; resultRef?: string; receiptRef?: string; evidenceRef?: string; evidenceDigest?: string; consumed: BudgetUsage }
   | { phase: 'failed'; errorRef: string; evidenceRef?: string; evidenceDigest?: string; consumed: BudgetUsage; requireClaim: boolean }
   | { phase: 'unknown'; evidenceRef: string; evidenceDigest: string };
 
@@ -499,6 +584,7 @@ export type SettlementContinuation = (input: {
 }) => Promise<{
   metadata: PublishedArtifact[];
   unknownEvidence?: { evidenceRef: string; evidenceDigest: string };
+  reobserve?: (connection: SqliteConnection) => void;
   validate?: (connection: SqliteConnection, run: Run, committedAt: string) => void;
   commit?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void;
 }>;
@@ -516,6 +602,10 @@ export async function settleValidatedInvocation(
 
 type RetainedSettlement = {
   validateSnapshot(connection: SqliteConnection, run: Run): void;
+  /** Set only by the genuine publication adapter factory below. A caller's
+   * continuation callback never substitutes for this original owner. */
+  publicationOwner?: PublicationInvocationOwner | OwnedPublicationReceivedResult | OwnedPublicationInitialAmbiguity;
+  dependencyOwner?: import('../dependency-settlement.js').OwnedDependencySettlement;
   settlement?: BudgetSettlementV1;
   plan?: PlannedArtifact;
   artifact?: PublishedArtifact;
@@ -549,21 +639,118 @@ export function prepareValidatedInvocationSettlement(
   } };
 }
 
+/** Original publication adapter only: no input refs, terminal data or callbacks
+ * are accepted here. Its own producer supplies the complete closed plan. */
+export function preparePublicationInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, publicationOwner: PublicationInvocationOwner | OwnedPublicationReceivedResult | OwnedPublicationInitialAmbiguity) {
+  let retained: RetainedSettlement | undefined;
+  return { async settle(expectedRunRevision: number) {
+    const { assertPublicationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationSettlementForInvocation(driver, owner, publicationOwner);
+    if (original.artifacts !== artifacts)
+      throw new TypeError('publication settlement requires its original artifact catalog');
+    retained ??= { validateSnapshot: original.validateSnapshot, publicationOwner };
+    return settleInitialInvocation(driver, original.readArtifacts, owner, { ...original.input, expectedRunRevision },
+      original.terminal, original.continuation, retained);
+  } };
+}
+
+/** The dependency's genuine native owner and complete physical retirement
+ * produce this adapter; ordinary continuation callbacks cannot mint it. */
+export function prepareDependencyInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  dependencyOwner: import('../dependency-settlement.js').OwnedDependencySettlement) {
+  let retained: RetainedSettlement | undefined;
+  return { async settle(expectedRunRevision: number) {
+    const { assertOwnedDependencySettlement } = await import('../dependency-settlement.js');
+    const original = assertOwnedDependencySettlement(driver, owner, dependencyOwner);
+    if (original.artifacts !== artifacts) throw new TypeError('dependency settlement changed its original artifact owner');
+    retained ??= { validateSnapshot: original.validateSnapshot, dependencyOwner };
+    return settleInitialInvocation(driver, artifacts, owner, { ...original.input, expectedRunRevision },
+      original.terminal, original.continuation, retained);
+  } };
+}
+
+/** Only the fixed genuine publication recovery/received adapter can append a
+ * later observation of an already charged claim. This is not initial
+ * settlement, a retry, a new reservation, or a caller evidence interface. */
+export function preparePublicationReconciliationInvocationSettlement(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  owner: StateOwnerContext, key: OwnedPublicationReconciliationResult | OwnedPublicationReceivedResult) {
+  return { async settle(expectedRunRevision: number) {
+    const { assertPublicationReconciliationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationReconciliationSettlementForInvocation(driver, owner, key);
+    if (original.artifacts !== artifacts) throw new TypeError('publication reconciliation requires its original artifact catalog');
+    const run = readRun(driver, original.input.runId);
+    if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution Run revision changed');
+    const plan = await original.continuation({ run, prepared: original.prepared, settlement: original.settlement });
+    let result!: { run: Run; entry: InvocationJournalEntry; settlement: BudgetSettlementV1 }, outcome: TimeFenceAdvance | undefined;
+    driver.transaction(connection => {
+      const bound = assertPublicationReconciliationSettlementForInvocation(driver, owner, key, connection);
+      if (bound !== original) throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication resolution owner changed during preparation');
+      assertActiveStateOwner(connection, owner);
+      const current = readRun(connection, run.id), entries = readInvocationAttempt(connection, run.id, original.prepared.opId, original.prepared.attempt);
+      if (JSON.stringify(current) !== JSON.stringify(run) || entries.length !== 3 ||
+          JSON.stringify(entries[0]) !== JSON.stringify(original.prepared) || JSON.stringify(entries[1]) !== JSON.stringify(original.claim) ||
+          JSON.stringify(entries[2]) !== JSON.stringify(original.unknown) || entries[2]!.phase !== 'unknown' ||
+          !original.unknown.budgetSettlementRef || nextJournalSequence(connection, run.id) !== original.journalSeq)
+        throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution lost its original charged UNKNOWN and exact Journal tail');
+      const now = sampleCanonicalNow(); outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
+      if (outcome !== 'healthy') return;
+      original.validateSnapshot(connection, current); plan.validate?.(connection, current, now);
+      if (now < original.observedAt || now < current.updatedAt)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'publication resolution precedes its actual observation or Run cut');
+      for (const metadata of [...original.metadata, ...plan.metadata]) insertArtifactMetadata(connection, metadata, now);
+      const terminal = original.terminal;
+      const entry: InvocationJournalEntry = { ...original.claim, seq: original.journalSeq, phase: terminal.phase,
+        budgetDelta: ZERO_BUDGET, budgetSettlementRef: original.unknown.budgetSettlementRef,
+        evidenceRef: terminal.evidenceRef, evidenceDigest: terminal.evidenceDigest, timestamp: now,
+        ...(terminal.phase === 'completed' ? { receiptRef: terminal.receiptRef } : { errorRef: terminal.errorRef }) };
+      appendInvocationJournalEntry(connection, entry);
+      const updated = connection.prepare('UPDATE runs SET revision=revision+1,updated_at=? WHERE id=? AND revision=?')
+        .run(now, run.id, BigInt(run.revision));
+      if (updated.changes !== 1n) throw new KernelStorageError('REVISION_CONFLICT', 'publication resolution lost its original Run update');
+      plan.commit?.(connection, current, entry, now);
+      const after = readRun(connection, run.id);
+      if (JSON.stringify(after.budgetConsumed) !== JSON.stringify(current.budgetConsumed) ||
+          JSON.stringify(after.budgetReserved) !== JSON.stringify(current.budgetReserved))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication reconciliation attempted to change its once-settled budget');
+      appendRunStateEvent(connection, after, now); result = { run: after, entry, settlement: original.settlement };
+    });
+    requireHealthyFence(outcome); return result;
+  } };
+}
+
 async function settleInitialInvocation(
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
   input: SettleInvocationInput, terminal: InitialSettlementKind, continuation?: SettlementContinuation,
   retained?: RetainedSettlement
 ): Promise<{ entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run }> {
+  let publication: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']> | undefined;
+  if (retained?.publicationOwner) {
+    const { assertPublicationSettlementForInvocation } = await import('../publication-settlement.js');
+    const original = assertPublicationSettlementForInvocation(driver, owner, retained.publicationOwner);
+    publication = original;
+    if (input.runId !== original.input.runId || input.opId !== original.input.opId || input.attempt !== original.input.attempt ||
+        JSON.stringify(terminal) !== JSON.stringify(original.terminal) || continuation !== original.continuation ||
+        retained.validateSnapshot !== original.validateSnapshot || artifacts !== original.readArtifacts)
+      throw new KernelStorageError('INVALID_REQUEST', 'publication settlement changed its original owning continuation');
+  }
+  if (retained?.dependencyOwner) {
+    const { assertOwnedDependencySettlement } = await import('../dependency-settlement.js');
+    const original = assertOwnedDependencySettlement(driver, owner, retained.dependencyOwner);
+    if (original.artifacts !== artifacts || input.runId !== original.input.runId || input.opId !== original.input.opId ||
+        input.attempt !== original.input.attempt || terminal !== original.terminal || continuation !== original.continuation ||
+        retained.validateSnapshot !== original.validateSnapshot)
+      throw new KernelStorageError('INVALID_REQUEST', 'dependency settlement changed its original physical continuation');
+  }
   const artifactRefs = terminal.phase === 'completed'
     ? [terminal.resultRef, terminal.receiptRef]
     : terminal.phase === 'failed'
       ? [terminal.errorRef, terminal.evidenceRef]
       : [terminal.evidenceRef];
-  await Promise.all(artifactRefs.filter((ref): ref is string => ref !== undefined).map((ref) => artifacts.readBytes(ref)));
-  const terminalMetadata = continuation === undefined ? await Promise.all(
-    artifactRefs
-      .filter((ref): ref is string => ref !== undefined)
-      .map((ref, index) => artifacts.describe(
+  await artifacts.mapReads(artifactRefs.filter((ref): ref is string => ref !== undefined), (ref) => artifacts.readBytes(ref));
+  const terminalMetadata = continuation === undefined ? await artifacts.mapReads(
+    artifactRefs.filter((ref): ref is string => ref !== undefined),
+    (ref, index) => artifacts.describe(
         ref,
         'application/json',
         terminal.phase === 'completed'
@@ -575,7 +762,7 @@ async function settleInitialInvocation(
               ? 'cliq-invocation-error-v1'
               : 'cliq-post-claim-no-release-evidence-v1'
             : 'cliq-invocation-ambiguity-evidence-v1'
-      ))
+      )
   ) : [];
 
   for (let retry = 0; retry < SETTLEMENT_RETRY_LIMIT; retry += 1) {
@@ -594,7 +781,18 @@ async function settleInitialInvocation(
     const prepared = entries.find((entry) => entry.phase === 'prepared');
     const claim = entries.find((entry) => entry.phase === 'dispatch_claimed');
     if (prepared === undefined) throw new KernelStorageError('NOT_FOUND', 'prepared invocation attempt is missing');
-    if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp')) {
+    if (prepared.opKind === 'mcp-server') {
+      const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
+      const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
+      if (assembly.format === 'cliq-run-assembly-v1')
+        throw new KernelStorageError('INVALID_REQUEST', 'MCP server lifecycle requires its original positive native retirement and unique local terminal writer');
+    }
+    if (prepared.opKind === 'tool' && prepared.target === 'builtin:dependency-acquire' && terminal.phase !== 'unknown' && !retained?.dependencyOwner)
+      throw new KernelStorageError('INVALID_REQUEST', 'dependency settlement requires its original native result and physical retirement');
+    if (prepared.opKind === 'publish' && !retained?.publicationOwner) {
+      throw new KernelStorageError('INVALID_REQUEST', 'publication settlement requires its original owned physical continuation');
+    }
+    if (continuation === undefined && (prepared.opKind === 'tool' || prepared.opKind === 'mcp' || prepared.opKind === 'verifier')) {
       const spec = decodeRunSpec(await artifacts.readCanonical(snapshotRun.specRef));
       const assembly = await artifacts.readCanonical<{ format?: string }>(spec.assemblyRef);
       if (assembly.format === 'cliq-run-assembly-v1' && terminal.phase !== 'unknown') {
@@ -661,7 +859,11 @@ async function settleInitialInvocation(
     if (retained) retained.plan = settlementPlan;
     const settlementArtifact = retained?.artifact ?? await artifacts.publishBytes(settlementPlan.bytes, settlementPlan.mediaType, settlementPlan.schemaKind);
     if (retained) retained.artifact = settlementArtifact;
-    const continuationPlan = retained?.continuation ?? await continuation?.({ run: snapshotRun, prepared, settlement });
+    // A winning Stop may select an uncommitted abort frontier after a CAS or
+    // rolled-back SQL failure. Only this exact publication owner can rebuild
+    // that data projection; the original settlement/effect remains fixed.
+    const continuationPlan = (retained?.publicationOwner ? undefined : retained?.continuation) ??
+      await continuation?.({ run: snapshotRun, prepared, settlement });
     if (retained) retained.continuation = continuationPlan;
     if (continuationPlan?.unknownEvidence && terminal.phase !== 'unknown') {
       throw new KernelStorageError('INVALID_REQUEST', 'only a protected unknown settlement can restage its evidence');
@@ -684,7 +886,9 @@ async function settleInitialInvocation(
         (connection, run, committedAt) => {
           retained?.validateSnapshot(connection, run);
           continuationPlan?.validate?.(connection, run, committedAt);
-        }
+        },
+        publication,
+        continuationPlan?.reobserve
       );
     } catch (error) {
       if (error instanceof ReducerSnapshotChanged) {
@@ -717,12 +921,15 @@ function commitInitialSettlement(
   settlementArtifact: PublishedArtifact,
   terminalMetadata: PublishedArtifact[],
   commitContinuation?: (connection: SqliteConnection, run: Run, entry: InvocationJournalEntry, committedAt: string) => void,
-  validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void
+  validateTerminal?: (connection: SqliteConnection, run: Run, committedAt: string) => void,
+  publication?: ReturnType<typeof import('../publication-settlement.js')['assertPublicationSettlementForInvocation']>,
+  reobserve?: (connection: SqliteConnection) => void
 ): { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run } {
   let result!: { entry: InvocationJournalEntry; settlement: BudgetSettlementV1; run: Run };
   let fenceOutcome: TimeFenceAdvance | undefined;
   driver.transaction((connection) => {
     assertActiveStateOwner(connection, owner);
+    reobserve?.(connection);
     const committedAt = sampleCanonicalNow();
     const run = readRun(connection, input.runId);
     if (
@@ -732,7 +939,10 @@ function commitInitialSettlement(
     ) throw new ReducerSnapshotChanged();
     // Journal-only evidence may settle, but only the recovery reducer may advance
     // a frontier retained by its exact reconciliation wait.
-    if (commitContinuation && run.waitingReason === 'reconciliation') {
+    const initialPublication = publication?.kind === 'initial_ambiguity' && preparedSnapshot.opKind === 'publish' &&
+      terminal.phase === 'unknown' && publication.input.runId === run.id && publication.input.opId === preparedSnapshot.opId &&
+      publication.input.attempt === preparedSnapshot.attempt && publication.terminal === terminal;
+    if (commitContinuation && run.waitingReason === 'reconciliation' && !initialPublication) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'invocation continuation awaits worker recovery');
     }
     const entries = readInvocationAttempt(connection, input.runId, input.opId, input.attempt);
@@ -761,9 +971,23 @@ function commitInitialSettlement(
       budgetSettlementRef: settlementArtifact.ref,
       timestamp: settlement.settledAt
     };
+    if (!claim && prepared!.opKind === 'mcp' && prepared!.replayClass === 'retry' && prepared!.attempt > 0) {
+      delete entry.evidenceRef; delete entry.evidenceDigest; // The old dispatch closure remains on its original prepared row.
+    }
     if (terminal.phase === 'completed') {
       if (terminal.resultRef !== undefined) entry.resultRef = terminal.resultRef;
       if (terminal.receiptRef !== undefined) entry.receiptRef = terminal.receiptRef;
+      if (entry.opKind === 'tool' && entry.target === 'builtin:dependency-acquire') {
+        // The original broker evidence stays on its claim. The completed
+        // dependency's own positive evidence is its result and receipt.
+        delete entry.evidenceRef; delete entry.evidenceDigest;
+      }
+      if (prepared!.opKind === 'publish') {
+        if (!terminal.evidenceRef || !terminal.evidenceDigest || terminal.evidenceRef !== terminal.receiptRef)
+          throw new KernelStorageError('INVALID_REQUEST', 'completed publication requires its actual identical terminal receipt and evidence');
+        // A claim carries birth evidence, not evidence of its later effect.
+        entry.evidenceRef = terminal.evidenceRef; entry.evidenceDigest = terminal.evidenceDigest;
+      }
     } else if (terminal.phase === 'failed') {
       entry.errorRef = terminal.errorRef;
       if (terminal.evidenceRef !== undefined) {
@@ -857,6 +1081,7 @@ export async function markInvocationUnknown(
   const spec = decodeRunSpec(await readCanonicalArtifact(artifacts, run.specRef));
   const assembly = await readCanonicalArtifact<Partial<RunAssemblyV1>>(artifacts, spec.assemblyRef);
   const prepared = readInvocationAttempt(driver, input.runId, input.opId, input.attempt).find(entry => entry.phase === 'prepared');
+  if (prepared?.opKind === 'mcp') throw new KernelStorageError('INVALID_REQUEST', 'MCP uncertainty requires its original native or successor process-death producer');
   if (prepared?.opKind === 'model' && assembly.format === 'cliq-run-assembly-v1' && assembly.provider?.adapter?.adapterId === MODEL_BROKER_ENTRY_ID) {
     return markInstalledBrokerAmbiguity(driver, artifacts, owner, input);
   }

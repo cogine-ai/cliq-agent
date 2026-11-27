@@ -1,64 +1,288 @@
+import { isBuiltinExecutionPhase, type BuiltinExecutionPhase } from '../sandbox/builtin-tool-diagnostics.js';
+import { noteInstalledBuiltinWorkPhase } from './installed-work-diagnostics.js';
+import { beginInstalledSchedulerDiagnostic } from './installed-run-diagnostics.js';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1, SandboxRuntimeBindingV1 } from '../kernel/execution.js';
+import { BUILTIN_SCRIPT_ENVIRONMENTS, BUILTIN_SCRIPT_PRIVATE_MOUNTS, BUILTIN_SCRIPT_RECIPE,
+  builtinToolInputBytes, decodeBuiltinToolInput, isBuiltinScriptTool } from '../sandbox/builtin-tool-data.js';
 import type { Run, PreparingWorkerLaunch, StateOwnerRecordV1, SupervisorInspectorIdentityV1, WorkerIdentity, WorkspaceGenerationSnapshotEvidenceV1, WorkerDeathWait } from '../kernel/types.js';
-import type { ToolObservationV1 } from '../kernel/tool-authorization.js';
+import type { ToolCheckpointProof, ToolObservationV1 } from '../kernel/tool-authorization.js';
 import { decodeRetainedRunAssembly, type RunAssemblyValidationMaterial } from '../model/run-assembly.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { exactKeys, requireEqual, type RuntimeBundleManifest, type ReleaseTrustKey } from '../policy/runtime-authority.js';
-import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE,
-  openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
+import { assertNativeContainmentDeath, assertNativePreactivationObservation, LINUX_WORKER_RECIPE, LINUX_VERIFIER_RECIPE,
+  observeInstalledPreparingResources, openInstalledLinuxWorkerLauncher, openLinuxWorkerLauncher, type LinuxBlockedWorker, type LinuxWorkerController,
   type LinuxWorkerInstallation, type NativePreactivationRetirement, type NativeRetainedWorkerRetirement } from '../sandbox/linux-worker.js';
 import { borrowRunWorkspaceForExecution, createRunWorkspaceMaterialization, observeRetainedRunWorkspace,
+  readRunWorkspacePreparingGit, openRunWorkspacePreparingGitInput,
   type RunWorkspaceGeneration, type RunWorkspaceMaterialization, type RunWorkspaceBirth } from '../workspace/run-workspace/generation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { isJoinedCasPublicationFailure } from './cas.js';
-import { readTimeFence, sampleCanonicalNow } from './canonical-time.js';
+import { sampleCanonicalNow } from './canonical-time.js';
+import { openInstalledPreparingGit, type InstalledPreparingGit, type PreparingGitCompletion } from '../sandbox/preparation-git.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
-import { decodeSandboxProfile, readBuiltinEditLaunchClosure, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure, decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
+import { decodeSandboxProfile, readWorkerLaunchClosure, readRetainedWorkerLaunchClosure, readQuarantinedWorkerLaunchClosure,
+  decodeWorkerProcessContainment, type WorkerLaunchClosure } from './execution-closure.js';
 import { loadAgentRun } from './reducers/agent.js';
+import { loadDeliveryContinuation, type DeliveryContinuation } from './run-continuation.js';
 import { assertLiveDispatchState, markInvocationUnknown } from './reducers/invocation.js';
-import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe } from './reducers/worker-recovery.js';
+import { beginWorkerRecovery, beginWorkerRecoveryProbe, closeWorkerRecoveryProbe, completeWorkerRecoveryProbe,
+  fenceOwnedWorkerOnShutdown, readOwnedWorkerRetirementCut } from './reducers/worker-recovery.js';
 import { activateWorkerLeaseWithinDeadline, beginGenerationCheckpoint, beginGenerationRevocation, recordWorkerPreactivated, renewWorkerLease, reserveWorkerLaunch } from './reducers/worker-launch.js';
 import { sealWorkerGeneration } from './reducers/worker-launch.js';
 import { recordWorkspaceGenerationPreactivated } from './reducers/workspace-transition.js';
-import { readRecoveryClosure } from './recovery-closure.js';
+import { readDeliveryPublicationClosure, readRecoveryClosure, readVerifierRecoveryClosure } from './recovery-closure.js';
 import { readRun } from './rows.js';
-import { isRolledBackSqliteTransactionFailure, type SqliteDriver } from './sqlite-driver.js';
-import { assertActiveStateOwner, assertFenceHealthy, type StateOwnerContext } from './state-owner.js';
+import { beginAgentLeaseReads, beginPublicationLeaseReads, type WorkerLeaseReads } from './publication-lease-read.js';
+import { assertSqliteConnectionOwnedBy, isRolledBackSqliteTransactionFailure, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
+import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
 import { startWorkerRecoveryTask, type WorkerRecoveryTask } from './worker-recovery-task.js';
 import { toolCheckpointId } from './tool-checkpoint.js';
-import { readToolCut } from './tool-cut.js';
-import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity } from './decoders.js';
+import { decodeRunSpec, decodeWorkerIdentity, decodeWorkspaceGenerationIdentity, decodeWorkspaceIdentity } from './decoders.js';
 import { retirePreactivationLaunch } from './preactivation-retirement.js';
-import type { HeldWorkerReservation } from './native-owner.js';
-import { withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
+import { loadNativeStateOwner, type HeldWorkerReservation, type HeldWorkspaceRoot, type HeldPreparingGitInput } from './native-owner.js';
+import { withHeldInstalledRuntime, withInstalledWorkerRoot, type HeldInstalledAnchor, type HeldInstalledRuntime } from './installed-runtime.js';
 import { stopCheckpointId, stopInvocationHistory } from '../runtime/stop.js';
 import { retireQuarantinedGeneration } from './generation-retirement.js';
-import { observeInstalledBrokerQuiescence, type StateStore } from './store.js';
+import { observeInstalledBrokerQuiescence, withInstalledMcpHttpAuthority, type StateStore } from './store.js';
+import { loadInstalledMcpHttpBroker } from './mcp-native-binding.js';
+import type { NativeMcpRunHttpOwner, RunMcpHttpBinding } from './mcp-broker-native.js';
+import { driveMcpRunProtocol, publishMcpRunCapture, acknowledgeMcpRunCapture, settleMcpRunUnknown,
+  readMcpRunResourceOwner } from './mcp-execution.js';
+import { failMcpRunWithoutRelease } from './mcp-execution.js';
+import { prepareMcpStdioRunInvocation } from './mcp-stdio-run.js';
+import { publishMcpStdioRunCaptures } from './mcp-stdio-execution.js';
+import { beginMcpStdioUnknown } from './mcp-stdio-unknown.js';
+import { beginMcpStdioLaunchFailure } from './mcp-stdio-launch-failure.js';
+import { acknowledgeMcpServerTerminal, beginMcpServerUndispatchedClosure } from './mcp-server-retirement.js';
+import { readMcpRegistryClosure } from './mcp-registration.js';
+import { mcpInitializeRequestData, mcpInitializedNotificationData, mcpToolsListRequestData, mcpToolsCallRequestData } from '../kernel/mcp-wire.js';
+import { readMcpRequestArguments } from './mcp-request-arguments.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from './repositories/worker-launches.js';
-import { hasOnlySettledInstalledModelUnknowns } from './worker-recovery.js';
-import { readInvocationAttempt } from './repositories/journal.js';
-import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation } from './worker-preparation.js';
+import { DEFAULT_RUN_SCHEDULING, decodeRunScheduling, type RunSchedulingV1 } from '../kernel/run-scheduling.js';
+import { hasOnlySettledInstalledModelUnknowns, hasOnlySettledMcpUnknowns } from './worker-recovery.js';
+import { readInvocationAttempt, readInvocationJournal, nextJournalSequence } from './repositories/journal.js';
+import { beginWorkerPreparation, recordWorkerPreparationGeneration, recordWorkerPreparationController, retireWorkerPreparation,
+  assertWorkerPreparationRelease } from './worker-preparation.js';
 import { validateInstalledModelNoReleaseHistory } from './broker-no-release.js';
+import { decodeGuestToolchainManifest, guestToolchainRoots, readRetainedVerifierToolchain } from './guest-toolchain.js';
+import { decodeVerifierCommand } from './verifier-artifacts.js';
+import { validateVerifierStoppedHistory } from './verifier-stop-history.js';
+import type { PublicationInvocationOwner } from './publication-invocation.js';
+import { deliveryPublicationCheckpointId } from './delivery-publication-progress.js';
+import type { PublicationPathWait } from '../kernel/reconciliation.js';
+import type { InstalledControlResponseV1, RunReconcileRequestV1 } from '../kernel/control-wire.js';
+import type { AuthenticatedControlIdentity } from './control-channel.js';
+import { retainBuiltinCapturePublication } from './builtin-tool-capture.js';
+import type { PublicationReconciliationTask } from './publication-reconciliation-task.js';
+import { prepareMcpStatusProbeTask, readMcpStatusProbeNativeJoin, type McpStatusProbeTask } from './mcp-status-task.js';
+import { finalizeMcpStatusProbe } from './mcp-status-finalization.js';
+import type { McpInvocationWaitV1 } from '../kernel/mcp-status.js';
+import { prepareMcpStatusSuccessorRecovery } from './mcp-status-recovery.js';
+import { prepareDependencyInvocationOwner, claimDependencyInvocation, acquireDependencyPackages, readDependencyProcessInputs,
+  registerDependencyProcess, stageDependencyProcessInputs, releaseDependencyProcess, retainDependencyResultForSettlement,
+  acknowledgeDependencyInvocation, closeDependencyInvocationOwner, revokeDependencyInvocationIO, assertDependencyLeaseMaintenance,
+  retainDependencyAcquisitionFailure, hasDependencyProcessCustody,
+  retainDependencyUnknownBrokerFence, markDependencyInvocationUnknown,
+  type DependencyInvocationOwner } from './dependency-invocation-owner.js';
+import { selectDependencyBeforeWorker, prepareActiveDependencyInvocation } from './dependency-preparation.js';
+import { publishDependencyRecipe } from './dependency-recipe-publication.js';
+import { dependencyReadyCheckpointId } from './dependency-retirement.js';
+import { prepareDependencyReceivedSettlement, prepareDependencyAcquisitionFailureSettlement } from './dependency-settlement.js';
 
 /** Trusted installation paths belong to Supervisor bootstrap, not a Run or a control frame. */
 export type RunExecutionInstallation = Pick<LinuxWorkerInstallation, 'installationRoot' | 'cgroupParent'>;
-export type LoadRunExecutionInput = { runId: string; material: RunAssemblyValidationMaterial };
+export type LoadRunExecutionInput =
+  | { runId: string; operation?: 'agent'; material: RunAssemblyValidationMaterial }
+  | { runId: string; operation: 'delivery' };
+export type RunExecutionWorkerIdentity = { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string };
 export type RunExecution = Readonly<{
   requestStop(): Promise<void>;
   activateCurrentWorker(input: { expectedRunRevision: number }): Promise<Run>;
-  assertCurrentModelWorker(input: { runId: string; leaseEpoch: number; launchId: string; generationRef: string; workerIdentityDigest: string }): void;
+  assertCurrentModelWorker(input: RunExecutionWorkerIdentity): void;
+  assertCurrentDeliveryWorker(input: RunExecutionWorkerIdentity): void;
   renewCurrentWorkerLease(): 'inactive' | 'unchanged' | 'renewed' | 'expired';
   executeCurrentTool(input: { expectedRunRevision: number }): Promise<Run>;
-  hasPendingToolCompletion(error?: unknown): boolean;
+  executeCurrentDependencies(input: { expectedRunRevision: number }): Promise<Run>;
+  executeCurrentVerifier(input: { expectedRunRevision: number }): Promise<Run>;
+  executeCurrentPublication(input: { expectedRunRevision: number }): Promise<Run>;
+  executeCurrentNoOpDelivery(input: { expectedRunRevision: number }): Promise<Run>;
+  executeCurrentPublicationMaintenance(input: { expectedRunRevision: number }): Promise<Run>;
+  hasPendingOperation(): boolean;
+  reconcilePublication(input: { expectedRunRevision: number }): Promise<Run>;
+  reconcileMcp(input: { expectedRunRevision: number }): Promise<Run>;
+  enqueuePublicationReconciliation(input: { request: RunReconcileRequestV1; identity: AuthenticatedControlIdentity }):
+    Promise<{ run: Run; response: Extract<InstalledControlResponseV1, { ok: true }>; completion: Promise<Run> }>;
+  enqueueMcpReconciliation(input: { request: RunReconcileRequestV1; identity: AuthenticatedControlIdentity }):
+    Promise<{ run: Run; response: Extract<InstalledControlResponseV1, { ok: true }>; completion: Promise<Run> }>;
+  hasPendingCompletion(error?: unknown): boolean;
+  resumeCurrentCompletion(input: { expectedRunRevision: number }): Promise<Run>;
+  finishCurrentFinalTurn(input: { expectedRunRevision: number }): Promise<Run>;
   finishCurrentStop(input: { expectedRunRevision: number }): Promise<Run>;
   resumeCurrentRetirement(input: { expectedRunRevision: number }): Promise<Run>;
   recoverWorker(input: { expectedRunRevision: number }): Promise<Run>;
 }>;
+const deliveryExecutions = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext; runId: string }>();
+const agentExecutions = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext;
+  readWorker(): RunExecutionWorkerIdentity }>();
+
+/** Read equivalence requires this original execution's live native worker. */
+export function assertAgentLeaseReadExecution(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown): RunExecutionWorkerIdentity {
+  const held = execution !== null && typeof execution === 'object' ? agentExecutions.get(execution) : undefined;
+  if (!held || held.driver !== driver || held.owner !== owner)
+    throw new TypeError('agent lease reads require the genuine same-owner execution');
+  return held.readWorker();
+}
+const publicationTaskBrand: unique symbol = Symbol('DeliveryPublicationTask');
+export type DeliveryPublicationTask = Readonly<{ readonly [publicationTaskBrand]: true }>;
+const noOpTaskBrand: unique symbol = Symbol('DeliveryNoOpTask');
+export type DeliveryNoOpTask = Readonly<{ readonly [noOpTaskBrand]: true }>;
+const publicationMaintenanceTaskBrand: unique symbol = Symbol('DeliveryPublicationMaintenanceTask');
+export type DeliveryPublicationMaintenanceTask = Readonly<{ readonly [publicationMaintenanceTaskBrand]: true }>;
+const publicationReceivedTaskBrand: unique symbol = Symbol('DeliveryPublicationReceivedTask');
+export type DeliveryPublicationReceivedTask = Readonly<{ readonly [publicationReceivedTaskBrand]: true }>;
+const publicationReconciliationTaskBrand: unique symbol = Symbol('DeliveryPublicationReconciliationTask');
+export type DeliveryPublicationReconciliationTask = Readonly<{ readonly [publicationReconciliationTaskBrand]: true }>;
+type DeliveryRootResources = Readonly<{
+  runId: string; expectedRunRevision: number; workspaceRoot: HeldWorkspaceRoot; controlledHome: HeldWorkspaceRoot; signal: AbortSignal;
+}>;
+type DeliveryMaintenanceResources = DeliveryRootResources & Readonly<{
+  publicationOwners: readonly PublicationInvocationOwner[];
+  retire?: PublicationExecutionResources['retire'];
+  reobserveRetirement: PublicationExecutionResources['reobserveRetirement'];
+}>;
+type DeliveryRootTaskBinding<R extends DeliveryRootResources = DeliveryRootResources> = {
+  driver: SqliteDriver; owner: StateOwnerContext; execution: RunExecution; artifacts: ArtifactCatalog;
+  assertOwned(): void; resources(connection?: SqliteConnection): R;
+};
+const noOpTasks = new WeakMap<object, DeliveryRootTaskBinding>();
+const publicationMaintenanceTasks = new WeakMap<object, DeliveryRootTaskBinding<DeliveryMaintenanceResources>>();
+const publicationReceivedTasks = new WeakMap<object, DeliveryRootTaskBinding>();
+type PublicationReconciliationResources = DeliveryRootResources & Readonly<{
+  publicationOwners: readonly PublicationInvocationOwner[];
+}>;
+const publicationReconciliationTasks = new WeakMap<object, DeliveryRootTaskBinding<PublicationReconciliationResources> & {
+  assertRegistered(): void;
+}>();
+type PublicationExecutionResources = Readonly<{
+  workspaceRoot: HeldWorkspaceRoot; controlledHome: HeldWorkspaceRoot;
+  publicationOwners: readonly PublicationInvocationOwner[];
+  signal: AbortSignal;
+  retire(): Promise<{ postEffect: ToolCheckpointProof; snapshot: WorkspaceGenerationSnapshotEvidenceV1 }>;
+  reobserveRetirement: import('./tool-checkpoint.js').NativeWorkerRetirement;
+}>;
+const publicationTasks = new WeakMap<object, { driver: SqliteDriver; owner: StateOwnerContext;
+  execution: RunExecution; worker: RunExecutionWorkerIdentity; assertCurrent(connection?: SqliteConnection): void; resources(): PublicationExecutionResources }>();
+
+function rootTaskBinding<R extends DeliveryRootResources>(tasks: WeakMap<object, DeliveryRootTaskBinding<R>>, driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: unknown, artifacts: ArtifactCatalog): DeliveryRootTaskBinding<R> {
+  // No caller getters, SQL, native borrow or Catalog access before all exact
+  // issuer references agree. A retained artifact cannot reconstitute a task.
+  const held = execution !== null && typeof execution === 'object' ? deliveryExecutions.get(execution) : undefined;
+  const original = task !== null && typeof task === 'object' ? tasks.get(task) : undefined;
+  if (!held || !original || held.driver !== driver || held.owner !== owner || original.driver !== driver ||
+      original.owner !== owner || original.execution !== execution || original.artifacts !== artifacts)
+    throw new TypeError('delivery requires its genuine same-owner original task and ArtifactCatalog');
+  return original;
+}
+function ownedRootTask<R extends DeliveryRootResources>(tasks: WeakMap<object, DeliveryRootTaskBinding<R>>, driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: unknown, artifacts: ArtifactCatalog): DeliveryRootTaskBinding<R> {
+  const original = rootTaskBinding(tasks, driver, owner, execution, task, artifacts);
+  original.assertOwned(); return original;
+}
+
+/** Lifetime assertion only: no worker lease, grant, projection or dispatch
+ * authority is minted by this same-scope task brand. */
+export function assertOwnedNoOpDeliveryTask(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
+  task: DeliveryNoOpTask, artifacts: ArtifactCatalog): void {
+  ownedRootTask(noOpTasks, driver, owner, execution, task, artifacts);
+}
+
+export async function readOwnedNoOpDeliveryExecutionResources(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: DeliveryNoOpTask, artifacts: ArtifactCatalog): Promise<DeliveryRootResources> {
+  return ownedRootTask(noOpTasks, driver, owner, execution, task, artifacts).resources();
+}
+
+/** A stopped maintenance task owns its actual roots, not a productive worker.
+ * The maintenance producer still proves the complete Stop/prefix/creator graph
+ * and its exact zero-budget SQL transition before any cleanup release. */
+export function assertDeliveryPublicationMaintenanceExecution(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: DeliveryPublicationMaintenanceTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): DeliveryMaintenanceResources {
+  const original = ownedRootTask(publicationMaintenanceTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
+}
+
+/** A known result can repeat only read-only final validation. This genuine
+ * execution task contains no worker, release gate, native owner or retry. */
+export function assertDeliveryPublicationReceivedExecution(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: DeliveryPublicationReceivedTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): DeliveryRootResources {
+  const original = ownedRootTask(publicationReceivedTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
+}
+
+/** Owns only the actual roots and previously issued publication handles. It
+ * contains no worker activation, semantic release or replacement M authority.
+ * The producer must still validate the committed exact inspection dispatch. */
+export function assertDeliveryPublicationReconciliationExecution(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: DeliveryPublicationReconciliationTask, artifacts: ArtifactCatalog, connection: SqliteConnection = driver): PublicationReconciliationResources {
+  const original = ownedRootTask(publicationReconciliationTasks, driver, owner, execution, task, artifacts);
+  assertSqliteConnectionOwnedBy(driver, connection); return original.resources(connection);
+}
+
+/** Registration/closure only, including when shutdown won immediately after
+ * the nonce committed. No root, signal, worker or I/O authority is returned.
+ * Actual inspection still requires the separate live resource assertion. */
+export function assertOwnedPublicationReconciliationTask(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, task: DeliveryPublicationReconciliationTask, artifacts: ArtifactCatalog): void {
+  rootTaskBinding(publicationReconciliationTasks, driver, owner, execution, task, artifacts);
+  publicationReconciliationTasks.get(task)!.assertRegistered();
+}
+
+/** A structural callback or an execution from another Store cannot satisfy
+ * the physical publication gate. The original owner retains every native FD. */
+export function assertDeliveryExecution(driver: SqliteDriver, owner: StateOwnerContext, value: unknown,
+  identity: RunExecutionWorkerIdentity): void {
+  const held = value !== null && typeof value === 'object' ? deliveryExecutions.get(value) : undefined;
+  if (!held || held.driver !== driver || held.owner !== owner || held.runId !== identity.runId)
+    throw new TypeError('publication requires its genuine same-owner Run execution');
+  (value as RunExecution).assertCurrentDeliveryWorker(identity);
+}
+
+/** Only the original in-flight publication task can borrow its execution's
+ * held worker. Ordinary callers still cannot release while any task is pending;
+ * a callback, retained artifact or another execution cannot waive that gate. */
+export function assertDeliveryPublicationExecution(driver: SqliteDriver, owner: StateOwnerContext, execution: unknown,
+  worker: RunExecutionWorkerIdentity, task: DeliveryPublicationTask, connection: SqliteConnection = driver): void {
+  const held = execution !== null && typeof execution === 'object' ? deliveryExecutions.get(execution) : undefined;
+  const original = task !== null && typeof task === 'object' ? publicationTasks.get(task) : undefined;
+  if (!held || !original || held.driver !== driver || held.owner !== owner || original.driver !== driver ||
+      original.owner !== owner || original.execution !== execution || held.runId !== original.worker.runId)
+    throw new TypeError('publication requires its genuine same-owner in-flight execution task');
+  requireEqual(worker, original.worker, 'publication original in-flight worker identity');
+  assertSqliteConnectionOwnedBy(driver, connection); original.assertCurrent(connection);
+}
+
+/** The real task supplies its continuously held roots and original worker's
+ * one retirement closure. A caller cannot provide a path, proof, Checkpoint or
+ * callback in their place. This friend permits completion after revocation,
+ * never a new semantic publication release. */
+export async function readOwnedPublicationExecutionResources(driver: SqliteDriver, owner: StateOwnerContext,
+  execution: unknown, publicationOwner: PublicationInvocationOwner): Promise<PublicationExecutionResources> {
+  const held = execution !== null && typeof execution === 'object' ? deliveryExecutions.get(execution) : undefined;
+  if (!held || held.driver !== driver || held.owner !== owner)
+    throw new TypeError('publication retirement requires its genuine same-owner execution');
+  const { assertOwnedPublicationPath } = await import('./publication-invocation.js');
+  const path = assertOwnedPublicationPath(driver, owner, execution, publicationOwner, driver);
+  const original = publicationTasks.get(path.task);
+  if (!original || original.driver !== driver || original.owner !== owner || original.execution !== execution ||
+      held.runId !== original.worker.runId)
+    throw new TypeError('publication retirement requires its original execution task');
+  requireEqual(path.worker, original.worker, 'publication retirement original worker');
+  return original.resources();
+}
 
 const nonce = () => sha256Bytes(randomBytes(32));
 type WorkerSpec = Extract<SandboxLaunchSpecV1, { purpose: 'worker_activation' }>;
@@ -73,6 +297,19 @@ type ActiveWorker = {
   processContainmentRef: string;
   closure: WorkerLaunchClosure;
 };
+type ReceivedCompletion = ({ kind: 'tool' | 'mcp_unreceived' | 'final_turn' | 'verifier' | 'dependency' | 'dependency_acquisition' | 'publication'; worker: LinuxBlockedWorker;
+  activeWorker: ActiveWorker } | { kind: 'publication_maintenance' | 'publication_received' | 'publication_reconciliation' | 'mcp_reconciliation';
+    worker?: LinuxBlockedWorker; activeWorker?: ActiveWorker }) & {
+  finish(): Promise<Run>; failure?: unknown; retainsWorker?: boolean; toolCompletionCommitted?: boolean };
+
+/** Pure retry classification only. The caller must already own the genuine
+ * received producer; its fixed completion still validates the entire Stop
+ * graph and current SQL cut before any durable result can be committed. */
+export function isPublicationStopRevisionConflict(kind: ReceivedCompletion['kind'], error: unknown,
+  stopIntentRef: string | null | undefined): boolean {
+  return (kind === 'publication_received' || kind === 'publication_reconciliation') &&
+    error instanceof KernelStorageError && error.code === 'REVISION_CONFLICT' && !!stopIntentRef;
+}
 
 async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: LinuxWorkerController,
   installation: Pick<RunExecutionInstallation, 'cgroupParent'>, selected: Pick<WorkerActivationCut, 'run' | 'runSpec'>, generationRef: string,
@@ -95,7 +332,7 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
       nativeReservation: reservation.identity },
     createdAt: sampleCanonicalNow(), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
-  const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
+  const containmentPlanRef = canonicalSha256(plan);
   const runtime: SandboxRuntimeBindingV1 = { runtimeBundleRef: assembly.runtime.runtimeBundleRef,
     runtimeBundleManifestDigest: assembly.runtime.runtimeBundleManifestDigest, sandboxBackend: 'linux_namespace', toolchain: { kind: 'none' },
     launcher: { executableId: launcher.entryId, executableDigest: launcher.digest }, runtimeDigest: '' };
@@ -114,40 +351,63 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
     resources: profile.resources, resourcesDigest: canonicalSha256(profile.resources), containmentPlanRef,
     containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
   spec.launchSpecDigest = digestOmitting(spec, 'launchSpecDigest');
-  const sandboxLaunchSpecRef = (await artifacts.publishCanonical(spec, spec.format)).ref;
+  const [publishedPlan, publishedSpec] = await artifacts.publishCanonicalPair([
+    { value: plan, schemaKind: plan.format }, { value: spec, schemaKind: spec.format }
+  ]);
+  if (publishedPlan.ref !== containmentPlanRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'worker plan publication differs from its original bytes');
+  const sandboxLaunchSpecRef = publishedSpec.ref;
   return { spec, input: { launchId, runId: run.id, expectedRunRevision: run.revision, spawnNonceDigest, activationNonceDigest,
     workspaceGenerationRef: generationRef, containmentPlanRef, sandboxLaunchSpecRef } };
 }
 
-async function publishEditRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string,
+async function publishBuiltinRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string,
   parentCgroup: string, prepared: Extract<Awaited<ReturnType<Awaited<ReturnType<typeof loadAgentRun>>['prepareTool']>>, { disposition: 'prepared' }>, dispatchId: string) {
-  if (prepared.target.execution.kind !== 'builtin' || prepared.target.execution.adapterId !== LINUX_WORKER_RECIPE.editId) {
+  const execution = prepared.target.execution;
+  const script = execution.kind === 'builtin_script';
+  if (!script && (execution.kind !== 'builtin' || execution.adapterId !== LINUX_WORKER_RECIPE.editId)) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit does not select the installed contained adapter');
   }
+  if (script && !isBuiltinScriptTool(prepared.request.toolName)) throw new TypeError('unsupported fixed script tool');
   if (workerSpec.filesystem.kind !== 'run_generation') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires a private Run generation');
   const owner = { kind: 'run_invocation' as const, runId: prepared.run.id, intendedLeaseEpoch: prepared.run.leaseEpoch,
     workerLaunchId: workerSpec.owner.workerLaunchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };
   if (workerSpec.containmentPlanRef === parentContainmentRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'actual parent containment is required');
-  const cgroupNameReservationDigest = canonicalSha256(['cliq-edit-cgroup-v1', dispatchId]);
+  const cgroupNameReservationDigest = canonicalSha256([script ? 'cliq-builtin-tool-cgroup-v1' : 'cliq-edit-cgroup-v1', dispatchId]);
   const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
     filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
     launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${cgroupNameReservationDigest}`),
-      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash('cliq-edit-namespace-v1', dispatchId),
+      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash(script ? 'cliq-builtin-tool-namespace-v1' : 'cliq-edit-namespace-v1', dispatchId),
       subreaperStartToken: '' }, createdAt: sampleCanonicalNow(), planDigest: '' };
   const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
   if (parentPlan.backend.kind !== 'linux' || plan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'edit requires the exact Linux parent');
   plan.backend.subreaperStartToken = parentPlan.backend.subreaperStartToken;
   plan.planDigest = digestOmitting(plan, 'planDigest');
   const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
-  const spec: EditSpec = { ...workerSpec, owner, purpose: 'tool',
-    executable: { kind: 'runtime_bundle', runtimeBundleRef: workerSpec.runtime.runtimeBundleRef,
-      runtimeBundleManifestDigest: workerSpec.runtime.runtimeBundleManifestDigest, executableId: prepared.target.execution.adapterId,
-      executableDigest: prepared.target.execution.adapterCodeDigest, role: 'tool_adapter', executionPath: LINUX_WORKER_RECIPE.editPath },
-    processInvocation: { kind: 'run_request', purpose: 'tool', recipe: 'cliq-tool-launch-v1', requestRef: prepared.entry.requestRef,
+  const guest = script ? decodeGuestToolchainManifest(await artifacts.readCanonical(execution.guestToolchainManifestRef)) : undefined;
+  const runtime: SandboxRuntimeBindingV1 = guest && script ? { ...workerSpec.runtime, toolchain: { kind: 'guest_toolchain',
+    guestToolchainManifestRef: execution.guestToolchainManifestRef, guestToolchainManifestDigest: guest.manifestDigest,
+    guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest }, runtimeDigest: '' } : workerSpec.runtime;
+  if (script) runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const mounts = script ? BUILTIN_SCRIPT_PRIVATE_MOUNTS.map(mount => ({ ...mount, privateRootId: identityHash(dispatchId, mount.purpose) })) : workerSpec.mounts;
+  if (script) {
+    const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(prepared.request.inputRef);
+    builtinToolInputBytes(prepared.request.toolName as import('../sandbox/builtin-tool-data.js').BuiltinScriptTool, call.value!, workerSpec.resources);
+  }
+  const spec: EditSpec = { ...workerSpec, owner, purpose: 'tool', runtime,
+    executable: script ? { kind: 'guest_toolchain', guestToolchainManifestRef: execution.guestToolchainManifestRef,
+      guestToolchainManifestDigest: execution.guestToolchainManifestDigest, toolId: execution.toolId, executableDigest: execution.executableDigest,
+      role: 'tool', executionPath: execution.executionPath } : { kind: 'runtime_bundle', runtimeBundleRef: workerSpec.runtime.runtimeBundleRef,
+      runtimeBundleManifestDigest: workerSpec.runtime.runtimeBundleManifestDigest, executableId: execution.adapterId,
+      executableDigest: execution.adapterCodeDigest, role: 'tool_adapter', executionPath: LINUX_WORKER_RECIPE.editPath },
+    processInvocation: { kind: 'run_request', purpose: 'tool', ...(script ? { recipe: BUILTIN_SCRIPT_RECIPE.invocation,
+      privateGitProtection: 'existing_read_only' as const } : { recipe: 'cliq-tool-launch-v1' as const }), requestRef: prepared.entry.requestRef,
       requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest,
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
       stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
-    filesystem: { ...workerSpec.filesystem, access: 'read_write' }, parentWorkerContainmentRef: parentContainmentRef,
+    filesystem: { ...workerSpec.filesystem, access: script && prepared.request.toolName !== 'bash' ? 'read_only' : 'read_write' },
+    ...(script ? { environment: prepared.request.toolName === 'bash' ? BUILTIN_SCRIPT_ENVIRONMENTS.bash : BUILTIN_SCRIPT_ENVIRONMENTS.read,
+      mounts, mountsDigest: canonicalSha256(mounts) } : {}), parentWorkerContainmentRef: parentContainmentRef,
     requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target,
     targetDigest: prepared.target.targetDigest, operationGrantRef: prepared.entry.grantRef!, containmentPlanRef,
     containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
@@ -167,54 +427,139 @@ async function publishInspector(artifacts: ArtifactCatalog, owner: StateOwnerRec
   return { inspectorIdentityRef: (await artifacts.publishCanonical(inspector, inspector.format)).ref, inspectorIdentityDigest: inspector.identityDigest };
 }
 
+async function publishVerifierRecipe(artifacts: ArtifactCatalog, workerSpec: WorkerSpec, parentContainmentRef: string, parentCgroup: string,
+  prepared: Extract<Awaited<ReturnType<Awaited<ReturnType<typeof loadAgentRun>>['prepareVerifier']>>, { disposition: 'prepared' }>, dispatchId: string) {
+  const command = decodeVerifierCommand(await artifacts.readCanonical(prepared.target.commandRef));
+  if (command.executable.kind !== 'guest_toolchain' || workerSpec.filesystem.kind !== 'run_generation')
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier requires its exact signed guest and private generation');
+  const executable = command.executable;
+  const guest = decodeGuestToolchainManifest(await artifacts.readCanonical(executable.guestToolchainManifestRef));
+  const owner = { kind: 'run_invocation' as const, runId: prepared.run.id, intendedLeaseEpoch: prepared.run.leaseEpoch,
+    workerLaunchId: workerSpec.owner.workerLaunchId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId };
+  const parentPlan = await artifacts.readCanonical<ProcessContainmentPlanV1>(workerSpec.containmentPlanRef);
+  if (parentPlan.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier requires its original Linux parent');
+  const cgroupNameReservationDigest = canonicalSha256(['cliq-verifier-cgroup-v1', dispatchId]);
+  const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
+    filesystemBinding: { kind: 'run-generation', generationRef: workerSpec.filesystem.generationRef }, parentContainmentRef,
+    launchNonceDigest: nonce(), backend: { kind: 'linux', cgroupPath: path.posix.join(parentCgroup, `cliq-${cgroupNameReservationDigest}`),
+      cgroupNameReservationDigest, pidNamespaceReservationId: identityHash('cliq-verifier-namespace-v1', dispatchId),
+      subreaperStartToken: parentPlan.backend.subreaperStartToken }, createdAt: sampleCanonicalNow(), planDigest: '' };
+  plan.planDigest = digestOmitting(plan, 'planDigest');
+  const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
+  const runtime: SandboxRuntimeBindingV1 = { ...workerSpec.runtime, toolchain: { kind: 'guest_toolchain',
+    guestToolchainManifestRef: executable.guestToolchainManifestRef, guestToolchainManifestDigest: guest.manifestDigest,
+    guestImageRef: guest.guestImageRef, guestImageDigest: guest.guestImageDigest }, runtimeDigest: '' };
+  runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const mounts = LINUX_VERIFIER_RECIPE.mounts.map(mount => ({ ...mount, privateRootId: identityHash(dispatchId, mount.purpose) }));
+  const spec: EditSpec = { ...workerSpec, owner, purpose: 'verifier', runtime,
+    executable: { kind: 'guest_toolchain', guestToolchainManifestRef: executable.guestToolchainManifestRef,
+      guestToolchainManifestDigest: guest.manifestDigest, toolId: executable.toolId, role: 'verifier',
+      executionPath: executable.executionPath, executableDigest: executable.executableDigest },
+    processInvocation: { kind: 'run_request', purpose: 'verifier', recipe: 'cliq-verifier-command-v1',
+      requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest,
+      targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
+      stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
+    filesystem: { ...workerSpec.filesystem, access: 'read_only' }, environment: LINUX_VERIFIER_RECIPE.environment,
+    mounts, mountsDigest: canonicalSha256(mounts), parentWorkerContainmentRef: parentContainmentRef,
+    requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest, targetRef: prepared.entry.target,
+    targetDigest: prepared.target.targetDigest, operationGrantRef: prepared.entry.grantRef!, containmentPlanRef,
+    containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
+  spec.launchSpecDigest = digestOmitting(spec, 'launchSpecDigest');
+  return (await artifacts.publishCanonical(spec, spec.format)).ref;
+}
+
+/** Inert installed shutdown diagnosis, never retirement evidence or authority. */
+export type RunRetirementPhase = 'history' | 'quarantine_closure' | 'native_retirement' |
+  'workspace_observation' | 'retirement_commit' | 'resource_join';
+/** Fixed current work labels only, never publication or retirement evidence. */
+export type RunPublicationPhase = 'publication_select' | 'publication_worker_activate' | 'publication_roots_open' |
+  'publication_prepare' | 'publication_prepare_read' | 'publication_prepare_grant' | 'publication_prepare_cut' |
+  'publication_prepare_physical' | 'publication_prepare_admit' | 'publication_dispatch' | 'publication_settlement' |
+  'publication_received_retirement' | 'publication_received_read' | 'publication_received_proof' | 'publication_received_settle';
 /** Deep internal resource owner. Opening validates only; process creation is lazy.
  * Durable lifecycle, retry and budgets remain exclusively in the existing reducers. */
 export async function loadRunExecution(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
-  bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation } | undefined,
+  bootstrap: { bundle: RuntimeBundleManifest; releaseKeys: readonly ReleaseTrustKey[]; execution?: RunExecutionInstallation;
+    sourceInspection?: { controlledHome: string }; scheduler?: RunSchedulingV1 } | undefined,
   input: LoadRunExecutionInput, isClosing: () => boolean = () => false,
-  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore
+  selectedRuntime?: HeldInstalledRuntime, installedAnchor?: HeldInstalledAnchor, executionStore?: StateStore, openingSignal?: AbortSignal,
+  onRetirementPhase?: (phase: RunRetirementPhase) => void,
+  onPublicationPhase?: (phase: RunPublicationPhase) => void,
+  onBuiltinPhase?: (phase: BuiltinExecutionPhase) => void
 ): Promise<{ execution: RunExecution; closeWorkerRecoveryProbe(input: { runId: string; expectedRunRevision: number }): Promise<Run>;
   beginClose(): Promise<void>; close(): Promise<void> }> {
-  // Validation material includes trusted resolver functions; retain those
-  // functions while snapshotting their data, just like loadAgentRun does.
-  input = { runId: input.runId, material: Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
-    [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial };
+  openingSignal?.throwIfAborted();
+  const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
+  const scheduling = decodeRunScheduling(bootstrap?.scheduler ?? DEFAULT_RUN_SCHEDULING);
   const runId = input.runId;
+  const retirementPhase = (phase: RunRetirementPhase) => { try { onRetirementPhase?.(phase); } catch { /* Diagnosis cannot decide retirement. */ } };
+  const publicationPhase = (phase: RunPublicationPhase) => { try { onPublicationPhase?.(phase); } catch { /* Diagnosis cannot decide publication. */ } };
+  let currentBuiltinPhase: BuiltinExecutionPhase | undefined;
+  const builtinPhase = (phase: BuiltinExecutionPhase) => {
+    if (!onBuiltinPhase || !isBuiltinExecutionPhase(phase)) return;
+    currentBuiltinPhase = phase;
+    try { onBuiltinPhase(phase); noteInstalledBuiltinWorkPhase(phase); } catch { /* Diagnosis cannot decide execution. */ }
+  };
+  // Delivery never reads or validates live model material. Agent resolvers
+  // retain their original trusted functions and snapshot BEFORE the first
+  // asynchronous read. The explicit selector is checked against retained State,
+  // never treated as permission or cast into another operation's authority.
+  const material = input.operation === 'delivery' ? undefined : Object.fromEntries(Object.entries(input.material).map(([key, value]) =>
+    [key, typeof value === 'function' ? value : immutableSnapshot(value)])) as RunAssemblyValidationMaterial;
+  const selectedSpec = decodeRunSpec(await openingReads.readCanonical(readRun(driver, runId).specRef));
+  if (selectedSpec.operation !== (input.operation ?? 'agent'))
+    throw new KernelStorageError('INVALID_REQUEST', 'execution selector does not match its retained Run operation');
+  const originalChild = readRun(driver, runId).parentRunId === undefined ? undefined
+    : await (await import('./child-admission.js')).readChildAdmission(driver, openingReads, runId, { signal: openingSignal });
   const installed = selectedRuntime !== undefined || installedAnchor !== undefined;
   let installation: Pick<RunExecutionInstallation, 'cgroupParent'> | undefined;
   if (installed) {
     withInstalledWorkerRoot(selectedRuntime!, installedAnchor!, (_fd, cgroupParent) => { installation = { cgroupParent }; });
   } else installation = bootstrap?.execution && immutableSnapshot(bootstrap.execution);
-  const launcher = installed ? await openInstalledLinuxWorkerLauncher(selectedRuntime!, installedAnchor!) :
+  const launcher = installed ? await openInstalledLinuxWorkerLauncher(selectedRuntime!, installedAnchor!, { ...(openingSignal ? { signal: openingSignal } : {}) }) :
     await openLinuxWorkerLauncher(bootstrap?.execution && { ...immutableSnapshot(bootstrap.execution), runtimeAuthority: bootstrap });
   let worker: LinuxBlockedWorker | undefined;
   async function reobserveRetirement() {
     // An already received result still belongs to its original producer.
     // Closing forbids new work, not that exact producer's final death check.
-    const completingOriginalTool = closingTool !== undefined && toolPhase === 'received' &&
-      (closingTool.operation === pending || receivedTool !== undefined && closingTool.completion === receivedTool) &&
-      closingTool.worker === worker && closingTool.activeWorker === activeWorker;
-    if (((closed || isClosing()) && !completingOriginalTool) || !worker || !activeWorker) {
+    const completingOriginal = closingCompletion !== undefined && operationPhase === 'received' &&
+      (closingCompletion.operation === pending || receivedCompletion !== undefined && closingCompletion.completion === receivedCompletion) &&
+      closingCompletion.worker === worker && closingCompletion.activeWorker === activeWorker;
+    if (((closed || isClosing()) && !completingOriginal) || !worker || !activeWorker) {
       throw new KernelStorageError('LEASE_FENCED', 'native worker retirement scope is closing or unavailable');
     }
     assertActiveStateOwner(driver, owner);
     return observeOriginalWorkerDeath(activeWorker);
   }
-  let agent: Awaited<ReturnType<typeof loadAgentRun>>;
+  let continuation: Awaited<ReturnType<typeof loadAgentRun>> | DeliveryContinuation;
+  function requireAgent() {
+    if (continuation.operation !== 'agent') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'this action requires an Agent Run execution');
+    return continuation;
+  }
   try {
-    agent = await loadAgentRun(driver, artifacts, owner, { runId, material: input.material, releaseKeys: bootstrap!.releaseKeys },
-      reobserveRetirement, selectedRuntime);
+    openingSignal?.throwIfAborted();
+    continuation = selectedSpec.operation === 'agent'
+      ? await loadAgentRun(driver, artifacts, owner, { runId, material: material!, releaseKeys: bootstrap!.releaseKeys },
+          reobserveRetirement, selectedRuntime, openingSignal)
+      : await loadDeliveryContinuation(driver, artifacts, owner, { runId, releaseKeys: bootstrap!.releaseKeys },
+          reobserveRetirement, selectedRuntime, openingSignal);
+    openingSignal?.throwIfAborted();
     const run = readRun(driver, runId);
-    if (run.parentRunId !== undefined) throw new KernelStorageError('INVALID_REQUEST', 'this installed execution recipe does not support child Runs');
-    const runSpec = decodeRunSpec(await artifacts.readCanonical(run.specRef));
-    const assembly = decodeRetainedRunAssembly(await artifacts.readCanonical(runSpec.assemblyRef));
-    const profile = decodeSandboxProfile(await artifacts.readCanonical(runSpec.sandboxProfileRef));
+    if (originalChild) {
+      requireEqual(originalChild.run, run, 'execution exact ordinary child admission cut');
+      for (const edge of [originalChild, ...originalChild.ancestors]) edge.assertUnchanged(driver);
+      originalChild.rootOrigin.assertUnchanged(driver);
+    } else if (run.parentRunId !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'child execution lost its complete original admission closure');
+    const runSpec = decodeRunSpec(await openingReads.readCanonical(run.specRef));
+    const assembly = decodeRetainedRunAssembly(await openingReads.readCanonical(runSpec.assemblyRef));
+    const profile = decodeSandboxProfile(await openingReads.readCanonical(runSpec.sandboxProfileRef));
     const currentOwner = assertActiveStateOwner(driver, owner);
     if (assembly.runtime.sandboxBackend !== 'linux_namespace' || assembly.runtime.workerExecutableId !== LINUX_WORKER_RECIPE.workerId ||
         assembly.runtime.runtimeBundleRef !== currentOwner.runtimeBundleRef || profile.backend !== 'linux_namespace' ||
         !profile.allowedOwners.includes('worker_activation') || !profile.allowedOwners.includes('run_invocation') || profile.resources.maxProcesses < 8) {
       throw new KernelStorageError('INVALID_REQUEST', 'frozen Run requires an unsupported execution recipe');
     }
+    openingSignal?.throwIfAborted();
   } catch (error) {
     try { await launcher.close(); }
     catch (failure) { throw new ResourceRetirementError('execution opening failed and its installation cleanup did not complete', failure); }
@@ -222,18 +567,95 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   }
   let pending: Promise<Run> | undefined, closed = false, cleanupFailure: unknown;
   let operationAbort: AbortController | undefined, revoking: Promise<void> | undefined, closing: Promise<void> | undefined;
+  let verifierReleaseReadAbort: AbortController | undefined;
+  let toolReleaseReadAbort: AbortController | undefined;
+  // Preflight reads do not own productive retirement, but still belong to this
+  // genuine execution scope before an operation/probe can be registered.
+  const preflightAbort = new AbortController(), preflightReads = artifacts.withReadSignal(preflightAbort.signal);
   let probe: { run: Run; wait: WorkerDeathWait; task: WorkerRecoveryTask; closure?: Promise<Run> } | undefined;
   let generation: RunWorkspaceGeneration | undefined, controller: LinuxWorkerController | undefined;
   let reservation: HeldWorkerReservation | undefined;
   let ownedLaunchId: string | undefined;
   let activeWorker: ActiveWorker | undefined;
+  let publicationLeaseReads: WorkerLeaseReads | undefined;
+  let agentLeaseReads: WorkerLeaseReads | undefined;
   let stopJoin: Promise<void> | undefined;
-  let toolPhase: 'preparing' | 'claimed' | 'received' | undefined;
-  let receivedTool: { worker: LinuxBlockedWorker; activeWorker: ActiveWorker; finish(): Promise<Run>; failure?: unknown } | undefined;
-  let closingTool: { operation?: Promise<Run>; completion?: typeof receivedTool; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
+  let operationPhase: 'reading' | 'preparing' | 'claimed' | 'received' | undefined;
+  let verifierReleased = false;
+  let toolReleased = false;
+  let receivedCompletion: ReceivedCompletion | undefined;
+  let closingCompletion: { operation?: Promise<Run>; completion?: typeof receivedCompletion; worker: LinuxBlockedWorker; activeWorker: ActiveWorker } | undefined;
   let retirementController: LinuxWorkerController | undefined;
   let preparation: PreparingWorkerLaunch | undefined, materialization: RunWorkspaceMaterialization | undefined;
   let workspaceBirth: RunWorkspaceBirth | undefined;
+  let preparingGit: InstalledPreparingGit | undefined;
+  let preparingGitInput: HeldPreparingGitInput | undefined;
+  const publicationOwners = new Set<PublicationInvocationOwner>();
+  const dependencyOwners = new Set<DependencyInvocationOwner>();
+  let dependencyOwner: DependencyInvocationOwner | undefined;
+  let mcpTransport: NativeMcpRunHttpOwner | undefined;
+  let mcpStdioTask: ReturnType<typeof prepareMcpStdioRunInvocation> | undefined;
+  let mcpStatusProbe: { task: McpStatusProbeTask; run?: Run; wait?: McpInvocationWaitV1 } | undefined;
+  let mcpStatusRecovery: ReturnType<typeof prepareMcpStatusSuccessorRecovery> | undefined;
+  let mcpStatusEnqueue: { requestId: string; requestDigest: string; principalId: string;
+    result: ReturnType<RunExecution['enqueueMcpReconciliation']> } | undefined;
+  let publicationTask: DeliveryPublicationTask | undefined;
+  let noOpTask: DeliveryNoOpTask | undefined;
+  let publicationMaintenanceTask: DeliveryPublicationMaintenanceTask | undefined;
+  let publicationReceivedTask: DeliveryPublicationReceivedTask | undefined;
+  let publicationReconciliationTask: DeliveryPublicationReconciliationTask | undefined;
+  let publicationProbe: { run: Run; wait: PublicationPathWait; task: PublicationReconciliationTask;
+    rootTask: DeliveryPublicationReconciliationTask; closure?: Promise<Run> } | undefined;
+  let publicationEnqueue: { requestId: string; requestDigest: string; principalId: string;
+    result: ReturnType<RunExecution['enqueuePublicationReconciliation']> } | undefined;
+  // Created only after a genuine durable known-result handoff. Cancelling
+  // projection never cancels the original effect or M-retirement authority.
+  let publicationProjectionAbort: AbortController | undefined;
+  let settleReceivedPublication: ((expectedRunRevision: number) => Promise<Run>) | undefined;
+  let publicationRoots: { workspaceRoot: HeldWorkspaceRoot; controlledHome: HeldWorkspaceRoot } | undefined;
+  let publicationRetirement: { worker: ActiveWorker; checkpointId: string; retire: ReturnType<typeof checkpointRetirement>;
+    cancellation: AbortController } | undefined;
+  function revokePublications(): void {
+    // Revoke every original release gate synchronously, before waiting for any
+    // worker, CAS or database completion. Revocation is not cleanup evidence.
+    for (const original of publicationOwners) {
+      try { original.revoke(); }
+      catch (error) { cleanupFailure ??= error; }
+    }
+  }
+  function closePublications(): void {
+    revokePublications();
+    for (const original of publicationOwners) {
+      try { original.close(); }
+      catch (error) { cleanupFailure ??= error; }
+    }
+  }
+  async function holdPublicationRoots(workspacePath: string, signal: AbortSignal) {
+    if (publicationRoots) {
+      signal.throwIfAborted(); publicationRoots.workspaceRoot.assertHeld(); publicationRoots.controlledHome.assertHeld();
+      return publicationRoots;
+    }
+    if (!bootstrap?.sourceInspection) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication lacks its trusted controlled home');
+    const native = selectedRuntime ? await withHeldInstalledRuntime(selectedRuntime, async installed => {
+      await installed.revalidate(signal);
+      if (installed.bundleDigest !== canonicalSha256(bootstrap.bundle))
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication native image differs from its original selected runtime');
+      const native = await installed.loadStateOwner(signal); await installed.revalidate(signal); return native;
+    }, signal) : await loadNativeStateOwner(bootstrap.bundle);
+    signal.throwIfAborted();
+    if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'publication scope closed before opening its roots');
+    const controlledHome = native.openWorkspaceRoot(bootstrap.sourceInspection.controlledHome);
+    try {
+      // No await between birth and resource registration. The real same-owner
+      // preflight subsequently binds this root to the original approved A.
+      const workspaceRoot = native.openWorkspaceRoot(workspacePath);
+      return publicationRoots = { controlledHome, workspaceRoot };
+    } catch (error) {
+      try { controlledHome.close(); }
+      catch (failure) { throw new ResourceRetirementError('publication root opening did not join its controlled home', new AggregateError([error, failure])); }
+      throw error;
+    }
+  }
   function revokeOriginalWorker(): Promise<void> {
     if (stopJoin) return stopJoin;
     const retainedController = controller, retainedWorker = worker;
@@ -255,19 +677,34 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   function beginClose(): Promise<void> {
     if (revoking) return revoking;
     closed = true;
-    if ((pending || receivedTool) && worker && activeWorker && (toolPhase === 'claimed' || toolPhase === 'received')) {
-      closingTool = { operation: pending, completion: receivedTool, worker, activeWorker };
+    preflightAbort.abort(new KernelStorageError('LEASE_FENCED', 'execution read-only preflight is closing'));
+    verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are closing'));
+    toolReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'tool release reads are closing'));
+    revokePublications();
+    publicationProjectionAbort?.abort(new KernelStorageError('LEASE_FENCED', 'publication read-only projection scope is closing'));
+    if ((pending || receivedCompletion) && worker && activeWorker && (operationPhase === 'claimed' || operationPhase === 'received')) {
+      closingCompletion = { operation: pending, completion: receivedCompletion, worker, activeWorker };
     }
     // A claimed producer may still deliver its genuine result after native
     // revocation. Do not abort that result's Checkpoint/settlement path.
-    if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
+    if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
     const joins: Promise<unknown>[] = [];
+    if (mcpTransport) try { joins.push(mcpTransport.close()); } catch (error) { cleanupFailure ??= error; }
+    if (mcpStdioTask) try { joins.push(mcpStdioTask.close()); } catch (error) { cleanupFailure ??= error; }
+    if (mcpStatusProbe) try { mcpStatusProbe.task.cancel(); joins.push(mcpStatusProbe.task.close()); } catch (error) { cleanupFailure ??= error; }
+    if (mcpStatusRecovery) try { mcpStatusRecovery.cancel(); joins.push(mcpStatusRecovery.close()); } catch (error) { cleanupFailure ??= error; }
+    for (const original of dependencyOwners) {
+      try { joins.push(revokeDependencyInvocationIO(driver, owner, original)); } catch (error) { cleanupFailure ??= error; }
+    }
+    // Idle model workers remain physically held until StateStore has joined
+    // their original broker settlement. Pending executions enter actual
+    // revocation before inspector cancellation, including BIND/READY polls
+    // that do not consume the abort signal.
+    try { if (pending || receivedCompletion) joins.push(revokeOriginalWorker()); }
+    catch (error) { cleanupFailure ??= error; }
     try { if (probe) joins.push(probe.task.cancelAndJoin()); }
     catch (error) { cleanupFailure ??= error; }
-    // Idle model workers remain physically held until StateStore has joined
-    // their original broker settlement. Pending executions must be revoked
-    // now, including BIND/READY polls that do not consume the abort signal.
-    try { if (pending || receivedTool) joins.push(revokeOriginalWorker()); }
+    try { if (publicationProbe) joins.push(publicationProbe.task.cancelAndJoin()); }
     catch (error) { cleanupFailure ??= error; }
     revoking = Promise.allSettled(joins).then(results => {
       const failed = results.find(result => result.status === 'rejected');
@@ -293,10 +730,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     const identity = decodeWorkerIdentity(await artifacts.readCanonical(current.activated.launch.workerIdentityDigest!));
     return retirementController.terminateRetained({ closure: current.closure, containment: worker.containment, workerIdentity: identity });
   }
-  async function retireResources() {
+  async function retireWorkerResources() {
     const retainedGeneration = generation, retainedController = controller, retainedReservation = reservation, retainedRetirement = retirementController,
       retainedMaterialization = materialization;
     retirementController = undefined;
+    // Worker death cannot discard the original UNKNOWN publication's only
+    // continuously held reconciliation handles. They remain irreversibly
+    // revoked; retaining them supplies no new semantic release authority.
+    // Publication owns a separate lifetime. Its genuine producer joins its
+    // completed envelope, or execution.close joins the original unresolved
+    // handles; worker retirement must not implicitly destroy that owner.
+    revokePublications();
     let retainedPreparation = preparation !== undefined;
     if (preparation) {
       try { retainedPreparation = readRequiredWorkerLaunch(driver, preparation.launchId).phase === 'preparing'; }
@@ -309,35 +753,73 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       materialization = undefined; workspaceBirth = undefined; preparation = undefined;
       generation = undefined; controller = undefined; reservation = undefined;
     }
-    worker = undefined; ownedLaunchId = undefined; activeWorker = undefined;
+    const retainedPublicationRetirement = publicationRetirement;
+    publicationLeaseReads?.close(); publicationLeaseReads = undefined;
+    agentLeaseReads?.close(); agentLeaseReads = undefined;
+    worker = undefined; ownedLaunchId = undefined; activeWorker = undefined; publicationRetirement = undefined;
+    // Original controller revokes and joins preparation before the tree or
+    // reservation can close. Claimed native inputs deliberately reject early
+    // descriptor release; construction failures require this real close first.
+    try { await retainedController?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
+    try { await preparingGit?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
+    try { preparingGitInput?.close(); }
+    catch (failure) { cleanupFailure ??= failure; }
     try { retainedGeneration?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     try { await retainedMaterialization?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
-    // One failed release must not bypass the independent process join.
-    try { await retainedController?.close(); }
-    catch (failure) { cleanupFailure ??= failure; }
+    if (!retainedPreparation) { preparingGit = undefined; preparingGitInput = undefined; }
     try { await retainedRetirement?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
     try { retainedReservation?.close(); }
     catch (failure) { cleanupFailure ??= failure; }
+    retainedPublicationRetirement?.cancellation.abort();
     if (cleanupFailure !== undefined) throw cleanupFailure;
   }
-  const revision = (value: { expectedRunRevision: number }, completingReceivedTool = false) => {
+  const revision = (value: { expectedRunRevision: number }, completingReceived = false) => {
     if (!exactKeys(value, ['expectedRunRevision']) || !Number.isSafeInteger(value.expectedRunRevision) || value.expectedRunRevision < 1) {
       throw new KernelStorageError('INVALID_REQUEST', 'execution requires one exact Run revision');
     }
     if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'Run execution scope is closing or closed');
     if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'Run execution scope has an unresolved retirement failure');
     if (pending) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution already has an operation in flight');
-    if (receivedTool && !completingReceivedTool) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution retains its original tool completion');
+    if (receivedCompletion && !completingReceived) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution retains its original completion');
     if (readRun(driver, runId).revision !== value.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'Run execution revision changed');
     assertActiveStateOwner(driver, owner);
     return value.expectedRunRevision;
   };
-  /** One actual birth spine for model and tool frontiers. Success retains the
+  function assertCurrentWorker(value: RunExecutionWorkerIdentity, nextStep: 'agent' | 'delivery', task?: DeliveryPublicationTask,
+    connection: SqliteConnection = driver) {
+    const action = nextStep === 'agent' ? 'model' : 'delivery';
+    const originalPublication = nextStep === 'delivery' && task !== undefined && publicationTask === task && pending !== undefined &&
+      publicationTasks.get(task)?.execution === execution;
+    if (!exactKeys(value, ['runId', 'leaseEpoch', 'launchId', 'generationRef', 'workerIdentityDigest']) ||
+        value.runId !== runId || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 ||
+        closed || isClosing() || cleanupFailure !== undefined || pending && !originalPublication || receivedCompletion && !originalPublication ||
+        !activeWorker || !worker || !generation || !controller || !reservation ||
+        value.launchId !== ownedLaunchId || value.launchId !== activeWorker.activated.launch.launchId ||
+        value.generationRef !== activeWorker.authority.generationRef || value.workerIdentityDigest !== activeWorker.activated.launch.workerIdentityDigest) {
+      throw new KernelStorageError('LEASE_FENCED', `${action} release does not name this execution owner's original physical worker`);
+    }
+    const run = readRun(connection, runId);
+    const live = assertLiveDispatchState(connection, owner, runId, run.revision, value.leaseEpoch, sampleCanonicalNow());
+    if (run.nextStep !== nextStep || live.launch.launchId !== value.launchId || live.launch.workerIdentityDigest !== value.workerIdentityDigest ||
+        live.launch.workspaceGenerationRef !== value.generationRef || live.launch.processContainmentRef !== activeWorker.processContainmentRef) {
+      throw new KernelStorageError('LEASE_FENCED', `${action} release durable worker identity changed`);
+    }
+    reservation.assertHeld();
+    worker.assertHeld();
+    // The native worker already retains the original generation borrow;
+    // its assertion verifies that descriptor, mount, quota identity and owner.
+    assertActiveStateOwner(connection, owner);
+  }
+  /** One actual birth spine for productive Run frontiers. Success retains the
    * original resources; the existing operation owner joins them on failure. */
   async function activateWorker(selected: WorkerActivationCut, signal: AbortSignal): Promise<ActiveWorker> {
+    const reads = artifacts.withReadSignal(signal);
+    reads.assertReadActive();
     if (activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined) {
       throw new KernelStorageError('REVISION_CONFLICT', 'Run execution already owns native worker resources');
     }
@@ -356,14 +838,54 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
     const launchId = identityHash('cliq-worker-launch-v1', runId, String(run.leaseEpoch + 1), nonce());
     const spawnNonceDigest = nonce(), activationNonceDigest = nonce(), generationCreationNonceDigest = nonce();
-    preparation = await beginWorkerPreparation(driver, artifacts, owner, { runId, expectedRunRevision: run.revision,
-      launchId, spawnNonceDigest, activationNonceDigest, generationCreationNonceDigest });
-    materialization = createRunWorkspaceMaterialization({ filesystem: owner.filesystem, artifacts,
-      checkpoint: selected.latestCheckpoint, generationCreationNonceDigest, signal });
+    preparation = await beginWorkerPreparation(driver, reads, owner, { runId, expectedRunRevision: run.revision,
+      launchId, spawnNonceDigest, activationNonceDigest, generationCreationNonceDigest },
+      installed ? scheduling.maxConcurrentRuns : undefined);
+    const profile = decodeSandboxProfile(await reads.readCanonical(selected.runSpec.sandboxProfileRef));
+    materialization = createRunWorkspaceMaterialization({ filesystem: owner.filesystem, artifacts: reads,
+      checkpoint: selected.latestCheckpoint, generationCreationNonceDigest, signal, gitResources: profile.resources });
     workspaceBirth = await materialization.birth();
     const born = await recordWorkerPreparationGeneration(driver, artifacts, owner, { launchId, birth: workspaceBirth });
     signal.throwIfAborted();
-    generation = await materialization.finish();
+    const git = readRunWorkspacePreparingGit(owner.filesystem, workspaceBirth);
+    let gitCompletion: PreparingGitCompletion | undefined;
+    if (git) {
+      // Publish and join the original inert metadata before acquiring runtime
+      // processes. The same controller registration transaction roots this ref.
+      const metadata = await reads.publishBytes(git.metadata, 'application/json', 'cliq-source-git-inspection-output-v1');
+      if (metadata.ref !== git.metadataRef) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git metadata publication differs');
+      if (!bootstrap) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git has no trusted bootstrap');
+      const roots = guestToolchainRoots(bootstrap.bundle);
+      if (roots.length !== 1) throw new KernelStorageError('ARTIFACT_MISMATCH', 'preparing Git requires its unique signed toolchain');
+      const toolchain = await readRetainedVerifierToolchain(reads, { bundle: bootstrap.bundle, releaseKeys: bootstrap.releaseKeys,
+        guestToolchainManifestRef: roots[0]!.artifactRef, signal });
+      controller = await launcher.startController({ signal });
+      reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+      await recordWorkerPreparationController(driver, artifacts, owner,
+        { launchId, birth: controller.preparationBirth, reservation, workspaceBirth });
+      signal.throwIfAborted();
+      const originalOwner = assertActiveStateOwner(driver, owner);
+      assertWorkerPreparationRelease(driver, owner, launchId);
+      const input = preparingGitInput = openRunWorkspacePreparingGitInput(owner.filesystem, workspaceBirth, reservation, {
+        runId, generationId: born.generation.generationId, launchId, spawnNonceDigest, activationNonceDigest,
+        generationCreationNonceDigest, generationRef: born.generationRef, inputIntentRef: git.metadataRef });
+      preparingGit = await openInstalledPreparingGit(controller, input, reads, { privateGitStateRef: git.privateGitStateRef, toolchain,
+        recipe: { ...profile.resources, stateOwnerEpoch: owner.ownerEpoch, supervisorInstanceId: owner.supervisorInstanceId,
+          stateOwnerRowDigest: originalOwner.rowDigest, sessionId: run.sessionId, sourceCheckpointId: selected.latestCheckpoint.id,
+          sourceWorkspaceStateRef: selected.latestCheckpoint.workspaceStateRef, repositoryIdentityDigest: git.repositoryIdentityDigest } }, signal);
+      assertWorkerPreparationRelease(driver, owner, launchId);
+      const preparationResources = await preparingGit.reservation(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.createBlocked();
+      const preparationDomain = await preparingGit.ready(); signal.throwIfAborted();
+      // READY has actually returned before any optional observation.
+      observeInstalledPreparingResources(controller, preparationResources, preparationDomain);
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.releaseCapture();
+      await preparingGit.transferInput(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId); preparingGit.continueFixedGit();
+      gitCompletion = await preparingGit.complete(); signal.throwIfAborted();
+      assertWorkerPreparationRelease(driver, owner, launchId);
+    }
+    generation = await materialization.finish(gitCompletion ? { gitPreparation: gitCompletion } : undefined);
     const authority = await generation.publishMaterializedAuthority();
     if (authority.generationRef !== born.generationRef || authority.generationIdentityDigest !== born.generationIdentityDigest)
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'ready generation differs from its original registered directory birth');
@@ -371,19 +893,22 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       expectedRowVersion: born.generation.rowVersion, snapshotEvidenceRef: authority.snapshotEvidenceRef, snapshotEvidenceDigest: authority.snapshotEvidenceDigest });
     // Keep the existing two-write readonly pair intact across cancellation.
     signal.throwIfAborted();
-    const profile = decodeSandboxProfile(await artifacts.readCanonical(selected.runSpec.sandboxProfileRef));
     const borrowed = borrowRunWorkspaceForExecution(generation);
     try { borrowed.assertQuota(profile.resources.maxGenerationBytes); } finally { borrowed.close(); }
-    controller = await launcher.startController({ signal });
-    reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
-    await recordWorkerPreparationController(driver, artifacts, owner, { launchId, birth: controller.preparationBirth, reservation });
-    const recipe = await publishWorkerRecipe(artifacts, controller, installation!, selected, authority.generationRef,
+    if (!controller) {
+      controller = await launcher.startController({ signal });
+      reservation = owner.filesystem.createWorkerReservation(launchId, spawnNonceDigest);
+      await recordWorkerPreparationController(driver, artifacts, owner,
+        { launchId, birth: controller.preparationBirth, reservation, workspaceBirth });
+    }
+    if (!reservation) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker activation lost its original reservation');
+    const recipe = await publishWorkerRecipe(reads, controller, installation!, selected, authority.generationRef,
       reservation, launchId, spawnNonceDigest, activationNonceDigest);
-    const closure = await readWorkerLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...recipe.input, run });
+    const closure = await readWorkerLaunchClosure(reads, assertActiveStateOwner(driver, owner), { ...recipe.input, run });
     signal.throwIfAborted();
     const binding = await controller.bindWorkerReservation({ closure, reservation, activationNonceDigest });
     signal.throwIfAborted();
-    const reserved = await reserveWorkerLaunch(driver, artifacts, owner, recipe.input, binding);
+    const reserved = await reserveWorkerLaunch(driver, reads, owner, recipe.input, binding);
     ownedLaunchId = reserved.launchId;
     worker = await controller.launchWorker({ closure, generation, activationNonceDigest: reserved.activationNonceDigest });
     const processIdentity = await worker.observeProcess();
@@ -399,11 +924,13 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     await worker.activateCommitted(activated.launch);
     signal.throwIfAborted();
     activeWorker = { authority, recipe, reserved, activated, processContainmentRef, closure };
+    if (continuation.operation === 'agent') agentLeaseReads = beginAgentLeaseReads(driver, owner, execution);
     return activeWorker;
   }
   /** Tool completion and stop drain share the original physical worker's
    * quiescence/snapshot spine. A retained artifact cannot supply this owner. */
-  function checkpointRetirement(current: ActiveWorker, checkpointId: string, signal: AbortSignal) {
+  function checkpointRetirement(current: ActiveWorker, checkpointId: string, signal: AbortSignal,
+    onPhase?: (phase: RunRetirementPhase) => void) {
     if (current !== activeWorker || !worker || !generation || ownedLaunchId !== current.activated.launch.launchId) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint retirement lost its original physical worker owner');
     }
@@ -433,8 +960,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       if (current !== activeWorker || worker !== currentWorker || generation !== currentGeneration || ownedLaunchId !== activated.launch.launchId) {
         throw new KernelStorageError('RECOVERY_REQUIRED', 'checkpoint continuation lost its original physical owner');
       }
-      assertActiveStateOwner(driver, owner);
-      const beforeSeal = await readRecoveryClosure(driver, artifacts, runId);
+      onPhase?.('history');
+      const beforeSeal = readOwnedWorkerRetirementCut(driver, owner, current.activated, current.closure);
       signal.throwIfAborted();
       const activeGeneration = beforeSeal.workspaceGenerations.find(row => row.generationRef === authority.generationRef);
       const activeLaunch = beforeSeal.workerLaunches.find(row => row.launchId === activated.launch.launchId);
@@ -448,6 +975,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         requireEqual(activeLaunch, retainedStage.launch, 'checkpoint continuation original launch stage');
         requireEqual(activeGeneration, retainedStage.generation, 'checkpoint continuation original generation stage');
       }
+      onPhase?.('native_retirement');
       revoking ??= beginGenerationRevocation(driver, owner, { launchId: activeLaunch.launchId,
         expectedLeaseVersion: activeLaunch.leaseVersion, expectedGenerationRowVersion: activeGeneration.rowVersion, quiesceId });
       death ??= await observeOriginalWorkerDeath(current);
@@ -455,6 +983,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       requireEqual(death.containment, currentWorker.containment, 'checkpoint original native containment');
       checkpointing ??= beginGenerationCheckpoint(driver, owner, { launchId: activeLaunch.launchId, expectedLeaseVersion: revoking.launch.leaseVersion,
         expectedGenerationRowVersion: revoking.generation.rowVersion, quiesceId });
+      onPhase?.('workspace_observation');
       observed ??= await currentGeneration.observe({ signal });
       inspector ??= await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
       retirementBody ??= deathBody(death, inspector);
@@ -477,19 +1006,216 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
   async function retireToCheckpoint(current: ActiveWorker, checkpointId: string, signal: AbortSignal) {
     return checkpointRetirement(current, checkpointId, signal)();
   }
+  function publicationCheckpointRetirement(current: ActiveWorker, planRef: string) {
+    const checkpointId = deliveryPublicationCheckpointId(runId, planRef);
+    if (publicationRetirement) {
+      if (publicationRetirement.worker !== current || publicationRetirement.checkpointId !== checkpointId)
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'publication cannot replace its original M retirement owner');
+      return publicationRetirement.retire;
+    }
+    // M belongs to this whole resource scope, not the first semantic path.
+    // Stop may abort that path between SQL claim and arm; its no-effect result
+    // must still be able to retire the same M later. This scope-owned signal
+    // ends only after the original resources have joined. It grants no release
+    // and does not solve the separate bounded shutdown/projection handoff.
+    const cancellation = new AbortController();
+    const retire = checkpointRetirement(current, checkpointId, cancellation.signal);
+    publicationRetirement = { worker: current, checkpointId, retire, cancellation }; return retire;
+  }
+  async function openPublicationMaintenanceTask(selected: Awaited<ReturnType<typeof readRecoveryClosure>>,
+    expectedRunRevision: number, signal: AbortSignal): Promise<DeliveryPublicationMaintenanceTask> {
+    signal.throwIfAborted();
+    if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'delivery' ||
+        !selected.run.stopIntentRef || !['queued', 'running'].includes(selected.run.status))
+      throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication maintenance requires its exact durable stopping cut');
+    const reads = artifacts.withReadSignal(signal);
+    const { readDeliveryRunAdmission } = await import('./reducers/delivery-admission.js');
+    const admission = await readDeliveryRunAdmission(driver, reads, runId, { signal });
+    requireEqual(admission.run, selected.run, 'publication maintenance original admission cut');
+    const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+    const prefix = await readPublicationPrefix(driver, reads, selected);
+    if (!prefix.authorization) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication maintenance has no original approved Plan');
+    const workspace = decodeWorkspaceIdentity(await reads.readCanonical(admission.target.workspaceIdentityRef));
+    if (workspace.kind !== 'live' || workspace.identityDigest !== admission.target.workspaceIdentityDigest)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'publication maintenance lost its original live workspace');
+    const roots = await holdPublicationRoots(workspace.canonicalRootPath, signal);
+    const retire = activeWorker ? publicationCheckpointRetirement(activeWorker, prefix.authorization.context.planRef) : undefined;
+    const task: DeliveryPublicationMaintenanceTask = Object.freeze({ [publicationMaintenanceTaskBrand]: true as const });
+    publicationMaintenanceTask = task;
+    const assertOwned = () => {
+      if (publicationMaintenanceTask !== task || !pending || closed || isClosing() || cleanupFailure !== undefined)
+        throw new KernelStorageError('LEASE_FENCED', 'publication maintenance lost its original in-flight task');
+      signal.throwIfAborted();
+    };
+    publicationMaintenanceTasks.set(task, { driver, owner, execution, artifacts, assertOwned,
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
+        if (publicationRoots !== roots) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication maintenance lost its original held roots');
+        roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
+        return Object.freeze({ runId, expectedRunRevision, ...roots, signal,
+          publicationOwners: Object.freeze([...publicationOwners]), ...(retire ? { retire } : {}), reobserveRetirement });
+      } });
+    return task;
+  }
+  async function openPublicationReconciliationTask(selected: Awaited<ReturnType<typeof readRecoveryClosure>>,
+    expectedRunRevision: number, signal: AbortSignal): Promise<DeliveryPublicationReconciliationTask> {
+    signal.throwIfAborted();
+    if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'delivery' ||
+        !['queued', 'waiting'].includes(selected.run.status) || selected.run.activeWorkerLaunchId ||
+        selected.workerLaunches.length || selected.workspaceGenerations.some(row => row.phase !== 'retired' && row.phase !== 'sealed') ||
+        activeWorker || worker || generation || controller || reservation || ownedLaunchId)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication inspection requires the genuinely retired original worker resources');
+    const reads = artifacts.withReadSignal(signal);
+    const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+    const prefix = await readPublicationPrefix(driver, reads, selected), workspace = prefix.authorization?.workspace;
+    if (!workspace || workspace.kind !== 'live')
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication inspection has no original approved live workspace');
+    const unresolved = [...prefix.entries.values()].filter(entry => entry.claim && !entry.pendingReceivedHandoff &&
+      (!entry.result || entry.result.item.outcome === 'unknown'));
+    if (unresolved.length !== 1)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication inspection requires one exact original unresolved claim');
+    const originalEntry = unresolved[0]!, originalClaim = originalEntry.claim!;
+    const launches = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.leaseEpoch === originalClaim.leaseEpoch &&
+      launch.retirementKind !== 'preparation');
+    const originalGeneration = launches.length === 1
+      ? selected.workspaceGenerations.find(row => row.generationRef === launches[0]!.workspaceGenerationRef) : undefined;
+    // Earlier verifier generations may genuinely remain sealed. The exact
+    // forward claim's M must be retired; an abort maintenance claim may instead
+    // use its already genuinely sealed M. Neither branch recreates a worker or
+    // changes a sealed/retired generation's phase to manufacture evidence.
+    const closedMaintenance = originalEntry.sequence === 'abort' && !!selected.run.stopIntentRef;
+    if (launches.length !== 1 || launches[0]!.phase !== 'retired' || !originalGeneration ||
+        originalGeneration.phase !== 'retired' && !(closedMaintenance && originalGeneration.phase === 'sealed'))
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication inspection original claimed M is not genuinely retired');
+    const roots = await holdPublicationRoots(workspace.canonicalRootPath, signal);
+    const task: DeliveryPublicationReconciliationTask = Object.freeze({ [publicationReconciliationTaskBrand]: true as const });
+    publicationReconciliationTask = task;
+    const assertRegistered = () => {
+      if (publicationReconciliationTask !== task || !pending && publicationProbe?.rootTask !== task ||
+          cleanupFailure !== undefined || publicationRoots !== roots ||
+          activeWorker || worker || generation || controller || reservation || ownedLaunchId)
+        throw new KernelStorageError('LEASE_FENCED', 'publication inspection lost its original registered task');
+    };
+    const assertOwned = () => {
+      assertRegistered();
+      if (closed || isClosing())
+        throw new KernelStorageError('LEASE_FENCED', 'publication inspection lost its original authority-reducing task');
+      signal.throwIfAborted();
+    };
+    publicationReconciliationTasks.set(task, { driver, owner, execution, artifacts, assertOwned, assertRegistered,
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
+        roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
+        return Object.freeze({ runId, expectedRunRevision, ...roots, signal, publicationOwners: Object.freeze([...publicationOwners]) });
+      } });
+    return task;
+  }
+  async function finishReceivedPublication() {
+    publicationPhase('publication_settlement');
+    // Joined CAS/rolled-back SQL retries keep the same genuine result token
+    // and fixed once-only BudgetSettlement. A new task must not reset it.
+    if (settleReceivedPublication) return settleReceivedPublication(readRun(driver, runId).revision);
+    publicationPhase('publication_received_read');
+    const abort = new AbortController(); publicationProjectionAbort = abort;
+    if (closed || isClosing()) abort.abort(new KernelStorageError('LEASE_FENCED', 'publication read-only projection scope is closing'));
+    const signal = abort.signal, reads = artifacts.withReadSignal(signal);
+    signal.throwIfAborted();
+    const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+    const { prepareOwnedPublicationReceivedResult } = await import('./publication-finalization.js');
+    const { preparePublicationReceivedSettlement } = await import('./publication-settlement.js');
+    const { cut: selected, prefix } = await readDeliveryPublicationClosure(driver, reads, runId);
+    const entry = prefix.forward.at(-1), workspace = prefix.authorization?.workspace;
+    if (!entry?.pendingReceivedHandoff || !workspace || workspace.kind !== 'live' ||
+        selected.run.status !== 'queued' || selected.run.nextStep !== 'delivery' || selected.run.activeWorkerLaunchId ||
+        selected.workerLaunches.length || prefix.abortResults.length)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication has no complete original read-only received handoff');
+    const roots = await holdPublicationRoots(workspace.canonicalRootPath, signal);
+    const task: DeliveryPublicationReceivedTask = Object.freeze({ [publicationReceivedTaskBrand]: true as const });
+    publicationReceivedTask = task;
+    const assertOwned = () => {
+      if (publicationReceivedTask !== task || !pending || closed || isClosing() || cleanupFailure !== undefined ||
+          publicationProjectionAbort !== abort || publicationRoots !== roots)
+        throw new KernelStorageError('LEASE_FENCED', 'publication received result lost its original read-only task');
+      signal.throwIfAborted();
+    };
+    publicationReceivedTasks.set(task, { driver, artifacts, owner, execution, assertOwned,
+      resources(connection = driver) {
+        assertOwned(); assertActiveStateOwner(connection, owner);
+        roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
+        return Object.freeze({ runId, expectedRunRevision: selected.run.revision, ...roots, signal });
+      } });
+    publicationPhase('publication_received_proof');
+    const receivedResult = await prepareOwnedPublicationReceivedResult(driver, artifacts, owner, execution, task);
+    const settlement = await preparePublicationReceivedSettlement(driver, artifacts, owner, { execution, receivedResult });
+    settleReceivedPublication = async expected => {
+      publicationPhase('publication_received_settle');
+      return (await settlement.settle({ expectedRunRevision: expected })).run;
+    };
+    return settleReceivedPublication(readRun(driver, runId).revision);
+  }
   function ownOperation(work: Promise<Run>, abort: AbortController, retainWorker = false): Promise<Run> {
     let operationFailure: { error: unknown } | undefined;
     let retainedCompletion = false;
     const operation = work.catch(async error => {
       operationFailure = { error };
-      if (receivedTool && cleanupFailure === undefined && receivedTool.worker === worker && receivedTool.activeWorker === activeWorker &&
-          (isJoinedCasPublicationFailure(error) || isRolledBackSqliteTransactionFailure(driver, error))) {
-        // A known result is not UNKNOWN. Keep its exact physical owner and
-        // unfinished immutable publications after positively joined I/O failure.
-        receivedTool.failure = error;
+      if (receivedCompletion?.kind === 'mcp_reconciliation') {
+        // No semantic release is retried. The same genuine joined purpose3
+        // owner retains its raw response/retirement across storage or Stop
+        // races until its one original nonce/outcome transaction is durable.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        receivedCompletion.failure = error; retainedCompletion = true; throw error;
+      }
+      if (receivedCompletion?.kind === 'mcp_unreceived' && receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker) {
+        // This explicitly unreceived owner retains only its actual native
+        // no-I/O/UNKNOWN settlement continuation, never a response or retry.
+        // Storage failure must not fence M before that same settlement can
+        // commit, because the ordered no-I/O result still owns its frontier.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        receivedCompletion.failure = error; retainedCompletion = true; throw error;
+      }
+      if (receivedCompletion?.kind === 'publication_received') {
+        // A durable handoff already proves the original M/arenas retired. No
+        // new preactivation recovery or physical operation can be inferred
+        // from a cancelled/failed read-only projection.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        if (!closed && !isClosing() && cleanupFailure === undefined &&
+            (isJoinedCasPublicationFailure(error) || isRolledBackSqliteTransactionFailure(driver, error) ||
+              isPublicationStopRevisionConflict(receivedCompletion.kind, error, readRun(driver, runId).stopIntentRef))) {
+          // SQL Stop presence permits retaining this known readonly owner,
+          // never accepting the Stop or granting an effect. The same fixed
+          // adapter must still fully validate the new original Stop graph.
+          receivedCompletion.failure = error; retainedCompletion = true;
+        }
+        throw error;
+      }
+      if ((receivedCompletion?.kind === 'tool' || receivedCompletion?.kind === 'dependency' || receivedCompletion?.kind === 'dependency_acquisition') && receivedCompletion.toolCompletionCommitted === true &&
+          receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker) {
+        // The unique effect/charge is already durable. Keep only its original
+        // data-release continuation; retry cannot complete or dispatch again.
+        if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+        receivedCompletion.failure = error;
         retainedCompletion = true;
         throw error;
       }
+      if (receivedCompletion && cleanupFailure === undefined && receivedCompletion.worker === worker && receivedCompletion.activeWorker === activeWorker &&
+          (isJoinedCasPublicationFailure(error) || isRolledBackSqliteTransactionFailure(driver, error) ||
+            isPublicationStopRevisionConflict(receivedCompletion.kind, error, readRun(driver, runId).stopIntentRef) ||
+            ['dependency', 'dependency_acquisition'].includes(receivedCompletion.kind) && error instanceof KernelStorageError && error.code === 'REVISION_CONFLICT' &&
+              !!readRun(driver, runId).stopIntentRef)) {
+        // A known result is not UNKNOWN. Keep its exact physical owner and
+        // unfinished immutable publications after positively joined I/O failure
+        // or an intervening Stop. The same original completion must reselect
+        // and validate that Stop, including during shutdown; it may not be
+        // replaced by probe_cancelled or a deadline observation.
+        receivedCompletion.failure = error;
+        retainedCompletion = true;
+        throw error;
+      }
+      // The failed producer is entering recovery. End its productive heartbeat
+      // before the reader captures the exact lease row that its reducing fence
+      // must still match.
+      publicationLeaseReads?.close(); publicationLeaseReads = undefined;
+      agentLeaseReads?.close(); agentLeaseReads = undefined;
       if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
       let retiringPreparation = false;
       try {
@@ -500,8 +1226,10 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           // preparation retirement has committed. Descriptor close alone is
           // not a durable proof of either tree or controller retirement.
           const original = preparation, birth = workspaceBirth;
-          await materialization?.close();
           const controllerRetirement = controller ? await controller.closePreparation() : undefined;
+          await preparingGit?.close();
+          preparingGitInput?.close();
+          await materialization?.close();
           reservation?.close();
           if ((!birth && !materialization) || !executionStore) throw new ResourceRetirementError('worker preparation has no complete original birth/retirement closure', error);
           await retireWorkerPreparation(driver, artifacts, owner, { preparation: original,
@@ -510,7 +1238,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             ...(controllerRetirement ? { controllerRetirement } : {}), ...(reservation ? { reservation } : {}),
             brokerQuiescence: observeInstalledBrokerQuiescence(executionStore, runId) });
         } else if (ownedLaunchId !== undefined && run.activeWorkerLaunchId === ownedLaunchId) {
-          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          if (closed && activeWorker) await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, activeWorker.activated, activeWorker.closure);
+          else {
+            const recovering = activeWorker;
+            try { await beginWorkerRecovery(driver, preflightReads, owner, { runId, expectedRunRevision: run.revision }); }
+            catch (recoveryError) {
+              if (!closed || !recovering || activeWorker !== recovering || !preflightAbort.signal.aborted ||
+                  recoveryError !== preflightAbort.signal.reason) throw recoveryError;
+              // The original read has joined. The still-owned activation can
+              // now install the same unresolved shutdown fence before join.
+              await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, recovering.activated, recovering.closure);
+            }
+          }
         } else if (ownedLaunchId !== undefined && run.status === 'queued') {
           // Join the original spawner first. A new controller can only inspect
           // the exact witness; it cannot release the old activation channel.
@@ -532,7 +1271,8 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       }
       throw error;
     }).finally(async () => {
-      try { if (!retainedCompletion && (!retainWorker || operationFailure)) await retireResources(); }
+      const completedRead = (receivedCompletion?.kind === 'tool' || receivedCompletion?.kind === 'mcp_unreceived') && receivedCompletion.retainsWorker === true;
+      try { if (!retainedCompletion && ((!retainWorker && !completedRead) || operationFailure)) await retireWorkerResources(); }
       catch (failure) {
         if (operationFailure && operationFailure.error !== failure) {
           cleanupFailure = new ResourceRetirementError('Run execution failed and its resources did not retire',
@@ -542,9 +1282,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         throw failure;
       } finally {
         if (!retainedCompletion) {
-          receivedTool = undefined;
-          if (closingTool?.operation === operation || closingTool?.completion !== undefined) closingTool = undefined;
-          toolPhase = undefined;
+          receivedCompletion = undefined;
+          publicationTask = undefined;
+          noOpTask = undefined;
+          publicationMaintenanceTask = undefined;
+          publicationReceivedTask = undefined;
+          if (!publicationProbe || readRun(driver, runId).waitingOnRef !== publicationProbe.run.waitingOnRef)
+            publicationReconciliationTask = undefined;
+          publicationProjectionAbort = undefined;
+          settleReceivedPublication = undefined;
+          if (closingCompletion?.operation === operation || closingCompletion?.completion !== undefined) closingCompletion = undefined;
+          operationPhase = undefined;
+          toolReleased = false;
         }
         pending = undefined; if (operationAbort === abort) operationAbort = undefined;
       }
@@ -552,7 +1301,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     pending = operation;
     return operation;
   }
-  async function closeProbe(input: { runId: string; expectedRunRevision: number }, waitForDeadline = false): Promise<Run> {
+  function resumeOwnedCompletion(abort: AbortController): Promise<Run> {
+    const original = receivedCompletion;
+    if (!original) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run execution has no original completion to resume');
+    // A publication may still own its original unarmed birth after joined CAS
+    // failure. Its first productive assertion must see the registered pending
+    // task, exactly as on initial dispatch, not a special relaxed release gate.
+    const publication = original.kind === 'publication' || original.kind === 'publication_maintenance' ||
+      original.kind === 'publication_received' || original.kind === 'publication_reconciliation' || original.kind === 'mcp_reconciliation';
+    const work = publication ? Promise.resolve().then(() => original.finish()) : original.finish();
+    return ownOperation(work, abort, publication);
+  }
+  async function closeProbe(input: { runId: string; expectedRunRevision: number }, shutdown = false): Promise<Run> {
     input = immutableSnapshot(input);
     if (!exactKeys(input, ['runId', 'expectedRunRevision']) || input.runId !== runId ||
         !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
@@ -567,7 +1327,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
     }
     if (retained.wait.probeState.phase !== 'automatic_in_flight') throw new KernelStorageError('RECOVERY_REQUIRED', 'registered worker task has no dispatch');
     const deadline = retained.wait.probeState.dispatch.probeDeadlineAt;
-    if (!waitForDeadline && sampleCanonicalNow() < deadline) {
+    if (!shutdown && sampleCanonicalNow() < deadline) {
       throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
     }
     if (retained.closure) return retained.closure;
@@ -577,21 +1337,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       // then release normally; a public stale-revision closure cannot.
       let current = readRun(driver, runId);
       if (current.waitingOnRef !== retained.run.waitingOnRef) {
-        if (waitForDeadline) return current;
+        if (shutdown) return current;
         throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection completed before cancellation');
       }
-      const boundedUntil = performance.now() + 31_000;
-      while (sampleCanonicalNow() < deadline) {
-        const fence = assertFenceHealthy(readTimeFence(driver));
-        const now = sampleCanonicalNow();
-        if (now < fence.lastAcceptedAt || performance.now() >= boundedUntil) {
-          throw new KernelStorageError('RECOVERY_REQUIRED', 'worker shutdown cannot advance its stored deadline under a regressed clock');
-        }
-        await delay(Math.min(1000, Math.max(1, Date.parse(deadline) - Date.parse(now))));
-      }
-      current = readRun(driver, runId);
+      // An earlier uncertain retirement still owns this wait and StateOwner.
+      // A later joined task cannot erase that uncertainty by closing its nonce.
+      if (cleanupFailure !== undefined) throw cleanupFailure;
+      // A real shutdown closes this same cancelled-and-joined nonce, not its
+      // unelapsed deadline. The reducer persists the distinct closure before
+      // this original receipt/owner may be released; failures retain both.
       const result = await closeWorkerRecoveryProbe(driver, artifacts, owner,
-        { runId, expectedRunRevision: waitForDeadline ? current.revision : input.expectedRunRevision }, receipt);
+        { runId, expectedRunRevision: shutdown ? current.revision : input.expectedRunRevision }, receipt, shutdown ? 'shutdown' : 'deadline');
       if (probe === retained) probe = undefined;
       return result;
     })();
@@ -603,104 +1359,1027 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       throw error;
     }
   }
+  async function closePublicationProbe(expectedRunRevision: number, kind: 'shutdown' | 'deadline'): Promise<Run> {
+    if (receivedCompletion)
+      throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure must first persist its actual received result');
+    const retained = publicationProbe;
+    if (!retained) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication closure has no original registered probe');
+    const current = readRun(driver, runId);
+    if (current.revision !== expectedRunRevision)
+      throw new KernelStorageError('REVISION_CONFLICT', 'publication closure Run revision changed');
+    if (current.waitingOnRef !== retained.run.waitingOnRef) return current;
+    if (retained.closure) return retained.closure;
+    const closingProbe = (async () => {
+      const receipt = await retained.task.cancelAndJoin();
+      const current = readRun(driver, runId);
+      // A genuinely received completion wins over cancellation of its probe.
+      if (current.waitingOnRef !== retained.run.waitingOnRef) return current;
+      const { closePublicationReconciliationProbe } = await import('./publication-reconciliation.js');
+      const result = await closePublicationReconciliationProbe(driver, artifacts, owner, { runId,
+        expectedRunRevision: current.revision, execution, task: retained.rootTask, closure: { kind, receipt } });
+      if (publicationProbe === retained) publicationProbe = undefined;
+      return result;
+    })();
+    retained.closure = closingProbe;
+    try { return await closingProbe; }
+    catch (error) {
+      if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
+      if (retained.closure === closingProbe) retained.closure = undefined;
+      throw error;
+    }
+  }
+
+  function runPublicationReconciliation(value: { expectedRunRevision: number },
+    mutation?: { request: RunReconcileRequestV1; identity: AuthenticatedControlIdentity },
+    onEnqueued?: (result: { run: Run; response: Extract<InstalledControlResponseV1, { ok: true }> }) => void): Promise<Run> {
+    if (continuation.operation !== 'delivery')
+      throw new KernelStorageError('INVALID_REQUEST', 'publication reconciliation requires its original Delivery execution');
+    const expectedRunRevision = revision(value, true);
+    const abort = new AbortController(); operationAbort = abort;
+    if (receivedCompletion) {
+      if (mutation || receivedCompletion.kind !== 'publication_reconciliation')
+        throw new KernelStorageError('REVISION_CONFLICT', 'publication inspection cannot replace an original pending result');
+      return resumeOwnedCompletion(abort);
+    }
+    operationPhase = 'preparing';
+    const signal = abort.signal, reads = artifacts.withReadSignal(signal);
+    const work = Promise.resolve().then(async () => {
+      const reconciliation = await import('./publication-reconciliation.js');
+      const retained = publicationProbe;
+      if (retained && readRun(driver, runId).waitingOnRef === retained.run.waitingOnRef) {
+        if (mutation) throw new KernelStorageError('INVALID_REQUEST', 'publication probe is already in flight');
+        const state = retained.wait.probeState;
+        if ((state.phase === 'automatic_in_flight' || state.phase === 'user_in_flight') && sampleCanonicalNow() >= state.dispatch.probeDeadlineAt)
+          return closePublicationProbe(readRun(driver, runId).revision, 'deadline');
+        return readRun(driver, runId);
+      }
+      if (retained) publicationProbe = undefined;
+      let selected = await reconciliation.readPublicationReconciliation(driver, reads, runId);
+      if (selected && selected.run.revision !== expectedRunRevision)
+        throw new KernelStorageError('REVISION_CONFLICT', 'publication inspection initial cut changed');
+      if (selected && !mutation) {
+        const state = selected.wait.probeState;
+        if (state.phase === 'automatic_exhausted' || state.phase === 'automatic_pending' && sampleCanonicalNow() < state.nextProbeAt)
+          return selected.run;
+      }
+      let cut = selected?.cut ?? await readRecoveryClosure(driver, reads, runId);
+      let task = await openPublicationReconciliationTask(cut, expectedRunRevision, signal);
+      if (!selected) {
+        const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+        const prefix = await readPublicationPrefix(driver, reads, cut);
+        const initial = [...prefix.entries.values()].filter(entry => entry.sequence === 'abort' && entry.claim &&
+          !entry.result && !entry.pendingReceivedHandoff && entry.history.length === 2 && entry.history.at(-1)!.phase === 'dispatch_claimed');
+        if (initial.length === 1) {
+          // This claim has no live worker to put into a fictitious death wait.
+          // Its genuine readonly task proves the already-closed M, exact old
+          // maintenance claim/Stop/grant and actual original-owner death.
+          const { prepareOwnedPublicationMaintenanceAmbiguity } = await import('./publication-invocation.js');
+          const { preparePublicationInitialAmbiguitySettlement } = await import('./publication-settlement.js');
+          const ambiguity = await prepareOwnedPublicationMaintenanceAmbiguity(driver, artifacts, owner, execution, task);
+          const settlement = await preparePublicationInitialAmbiguitySettlement(driver, artifacts, owner, ambiguity);
+          await settlement.settle({ expectedRunRevision: cut.run.revision });
+          cut = await readRecoveryClosure(driver, reads, runId);
+          task = await openPublicationReconciliationTask(cut, cut.run.revision, signal);
+        }
+        selected = await reconciliation.preparePublicationReconciliation(driver, artifacts, owner,
+          { runId, expectedRunRevision: cut.run.revision, execution, task });
+      }
+      const priorState = selected.wait.probeState;
+      if ((priorState.phase === 'automatic_in_flight' || priorState.phase === 'user_in_flight') &&
+          priorState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
+        if (mutation) throw new KernelStorageError('INVALID_REQUEST', 'a predecessor publication probe must first close');
+        return reconciliation.closePublicationReconciliationProbe(driver, artifacts, owner, { runId,
+          expectedRunRevision: selected.run.revision, execution, task, closure: { kind: 'deadline' } });
+      }
+      const { startPublicationReconciliationTask } = await import('./publication-reconciliation-task.js');
+      const dispatched = await reconciliation.beginPublicationReconciliationProbe(driver, artifacts, owner,
+        { runId, expectedRunRevision: selected.run.revision, execution, task, ...(mutation ? { mutation } : {}) });
+      if (dispatched.replayed) {
+        if (!dispatched.response) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication enqueue replay lost its response');
+        onEnqueued?.({ run: dispatched.run, response: dispatched.response }); return readRun(driver, runId);
+      }
+      // Do not throw for cancellation in this commit-to-registration gap.
+      // Register the actual original queued operation first, so shutdown can
+      // attest its real cancelled-before-I/O join rather than invent a task.
+      let producer: { cancelAndJoin(): Promise<void> } | undefined;
+      let probeTask: PublicationReconciliationTask;
+      try { probeTask = startPublicationReconciliationTask({ driver, artifacts, owner, execution, task,
+        run: dispatched.run, wait: dispatched.wait }, async probeSignal => {
+        const cancelRead = () => abort.abort(probeSignal.reason);
+        probeSignal.addEventListener('abort', cancelRead, { once: true });
+        if (probeSignal.aborted) cancelRead();
+        try {
+          const publication = await import('./publication-invocation.js');
+          const actual = await publication.prepareOwnedPublicationReconciliation(driver, artifacts, owner, execution, task);
+          producer = actual;
+          if (probeSignal.aborted) void actual.cancelAndJoin().catch(() => {});
+          const finish = async () => {
+            const completed = publication.classifyOwnedPublicationReconciliationCompletion(driver, artifacts, owner, execution, await actual.finish());
+            if (completed.kind === 'late_audit') {
+              const writer = await reconciliation.preparePublicationLateObservation(driver, artifacts, owner,
+                { execution, lateObservation: completed.lateObservation });
+              // This appends audit only. The owning probe is joined/closed
+              // separately, with its original nonce and original deadline.
+              return writer.commit({ expectedRunRevision: readRun(driver, runId).revision });
+            }
+            const token = completed.result;
+            const result = await publication.readOwnedPublicationReconciliationResult(driver, artifacts, owner, execution, token);
+            if (result.disposition === 'received' && result.isLastForwardPath) {
+              const { handoffOwnedReconciledPublicationResult } = await import('./publication-finalization.js');
+              return handoffOwnedReconciledPublicationResult(driver, artifacts, owner, execution, token);
+            }
+            const { preparePublicationReconciliationSettlement } = await import('./publication-settlement.js');
+            const settlement = await preparePublicationReconciliationSettlement(driver, artifacts, owner,
+              { execution, recoveryResult: token });
+            return (await settlement.settle({ expectedRunRevision: readRun(driver, runId).revision })).run;
+          };
+          // Preserve this actual producer before awaiting its fixed result or
+          // durable writes. Its genuine private state, not a caught error,
+          // distinguishes a cancelled pre-result read from a received outcome.
+          operationPhase = 'received';
+          const completion: ReceivedCompletion = { kind: 'publication_reconciliation', finish };
+          receivedCompletion = completion;
+          try { return await finish(); }
+          catch (error) {
+            if (!actual.hasReceivedResult() && receivedCompletion === completion) {
+              receivedCompletion = undefined; operationPhase = 'preparing';
+            }
+            throw error;
+          }
+        } finally { probeSignal.removeEventListener('abort', cancelRead); }
+      }, async () => { await producer?.cancelAndJoin(); }); }
+      catch (cause) {
+        throw cleanupFailure = new ResourceRetirementError('committed publication probe lost its original task registration', cause);
+      }
+      publicationProbe = { run: dispatched.run, wait: dispatched.wait, rootTask: task, task: probeTask };
+      if (mutation) {
+        if (!dispatched.response) throw new KernelStorageError('RECOVERY_REQUIRED', 'publication enqueue did not retain its response');
+        onEnqueued?.({ run: dispatched.run, response: dispatched.response });
+      }
+      if (closed || isClosing()) void probeTask.cancelAndJoin().catch(() => {});
+      const state = dispatched.wait.probeState;
+      if (state.phase !== 'automatic_in_flight' && state.phase !== 'user_in_flight')
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'publication producer has no persisted deadline');
+      const timer = setTimeout(() => { void probeTask.cancelAndJoin().catch(() => {}); },
+        Math.max(0, Date.parse(state.dispatch.probeDeadlineAt) - Date.now()));
+      try { return await probeTask.work; }
+      catch (error) {
+        if (!receivedCompletion && !closed && !isClosing() && sampleCanonicalNow() >= state.dispatch.probeDeadlineAt &&
+            readRun(driver, runId).waitingOnRef === dispatched.run.waitingOnRef)
+          return closePublicationProbe(readRun(driver, runId).revision, 'deadline');
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        if (publicationProbe?.task === probeTask && readRun(driver, runId).waitingOnRef !== dispatched.run.waitingOnRef) {
+          publicationProbe = undefined;
+        }
+      }
+    });
+    return ownOperation(work, abort, true);
+  }
+  async function finishMcpStatusProbe(original: NonNullable<typeof mcpStatusProbe>, signal?: AbortSignal): Promise<Run> {
+    await original.task.resumeResult();
+    const result = await finalizeMcpStatusProbe(driver, artifacts, owner, original.task, requireAgent().resolveToolInput, signal);
+    if (result.kind !== 'awaiting_original_deadline' && mcpStatusProbe === original) mcpStatusProbe = undefined;
+    return result.run;
+  }
+  async function finishMcpStatusRecovery(original: NonNullable<typeof mcpStatusRecovery>): Promise<Run> {
+    const result = await original.resumeResult();
+    if (mcpStatusRecovery === original) mcpStatusRecovery = undefined;
+    return result;
+  }
+  function runMcpReconciliation(value: { expectedRunRevision: number },
+    mutation?: { request: RunReconcileRequestV1; identity: AuthenticatedControlIdentity },
+    onEnqueued?: (result: { run: Run; response: Extract<InstalledControlResponseV1, { ok: true }> }) => void): Promise<Run> {
+    requireAgent();
+    if (!selectedRuntime || !installedAnchor) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP signed status requires the genuine installed Linux owner');
+    const expectedRunRevision = revision(value, true), abort = new AbortController(); operationAbort = abort;
+    if (receivedCompletion) {
+      if (mutation || receivedCompletion.kind !== 'mcp_reconciliation')
+        throw new KernelStorageError('REVISION_CONFLICT', 'MCP signed status cannot replace an original retained completion');
+      return resumeOwnedCompletion(abort);
+    }
+    operationPhase = 'preparing'; const signal = abort.signal, reads = artifacts.withReadSignal(signal);
+    const work = Promise.resolve().then(async () => {
+      if (mcpStatusRecovery) {
+        if (mutation) throw new KernelStorageError('INVALID_REQUEST', 'MCP signed status retains its original successor cleanup');
+        const original = mcpStatusRecovery;
+        receivedCompletion = { kind: 'mcp_reconciliation', finish: () => finishMcpStatusRecovery(original) };
+        operationPhase = 'received'; return receivedCompletion.finish();
+      }
+      const retained = mcpStatusProbe;
+      if (retained) {
+        if (mutation) throw new KernelStorageError('INVALID_REQUEST', 'MCP signed status already owns its original inspection');
+        if (!retained.run || !retained.wait || readRun(driver, runId).waitingOnRef !== retained.run.waitingOnRef)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP signed status retains an unfinished original native nonce');
+        const state = retained.wait.probeState;
+        if ((state.phase === 'automatic_in_flight' || state.phase === 'user_in_flight') && !readRun(driver, runId).stopIntentRef &&
+            sampleCanonicalNow() < state.dispatch.probeDeadlineAt) return readRun(driver, runId);
+        receivedCompletion = { kind: 'mcp_reconciliation', finish: () => finishMcpStatusProbe(retained, signal) };
+        operationPhase = 'received'; return receivedCompletion.finish();
+      }
+      const cut = await readRecoveryClosure(driver, reads, runId);
+      if (cut.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'MCP signed status original recovery cut changed');
+      const selected = await (await import('./mcp-status-state.js')).validateMcpInvocationWait(driver, reads, cut), state = selected.wait.probeState;
+      await (await import('./mcp-server-retirement.js')).resumeOwnedMcpServerReconcileWait(driver, artifacts, owner, runId, signal);
+      if (state.phase === 'automatic_in_flight' || state.phase === 'user_in_flight') {
+        if (mutation) throw new KernelStorageError('INVALID_REQUEST', 'MCP user probe cannot replace an original in-flight nonce');
+        if (state.dispatch.subjectKind !== 'mcp_recovery') throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP signed status retained a foreign probe purpose');
+        if (state.dispatch.owningSupervisorInstanceId === owner.supervisorInstanceId || sampleCanonicalNow() < state.dispatch.probeDeadlineAt)
+          return selected.run;
+        const original = prepareMcpStatusSuccessorRecovery({ driver, artifacts, owner, selected: selectedRuntime, anchor: installedAnchor,
+          runId, expectedRunRevision, signal });
+        mcpStatusRecovery = original;
+        try {
+          const run = await original.result(); if (mcpStatusRecovery === original) mcpStatusRecovery = undefined; return run;
+        } catch (error) {
+          if (isJoinedCasPublicationFailure(error)) {
+            original.assertJoined();
+            receivedCompletion = { kind: 'mcp_reconciliation', failure: error, finish: () => finishMcpStatusRecovery(original) };
+          }
+          throw error;
+        }
+      }
+      if (!mutation && (state.phase === 'automatic_exhausted' || sampleCanonicalNow() < state.nextProbeAt)) return selected.run;
+      let original: NonNullable<typeof mcpStatusProbe>;
+      const task = prepareMcpStatusProbeTask({ driver, artifacts, owner, selected: selectedRuntime, anchor: installedAnchor, runId,
+        expectedRunRevision, signal, ...(mutation ? { mutation } : {}),
+        assertOpen() {
+          signal.throwIfAborted();
+          if (closed || isClosing() || cleanupFailure !== undefined || mcpStatusProbe !== original)
+            throw new KernelStorageError('LEASE_FENCED', 'MCP signed status original execution receiver is closing or changed');
+        },
+        onCommitted(prepared) {
+          original.run = prepared.run; original.wait = prepared.wait;
+          if (mutation) {
+            if (!prepared.response) throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP user enqueue lost its exact first response');
+            onEnqueued?.({ run: prepared.run, response: prepared.response });
+          }
+          if (closed || isClosing()) task.cancel();
+        } });
+      original = { task }; mcpStatusProbe = original;
+      try { await task.result(); }
+      catch (error) {
+        if (original.run && isJoinedCasPublicationFailure(error)) {
+          readMcpStatusProbeNativeJoin(driver, artifacts, owner, task);
+          receivedCompletion = { kind: 'mcp_reconciliation', failure: error, finish: () => finishMcpStatusProbe(original) };
+        }
+        throw error;
+      }
+      receivedCompletion = { kind: 'mcp_reconciliation', finish: () => finishMcpStatusProbe(original, signal) };
+      operationPhase = 'received'; return receivedCompletion.finish();
+    });
+    return ownOperation(work, abort, true);
+  }
+  function readOwnedWorkerLease() {
+    if (!activeWorker || !worker || !generation || !controller || !reservation || closed || isClosing()) return;
+    if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
+    if (pending && dependencyOwner) assertDependencyLeaseMaintenance(driver, owner, dependencyOwner);
+    const retained = activeWorker, run = readRun(driver, runId);
+    if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return;
+    const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
+    if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return;
+    if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
+        launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
+        launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
+      throw new KernelStorageError('LEASE_FENCED', 'worker maintenance differs from its original physical owner');
+    }
+    reservation.assertHeld();
+    worker.assertHeld();
+    assertActiveStateOwner(driver, owner);
+    return { retained, run, launch };
+  }
+  function renewOwnedWorkerLease(refreshAtBoundary = false): ReturnType<RunExecution['renewCurrentWorkerLease']> {
+    const owned = readOwnedWorkerLease();
+    if (!owned) return 'inactive';
+    const { retained, run, launch } = owned;
+    const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
+    if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
+    const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
+    requireEqual(live.launch, launch, 'worker maintenance current launch');
+    requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
+    const expiryMs = parseCanonicalTime(launch.leaseExpiresAt);
+    const nextExpiryMs = Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt));
+    if (nextExpiryMs <= expiryMs || (!refreshAtBoundary && expiryMs - nowMs > 30_000)) return 'unchanged';
+    const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
+      runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
+      newLeaseExpiresAt: new Date(nextExpiryMs).toISOString() });
+    publicationLeaseReads?.record(launch, renewed);
+    agentLeaseReads?.record(launch, renewed);
+    retained.activated = { ...retained.activated, launch: renewed };
+    return 'renewed';
+  }
+  function refreshInvocationLease(current: ActiveWorker, currentWorker: LinuxBlockedWorker) {
+    if (activeWorker !== current || worker !== currentWorker)
+      throw new KernelStorageError('LEASE_FENCED', 'invocation phase lost its original physical parent');
+    const result = renewOwnedWorkerLease(true);
+    if (result === 'inactive' || result === 'expired')
+      throw new KernelStorageError('LEASE_FENCED', 'invocation phase lost its original live parent lease');
+  }
   const execution: RunExecution = Object.freeze({
-    hasPendingToolCompletion: error => receivedTool !== undefined && (error === undefined || receivedTool.failure === error),
+    hasPendingOperation: () => pending !== undefined,
+    reconcilePublication: value => runPublicationReconciliation(value),
+    reconcileMcp: value => runMcpReconciliation(value),
+    enqueueMcpReconciliation: input => {
+      const request = immutableSnapshot(input.request);
+      if (mcpStatusEnqueue?.requestId === request.requestId && mcpStatusEnqueue.principalId === input.identity.principalId) {
+        if (mcpStatusEnqueue.requestDigest !== request.requestDigest)
+          return Promise.reject(new KernelStorageError('REQUEST_ID_CONFLICT', 'MCP status requestId was reused'));
+        return mcpStatusEnqueue.result;
+      }
+      const result: ReturnType<RunExecution['enqueueMcpReconciliation']> = new Promise((resolve, reject) => {
+        try {
+          const completion = runMcpReconciliation({ expectedRunRevision: request.expectedRevision }, { request, identity: input.identity },
+            result => resolve({ ...result, completion }));
+          void completion.catch(reject);
+        } catch (error) { reject(error); }
+      });
+      const flight = { requestId: request.requestId, requestDigest: request.requestDigest, principalId: input.identity.principalId, result };
+      mcpStatusEnqueue = flight;
+      const clear = () => { if (mcpStatusEnqueue === flight) mcpStatusEnqueue = undefined; }; void result.then(clear, clear); return result;
+    },
+    enqueuePublicationReconciliation: input => {
+      const request = immutableSnapshot(input.request);
+      if (publicationEnqueue?.requestId === request.requestId && publicationEnqueue.principalId === input.identity.principalId) {
+        if (publicationEnqueue.requestDigest !== request.requestDigest)
+          return Promise.reject(new KernelStorageError('REQUEST_ID_CONFLICT', 'publication probe requestId was reused'));
+        return publicationEnqueue.result;
+      }
+      const result: ReturnType<RunExecution['enqueuePublicationReconciliation']> = new Promise((resolve, reject) => {
+        try {
+          const completion = runPublicationReconciliation({ expectedRunRevision: request.expectedRevision },
+            { request, identity: input.identity }, result => resolve({ ...result, completion }));
+          void completion.catch(reject);
+        } catch (error) { reject(error); }
+      });
+      const flight = { requestId: request.requestId, requestDigest: request.requestDigest, principalId: input.identity.principalId, result };
+      publicationEnqueue = flight;
+      const clear = () => { if (publicationEnqueue === flight) publicationEnqueue = undefined; };
+      void result.then(clear, clear);
+      return result;
+    },
+    hasPendingCompletion: error => receivedCompletion !== undefined && (error === undefined || receivedCompletion.failure === error),
+    resumeCurrentCompletion: async value => {
+      revision(value, true);
+      if (!receivedCompletion) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'Run execution has no original completion to resume');
+      const abort = new AbortController(); operationAbort = abort;
+      return resumeOwnedCompletion(abort);
+    },
     requestStop: () => {
       const current = readRun(driver, runId);
       assertActiveStateOwner(driver, owner);
       if (!current.stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'productive revocation requires the committed StopIntent');
+      verifierReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'verifier release reads are stopped'));
+      toolReleaseReadAbort?.abort(new KernelStorageError('LEASE_FENCED', 'tool release reads are stopped'));
+      revokePublications();
+      if (mcpStatusProbe) { mcpStatusProbe.task.cancel(); return mcpStatusProbe.task.close(); }
+      if (mcpStatusRecovery) { mcpStatusRecovery.cancel(); return mcpStatusRecovery.close(); }
       if (stopJoin) return stopJoin;
       // Inspections are authority reducing and retain their own original join.
       // A stop must not cancel the very proof needed to close that wait.
       if (probe && current.status === 'waiting' && current.waitingOnRef === probe.run.waitingOnRef) return Promise.resolve();
-      if (toolPhase !== 'claimed' && toolPhase !== 'received') operationAbort?.abort();
+      if (continuation.operation === 'delivery' && publicationReconciliationTask &&
+          current.status === 'waiting' && current.waitingReason === 'reconciliation') return Promise.resolve();
+      if (operationPhase !== 'claimed' && operationPhase !== 'received') operationAbort?.abort();
       // close enters irreversible native channel revocation synchronously,
       // before the control request can acknowledge its durable intent.
-      return revokeOriginalWorker();
+      const joined: Promise<unknown>[] = [...dependencyOwners].map(original => revokeDependencyInvocationIO(driver, owner, original));
+      if (mcpTransport) joined.push(mcpTransport.close());
+      if (mcpStdioTask) joined.push(mcpStdioTask.close());
+      joined.push(revokeOriginalWorker());
+      return Promise.all(joined).then(() => {});
     },
     renewCurrentWorkerLease: () => {
-      // An operation in flight owns its current lease. Maintenance cannot
-      // race its native activation, revocation or Checkpoint transition.
-      if (closed || isClosing() || pending || receivedTool || !activeWorker || !worker || !generation || !controller || !reservation) return 'inactive';
-      if (cleanupFailure !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker maintenance retains a resource retirement failure');
-      const retained = activeWorker, run = readRun(driver, runId);
-      if (run.status !== 'running' || run.cancelRequested || run.stopIntentRef !== undefined || run.activeWorkerLaunchId === undefined) return 'inactive';
-      const launch = readRequiredWorkerLaunch(driver, run.activeWorkerLaunchId);
-      if (launch.phase !== 'activated' || launch.generationWriteState !== 'active') return 'inactive';
-      if (launch.launchId !== ownedLaunchId || launch.launchId !== retained.activated.launch.launchId ||
-          launch.leaseEpoch !== retained.activated.launch.leaseEpoch || launch.workerIdentityDigest !== retained.activated.launch.workerIdentityDigest ||
-          launch.workspaceGenerationRef !== retained.authority.generationRef || launch.processContainmentRef !== retained.processContainmentRef) {
-        throw new KernelStorageError('LEASE_FENCED', 'worker maintenance differs from its original physical owner');
-      }
-      reservation.assertHeld();
-      worker.assertHeld();
-      assertActiveStateOwner(driver, owner);
-      const now = sampleCanonicalNow(), nowMs = parseCanonicalTime(now);
-      if (!launch.leaseExpiresAt || nowMs >= parseCanonicalTime(launch.leaseExpiresAt) || nowMs >= parseCanonicalTime(run.deadlineAt)) return 'expired';
-      const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, now);
-      requireEqual(live.launch, launch, 'worker maintenance current launch');
-      requireEqual(live.generation, retained.activated.generation, 'worker maintenance original active generation');
-      if (parseCanonicalTime(launch.leaseExpiresAt) - nowMs > 30_000) return 'unchanged';
-      const renewed = renewWorkerLease(driver, owner, { launchId: launch.launchId, expectedLeaseVersion: launch.leaseVersion,
-        runId, leaseEpoch: run.leaseEpoch, workerIdentityDigest: launch.workerIdentityDigest!,
-        newLeaseExpiresAt: new Date(Math.min(nowMs + 60_000, parseCanonicalTime(run.deadlineAt))).toISOString() });
-      retained.activated = { ...retained.activated, launch: renewed };
-      return 'renewed';
+      // Acquisition registers its original completion before the first GET
+      // so it can retain custody on failure. While claimed, that is pending
+      // I/O. Native activation, revocation and Checkpoint still fence renewal.
+      const acquiringDependencies = dependencyOwner !== undefined && operationPhase === 'claimed' &&
+        receivedCompletion?.kind === 'dependency_acquisition';
+      const maintainingPublication = publicationLeaseReads !== undefined && (operationPhase === 'preparing' || operationPhase === 'claimed');
+      const readingToolSelection = agentLeaseReads !== undefined && operationPhase === 'reading';
+      if (pending && !maintainingPublication && !readingToolSelection && !((verifierReleased || toolReleased || dependencyOwner !== undefined) && operationPhase === 'claimed') ||
+          receivedCompletion && !maintainingPublication && !acquiringDependencies) return 'inactive';
+      return renewOwnedWorkerLease();
     },
     assertCurrentModelWorker: value => {
-      if (!exactKeys(value, ['runId', 'leaseEpoch', 'launchId', 'generationRef', 'workerIdentityDigest']) ||
-          value.runId !== runId || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 ||
-          closed || isClosing() || cleanupFailure !== undefined || pending || receivedTool || !activeWorker || !worker || !generation || !controller || !reservation ||
-          value.launchId !== ownedLaunchId || value.launchId !== activeWorker.activated.launch.launchId ||
-          value.generationRef !== activeWorker.authority.generationRef || value.workerIdentityDigest !== activeWorker.activated.launch.workerIdentityDigest) {
-        throw new KernelStorageError('LEASE_FENCED', 'model release does not name this execution owner\'s original physical worker');
-      }
-      const run = readRun(driver, runId);
-      const live = assertLiveDispatchState(driver, owner, runId, run.revision, value.leaseEpoch, sampleCanonicalNow());
-      if (run.nextStep !== 'agent' || live.launch.launchId !== value.launchId || live.launch.workerIdentityDigest !== value.workerIdentityDigest ||
-          live.launch.workspaceGenerationRef !== value.generationRef || live.launch.processContainmentRef !== activeWorker.processContainmentRef) {
-        throw new KernelStorageError('LEASE_FENCED', 'model release durable worker identity changed');
-      }
-      reservation.assertHeld();
-      worker.assertHeld();
-      // The native worker already retains the original generation borrow;
-      // its assertion verifies that descriptor, mount, quota identity and owner.
-      assertActiveStateOwner(driver, owner);
+      requireAgent();
+      assertCurrentWorker(value, 'agent');
+    },
+    assertCurrentDeliveryWorker: value => {
+      if (continuation.operation !== 'delivery') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication requires a Delivery Run execution');
+      assertCurrentWorker(value, 'delivery');
     },
     activateCurrentWorker: async value => {
       const expectedRunRevision = revision(value);
       const abort = new AbortController();
       operationAbort = abort;
       const signal = abort.signal;
+      const reads = artifacts.withReadSignal(signal);
       const work = (async () => {
         signal.throwIfAborted();
-        const selected = await readRecoveryClosure(driver, artifacts, runId);
+        const selected = await readRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
-        if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'agent' || !selected.run.frontierRef) {
-          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model worker activation requires its current agent frontier');
-        }
-        const frontier = await artifacts.readCanonical<import('../kernel/types.js').RunFrontier>(selected.run.frontierRef);
-        if (frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase)) {
-          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model worker activation requires a validated model frontier');
-        }
+        if (selected.run.revision !== expectedRunRevision || !selected.run.frontierRef)
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker activation requires its current Run frontier');
+        const frontier = await reads.readCanonical<import('../kernel/types.js').RunFrontier>(selected.run.frontierRef);
+        if (continuation.operation === 'agent') {
+          if (selected.run.nextStep !== 'agent' || frontier.kind !== 'agent' || !['model_turn', 'context_compaction'].includes(frontier.phase))
+            throw new KernelStorageError('STATE_TRANSITION_INVALID', 'model worker activation requires a validated model frontier');
+        } else if (selected.run.nextStep !== 'delivery' || frontier.kind !== 'delivery' || frontier.phase !== 'publish')
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'delivery worker activation requires its exact publication frontier');
         signal.throwIfAborted();
         const activated = await activateWorker(selected, signal);
         return activated.activated.run;
       })();
       return ownOperation(work, abort, true);
     },
-    executeCurrentTool: async value => {
-      const expectedRunRevision = revision(value, true);
-      const abort = new AbortController();
-      operationAbort = abort;
-      if (receivedTool) return ownOperation(receivedTool.finish(), abort);
+    executeCurrentNoOpDelivery: async value => {
+      if (continuation.operation !== 'delivery') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'no-op projection requires a Delivery Run execution');
+      const expectedRunRevision = revision(value);
+      const abort = new AbortController(); operationAbort = abort;
       const signal = abort.signal;
-      toolPhase = 'preparing';
-      let claimedTool: Awaited<ReturnType<typeof agent.claimTool>> | undefined;
+      operationPhase = 'preparing';
+      const work = Promise.resolve().then(async () => {
+        signal.throwIfAborted();
+        const reads = artifacts.withReadSignal(signal);
+        const selected = await readRecoveryClosure(driver, reads, runId);
+        if (selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' ||
+            selected.run.status !== 'queued' || selected.run.stopIntentRef || selected.run.cancelRequested ||
+            selected.run.activeWorkerLaunchId !== undefined || activeWorker || worker || generation || controller || reservation || ownedLaunchId !== undefined)
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'no-op delivery requires its exact worker-free verification cut');
+        const { readDeliveryRunAdmission } = await import('./reducers/delivery-admission.js');
+        const admission = await readDeliveryRunAdmission(driver, reads, runId, { signal });
+        requireEqual(admission.run, selected.run, 'no-op original admission cut');
+        const workspace = decodeWorkspaceIdentity(await reads.readCanonical(admission.target.workspaceIdentityRef));
+        if (workspace.kind !== 'live' || workspace.identityDigest !== admission.target.workspaceIdentityDigest)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'no-op delivery lost its original live workspace');
+        const roots = await holdPublicationRoots(workspace.canonicalRootPath, signal);
+        const task: DeliveryNoOpTask = Object.freeze({ [noOpTaskBrand]: true as const });
+        noOpTask = task;
+        const assertOwned = () => {
+          if (noOpTask !== task || !pending || closed || isClosing() || cleanupFailure !== undefined)
+            throw new KernelStorageError('LEASE_FENCED', 'no-op projection lost its original in-flight execution task');
+          signal.throwIfAborted();
+        };
+        noOpTasks.set(task, { driver, owner, execution, artifacts, assertOwned,
+          resources() {
+            assertOwned(); assertActiveStateOwner(driver, owner);
+            if (publicationRoots !== roots) throw new KernelStorageError('RECOVERY_REQUIRED', 'no-op projection lost its original held roots');
+            roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
+            return Object.freeze({ runId, expectedRunRevision, ...roots, signal });
+          } });
+        const { completeOwnedNoOpDelivery } = await import('./delivery-noop-finalization.js');
+        return completeOwnedNoOpDelivery(driver, artifacts, owner, execution, task);
+      });
+      return ownOperation(work, abort);
+    },
+    executeCurrentPublicationMaintenance: async value => {
+      if (continuation.operation !== 'delivery') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication maintenance requires a Delivery Run execution');
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'publication_maintenance')
+        throw new KernelStorageError('REVISION_CONFLICT', 'maintenance cannot replace another original completion');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return resumeOwnedCompletion(abort);
+      const signal = abort.signal;
+      operationPhase = 'preparing';
+      const work = Promise.resolve().then(async () => {
+        signal.throwIfAborted();
+        const reads = artifacts.withReadSignal(signal);
+        const selected = await readRecoveryClosure(driver, reads, runId);
+        const task = await openPublicationMaintenanceTask(selected, expectedRunRevision, signal);
+        const roots = assertDeliveryPublicationMaintenanceExecution(driver, owner, execution, task, artifacts);
+        const publication = await import('./publication-invocation.js');
+        const prepared = await publication.preparePublicationMaintenance(driver, artifacts, owner,
+          { execution, task, workspaceRoot: roots.workspaceRoot, expectedRunRevision, signal });
+        if (prepared.kind === 'not_created') return prepared.run;
+        const original = prepared.publicationOwner;
+        publicationOwners.add(original);
+        if (closed || isClosing() || signal.aborted) original.revoke();
+        // Register the original completion even when Stop won during prepare.
+        // Its claim gate remains revoked; the same owner's catch below must
+        // close the preparation rather than losing it to generic cleanup.
+        const originalWorker = worker, originalActive = activeWorker;
+        let claimed = false;
+        receivedCompletion = { kind: 'publication_maintenance', worker: originalWorker, activeWorker: originalActive,
+          finish: async () => {
+            if (worker !== originalWorker || activeWorker !== originalActive)
+              throw new KernelStorageError('RECOVERY_REQUIRED', 'publication maintenance lost its original execution resources');
+            if (!claimed) {
+              try { await publication.claimPublicationInvocation(driver, owner, original); }
+              catch (error) {
+                if (!(error instanceof KernelStorageError && error.code === 'LEASE_FENCED') &&
+                    !(signal.aborted && error === signal.reason)) throw error;
+                const status = publication.readOwnedPublicationDispatchState(driver, owner, execution, original);
+                if (status.phase === 'prepared') return publication.retirePublicationPreparation(driver, owner, execution, original);
+                if (status.armed) throw error;
+                original.revoke();
+              }
+              claimed = true;
+            }
+            operationPhase = 'claimed';
+            await publication.advancePublicationPath(driver, owner, execution, original);
+            operationPhase = 'received';
+            const { preparePublicationSettlement } = await import('./publication-settlement.js');
+            const settlement = await preparePublicationSettlement(driver, artifacts, owner, { execution, publicationOwner: original });
+            return (await settlement.settle({ expectedRunRevision: readRun(driver, runId).revision })).run;
+          } };
+        if (closingCompletion && closingCompletion.worker === originalWorker && closingCompletion.activeWorker === originalActive)
+          closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      });
+      return ownOperation(work, abort, true);
+    },
+    executeCurrentPublication: async value => {
+      if (continuation.operation !== 'delivery') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication requires a Delivery Run execution');
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'publication' && receivedCompletion.kind !== 'publication_received')
+        throw new KernelStorageError('REVISION_CONFLICT', 'another original result cannot become publication');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return resumeOwnedCompletion(abort);
+      const signal = abort.signal;
+      const reads = artifacts.withReadSignal(signal);
+      operationPhase = 'preparing';
+      // Start only after ownOperation registers the pending task. In particular
+      // no native birth, request preparation or await escapes that ownership.
+      const work = Promise.resolve().then(async () => {
+        signal.throwIfAborted();
+        const publication = await import('./publication-invocation.js');
+        const { preparePublicationSettlement } = await import('./publication-settlement.js');
+        const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+        publicationPhase('publication_select');
+        const { cut: selected, prefix } = await readDeliveryPublicationClosure(driver, reads, runId);
+        signal.throwIfAborted();
+        if (prefix.forward.at(-1)?.pendingReceivedHandoff) {
+          if (selected.run.revision !== expectedRunRevision)
+            throw new KernelStorageError('REVISION_CONFLICT', 'publication received handoff revision changed');
+          // Retained evidence is accepted only by the complete typed reader.
+          // This branch is before activateWorker and has no release capability.
+          operationPhase = 'received';
+          receivedCompletion = { kind: 'publication_received', finish: finishReceivedPublication };
+          return receivedCompletion.finish();
+        }
+        const authorization = prefix.authorization;
+        const queued = selected.run.status === 'queued' && selected.run.activeWorkerLaunchId === undefined;
+        const retained = selected.run.status === 'running' && activeWorker !== undefined && worker !== undefined && generation !== undefined &&
+          selected.run.activeWorkerLaunchId === ownedLaunchId;
+        if (selected.run.revision !== expectedRunRevision || (!queued && !retained) || selected.run.nextStep !== 'delivery' ||
+            selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt ||
+            !authorization?.grant || authorization.workspace.kind !== 'live' || prefix.abortResults.length ||
+            prefix.forward.some(entry => entry.result?.item.outcome !== 'completed'))
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication requires its exact unstopped approved forward prefix');
+        const operationIndex = prefix.forward.length;
+        if (!authorization.context.plan.forwardOperations[operationIndex])
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'publication has no remaining approved forward operation');
+        requireEqual(await reads.readCanonical(selected.run.frontierRef!), { ...authorization.frontier,
+          phase: 'publish', nextPathOperationIndex: operationIndex }, 'publication execution exact current frontier');
+        if (queued) publicationPhase('publication_worker_activate');
+        const current = queued ? await activateWorker(selected, signal) : activeWorker!;
+        if (!worker || !generation || !controller || !reservation || ownedLaunchId !== current.activated.launch.launchId)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'publication lost its original physical worker');
+        const currentWorker = worker;
+        const identity: RunExecutionWorkerIdentity = Object.freeze({ runId, leaseEpoch: current.activated.run.leaseEpoch,
+          launchId: current.activated.launch.launchId, generationRef: current.authority.generationRef,
+          workerIdentityDigest: current.activated.launch.workerIdentityDigest! });
+        const task: DeliveryPublicationTask = Object.freeze({ [publicationTaskBrand]: true as const });
+        publicationTask = task;
+        publicationPhase('publication_roots_open');
+        const roots = await holdPublicationRoots(authorization.workspace.canonicalRootPath, signal);
+        const retire = publicationCheckpointRetirement(current, authorization.context.planRef);
+        publicationTasks.set(task, { driver, owner, execution, worker: identity,
+          assertCurrent: (connection = driver) => assertCurrentWorker(identity, 'delivery', task, connection),
+          resources() {
+            if (activeWorker !== current || worker !== currentWorker || publicationRoots !== roots ||
+                ownedLaunchId !== identity.launchId || cleanupFailure !== undefined)
+              throw new KernelStorageError('RECOVERY_REQUIRED', 'publication retirement lost its original execution resources');
+            assertActiveStateOwner(driver, owner); roots.workspaceRoot.assertHeld(); roots.controlledHome.assertHeld();
+            return Object.freeze({ ...roots, publicationOwners: Object.freeze([...publicationOwners]), signal, retire,
+              reobserveRetirement });
+          } });
+        assertCurrentWorker(identity, 'delivery', task);
+        publicationLeaseReads ??= beginPublicationLeaseReads(driver, owner, execution, identity, task);
+        const preparationDiagnosis = beginInstalledSchedulerDiagnostic('publication_preparation');
+        preparationDiagnosis?.phase('publication_prepare');
+        publicationPhase('publication_prepare');
+        const original = await publication.preparePublicationInvocation(driver, artifacts, owner, {
+          execution, task, worker: identity, workspaceRoot: roots.workspaceRoot,
+          expectedRunRevision: readRun(driver, runId).revision, signal }, phase => {
+          publicationPhase(phase); preparationDiagnosis?.phase(phase);
+        }).catch(error => {
+          // Preserve the original refusal before failure retirement can wait
+          // for resources. This observation supplies no result or join proof.
+          preparationDiagnosis?.failure(error, closed || isClosing());
+          throw error;
+        });
+        publicationOwners.add(original);
+        // The preparation can finish after Stop. Register its original owner
+        // before inspecting the signal, so all close paths retain its join.
+        if (closed || isClosing() || signal.aborted || readRun(driver, runId).stopIntentRef) original.revoke();
+        // Do not throw before registering the original completion: a revoked
+        // claim must drain this exact preparation, never only close its FDs.
+        let claimed = false;
+        // Physical release and its CAS publications are one original producer.
+        // Joined I/O/rolled-back SQL errors preserve this exact owner, including
+        // commitAttempted, rather than opening or dispatching another arena.
+        receivedCompletion = { kind: 'publication', worker: currentWorker, activeWorker: current, finish: async () => {
+          publicationPhase('publication_dispatch');
+          if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== identity.launchId)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'publication completion lost its original worker');
+          if (!claimed) {
+            try { await publication.claimPublicationInvocation(driver, owner, original); }
+            catch (error) {
+              // Stop/expiry can win after the permanent SQL claim but before
+              // the real native arm. Only this issuer's unarmed object may
+              // then enter no-effect retirement; never infer an arm from SQL.
+              if (!(error instanceof KernelStorageError && error.code === 'LEASE_FENCED') &&
+                  !(signal.aborted && error === signal.reason)) throw error;
+              const status = publication.readOwnedPublicationDispatchState(driver, owner, execution, original);
+              if (status.phase === 'prepared') return publication.retirePublicationPreparation(driver, owner, execution, original);
+              if (status.armed) throw error;
+              original.revoke();
+            }
+            claimed = true;
+          }
+          operationPhase = 'claimed';
+          await publication.advancePublicationPath(driver, owner, execution, original);
+          operationPhase = 'received';
+          publicationPhase('publication_settlement');
+          const completed = publication.readOwnedPublicationCompletion(driver, owner, execution, original, driver);
+          if (completed.disposition === 'received' && completed.isLastForwardPath) {
+            const { handoffOwnedPublicationResult } = await import('./publication-finalization.js');
+            await handoffOwnedPublicationResult(driver, artifacts, owner, execution, original);
+            // Only the committed handoff permits cancellation of subsequent
+            // read-only work. First join the already-retired original resources.
+            receivedCompletion = { kind: 'publication_received', finish: finishReceivedPublication };
+            publicationPhase('publication_received_retirement');
+            await retireWorkerResources();
+            return receivedCompletion.finish();
+          }
+          const settlement = await preparePublicationSettlement(driver, artifacts, owner, { execution, publicationOwner: original });
+          const settled = await settlement.settle({ expectedRunRevision: readRun(driver, runId).revision });
+          if (settled.run.status === 'succeeded' || settled.run.status === 'completed_unverified') await retireWorkerResources();
+          return settled.run;
+        } };
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current)
+          closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      });
+      return ownOperation(work, abort, true);
+    },
+    finishCurrentFinalTurn: async value => {
+      const currentAgent = requireAgent();
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'final_turn') throw new KernelStorageError('REVISION_CONFLICT', 'another result cannot become a final-turn completion');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      const signal = abort.signal;
+      operationPhase = 'preparing';
       const work = (async () => {
         signal.throwIfAborted();
-        const selected = await readToolCut(driver, artifacts, runId, agent.resolveToolInput);
+        if (!activeWorker || !worker || !generation || !controller || !reservation ||
+            ownedLaunchId !== activeWorker.activated.launch.launchId) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'final turn requires its original physical worker owner');
+        }
+        const current = activeWorker, currentWorker = worker;
+        // Fix the completed producer before the first quiescence or immutable
+        // publication. This is not permission to request another model turn.
+        retirementPhase('history');
+        const childSelection = await currentAgent.planFinalChildren({ expectedRunRevision }, signal);
+        const candidate = childSelection.disposition === 'candidate'
+          ? await currentAgent.beginFinalCandidate({ expectedRunRevision }, signal) : undefined;
         signal.throwIfAborted();
+        const checkpointId = childSelection.disposition === 'child_final_required' ? childSelection.checkpointId : candidate!.checkpointId;
+        const retire = checkpointRetirement(current, checkpointId, signal, retirementPhase);
+        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        operationPhase = 'received';
+        receivedCompletion = { kind: 'final_turn', worker: currentWorker, activeWorker: current, finish: async () => {
+          if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== current.activated.launch.launchId) {
+            throw new KernelStorageError('LEASE_FENCED', 'final-turn completion lost its original physical owner');
+          }
+          assertActiveStateOwner(driver, owner);
+          proof ??= await retire();
+          for (let completion = 0; ; completion++) {
+            const selected = readRun(driver, runId);
+            if (!selected.stopIntentRef && sampleCanonicalNow() >= selected.deadlineAt) {
+              await currentAgent.expireRun({ expectedRunRevision: selected.revision });
+              continue;
+            }
+            if (selected.activeWorkerLaunchId !== ownedLaunchId || selected.leaseEpoch !== current.activated.launch.leaseEpoch) {
+              throw new KernelStorageError('LEASE_FENCED', 'final turn no longer belongs to its original active worker');
+            }
+            try {
+              retirementPhase('retirement_commit');
+              return candidate ? (await candidate.complete({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect })).run
+                : (await currentAgent.waitForFinalChildren({ expectedRunRevision: selected.revision, checkpoint: proof.postEffect }, signal)).run;
+            } catch (error) {
+              if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || completion >= 7 ||
+                  readRun(driver, runId).revision === selected.revision) throw error;
+            }
+          }
+        } };
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current)
+          closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      })();
+      return ownOperation(work, abort);
+    },
+    executeCurrentDependencies: async value => {
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'dependency' && receivedCompletion.kind !== 'dependency_acquisition')
+        throw new KernelStorageError('REVISION_CONFLICT', 'another result cannot become a dependency execution');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      const signal = abort.signal, reads = artifacts.withReadSignal(signal);
+      operationPhase = 'preparing';
+      let claimed: Awaited<ReturnType<typeof claimDependencyInvocation>> | undefined;
+      let acquiring: { original: DependencyInvocationOwner; parent: LinuxBlockedWorker; current: ActiveWorker } | undefined;
+      let handledFailure: { error: unknown } | undefined;
+      const handleDependencyFailure = async (error: unknown): Promise<Run> => {
+        if (handledFailure?.error === error) throw error;
+
+        if (operationPhase === 'claimed' && receivedCompletion?.kind === 'dependency_acquisition' && isJoinedCasPublicationFailure(error)) throw error;
+        handledFailure = { error };
+        if (claimed && acquiring && dependencyOwner === acquiring.original && operationPhase === 'claimed' &&
+            !(error instanceof ResourceRetirementError) && !hasDependencyProcessCustody(driver, owner, acquiring.original)) {
+          const { original, parent, current } = acquiring;
+          const retire = checkpointRetirement(current, dependencyReadyCheckpointId(runId, claimed.opId, claimed.attempt), signal);
+          let retained = false, committed = false;
+          let proof: Awaited<ReturnType<typeof retire>> | undefined;
+          let settlement: Awaited<ReturnType<typeof prepareDependencyAcquisitionFailureSettlement>> | undefined;
+          const completion: ReceivedCompletion = { kind: 'dependency_acquisition', worker: parent, activeWorker: current, finish: async () => {
+            if (worker !== parent || activeWorker !== current || ownedLaunchId !== current.activated.launch.launchId)
+              throw new KernelStorageError('LEASE_FENCED', 'dependency acquisition failure lost its original physical parent');
+            assertActiveStateOwner(driver, owner);
+            if (!retained) { await retainDependencyAcquisitionFailure(driver, owner, original); retained = true; }
+            operationPhase = 'received';
+            if (!committed) {
+              const actual = readRun(driver, runId);
+              if (!actual.stopIntentRef && sampleCanonicalNow() >= actual.deadlineAt)
+                await continuation.expireRun({ expectedRunRevision: actual.revision });
+              proof ??= await retire();
+              settlement ??= await prepareDependencyAcquisitionFailureSettlement(driver, artifacts, owner, original, proof.postEffect, reobserveRetirement);
+              await settlement.settle(readRun(driver, runId).revision); committed = true; completion.toolCompletionCommitted = true;
+            }
+            // No process ever existed: its data were closed by the original
+            // broker, so this branch cannot send a process result ACK.
+            await closeDependencyInvocationOwner(driver, owner, original);
+            dependencyOwners.delete(original); if (dependencyOwner === original) dependencyOwner = undefined;
+            const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+            await continuation.stopForDependencyFailure({ expectedRunRevision: readRun(driver, runId).revision, ...inspector });
+            return readRun(driver, runId);
+          } };
+          receivedCompletion = completion;
+          if (closingCompletion?.worker === parent && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+          return completion.finish();
+        }
+        if (operationPhase !== 'received' && dependencyOwner) {
+          const original = dependencyOwner;
+          if (claimed) {
+            let committed = false;
+            const parent = worker!, current = activeWorker!;
+            const completion: ReceivedCompletion = { kind: 'dependency_acquisition', worker: parent, activeWorker: current, finish: async () => {
+              await retainDependencyUnknownBrokerFence(driver, owner, original); operationPhase = 'received';
+              if (!committed) { await markDependencyInvocationUnknown(driver, owner, original); committed = true; completion.toolCompletionCommitted = true; }
+              await revokeOriginalWorker();
+              const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+              const stopped = (await continuation.stopForDependencyAmbiguity({ expectedRunRevision: readRun(driver, runId).revision, ...inspector })).run;
+              return stopped.activeWorkerLaunchId ? await beginWorkerRecovery(driver, artifacts, owner,
+                { runId, expectedRunRevision: stopped.revision }) : stopped;
+            } };
+            receivedCompletion = completion;
+            if (closingCompletion?.worker === parent && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+            return completion.finish();
+          }
+          await closeDependencyInvocationOwner(driver, owner, original); dependencyOwners.delete(original); dependencyOwner = undefined;
+        }
+        throw error;
+      };
+      const work = (async () => {
+        if (!selectedRuntime || !bootstrap) throw new KernelStorageError('INVALID_REQUEST', 'dependency requires its actual selected installed native runtime');
+        const cut = await readRecoveryClosure(driver, reads, runId);
+        if (cut.run.revision !== expectedRunRevision || cut.run.nextStep !== 'verify')
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dependency requires its exact original candidate');
+        const frontier = await reads.readCanonical<import('../kernel/types.js').RunFrontier>(cut.run.frontierRef!);
+        if (frontier.kind !== 'verify' || frontier.phase !== 'dependencies') throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dependency phase is not current');
+        const history = await (await import('./dependency-history.js')).readDependencyHistory(driver, reads, cut);
+        if (history.get(frontier.candidateItemId)?.failed) {
+          const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+          return (await continuation.stopForDependencyFailure({ expectedRunRevision, ...inspector })).run;
+        }
+        if (cut.run.cancelRequested || cut.run.stopIntentRef || sampleCanonicalNow() >= cut.run.deadlineAt)
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'dependency cannot release after its original Stop or deadline');
+        if (!cut.run.activeWorkerLaunchId) {
+          const selection = await selectDependencyBeforeWorker(driver, reads, owner, { runId, expectedRunRevision }, bootstrap.releaseKeys, signal);
+          if (selection.disposition === 'denied')
+            return (await continuation.stopForDependencyScriptDenial({ expectedRunRevision: selection.run.revision })).run;
+          if (selection.disposition !== 'worker_required') return selection.run;
+        }
+        const current = cut.run.activeWorkerLaunchId ? activeWorker : await activateWorker(cut, signal);
+        if (!current || !worker || !generation || !controller || !reservation || ownedLaunchId !== current.activated.launch.launchId)
+          throw new KernelStorageError('LEASE_FENCED', 'dependency cannot adopt another original parent');
+        const parent = worker, run = readRun(driver, runId);
+        const prepared = await prepareActiveDependencyInvocation(driver, reads, owner,
+          { runId, expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, bootstrap.releaseKeys, signal);
+        if (parent.containment.backend.kind !== 'linux') throw new TypeError('dependency requires its actual Linux parent');
+        const dispatchId = identityHash('cliq-dependency-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        const sandboxLaunchSpecRef = await publishDependencyRecipe(reads, current.recipe.spec, current.processContainmentRef,
+          parent.containment.backend.cgroupPath, prepared, dispatchId);
+        const original = await prepareDependencyInvocationOwner(driver, artifacts, owner, selectedRuntime, { runId, opId: prepared.entry.opId,
+          attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef, sourceCheckpointId: prepared.sourceCheckpointId }, bootstrap.releaseKeys, signal);
+        dependencyOwners.add(original); dependencyOwner = original;
+        claimed = await claimDependencyInvocation(driver, owner, original); operationPhase = 'claimed';
+        acquiring = { original, parent, current };
+        let invocationPending: Promise<import('../sandbox/linux-worker.js').LinuxBlockedDependency> | undefined;
+        let resultPending: Promise<import('../sandbox/linux-worker.js').NativeDependencyResult> | undefined;
+        const acquireOriginal = async (): Promise<Run> => {
+          await acquireDependencyPackages(driver, owner, original);
+          invocationPending ??= (async () => {
+            const inputs = await readDependencyProcessInputs(driver, owner, original);
+            const process = await parent.createDependency(inputs.closure, inputs.transport, inputs.binding, { signal });
+            registerDependencyProcess(driver, owner, original, process);
+            await stageDependencyProcessInputs(driver, owner, original);
+            await releaseDependencyProcess(driver, owner, original); return process;
+          })();
+          const invocation = await invocationPending;
+          const result = await (resultPending ??= invocation.result());
+        // Synchronous native/private snapshot first; every later failure keeps
+        // this exact received result and never creates a second acquisition.
+        operationPhase = 'received';
+        let retained = false;
+        const retire = checkpointRetirement(current, dependencyReadyCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        let settlement: Awaited<ReturnType<typeof prepareDependencyReceivedSettlement>> | undefined;
+        let committed = false;
+        const completion: ReceivedCompletion = { kind: 'dependency', worker: parent, activeWorker: current, finish: async () => {
+          if (worker !== parent || activeWorker !== current || ownedLaunchId !== current.activated.launch.launchId)
+            throw new KernelStorageError('LEASE_FENCED', 'dependency completion lost its actual original parent');
+          assertActiveStateOwner(driver, owner);
+          if (!retained) { retainDependencyResultForSettlement(driver, owner, original, result); retained = true; }
+          if (!committed) {
+            let actual = readRun(driver, runId);
+            if (!actual.stopIntentRef && sampleCanonicalNow() >= actual.deadlineAt)
+              actual = (await continuation.expireRun({ expectedRunRevision: actual.revision })).run;
+            proof ??= await retire();
+            settlement ??= await prepareDependencyReceivedSettlement(driver, artifacts, owner, original, proof.postEffect, reobserveRetirement);
+            await settlement.settle(readRun(driver, runId).revision); committed = true; completion.toolCompletionCommitted = true;
+          }
+          await acknowledgeDependencyInvocation(driver, owner, original);
+          await closeDependencyInvocationOwner(driver, owner, original);
+          dependencyOwners.delete(original); if (dependencyOwner === original) dependencyOwner = undefined;
+          if (settlement?.outcome === 'failed') {
+            const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+            await continuation.stopForDependencyFailure({ expectedRunRevision: readRun(driver, runId).revision, ...inspector });
+          }
+          return readRun(driver, runId);
+        } };
+        receivedCompletion = completion;
+        if (closingCompletion?.worker === parent && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+        // Register before a result friend, native mutex or first await can fail.
+        retainDependencyResultForSettlement(driver, owner, original, result); retained = true;
+        return completion.finish();
+        };
+        // CAS publication can fail after a real joined GET. Retain the same
+        // opaque package/cursor and fixed owner, never another claim or GET.
+        receivedCompletion = { kind: 'dependency_acquisition', worker: parent, activeWorker: current, finish: () => acquireOriginal().catch(handleDependencyFailure) };
+        if (closingCompletion?.worker === parent && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      })().catch(handleDependencyFailure);
+      return ownOperation(work, abort);
+    },
+    executeCurrentVerifier: async value => {
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'verifier')
+        throw new KernelStorageError('REVISION_CONFLICT', 'another received result cannot become a verifier execution');
+      const abort = new AbortController(); operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      const signal = abort.signal;
+      const reads = artifacts.withReadSignal(signal);
+      operationPhase = 'preparing';
+      let preparedVerifier: Extract<Awaited<ReturnType<typeof continuation.prepareVerifier>>, { disposition: 'prepared' }> | undefined;
+      let claimedVerifier: Awaited<ReturnType<typeof continuation.claimVerifier>> | undefined;
+      const preparePermission = async (expectedRunRevision: number): Promise<Run | undefined> => {
+        const selected = await continuation.prepareVerifierPermission({ expectedRunRevision }, signal);
+        if (selected.disposition === 'authorized') return undefined;
+        if (selected.disposition === 'retirement_required') {
+          const current = activeWorker;
+          if (!current || !worker || ownedLaunchId !== current.activated.launch.launchId)
+            throw new KernelStorageError('LEASE_FENCED', 'verifier selection cannot retire another original worker');
+          const proof = await retireToCheckpoint(current, selected.checkpointId, signal);
+          await continuation.retireVerifierSelection({ expectedRunRevision: selected.run.revision,
+            checkpointId: selected.checkpointId, checkpoint: proof.postEffect });
+          await retireWorkerResources(); return readRun(driver, runId);
+        }
+        if (selected.disposition === 'policy_denied') return (await continuation.stopForVerifierPolicyDenial({ expectedRunRevision: selected.run.revision })).run;
+        return selected.run;
+      };
+      const work = (async () => {
+        signal.throwIfAborted();
+        builtinPhase('verifier_permission');
+        const waiting = await preparePermission(expectedRunRevision); if (waiting) return waiting;
+        builtinPhase('verifier_recovery');
+        const { cut: selected, progress } = await readVerifierRecoveryClosure(driver, reads, runId);
+        signal.throwIfAborted();
+        if (!progress || selected.run.revision !== expectedRunRevision || selected.run.nextStep !== 'verify' || progress.complete ||
+            selected.run.cancelRequested || selected.run.stopIntentRef || sampleCanonicalNow() >= selected.run.deadlineAt)
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'verifier requires its exact unstopped pending candidate');
+        const queued = selected.run.status === 'queued' && !selected.run.activeWorkerLaunchId;
+        builtinPhase('verifier_activate');
+        const current = queued ? await activateWorker(selected, signal) : activeWorker;
+        if (!current || !worker || !generation || !controller || !reservation ||
+            ownedLaunchId !== current.activated.launch.launchId || readRun(driver, runId).activeWorkerLaunchId !== ownedLaunchId)
+          throw new KernelStorageError('LEASE_FENCED', 'verifier cannot adopt another parent worker');
+        const currentWorker = worker, run = readRun(driver, runId);
+        // Refresh only between phases, when no verifier reader holds a
+        // WorkerLaunch cut. The held worker and original lease still decide.
+        const refreshVerifierLease = () => refreshInvocationLease(current, currentWorker);
+        builtinPhase('verifier_prepare');
+        const prepared = await continuation.prepareVerifier({ expectedRunRevision: run.revision, leaseEpoch: run.leaseEpoch }, signal);
+        if (prepared.disposition !== 'prepared') {
+          const waiting = await preparePermission(prepared.run.revision);
+          if (!waiting) throw new KernelStorageError('REVISION_CONFLICT', 'verifier selection changed after activation');
+          return waiting;
+        }
+        preparedVerifier = prepared;
+        signal.throwIfAborted();
+        if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'verifier parent is not Linux');
+        const dispatchId = identityHash('cliq-verifier-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        const sandboxLaunchSpecRef = await publishVerifierRecipe(reads, current.recipe.spec, current.processContainmentRef,
+          currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
+        signal.throwIfAborted();
+        refreshVerifierLease();
+        const claimed = await continuation.claimVerifier({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch,
+          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal, refreshVerifierLease);
+        claimedVerifier = claimed; operationPhase = 'claimed';
+        refreshVerifierLease();
+        const invocation = await currentWorker.createVerifier(claimed.closure, { signal });
+        signal.throwIfAborted();
+        refreshVerifierLease();
+        const releaseReads = new AbortController(); verifierReleaseReadAbort = releaseReads;
+        if (closed || isClosing()) releaseReads.abort(new KernelStorageError('LEASE_FENCED', 'verifier release is closing'));
+        try { await claimed.release(invocation, releaseReads.signal); verifierReleased = true; }
+        finally { if (verifierReleaseReadAbort === releaseReads) verifierReleaseReadAbort = undefined; }
+        const result = await invocation.result();
+        verifierReleased = false; operationPhase = 'received';
+        // Register before any post-result await. Closing can revoke the
+        // original producer but cannot replace its genuinely received result.
+        let completion: Awaited<ReturnType<typeof continuation.beginVerifierCompletion>> | undefined;
+        const retire = checkpointRetirement(current, prepared.checkpointId, signal);
+        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        receivedCompletion = { kind: 'verifier', worker: currentWorker, activeWorker: current, finish: async () => {
+          if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== current.activated.launch.launchId)
+            throw new KernelStorageError('LEASE_FENCED', 'verifier result lost its original physical producer');
+          assertActiveStateOwner(driver, owner);
+          let actual = readRun(driver, runId);
+          if (!actual.stopIntentRef && sampleCanonicalNow() >= actual.deadlineAt)
+            actual = (await continuation.expireRun({ expectedRunRevision: actual.revision })).run;
+          completion ??= await continuation.beginVerifierCompletion({ expectedRunRevision: actual.revision,
+            opId: prepared.entry.opId, attempt: prepared.entry.attempt, result });
+          proof ??= await retire();
+          return (await completion.complete({ expectedRunRevision: readRun(driver, runId).revision, checkpoint: proof.postEffect })).run;
+        } };
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
+      })().catch(async error => {
+        verifierReleased = false;
+        if (claimedVerifier && operationPhase !== 'received') {
+          await revokeOriginalWorker();
+          const history = readInvocationAttempt(driver, runId, claimedVerifier.entry.opId, claimedVerifier.entry.attempt);
+          if (history.at(-1)?.phase === 'dispatch_claimed') {
+            const ambiguity = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-verifier-ambiguity-v1', runId,
+              opId: claimedVerifier.entry.opId, attempt: claimedVerifier.entry.attempt, dispatchId: claimedVerifier.entry.dispatchId,
+              claimJournalSeq: claimedVerifier.entry.seq, requestRef: claimedVerifier.entry.requestRef,
+              targetRef: claimedVerifier.entry.target, grantRef: claimedVerifier.entry.grantRef,
+              reason: 'original_producer_joined_without_result' }, 'cliq-verifier-ambiguity-v1');
+            await markInvocationUnknown(driver, artifacts, owner, { runId, opId: claimedVerifier.entry.opId,
+              attempt: claimedVerifier.entry.attempt, expectedRunRevision: readRun(driver, runId).revision,
+              evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
+          }
+        } else if (preparedVerifier && operationPhase !== 'received') {
+          await continuation.failVerifierPreparation({ expectedRunRevision: readRun(driver, runId).revision,
+            opId: preparedVerifier.entry.opId, attempt: preparedVerifier.entry.attempt });
+        }
+        throw error;
+      });
+      return ownOperation(work, abort);
+    },
+    executeCurrentTool: async value => {
+      const currentAgent = requireAgent();
+      const expectedRunRevision = revision(value, true);
+      if (receivedCompletion && receivedCompletion.kind !== 'tool') throw new KernelStorageError('REVISION_CONFLICT', 'another result cannot become a tool execution');
+      const abort = new AbortController();
+      operationAbort = abort;
+      if (receivedCompletion) return ownOperation(receivedCompletion.finish(), abort);
+      // Selection only reads retained data. The original active worker keeps
+      // its guarded heartbeat until execution preparation begins.
+      const signal = abort.signal;
+      const reads = artifacts.withReadSignal(signal);
+      operationPhase = 'reading';
+      let claimedTool: Awaited<ReturnType<typeof currentAgent.claimTool>> | undefined;
+      const work = (async () => {
+        builtinPhase('tool_select');
+        signal.throwIfAborted();
+        const selected = await currentAgent.readToolInvocation(signal);
+        signal.throwIfAborted();
+        operationPhase = 'preparing';
         const queued = selected.run.status === 'queued' && selected.run.activeWorkerLaunchId === undefined;
         const retained = selected.run.status === 'running' && activeWorker !== undefined && worker !== undefined && generation !== undefined &&
           selected.run.activeWorkerLaunchId === activeWorker.activated.launch.launchId;
@@ -717,145 +2396,559 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           await worker!.observeProcess();
           signal.throwIfAborted();
         }
-        if (selected.call.toolName !== 'edit') throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe supports only the current builtin edit');
-        const projection = await agent.readToolInvocation();
-        requireEqual(projection.run, selected.run, 'current native tool projection');
-        if (projection.kind !== 'tool' || projection.execution.kind !== 'builtin' || projection.execution.adapterId !== LINUX_WORKER_RECIPE.editId) {
+        // Keep the original post-observation revision/lifecycle fence without
+        // replaying the same complete artifact graph for a second projection.
+        requireEqual(readRun(driver, runId), selected.run, 'current native tool projection');
+        // Projection and lifecycle planning belong to the same complete cut.
+        // prepare/claim/release still independently reread their own authority.
+        const projection = selected;
+        if (projection.kind === 'tool' && !(projection.execution.kind === 'builtin' && projection.execution.adapterId === LINUX_WORKER_RECIPE.editId ||
+            projection.execution.kind === 'builtin_script' || projection.execution.kind === 'mcp' || projection.execution.kind === 'supervisor_operation' && projection.execution.handlerId === 'skill_resource') ||
+            projection.kind === 'input' && projection.execution.kind !== 'supervisor_control') {
           throw new KernelStorageError('INVALID_REQUEST', 'this installed recipe does not support the frozen tool execution identity');
         }
-        const workspaceCut = await readRecoveryClosure(driver, artifacts, runId);
-        requireEqual(workspaceCut.run, selected.run, 'native tool workspace cut');
-        const current = queued ? await activateWorker(workspaceCut, signal) : activeWorker!;
-        const { recipe, processContainmentRef } = current;
-        const activated = { ...current.activated, run: queued ? current.activated.run : selected.run };
-        if (!worker || !generation) throw new KernelStorageError('RECOVERY_REQUIRED', 'native tool execution lost its original physical owner');
-        const currentWorker = worker;
-        signal.throwIfAborted();
-        const prepared = await agent.prepareTool({ expectedRunRevision: activated.run.revision, leaseEpoch: activated.run.leaseEpoch });
-        if (prepared.disposition !== 'prepared') {
-          const checkpointId = prepared.disposition === 'approval_required' ? prepared.checkpointId
-            : identityHash('cliq-denied-tool-worker-checkpoint-v1', runId, prepared.run.latestCheckpointId, nonce());
+        if (retained && projection.kind === 'tool' && projection.execution.kind !== 'supervisor_operation' && !worker!.hasInvocationCapacity()) {
+          // This is the original controller's monotonic scope arena, observed
+          // before preparing any new grant or permanent claim. It is not the
+          // Run tool-call budget and supplies no process-death evidence.
+          const latest = new Map<string, typeof selected.journal[number]>();
+          for (const entry of selected.journal) latest.set(`${entry.opId}:${entry.attempt}`, entry);
+          if ([...latest.values()].some(entry => ['prepared', 'dispatch_claimed', 'unknown'].includes(entry.phase)))
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'scope capacity cannot replace an original unresolved invocation');
+          const current = activeWorker!, cause = 'scope_capacity';
+          const checkpointId = identityHash('cliq-tool-capacity-checkpoint-v1', runId,
+            current.activated.launch.launchId, selected.run.frontierRef!, String(selected.run.revision), cause);
           const proof = await retireToCheckpoint(current, checkpointId, signal);
-          if (prepared.disposition === 'approval_required') {
-            await agent.waitForToolApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef, checkpoint: proof.postEffect });
-          } else {
-            const current = await readRecoveryClosure(driver, artifacts, runId);
-            await sealWorkerGeneration(driver, artifacts, owner, { launchId: activated.launch.launchId,
-              expectedRunRevision: current.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
-              quiesceId: proof.quiesceId, checkpointId, contextManifestRef: current.latestCheckpoint.contextManifestRef,
+          if (proof.postEffect.workspaceStateRef !== selected.checkpoint.workspaceStateRef)
+            throw new KernelStorageError('RECOVERY_REQUIRED', 'scope capacity retirement cannot adopt an unobserved workspace change');
+          const cut = await readRecoveryClosure(driver, reads, runId);
+          if (cut.run.frontierRef !== selected.run.frontierRef || cut.latestCheckpoint.id !== selected.checkpoint.id)
+            throw new KernelStorageError('REVISION_CONFLICT', 'scope capacity retirement lost its original tool frontier');
+          const sealed = await sealWorkerGeneration(driver, artifacts, owner, { launchId: current.activated.launch.launchId,
+            expectedRunRevision: cut.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
+            quiesceId: proof.quiesceId, checkpointId, contextManifestRef: cut.latestCheckpoint.contextManifestRef,
+            ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' }, reobserveRetirement);
+          await retireWorkerResources();
+          return sealed.run;
+        }
+        builtinPhase('tool_prepare');
+        if (retained && projection.kind === 'tool' &&
+            (projection.execution.kind === 'builtin' || projection.execution.kind === 'builtin_script'))
+          refreshInvocationLease(activeWorker!, worker!);
+        let prepared = await currentAgent.prepareTool({ expectedRunRevision: selected.run.revision, leaseEpoch: selected.run.leaseEpoch }, signal);
+        if (prepared.disposition === 'retry_pending' || prepared.disposition === 'retry_terminal_required' || prepared.disposition === 'result_committed') return prepared.run;
+        if (prepared.disposition === 'retirement_required') {
+          if (!retained || !activeWorker) throw new KernelStorageError('RECOVERY_REQUIRED', 'waiting selection lost its original live worker');
+          const current = activeWorker, proof = await retireToCheckpoint(current, prepared.checkpointId, signal);
+          await currentAgent.retireToolSelection({ expectedRunRevision: prepared.run.revision,
+            checkpointId: prepared.checkpointId, checkpoint: proof.postEffect });
+          await retireWorkerResources();
+          signal.throwIfAborted();
+          const next = readRun(driver, runId);
+          // Nothing from the old worker's decision is an authorization, nonce,
+          // pending wait or grant. Reproduce the complete policy on this cut.
+          prepared = await currentAgent.prepareTool({ expectedRunRevision: next.revision, leaseEpoch: next.leaseEpoch }, signal);
+        }
+        if (prepared.disposition === 'retry_pending' || prepared.disposition === 'retry_terminal_required' || prepared.disposition === 'result_committed') return prepared.run;
+        if (prepared.disposition === 'mcp_server_approval_required') {
+          await currentAgent.waitForMcpServerApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'approval_required') {
+          await currentAgent.waitForToolApproval({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'input_required') {
+          await currentAgent.waitForInput({ expectedRunRevision: prepared.run.revision, waitingOnRef: prepared.waitingOnRef });
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'child_admission_required') return prepared.run;
+        if (prepared.disposition === 'skill_resource_required') {
+          try { return (await currentAgent.readSkillResource({ expectedRunRevision: prepared.run.revision, leaseEpoch: prepared.run.leaseEpoch }, signal)).run; }
+          catch (error) {
+            if (!(error instanceof KernelStorageError) || error.code !== 'BUDGET_EXHAUSTED') throw error;
+            return (await currentAgent.stopForResourceFailure({ expectedRunRevision: prepared.run.revision })).run;
+          }
+        }
+        if (prepared.disposition === 'children_required') {
+          await currentAgent.waitForChildren({ expectedRunRevision: prepared.run.revision }, signal);
+          return readRun(driver, runId);
+        }
+        if (prepared.disposition === 'denied') {
+          if (activeWorker) {
+            const current = activeWorker;
+            const checkpointId = identityHash('cliq-denied-tool-worker-checkpoint-v1', runId, prepared.run.latestCheckpointId, nonce());
+            const proof = await retireToCheckpoint(current, checkpointId, signal);
+            const cut = await readRecoveryClosure(driver, reads, runId);
+            await sealWorkerGeneration(driver, artifacts, owner, { launchId: current.activated.launch.launchId,
+              expectedRunRevision: cut.run.revision, expectedGenerationRowVersion: proof.checkpointing.generation.rowVersion,
+              quiesceId: proof.quiesceId, checkpointId, contextManifestRef: cut.latestCheckpoint.contextManifestRef,
               ...proof.postEffect, snapshotEvidenceDigest: proof.snapshot.evidenceDigest, checkpointReason: 'auto' }, reobserveRetirement);
           }
           return readRun(driver, runId);
         }
+        if (prepared.disposition === 'worker_required') {
+          const workspaceCut = await readRecoveryClosure(driver, reads, runId);
+          requireEqual(workspaceCut.run, prepared.run, 'native tool worker selection cut');
+          const current = await activateWorker(workspaceCut, signal);
+          prepared = await currentAgent.prepareTool({ expectedRunRevision: current.activated.run.revision,
+            leaseEpoch: current.activated.run.leaseEpoch }, signal);
+        }
+        if (prepared.disposition === 'retry_pending' || prepared.disposition === 'retry_terminal_required' || prepared.disposition === 'result_committed') return prepared.run;
+        if (prepared.disposition !== 'prepared' || !activeWorker)
+          throw new KernelStorageError('REVISION_CONFLICT', 'tool must be selected again after its worker cut changed');
+        const current = activeWorker;
+        const { recipe, processContainmentRef } = current;
+        const activated = { ...current.activated, run: prepared.run };
+        if (!worker || !generation) throw new KernelStorageError('RECOVERY_REQUIRED', 'native tool execution lost its original physical owner');
+        const currentWorker = worker;
+        signal.throwIfAborted();
         const dispatchId = identityHash('cliq-tool-dispatch-v1', runId, prepared.entry.opId, String(prepared.entry.attempt), nonce());
+        if (prepared.target.execution.kind === 'mcp') {
+          if (!selectedRuntime || !bootstrap) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP requires its complete original installed recipe');
+          const execution = prepared.target.execution;
+          const grant = await reads.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(prepared.entry.grantRef!);
+          const frozen = await readMcpRegistryClosure(driver, reads, execution.registryRevisionRef, grant.principalId);
+          if (frozen.registry.transport.kind === 'stdio') {
+            if (!installedAnchor) throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'MCP stdio requires its original held installed anchor');
+            const actual = prepareMcpStdioRunInvocation({ driver, artifacts, owner, selected: selectedRuntime, anchor: installedAnchor,
+              agent: currentAgent, prepared, effectDispatchId: dispatchId, signal,
+              assertOpen() { if (closed || isClosing() || mcpStdioTask !== actual) throw new KernelStorageError('LEASE_FENCED', 'MCP stdio original resource is closing'); },
+              onLaunchClaimed() { operationPhase = 'claimed'; },
+              onEffectClaimed() { operationPhase = 'claimed'; toolReleased = true; } });
+            // Register the synchronous closeable receiver before any await.
+            mcpStdioTask = actual;
+            const received = await actual.result();
+            if (received.kind === 'setup_failed') {
+              if (!received.native || !received.binding || !received.scope || !received.input || !received.serverPrepared)
+                throw new ResourceRetirementError('MCP stdio original setup lacks its complete prepared local failure owner', received.failure);
+              if (received.instance) {
+                const latest = readRun(driver, runId);
+                if (!latest.stopIntentRef && sampleCanonicalNow() >= latest.deadlineAt) await currentAgent.expireRun({ expectedRunRevision: latest.revision });
+                const retirement = beginMcpServerUndispatchedClosure(driver, owner, received.instance.ref, prepared.entry, currentAgent.resolveToolInput);
+                operationPhase = 'received'; let localRun: Run | undefined;
+                const completion: ReceivedCompletion = { kind: 'mcp_unreceived', worker: currentWorker, activeWorker: current, retainsWorker: true, finish: async () => {
+                  localRun ??= await retirement.finish(); if (mcpStdioTask === actual) mcpStdioTask = undefined; return localRun;
+                } };
+                receivedCompletion = completion;
+                if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+                return completion.finish();
+              }
+              const failure = beginMcpStdioLaunchFailure(driver, artifacts, owner, { native: received.native, binding: received.binding,
+                scope: received.scope, input: received.input, prepared: received.serverPrepared.entry, claim: received.serverClaim?.entry,
+                toolPrepared: prepared.entry, reason: signal.aborted ? 'cancel' : Date.now() >= received.binding.launchDeadlineMs ? 'deadline'
+                  : received.failure instanceof TypeError ? 'manifest_mismatch' : 'transport_failure' });
+              operationPhase = 'received'; let failedRun: Run | undefined;
+              const completion: ReceivedCompletion = { kind: 'mcp_unreceived', worker: currentWorker, activeWorker: current, retainsWorker: true, finish: async () => {
+                failedRun ??= await failure.finish(); if (mcpStdioTask === actual) mcpStdioTask = undefined;
+                return failedRun;
+              } };
+              receivedCompletion = completion;
+              if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+              return completion.finish();
+            }
+            toolReleased = false;
+            if (received.kind === 'unknown') {
+              const uncertain = beginMcpStdioUnknown(driver, artifacts, owner, received.native, received.binding,
+                prepared.entry, received.claim.entry, currentAgent.resolveToolInput);
+              let settled = false;
+              const completion: ReceivedCompletion = { kind: 'mcp_unreceived', worker: currentWorker, activeWorker: current, finish: async () => {
+                if (!settled) { await uncertain.finish(); settled = true; }
+                const selected = readRun(driver, runId), recovering = selected.activeWorkerLaunchId === current.activated.launch.launchId
+                  ? await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: selected.revision }) : selected;
+                if (mcpStdioTask === actual) mcpStdioTask = undefined;
+                return recovering;
+              } };
+              receivedCompletion = completion;
+              if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+              return completion.finish();
+            }
+            operationPhase = 'received';
+            const observedAt = sampleCanonicalNow(), retire = checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+            let captured: Awaited<ReturnType<typeof publishMcpStdioRunCaptures>> | undefined, proof: Awaited<ReturnType<typeof retire>> | undefined;
+            let observation: ToolObservationV1 | undefined, observationRef: string | undefined, acknowledged = false;
+            const completion: ReceivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, finish: async () => {
+              captured ??= await publishMcpStdioRunCaptures(artifacts, received.native); proof ??= await retire();
+              if (!observation) {
+                const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: received.claim.entry.opId,
+                  attempt: received.claim.entry.attempt, requestRef: received.claim.entry.requestRef, targetRef: received.claim.entry.target,
+                  grantRef: received.claim.entry.grantRef!, dispatchId, observedAt, postEffect: proof.postEffect,
+                  captureRef: captured.ref, captureDigest: captured.value.captureDigest };
+                if (captured.value.result && captured.value.format === 'cliq-mcp-stdio-run-capture-v1')
+                  observation = { ...base, outcome: 'executed', content: captured.value.result, observationDigest: '' };
+                else {
+                  const diagnostic = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code: 'TOOL_PROTOCOL_ERROR',
+                    ...(captured.value.format === 'cliq-mcp-stdio-known-unusable-run-capture-v1' ? {
+                      knownUnusableCaptureRef: captured.ref, knownUnusableCaptureDigest: captured.value.captureDigest } : {}) }, 'cliq-tool-output-diagnostic-v1');
+                  observation = { ...base, outcome: 'error', code: 'TOOL_PROTOCOL_ERROR', diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+                }
+                observation.observationDigest = digestOmitting(observation, 'observationDigest');
+              }
+              observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+              if (!completion.toolCompletionCommitted) {
+                for (let retry = 0; ; retry++) {
+                  const run = readRun(driver, runId);
+                  try { await currentAgent.completeTool({ opId: received.claim.entry.opId, attempt: received.claim.entry.attempt,
+                    expectedRunRevision: run.revision, observationRef }); completion.toolCompletionCommitted = true; break; }
+                  catch (error) { if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 || readRun(driver, runId).revision === run.revision) throw error; }
+                }
+              }
+              if (!acknowledged) { acknowledgeMcpServerTerminal(driver, owner, received.instance.ref); acknowledged = true; }
+              if (mcpStdioTask === actual) mcpStdioTask = undefined;
+              if (captured.value.format === 'cliq-mcp-stdio-known-unusable-run-capture-v1') {
+                await retireWorkerResources(); const latest = readRun(driver, runId);
+                if (!['failed', 'cancelled', 'succeeded'].includes(latest.status)) await currentAgent.stopForMcpKnownUnusable({ expectedRunRevision: latest.revision,
+                  ...await publishInspector(artifacts, assertActiveStateOwner(driver, owner)) });
+              }
+              return readRun(driver, runId);
+            } };
+            receivedCompletion = completion;
+            if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+            return completion.finish();
+          }
+          const transport = frozen.registry.transport;
+          const output = frozen.registry.tools.find(tool => tool.name === execution.serverToolName)?.outputSchemaRef;
+          const outputSchema = output ? await reads.readCanonical(output) : undefined;
+          const call = await reads.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(prepared.request.inputRef);
+          const argumentsValue = await readMcpRequestArguments(reads, { request: prepared.request, target: prepared.target,
+            registry: frozen.registry, registryRef: frozen.ref, call });
+          const broker = await loadInstalledMcpHttpBroker(selectedRuntime, signal);
+          const trustStoreBytes = await reads.readBytes((await reads.readCanonical<import('../kernel/credential-authority.js').EndpointRegistrationV1>(transport.endpointRegistrationRef)).tls.trustStoreRef);
+          const frames = [mcpInitializeRequestData(1, '0.15.0'), mcpInitializedNotificationData(), mcpToolsListRequestData(2),
+            mcpToolsCallRequestData(3, execution.serverToolName, argumentsValue)];
+          const firstPreparation = readInvocationJournal(driver, runId).find(entry => entry.opId === prepared.entry.opId && entry.phase === 'prepared');
+          if (!firstPreparation) throw new KernelStorageError('RECOVERY_REQUIRED', 'MCP HTTP lost its original first call preparation');
+          const originalRetryDeadline = await (await import('./mcp-retry-admission.js')).readMcpRetryPreparedDeadline(driver, reads, prepared.entry);
+          const deadlineMs = Math.min(parseCanonicalTime(prepared.run.deadlineAt), parseCanonicalTime(grant.expiresAt),
+            parseCanonicalTime(activated.launch.leaseExpiresAt!), parseCanonicalTime(firstPreparation.timestamp) + frozen.registry.lifecycle.callTimeoutMs,
+            originalRetryDeadline ?? Number.MAX_SAFE_INTEGER);
+          if (Date.now() >= deadlineMs) throw new KernelStorageError('LEASE_FENCED', 'MCP original call deadline expired before its native preparation');
+          const transportInput = frames.map(frame => ({ phase: frame.phase, bodyBytes: Buffer.from(frame.json), bodyBytesDigest: frame.digest }));
+          return withInstalledMcpHttpAuthority(selectedRuntime, owner, reads, grant.principalId, transport, async authority => {
+            signal.throwIfAborted(); authority.assertCurrent();
+            const endpoint = authority.endpoint;
+            const native = broker.prepareRunHttp({ authentication: authority.authentication,
+              target: { hostAscii: endpoint.target.hostAscii, port: endpoint.target.port, path: endpoint.target.basePath,
+                serverNameAscii: endpoint.tls.serverNameAscii, spkiSha256Pins: endpoint.tls.spkiSha256Pins },
+              trustStoreBytes, trustStoreDigest: endpoint.tls.trustStoreDigest, maximumResponseBytes: 1_048_576,
+              remainingDeadlineMs: Math.max(1, deadlineMs - Date.now()), recipe: transportInput });
+            mcpTransport = native;
+            try { await native.ready; signal.throwIfAborted(); }
+            catch (error) { await native.close(); mcpTransport = undefined; throw error; }
+            native.retainDispatchFence();
+            const binding: RunMcpHttpBinding = { runId, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId,
+              dispatchJournalSeq: nextJournalSequence(driver, runId), requestRef: prepared.entry.requestRef, requestDigest: prepared.request.requestDigest,
+              targetRef: prepared.entry.target, targetDigest: prepared.target.targetDigest, grantRef: prepared.entry.grantRef!, grantDigest: grant.grantDigest,
+              registryRef: frozen.ref, manifestDigest: frozen.registry.manifestDigest, toolContractDigest: execution.toolContractDigest,
+              batchItemId: prepared.request.batchItemId, callId: prepared.request.callId, callIndex: prepared.request.callIndex,
+              supervisorInstanceId: owner.supervisorInstanceId, stateOwnerEpoch: owner.ownerEpoch, workerLaunchId: activated.launch.launchId,
+              leaseEpoch: prepared.entry.leaseEpoch, brokerFenceTokenDigest: native.brokerFenceTokenDigest, deadlineMs };
+            let claimed: Awaited<ReturnType<typeof currentAgent.claimTool>>;
+            try {
+              native.bind(binding);
+              claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
+                opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, brokerFenceTokenDigest: native.brokerFenceTokenDigest }, signal, { kind: 'http', owner: native, binding });
+            } catch (error) { await native.close(); native.releaseDispatchFence(); mcpTransport = undefined; throw error; }
+            operationPhase = 'claimed'; toolReleased = true;
+            try {
+              await driveMcpRunProtocol(native, binding, frozen.registry, () => {
+                authority.assertCurrent(); frozen.assertUnchanged(driver); claimed.assertMcpRelease();
+                if (closed || isClosing() || mcpTransport !== native) throw new KernelStorageError('LEASE_FENCED', 'MCP original resource owner is closing');
+              }, outputSchema);
+            } catch (error) {
+              const custody = readMcpRunResourceOwner(native, binding);
+              if (!custody.resultReceived) {
+                let settled: Run | undefined;
+                const settlement: ReceivedCompletion = { kind: 'mcp_unreceived', worker: currentWorker, activeWorker: current,
+                  finish: async () => {
+                    if (!settled) {
+                      if (custody.joined && !custody.joined.networkStarted && !custody.joined.requestStarted &&
+                          !custody.joined.setupReleased && !custody.joined.effectReleased)
+                        settled = await failMcpRunWithoutRelease(driver, artifacts, owner, native, prepared.entry, claimed.entry, currentAgent.resolveToolInput);
+                      else settled = (await settleMcpRunUnknown(driver, artifacts, owner, native, prepared.entry, claimed.entry)).run;
+                    }
+                    // The existing real recovery/quarantine owns M's death
+                    // and private-generation retirement, preserving the ready
+                    // no-I/O result or original unresolved tool frontier.
+                    const selected = readRun(driver, runId);
+                    const recovering = selected.activeWorkerLaunchId === current.activated.launch.launchId
+                      ? await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: selected.revision }) : selected;
+                    mcpTransport = undefined; return recovering;
+                  } };
+                receivedCompletion = settlement;
+                if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = settlement;
+                return settlement.finish();
+              }
+              // A complete native matching response remains in custody even
+              // when semantic validation or finite-tail export refuses.
+            }
+            operationPhase = 'received';
+            const observedAt = sampleCanonicalNow();
+            const retire = checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+            let captured: Awaited<ReturnType<typeof publishMcpRunCapture>> | undefined;
+            let proof: Awaited<ReturnType<typeof retire>> | undefined;
+            let observation: ToolObservationV1 | undefined, observationRef: string | undefined;
+            let captureAcknowledged = false;
+            const completion: ReceivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, finish: async () => {
+              captured ??= await publishMcpRunCapture(artifacts, native); proof ??= await retire();
+              if (!observation) {
+                const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
+                  attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
+                  grantRef: claimed.entry.grantRef!, dispatchId, observedAt, postEffect: proof.postEffect,
+                  captureRef: captured.ref, captureDigest: captured.value.captureDigest };
+                if (captured.value.result) observation = { ...base, outcome: 'executed', content: captured.value.result, observationDigest: '' };
+                else {
+                  const unusable = captured.value.unusableResponseRef && await reads.readCanonical<import('../kernel/mcp.js').McpKnownUnusableResponseV1>(captured.value.unusableResponseRef);
+                  const diagnostic = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code: 'TOOL_PROTOCOL_ERROR',
+                    ...(unusable ? { knownUnusableResponseRef: captured.value.unusableResponseRef, knownUnusableResponseDigest: unusable.auditDigest } : {}) }, 'cliq-tool-output-diagnostic-v1');
+                  observation = { ...base, outcome: 'error', code: 'TOOL_PROTOCOL_ERROR', diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+                }
+                observation.observationDigest = digestOmitting(observation, 'observationDigest');
+              }
+              observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+              if (!completion.toolCompletionCommitted) {
+                for (let retry = 0; ; retry++) {
+                  const run = readRun(driver, runId);
+                  try { await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+                    expectedRunRevision: run.revision, observationRef }); completion.toolCompletionCommitted = true; break; }
+                  catch (error) { if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 || readRun(driver, runId).revision === run.revision) throw error; }
+                }
+              }
+              if (!captureAcknowledged) { acknowledgeMcpRunCapture(captured.ref); captureAcknowledged = true; }
+              mcpTransport = undefined;
+              if (captured.value.format === 'cliq-mcp-known-unusable-run-capture-v1') {
+                await retireWorkerResources();
+                const cut = readRun(driver, runId);
+                if (!['failed', 'cancelled', 'succeeded'].includes(cut.status))
+                  await currentAgent.stopForMcpKnownUnusable({ expectedRunRevision: cut.revision,
+                    ...await publishInspector(artifacts, assertActiveStateOwner(driver, owner)) });
+              }
+              return readRun(driver, runId);
+            } };
+            receivedCompletion = completion;
+            if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = completion;
+            return completion.finish();
+          }, signal);
+        }
+        builtinPhase('tool_claim_spec');
         if (currentWorker.containment.backend.kind !== 'linux') throw new KernelStorageError('ARTIFACT_MISMATCH', 'native edit parent is not Linux');
-        const sandboxLaunchSpecRef = await publishEditRecipe(artifacts, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
+        const refreshBuiltinLease = () => refreshInvocationLease(current, currentWorker);
+        refreshBuiltinLease();
+        const sandboxLaunchSpecRef = await publishBuiltinRecipe(reads, recipe.spec, processContainmentRef, currentWorker.containment.backend.cgroupPath, prepared, dispatchId);
         // The permanent claim precedes even blocked invocation process creation.
         signal.throwIfAborted();
-        const claimed = await agent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
-          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef });
+        refreshBuiltinLease();
+        builtinPhase('tool_claim');
+        const claimed = await currentAgent.claimTool({ expectedRunRevision: prepared.run.revision, leaseEpoch: activated.run.leaseEpoch,
+          opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId, sandboxLaunchSpecRef }, signal, undefined, refreshBuiltinLease);
         claimedTool = claimed;
-        toolPhase = 'claimed';
-        const call = await artifacts.readCanonical<import('../protocol/agent-ir.js').ToolCallInputV1>(claimed.request.inputRef);
-        const grant = await artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolOperationGrantV1>(claimed.entry.grantRef!);
-        const live = assertLiveDispatchState(driver, owner, runId, prepared.run.revision, activated.run.leaseEpoch, sampleCanonicalNow());
-        const edit = await readBuiltinEditLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { ...live, prepared: prepared.entry,
-          request: claimed.request, target: claimed.target, call, grant, dispatchId, sandboxLaunchSpecRef });
-        const invocation = await currentWorker.createInvocation(edit);
+        operationPhase = 'claimed';
+        builtinPhase('tool_claim_live');
+        refreshBuiltinLease();
+        const launchClosure = claimed.launchClosure;
+        if (!launchClosure) throw new KernelStorageError('RECOVERY_REQUIRED', 'builtin claim lost its exact verified launch');
+        const { call } = launchClosure;
+        const script = claimed.target.execution.kind === 'builtin_script';
+        builtinPhase('tool_native_parent');
+        const invocation = await currentWorker.createInvocation(launchClosure, onBuiltinPhase ? builtinPhase : undefined);
+        builtinPhase('tool_process_observe');
         await invocation.observeProcess();
         signal.throwIfAborted();
-        await claimed.release(invocation);
+        refreshBuiltinLease();
+        const releaseReads = new AbortController(); toolReleaseReadAbort = releaseReads;
+        if (closed || isClosing()) releaseReads.abort(new KernelStorageError('LEASE_FENCED', 'tool release is closing'));
+        builtinPhase('tool_release');
+        try { await claimed.release(invocation, releaseReads.signal); toolReleased = script; }
+        finally { if (toolReleaseReadAbort === releaseReads) toolReleaseReadAbort = undefined; }
+        builtinPhase('tool_result');
         const result = await invocation.result();
-        toolPhase = 'received';
+        const editSucceeded = result === 'ok';
+        // The native friend copies the original private bytes synchronously,
+        // before any caller view or post-effect/persistence await can mutate them.
+        // Keep raw result custody synchronous: no observer runs between the
+        // original result and its private capture copy.
+        if (onBuiltinPhase) currentBuiltinPhase = 'tool_capture';
+        const captured = typeof result === 'string' ? undefined : retainBuiltinCapturePublication(artifacts,
+          assertActiveStateOwner(driver, owner), prepared.entry, claimed.entry, result,
+          decodeBuiltinToolInput(builtinToolInputBytes(result.tool, call.value!, launchClosure.spec.resources)));
+        builtinPhase('tool_capture');
+        if (script !== (captured !== undefined) || captured && captured.tool !== call.toolName)
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'tool result differs from its original fixed native recipe');
+        operationPhase = 'received';
+        builtinPhase('tool_received');
         const observedAt = sampleCanonicalNow();
+        const retainReadWorker = captured !== undefined && captured.tool !== 'bash';
+        const persistCapture = captured?.publish, nativeModel = captured?.model;
         // Register the original result before the first post-effect await.
         // This closure owns only that result's persistence, never a new dispatch.
-        const retire = checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
-        let proof: Awaited<ReturnType<typeof retire>> | undefined;
+        const retire = retainReadWorker ? undefined : checkpointRetirement(current, toolCheckpointId(runId, prepared.entry.opId, prepared.entry.attempt), signal);
+        let proof: Awaited<ReturnType<NonNullable<typeof retire>>> | undefined;
+        let capture: Awaited<ReturnType<NonNullable<typeof persistCapture>>> | undefined;
         let diagnostic: Awaited<ReturnType<ArtifactCatalog['publishCanonical']>> | undefined;
         let observation: ToolObservationV1 | undefined;
         let observationRef: string | undefined;
-        receivedTool = { worker: currentWorker, activeWorker: current, finish: async () => {
+        const completion: ReceivedCompletion = { kind: 'tool', worker: currentWorker, activeWorker: current, retainsWorker: retainReadWorker, finish: async () => {
           if (activeWorker !== current || worker !== currentWorker || ownedLaunchId !== activated.launch.launchId) {
             throw new KernelStorageError('LEASE_FENCED', 'received tool completion lost its original physical owner');
           }
           assertActiveStateOwner(driver, owner);
-          proof ??= await retire();
-          const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
-            attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
-            grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
-            postEffect: proof.postEffect };
-          if (!observation) {
-            if (result === 'ok') observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
-            else {
-              diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code: 'TOOL_EXECUTION_FAILED' }, 'cliq-tool-output-diagnostic-v1');
-              observation = { ...base, outcome: 'error', code: 'TOOL_EXECUTION_FAILED', diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+          if (!completion.toolCompletionCommitted) {
+            // Restore only after success so the original failure subscriber
+            // retains the specific rejected await, including during Stop.
+            if (persistCapture) {
+              builtinPhase('tool_received_capture_publish');
+              capture ??= await persistCapture();
+              builtinPhase('tool_received');
             }
-            observation.observationDigest = digestOmitting(observation, 'observationDigest');
+            if (retire) {
+              builtinPhase('tool_received_checkpoint_retirement');
+              proof ??= await retire();
+              builtinPhase('tool_received');
+            }
+            if (capture) builtinPhase('tool_received_capture_read');
+            const base = { schemaVersion: 1 as const, format: 'cliq-tool-observation-v1' as const, runId, opId: claimed.entry.opId,
+              attempt: claimed.entry.attempt, requestRef: claimed.entry.requestRef, targetRef: claimed.entry.target,
+              grantRef: claimed.entry.grantRef!, dispatchId, observedAt,
+              ...(proof ? { postEffect: proof.postEffect } : {}),
+              ...(capture ? { captureRef: capture.ref,
+                captureDigest: (await artifacts.readCanonical<import('./builtin-tool-capture.js').BuiltinToolCaptureV1>(capture.ref)).captureDigest } : {}) };
+            if (capture) builtinPhase('tool_received');
+            if (!observation) {
+              if (nativeModel?.outcome === 'executed') observation = { ...base, ...nativeModel, observationDigest: '' };
+              else if (!nativeModel && editSucceeded) observation = { ...base, outcome: 'executed', content: { ok: true }, observationDigest: '' };
+              else {
+                const code = nativeModel?.code ?? 'TOOL_EXECUTION_FAILED';
+                builtinPhase('tool_received_diagnostic_publish');
+                diagnostic ??= await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-tool-output-diagnostic-v1', code }, 'cliq-tool-output-diagnostic-v1');
+                builtinPhase('tool_received');
+                observation = { ...base, outcome: 'error', code, diagnosticRef: diagnostic.ref, diagnosticDigest: diagnostic.ref, observationDigest: '' };
+              }
+              observation.observationDigest = digestOmitting(observation, 'observationDigest');
+            }
+            builtinPhase('tool_received_observation_publish');
+            observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
+            builtinPhase('tool_received');
+            // A user stop changes Run revision, not this original producer's
+            // genuinely observed outcome. Retain the immutable result while the
+            // owning reducer revalidates the current cut; never replay the tool.
+            // That reducer still rejects a changed frontier, claim or lease.
+            for (let retry = 0; ; retry++) {
+              const current = readRun(driver, runId);
+              if (current.leaseEpoch !== claimed.entry.leaseEpoch || current.activeWorkerLaunchId !== ownedLaunchId) {
+                throw new KernelStorageError('LEASE_FENCED', 'tool result no longer belongs to its original active worker');
+              }
+              try {
+                builtinPhase('tool_received_complete_tool');
+                await currentAgent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
+                  expectedRunRevision: current.revision, observationRef });
+                builtinPhase('tool_received');
+                if (captured) completion.toolCompletionCommitted = true;
+                break;
+              } catch (error) {
+                if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || retry >= 7 ||
+                    readRun(driver, runId).revision === current.revision) throw error;
+                builtinPhase('tool_received');
+              }
+            }
           }
-          observationRef ??= (await artifacts.publishCanonical(observation, observation.format)).ref;
-          // A user stop changes Run revision, not this original producer's
-          // genuinely observed outcome. Retain the immutable result while the
-          // owning reducer revalidates the current cut; never replay the tool.
-          // That reducer still rejects a changed frontier, claim or lease.
-          for (let completion = 0; ; completion++) {
-            const current = readRun(driver, runId);
-            if (current.leaseEpoch !== claimed.entry.leaseEpoch || current.activeWorkerLaunchId !== ownedLaunchId) {
-              throw new KernelStorageError('LEASE_FENCED', 'tool result no longer belongs to its original active worker');
-            }
-            try {
-              await agent.completeTool({ opId: claimed.entry.opId, attempt: claimed.entry.attempt,
-                expectedRunRevision: current.revision, observationRef });
-              break;
-            } catch (error) {
-              if (!(error instanceof KernelStorageError) || error.code !== 'REVISION_CONFLICT' || completion >= 7 ||
-                  readRun(driver, runId).revision === current.revision) throw error;
+          if (captured) {
+            const acknowledged = await captured.acknowledge(invocation);
+            if (acknowledged.kind === 'controller_joined') {
+              // Data release after an actual controller join cannot pretend
+              // the original read-only parent is still executable. Reuse its
+              // ordinary recovery fence; no new death/retirement is asserted.
+              const latest = readRun(driver, runId);
+              if (latest.activeWorkerLaunchId === ownedLaunchId)
+                await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: latest.revision });
+              completion.retainsWorker = false;
             }
           }
           return readRun(driver, runId);
         } };
-        if (closingTool?.worker === currentWorker && closingTool.activeWorker === current) closingTool.completion = receivedTool;
-        return receivedTool.finish();
+        receivedCompletion = completion;
+        if (closingCompletion?.worker === currentWorker && closingCompletion.activeWorker === current) closingCompletion.completion = receivedCompletion;
+        return receivedCompletion.finish();
       })().catch(async error => {
-        if (claimedTool && toolPhase !== 'received') {
+        const failedBuiltinPhase = currentBuiltinPhase;
+        if (claimedTool && operationPhase !== 'received') {
           // A permanent claim is possibly dispatched even when cancellation
           // wins before the blocked child/RELEASE handshake. Join the actual
           // producer, preserve uncertainty and charge once; only the separate
           // genuine private rollback closure may later resolve that unknown.
+          builtinPhase('tool_error_revoke');
           await revokeOriginalWorker();
+          builtinPhase('tool_error_history');
           const history = readInvocationAttempt(driver, runId, claimedTool.entry.opId, claimedTool.entry.attempt);
           if (history.at(-1)?.phase === 'dispatch_claimed') {
+            builtinPhase('tool_error_evidence');
             const ambiguity = await artifacts.publishCanonical({ schemaVersion: 1, format: 'cliq-private-tool-ambiguity-v1',
               runId, opId: claimedTool.entry.opId, attempt: claimedTool.entry.attempt, dispatchId: claimedTool.entry.dispatchId,
               claimJournalSeq: claimedTool.entry.seq, requestRef: claimedTool.entry.requestRef, targetRef: claimedTool.entry.target,
               grantRef: claimedTool.entry.grantRef, reason: 'original_producer_joined_without_result' }, 'cliq-private-tool-ambiguity-v1');
+            builtinPhase('tool_error_unknown');
             await markInvocationUnknown(driver, artifacts, owner, { runId, opId: claimedTool.entry.opId,
               attempt: claimedTool.entry.attempt, expectedRunRevision: readRun(driver, runId).revision,
               evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
           }
         }
+        if (failedBuiltinPhase) builtinPhase(failedBuiltinPhase);
         throw error;
       });
       return ownOperation(work, abort);
     },
     finishCurrentStop: async value => {
       const expectedRunRevision = revision(value);
-      const selected = await readRecoveryClosure(driver, artifacts, runId);
+      const selected = await readRecoveryClosure(driver, preflightReads, runId);
       // A read may yield to close or another operation. Revalidate the exact
       // scope/revision before taking operation ownership or changing resources.
       revision({ expectedRunRevision });
       if (selected.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'stop drain revision changed');
       const stopIntentRef = selected.run.stopIntentRef;
       if (!stopIntentRef) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop drain requires the persisted StopIntent');
+      const childStop = continuation.operation === 'agent' ? await continuation.planStoppedChildren({ expectedRunRevision }, preflightAbort.signal) : undefined;
+      revision({ expectedRunRevision });
+      if (childStop?.disposition === 'child_stop_waiting') return childStop.run;
+      if (continuation.operation === 'delivery' && selected.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')) {
+        const { readPublicationPrefix } = await import('./delivery-publication-progress.js');
+        const prefix = await readPublicationPrefix(driver, preflightReads, selected);
+        if (!prefix.authorization || prefix.forward.some(entry => !entry.result || entry.result.item.outcome === 'unknown') ||
+            prefix.abortResults.length !== prefix.authorization.context.plan.abortOperations.length ||
+            prefix.abortResults.some(entry => !entry.result || entry.result.item.outcome === 'unknown'))
+          throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal publication stop awaits its complete original nonambiguous cleanup prefix');
+        // Refuse unsupported/unclosed cuts before taking operation ownership:
+        // ownOperation's failure retirement must not authorize a missing path.
+        revision({ expectedRunRevision });
+        const abort = new AbortController(); operationAbort = abort;
+        operationPhase = 'preparing';
+        const work = Promise.resolve().then(async () => {
+          const task = await openPublicationMaintenanceTask(selected, expectedRunRevision, abort.signal);
+          const { prepareOwnedPublicationAbortFinalization, closeOwnedPublicationAbortFinalization } =
+            await import('./publication-abort-finalization.js');
+          const finalization = await prepareOwnedPublicationAbortFinalization(driver, artifacts, owner, execution, task);
+          try {
+            return (await continuation.commitTerminalStop({ expectedRunRevision }, undefined, finalization)).run;
+          } finally { closeOwnedPublicationAbortFinalization(driver, owner, finalization); }
+        });
+        return ownOperation(work, abort);
+      }
       // Refuse BEFORE ownOperation: its failure handler intentionally performs
       // physical recovery. An unclosed claim must not enter that lifecycle just
       // because a terminal request is unsupported. The model-death path below
       // is worker-free; it cannot authorize sealing an active worker.
       if (selected.run.activeWorkerLaunchId !== undefined) {
-        const noRelease = await validateInstalledModelNoReleaseHistory(driver, artifacts, selected);
+        const noRelease = await validateInstalledModelNoReleaseHistory(driver, preflightReads, selected);
+        const stoppedVerifiers = await validateVerifierStoppedHistory(driver, preflightReads, selected);
+        const stoppedPreparations = continuation.operation === 'delivery' && selected.journal.some(entry => entry.opKind === 'publish')
+          ? await (await import('./delivery-publication-recovery.js')).readUnclaimedPublicationStopHistory(driver, preflightReads, selected)
+          : new Set<number>();
         for (const { entry, hasClaim } of stopInvocationHistory(selected.journal).values()) {
-          if (!['model', 'tool'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
-              (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq))))) {
+          // Only the full original no-claim preparation closure supplies this
+          // exact terminal seq. A failed phase or refunded budget alone never
+          // substitutes for native retirement, and M still retires below.
+          if (entry.opKind === 'publish' && !hasClaim && stoppedPreparations.has(entry.seq)) continue;
+          if (!['model', 'tool', 'verifier', 'child_admission', 'child_merge', 'child_await', 'skill_resource'].includes(entry.opKind) || (!['prepared', 'completed'].includes(entry.phase) &&
+              (entry.phase !== 'failed' || hasClaim && !(entry.opKind === 'model' && noRelease.has(entry.seq)) &&
+                !(entry.opKind === 'verifier' && stoppedVerifiers.has(entry.seq))))) {
             throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
           }
         }
@@ -871,27 +2964,41 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           }
           // The reducer requires every original generation sealed or backed
           // by retirement evidence; this branch supplies no new authority.
-          return (await agent.commitTerminalStop({ expectedRunRevision })).run;
+          if (childStop?.disposition === 'child_stop_required') {
+            if (continuation.operation !== 'agent') throw new TypeError('Delivery cannot own child Stop settlement');
+            return (await continuation.waitForStoppedChildren({ expectedRunRevision }, signal)).run;
+          }
+          return (await continuation.commitTerminalStop({ expectedRunRevision })).run;
         }
         if (!activeWorker || !worker || !generation || !controller || !reservation ||
             selected.run.activeWorkerLaunchId !== ownedLaunchId || selected.run.activeWorkerLaunchId !== activeWorker.activated.launch.launchId) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'stop drain cannot adopt another worker\'s retirement authority');
         }
-        const proof = await retireToCheckpoint(activeWorker, stopCheckpointId(runId, stopIntentRef), signal);
+        const proof = await retireToCheckpoint(activeWorker, childStop?.disposition === 'child_stop_required' ? childStop.checkpointId : stopCheckpointId(runId, stopIntentRef), signal);
         signal.throwIfAborted();
         // commitTerminalStop checks exact settled invocation history, the
         // currently accounted workspace, and refreshes actual native death
         // before its one atomic Checkpoint/Session/terminal transition.
-        return (await agent.commitTerminalStop({ expectedRunRevision, checkpoint: proof.postEffect })).run;
+        if (childStop?.disposition === 'child_stop_required') {
+          if (continuation.operation !== 'agent') throw new TypeError('Delivery cannot own child Stop settlement');
+          return (await continuation.waitForStoppedChildren({ expectedRunRevision, checkpoint: proof.postEffect }, signal)).run;
+        }
+        return (await continuation.commitTerminalStop({ expectedRunRevision, checkpoint: proof.postEffect })).run;
       })();
       return ownOperation(work, abort);
     },
     resumeCurrentRetirement: async value => {
       const expectedRunRevision = revision(value);
+      // This is only a negative scheduling selector. Any quarantine still
+      // requires the complete recovery closure and real retirement below.
+      if (!driver.prepare("SELECT 1 FROM workspace_generations WHERE run_id = ? AND phase = 'quarantined' LIMIT 1").get(runId))
+        return readRun(driver, runId);
       const abort = new AbortController(); operationAbort = abort;
       const signal = abort.signal;
+      const reads = artifacts.withReadSignal(signal);
       const work = (async () => {
-        let cut = await readRecoveryClosure(driver, artifacts, runId);
+        retirementPhase('history');
+        let cut = await readRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
         if (cut.run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'retirement resume revision changed');
         const eligible: Array<{ row: (typeof cut.workspaceGenerations)[number];
@@ -901,7 +3008,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         for (const row of cut.workspaceGenerations) {
           if (row.phase !== 'quarantined') continue;
           signal.throwIfAborted();
-          const quarantine = await artifacts.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef);
+          const quarantine = await reads.readCanonical<import('../kernel/types.js').WorkspaceGenerationQuarantineEvidenceV1>(row.quarantineEvidenceRef);
           if (quarantine.reason === 'worker_recovery' || quarantine.reason === 'launch_aborted' || quarantine.reason === 'launch_died_before_activation')
             eligible.push({ row, quarantine });
           else {
@@ -919,12 +3026,14 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           const launches = readWorkerLaunchesForRun(driver, runId).filter(launch => launch.workspaceGenerationRef === row.generationRef);
           if (launches.length !== 1) throw new KernelStorageError('RECOVERY_REQUIRED', 'retirement resume has no unique original worker launch');
           const launch = launches[0]!;
-          const closure = await readQuarantinedWorkerLaunchClosure(driver, artifacts, owner, { run: cut.run, launch, generation: row });
+          retirementPhase('quarantine_closure');
+          const closure = await readQuarantinedWorkerLaunchClosure(driver, reads, owner, { run: cut.run, launch, generation: row });
+          retirementPhase('native_retirement');
           controller = await launcher.startController({ signal });
           let retirement: { workerRetirement: NativeRetainedWorkerRetirement } | { preactivationRetirement: NativePreactivationRetirement };
           if (quarantine.reason === 'worker_recovery') {
-            const containment = decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef!));
-            const workerIdentity = decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest!));
+            const containment = decodeWorkerProcessContainment(await reads.readCanonical(launch.processContainmentRef!));
+            const workerIdentity = decodeWorkerIdentity(await reads.readCanonical(launch.workerIdentityDigest!));
             const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
             assertNativeContainmentDeath(death);
             retirement = { workerRetirement: await controller.closeRetained() };
@@ -934,9 +3043,9 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
               throw new KernelStorageError('RECOVERY_REQUIRED', 'preactivation generation retirement has no exact native reservation');
             reservation = owner.filesystem.openWorkerReservation(launch.launchId, launch.spawnNonceDigest, backend.nativeReservation);
             const containment = launch.processContainmentRef === undefined ? undefined
-              : decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef));
+              : decodeWorkerProcessContainment(await reads.readCanonical(launch.processContainmentRef));
             const workerIdentity = launch.workerIdentityDigest === undefined ? undefined
-              : decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest));
+              : decodeWorkerIdentity(await reads.readCanonical(launch.workerIdentityDigest));
             const observed = await controller.inspectPreactivation({ closure, reservation, activationNonceDigest: launch.activationNonceDigest,
               ...(containment === undefined ? {} : { containment }), ...(workerIdentity === undefined ? {} : { workerIdentity }) });
             assertNativePreactivationObservation(observed, closure);
@@ -945,14 +3054,18 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             if (observed.kind === 'created') assertNativeContainmentDeath(observed.death);
             retirement = { preactivationRetirement: await controller.closePreactivation() };
           }
-          const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-            identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal });
+          retirementPhase('workspace_observation');
+          const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts: reads,
+            identity: closure.generation, sourceRowVersion: quarantine.sourceRowVersion, signal, gitResources: closure.spec.resources });
           signal.throwIfAborted();
           const brokerQuiescence = observeInstalledBrokerQuiescence(executionStore, runId);
-          await retireQuarantinedGeneration(driver, artifacts, owner, { runId, expectedRunRevision: cut.run.revision,
+          retirementPhase('retirement_commit');
+          await retireQuarantinedGeneration(driver, reads, owner, { runId, expectedRunRevision: cut.run.revision,
             expectedGenerationRowVersion: row.rowVersion, generationRef: row.generationRef, ...retirement, workspaceRetirement, brokerQuiescence });
-          await retireResources();
-          cut = await readRecoveryClosure(driver, artifacts, runId);
+          retirementPhase('resource_join');
+          await retireWorkerResources();
+          retirementPhase('history');
+          cut = await readRecoveryClosure(driver, reads, runId);
         }
         return cut.run;
       })();
@@ -963,23 +3076,24 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       let registered: WorkerRecoveryTask | undefined;
       const sameInspectionStopCut = (previous: Run, current: Run): boolean => {
         if (canonicalSha256(previous) === canonicalSha256(current)) return true;
-        const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+        const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...data }: Run) => data;
         return current.revision > previous.revision && current.updatedAt >= previous.updatedAt &&
           !!current.stopIntentRef && (!previous.cancelRequested || current.cancelRequested) &&
           canonicalSha256(stable(current)) === canonicalSha256(stable(previous));
       };
       const inspect = async (run: Run, wait: WorkerDeathWait, signal: AbortSignal): Promise<Run> => {
+        const reads = artifacts.withReadSignal(signal);
         signal.throwIfAborted();
-        const cut = await readRecoveryClosure(driver, artifacts, runId);
+        const cut = await readRecoveryClosure(driver, reads, runId);
         signal.throwIfAborted();
         if (!sameInspectionStopCut(run, cut.run)) {
           throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection dispatch cut changed');
         }
         const launch = cut.workerLaunches.find(row => row.launchId === wait.subject.oldWorkerLaunchId)!;
         const oldGeneration = cut.workspaceGenerations.find(row => row.generationRef === wait.subject.workspaceGenerationRef)!;
-        const closure = await readRetainedWorkerLaunchClosure(artifacts, assertActiveStateOwner(driver, owner), { run: cut.run, launch, generation: oldGeneration });
-        const containment = decodeWorkerProcessContainment(await artifacts.readCanonical(launch.processContainmentRef!));
-        const workerIdentity = decodeWorkerIdentity(await artifacts.readCanonical(launch.workerIdentityDigest!));
+        const closure = await readRetainedWorkerLaunchClosure(reads, assertActiveStateOwner(driver, owner), { run: cut.run, launch, generation: oldGeneration });
+        const containment = decodeWorkerProcessContainment(await reads.readCanonical(launch.processContainmentRef!));
+        const workerIdentity = decodeWorkerIdentity(await reads.readCanonical(launch.workerIdentityDigest!));
         signal.throwIfAborted();
         controller = await launcher.startController({ signal });
         // This separate authority-reducing action terminates the retained
@@ -987,12 +3101,12 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         const death = await controller.terminateRetained({ closure, containment, workerIdentity, signal });
         assertNativeContainmentDeath(death);
         signal.throwIfAborted();
-        const handoff = cut.run.nextStep === 'agent' ? await agent.readModelAttempt() : undefined;
+        const handoff = cut.run.nextStep === 'agent' ? await requireAgent().readModelAttempt(signal) : undefined;
         if (handoff && !sameInspectionStopCut(cut.run, handoff.run)) {
           throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery model handoff cut changed');
         }
         const unknownHandoff = handoff?.state.phase === 'unknown' && hasOnlySettledInstalledModelUnknowns(
-          decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)), cut.journal);
+          decodeRetainedRunAssembly(await reads.readCanonical(cut.runSpec.assemblyRef)), cut.journal) || hasOnlySettledMcpUnknowns(cut.journal);
         const replacement = cut.workspaceGenerations.filter(row => row.phase === 'preactivated_readonly' || row.phase === 'materializing');
         if (unknownHandoff && replacement.length !== 0) {
           throw new KernelStorageError('RECOVERY_REQUIRED', 'unknown model worker quarantine cannot retain an unused replacement generation');
@@ -1006,7 +3120,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         // the ready Checkpoint lazily, after retirement and current eligibility.
         // Historical replacements remain explicit retained resources, not a
         // reason to invent a second birth or silently discard the first one.
-        const current = await readRecoveryClosure(driver, artifacts, runId);
+        const current = await readRecoveryClosure(driver, reads, runId);
         if (!sameInspectionStopCut(cut.run, current.run) ||
             canonicalSha256(current.journal) !== canonicalSha256(cut.journal) ||
             canonicalSha256(current.workerLaunches) !== canonicalSha256(cut.workerLaunches) ||
@@ -1024,10 +3138,16 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (!sameInspectionStopCut(current.run, completionRun)) {
           throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery completion subject changed before entry');
         }
-        const recovered = await completeWorkerRecoveryProbe(driver, artifacts, owner,
+        const recovered = await completeWorkerRecoveryProbe(driver, reads, owner,
           { runId, expectedRunRevision: completionRun.revision }, death, signal, brokerQuiescence,
-          { retire: () => controller!.closeRetained(), finish: async plan =>
-            (await agent.commitTerminalStop({ expectedRunRevision: readRun(driver, runId).revision }, plan)).run });
+          { retire: () => controller!.closeRetained(), finish: async plan => {
+            const terminal = (await continuation.commitTerminalStop({ expectedRunRevision: readRun(driver, runId).revision }, plan)).run;
+            for (const original of dependencyOwners) {
+              await closeDependencyInvocationOwner(driver, owner, original); dependencyOwners.delete(original);
+              if (dependencyOwner === original) dependencyOwner = undefined;
+            }
+            return terminal;
+          } });
         signal.throwIfAborted();
         // The owning task joins its actual resources before returning. The
         // installed driver separately resumes quarantine retirement with
@@ -1038,11 +3158,20 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (closed || isClosing()) throw new KernelStorageError('LEASE_FENCED', 'Run execution is closing');
         let run = readRun(driver, runId);
         if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery revision changed');
-        if (run.activeWorkerLaunchId !== undefined) run = await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision });
+        const dependencyUnknown = await (await import('./dependency-unknown-retirement.js')).settleDeadOwnerDependencyClaim(
+          driver, preflightReads, owner, { runId, expectedRunRevision: run.revision });
+        if (dependencyUnknown) {
+          run = dependencyUnknown.run;
+          if (!run.stopIntentRef) {
+            const inspector = await publishInspector(artifacts, assertActiveStateOwner(driver, owner));
+            run = (await continuation.stopForDependencyAmbiguity({ expectedRunRevision: run.revision, ...inspector })).run;
+          }
+        }
+        if (run.activeWorkerLaunchId !== undefined) run = await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
         if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery requires its installed worker wait');
         }
-        const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
+        const wait = await preflightReads.readCanonical<WorkerDeathWait>(run.waitingOnRef);
         if (wait.subject.kind !== 'worker_death') throw new KernelStorageError('INVALID_REQUEST', 'this execution scope cannot reconcile another subject');
         if (activeWorker) {
           if (wait.subject.oldWorkerLaunchId !== ownedLaunchId || !worker) {
@@ -1052,7 +3181,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           assertNativeContainmentDeath(death);
           // The inspection below uses a fresh controller and the retained
           // original containment. Never overwrite an unjoined physical owner.
-          await retireResources();
+          await retireWorkerResources();
         }
         if (wait.probeState.phase === 'automatic_in_flight' && wait.probeState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
           // A successor closes, rather than resumes, the predecessor task.
@@ -1064,11 +3193,11 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
             // Synchronous registration immediately after the dispatch commits,
             // before the producer can perform its first inspection I/O.
             const task = startWorkerRecoveryTask({ run: dispatched, wait: persisted, owner },
-              signal => inspect(dispatched, persisted, signal), retireResources);
+              signal => inspect(dispatched, persisted, signal), retireWorkerResources);
             probe = { run: dispatched, wait: persisted, task };
             registered = task;
             if (closed || isClosing()) void task.cancelAndJoin().catch(() => {});
-          });
+          }, preflightAbort.signal);
           if (!registered || !probe) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker dispatch has no registered producer');
           const dispatch = probe.wait.probeState;
           if (dispatch.phase !== 'automatic_in_flight') throw new KernelStorageError('RECOVERY_REQUIRED', 'worker producer has no persisted deadline');
@@ -1093,7 +3222,7 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
         if (error instanceof ResourceRetirementError) cleanupFailure ??= error;
         throw error;
       }).finally(async () => {
-        try { if (!registered) await retireResources(); }
+        try { if (!registered) await retireWorkerResources(); }
         finally {
           const retainedProbe = probe;
           if (retainedProbe && retainedProbe.task === registered && readRun(driver, runId).waitingOnRef !== retainedProbe.run.waitingOnRef) probe = undefined;
@@ -1104,6 +3233,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       return operation;
     }
   });
+  if (continuation.operation === 'delivery') deliveryExecutions.set(execution, { driver, owner, runId });
+  else agentExecutions.set(execution, { driver, owner, readWorker() {
+    const owned = readOwnedWorkerLease();
+    if (!owned) throw new KernelStorageError('LEASE_FENCED', 'agent history lost its original active worker');
+    const { retained, run, launch } = owned;
+    const live = assertLiveDispatchState(driver, owner, runId, run.revision, run.leaseEpoch, sampleCanonicalNow());
+    requireEqual(live.launch, launch, 'agent history current original launch');
+    requireEqual(live.generation, retained.activated.generation, 'agent history original active generation');
+    return Object.freeze({ runId, leaseEpoch: run.leaseEpoch, launchId: launch.launchId,
+      generationRef: retained.authority.generationRef, workerIdentityDigest: launch.workerIdentityDigest! });
+  } });
   return { execution, closeWorkerRecoveryProbe: input => closeProbe(input), beginClose, close() {
     if (closing) return closing;
     const revoked = beginClose();
@@ -1111,12 +3251,17 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
       const joins = await Promise.allSettled([revoked, ...(pending ? [pending.catch(() => {})] : [])]);
       const failure = joins.find(result => result.status === 'rejected');
       if (failure?.status === 'rejected') cleanupFailure ??= failure.reason;
-      if (receivedTool) {
+      if (receivedCompletion?.kind === 'publication_received') {
+        // Its actual receipt, M seal and arena retirement are already rooted
+        // durably. A successor may only revalidate; shutdown does not re-run
+        // an expensive cancelled projection or settle before that validation.
+        receivedCompletion = undefined;
+      } else if (receivedCompletion) {
         // Close cannot turn a received result into recovery or release its
         // image owner while its exact durable completion remains unfinished.
         const abort = new AbortController();
         operationAbort = abort;
-        await ownOperation(receivedTool.finish(), abort);
+        await resumeOwnedCompletion(abort);
       }
       if (activeWorker) {
         try {
@@ -1124,25 +3269,59 @@ export async function loadRunExecution(driver: SqliteDriver, artifacts: Artifact
           if (run.activeWorkerLaunchId !== ownedLaunchId) {
             throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its retained worker\'s durable owner');
           }
-          await beginWorkerRecovery(driver, artifacts, owner, { runId, expectedRunRevision: run.revision });
+          await fenceOwnedWorkerOnShutdown(driver, artifacts, owner, activeWorker.activated, activeWorker.closure);
         } catch (error) { cleanupFailure ??= error; }
         try {
           if (!worker) throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown lost its original physical worker');
           const death = await observeOriginalWorkerDeath(activeWorker);
           assertNativeContainmentDeath(death);
         } catch (error) { cleanupFailure ??= error; }
-        try { await retireResources(); }
+        try { await retireWorkerResources(); }
         catch (error) { cleanupFailure ??= error; }
+      }
+      if (publicationProbe && readRun(driver, runId).waitingOnRef === publicationProbe.run.waitingOnRef) {
+        // Unlike deadline expiry, genuine shutdown cancellation may close
+        // this nonce before thirty seconds only after its actual task joins.
+        // A failed join/write keeps the StateOwner; it is never a fake timeout.
+        await closePublicationProbe(readRun(driver, runId).revision, 'shutdown');
+      }
+      if (mcpStatusProbe) {
+        const original = mcpStatusProbe;
+        original.task.cancel(); await original.task.close();
+        // Actual purpose3 revocation/join closes only its original nonce.
+        // A safe received signed outcome still wins; no JS cancellation or
+        // descriptor close can stand in for this durable proof transaction.
+        await finishMcpStatusProbe(original);
+      }
+      if (mcpStatusRecovery) {
+        const original = mcpStatusRecovery; original.cancel(); await original.close();
+        if (original.hasRetirement()) await finishMcpStatusRecovery(original);
+        else if (mcpStatusRecovery === original) {
+          // No current native retirement result exists to publish. The
+          // original persisted wait is deliberately untouched; releasing a
+          // joined current reader is never evidence of absent old resources.
+          mcpStatusRecovery = undefined;
+        }
+      }
+      const run = readRun(driver, runId);
+      if (probe && run.waitingOnRef === probe.run.waitingOnRef) {
+        // Retain the original receipt and image owner until the actual
+        // cancelled task has a durable, distinct closure for this nonce.
+        await closeProbe({ runId, expectedRunRevision: run.revision }, true);
       }
       // Installation image release must not invalidate the execution's actual
       // retirement observation, and is still attempted after a failed join.
+      closePublications();
+      for (const original of dependencyOwners) {
+        try { await closeDependencyInvocationOwner(driver, owner, original); dependencyOwners.delete(original); }
+        catch (error) { cleanupFailure ??= error; }
+      }
+      for (const root of [publicationRoots?.workspaceRoot, publicationRoots?.controlledHome]) {
+        try { root?.close(); } catch (error) { cleanupFailure ??= error; }
+      }
       try { await launcher.close(); }
       catch (error) { cleanupFailure ??= error; }
       if (cleanupFailure !== undefined) throw cleanupFailure;
-      const run = readRun(driver, runId);
-      if (probe && run.waitingOnRef === probe.run.waitingOnRef) {
-        await closeProbe({ runId, expectedRunRevision: run.revision }, true);
-      }
     })();
     closing = attempt.catch(error => { closing = undefined; throw error; });
     return closing;

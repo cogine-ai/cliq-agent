@@ -7,7 +7,7 @@ import { loadNativeStateOwner } from '../native-owner.js';
 import { openStateStore, publishInProcessChannel, type StateStore, type StateStoreRuntimeAuthority } from '../store.js';
 
 type Command = {
-  mode: 'source-write' | 'retirement-write' | 'recover' | 'recovery-close-fault';
+  mode: 'source-write' | 'handoff-write' | 'retirement-write' | 'recover' | 'recovery-close-fault';
   stateRoot: string;
   authority: StateStoreRuntimeAuthority;
   request: unknown;
@@ -36,10 +36,11 @@ function pauseActualWrite(command: Command, store: StateStore): () => void {
         await write(...writeArgs);
         const bytes = writeArgs[0] instanceof Uint8Array ? Buffer.from(writeArgs[0]) : undefined;
         let matches = command.mode === 'source-write' && bytes?.equals(sourceBytes);
-        if (command.mode === 'retirement-write' && bytes) {
+        if ((command.mode === 'retirement-write' || command.mode === 'handoff-write') && bytes) {
           try {
             const value = JSON.parse(bytes.toString());
-            matches = value.format === 'cliq-supervisor-inspector-identity-v1' && value.stateOwnerEpoch === store.ownerEpoch;
+            matches = value.format === (command.mode === 'handoff-write'
+              ? 'cliq-source-inspection-retirement-handoff-v1' : 'cliq-source-inspection-retirement-v1');
           } catch { /* Ordinary source bytes are not metadata. */ }
         }
         if (matches && !paused) {

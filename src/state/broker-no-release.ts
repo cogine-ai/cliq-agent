@@ -66,7 +66,7 @@ export async function failInstalledModelClaimWithoutRelease(driver: SqliteDriver
     // This producer already owns the original signed image/root descriptors.
     // Never enqueue a runtime borrow behind the callback awaiting settlement.
     const initial = await readModelClaimCut(driver, artifacts, prepared);
-    await validateRetainedInstalledBrokerRecipe(artifacts, initial.run, initial.spec, initial.assembly);
+    await validateRetainedInstalledBrokerRecipe(driver, artifacts, initial.run, initial.spec, initial.assembly);
     const binding: ModelBrokerBinding = immutableSnapshot({ runId: claim.runId, opId: claim.opId, attempt: claim.attempt,
       dispatchId: claim.dispatchId!, dispatchJournalSeq: claim.seq, requestRef: prepared.requestRef, requestDigest: initial.request.requestDigest,
       targetRef: initial.authority.targetRef, targetDigest: initial.authority.targetDigest, grantRef: prepared.grantRef!,
@@ -172,7 +172,7 @@ export async function validateInstalledModelNoReleaseHistory(driver: SqliteDrive
   const failures = closure.journal.filter(entry => entry.opKind === 'model' && entry.phase === 'failed' && entry.dispatchId !== undefined);
   if (!failures.length) return verified;
   const assembly = await readCanonicalArtifact<RunAssemblyV1>(artifacts, closure.runSpec.assemblyRef);
-  await validateRetainedInstalledBrokerRecipe(artifacts, closure.run, closure.runSpec, assembly);
+  await validateRetainedInstalledBrokerRecipe(driver, artifacts, closure.run, closure.runSpec, assembly);
   for (const failed of failures) {
     const entries = closure.journal.filter(entry => entry.opId === failed.opId && entry.attempt === failed.attempt);
     const [prepared, claim] = entries;

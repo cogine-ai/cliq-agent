@@ -2,10 +2,14 @@ import crypto from 'node:crypto';
 import { constants, promises as fs } from 'node:fs';
 import type { Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { beginInstalledAssemblyWork, noteInstalledAssemblyRead, settleInstalledAssemblyWork,
+  type InstalledAssemblyWorkSpan } from './installed-work-diagnostics.js';
 import path from 'node:path';
+import { isMainThread } from 'node:worker_threads';
+import { discardCasChunks, withCasDiscardSlot } from './cas-discard.js';
 
 import type { ArtifactRef } from '../kernel/types.js';
-import { ResourceRetirementError } from './errors.js';
+import { joinResourceOperations, ResourceRetirementError } from './errors.js';
 
 export type { ArtifactRef } from '../kernel/types.js';
 
@@ -24,6 +28,18 @@ type OpenedArtifact = {
   info: Stats;
 };
 
+type Publication = {
+  source: AsyncIterable<Uint8Array>;
+  maxByteLength: number;
+  name: string;
+  renameTarget?: string;
+  temporaryInfo?: Stats;
+  linked: boolean;
+  ref: ArtifactRef;
+  byteLength: number;
+  writeFailure?: Error;
+};
+
 const FILE_MODE = 0o400;
 const ROOT_MODE = 0o700;
 const PERMISSION_AND_SPECIAL_BITS = 0o7777;
@@ -35,10 +51,6 @@ const joinedCasPublicationFailures = new WeakSet<Error>();
  * replace a native owner. The exact publication's resource joins mint it. */
 export function isJoinedCasPublicationFailure(error: unknown): error is Error {
   return error instanceof Error && joinedCasPublicationFailures.has(error);
-}
-
-function digest(bytes: Uint8Array): ArtifactRef {
-  return crypto.createHash('sha256').update(bytes).digest('hex');
 }
 
 function assertArtifactRef(ref: string): asserts ref is ArtifactRef {
@@ -146,7 +158,9 @@ async function assertRootPathStable(root: string, opened: RootHandle): Promise<v
 
 async function syncRoot(root: string, opened: RootHandle): Promise<void> {
   await assertRootPathStable(root, opened);
-  await opened.handle.sync();
+  const work = beginInstalledAssemblyWork('rootSync');
+  try { await opened.handle.sync(); }
+  finally { if (work) settleInstalledAssemblyWork(work); }
   await assertRootPathStable(root, opened);
 }
 
@@ -184,42 +198,42 @@ async function openOwnedImmutablePath(
 async function readAndVerifyOpened(
   ref: ArtifactRef,
   opened: OpenedArtifact,
-  expectedLinkCount?: number
+  expectedLinkCount = 1,
+  signal?: AbortSignal,
+  work?: InstalledAssemblyWorkSpan
 ): Promise<Buffer> {
-  if (expectedLinkCount !== undefined && opened.info.nlink !== expectedLinkCount) {
-    throw new Error(`artifact ${ref} has invalid link count ${opened.info.nlink}`);
+  signal?.throwIfAborted();
+  const bytes = Buffer.allocUnsafe(opened.info.size); let offset = 0;
+  for await (const chunk of verifiedChunks(ref, opened, opened.info.size, expectedLinkCount, signal, work)) {
+    chunk.copy(bytes, offset); offset += chunk.length;
   }
-  const bytes = await opened.handle.readFile();
-  const after = await opened.handle.stat();
-  assertOwnedImmutableFile(`artifact ${ref}`, after);
-  if (!sameInode(opened.info, after) || opened.info.size !== after.size) {
-    throw new Error(`artifact ${ref} changed while it was read`);
-  }
-  if (expectedLinkCount !== undefined && after.nlink !== expectedLinkCount) {
-    throw new Error(`artifact ${ref} changed link count while it was read`);
-  }
-  if (bytes.byteLength !== after.size) throw new Error(`artifact ${ref} has an inconsistent size`);
-  if (digest(bytes) !== ref) throw new Error(`artifact ${ref} is corrupt`);
+  signal?.throwIfAborted();
   return bytes;
 }
 
 async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expectedByteLength: number,
-  expectedLinkCount: number | null = 1): AsyncGenerator<Buffer> {
+  expectedLinkCount: number | null = 1, signal?: AbortSignal, work?: InstalledAssemblyWorkSpan): AsyncGenerator<Buffer> {
+  signal?.throwIfAborted();
   assertOwnedImmutableFile(`artifact ${ref}`, opened.info);
   if (expectedLinkCount !== null && opened.info.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} has an invalid link count`);
   if (opened.info.size !== expectedByteLength) throw new Error(`artifact ${ref} has an unexpected byte count`);
   const hash = crypto.createHash('sha256');
   let offset = 0;
   while (offset < expectedByteLength) {
+    signal?.throwIfAborted();
     const chunk = Buffer.allocUnsafe(Math.min(ARTIFACT_CHUNK_BYTES, expectedByteLength - offset));
     const { bytesRead } = await opened.handle.read(chunk, 0, chunk.length, offset);
+    if (work) noteInstalledAssemblyRead(work, bytesRead);
+    signal?.throwIfAborted();
     if (bytesRead === 0) throw new Error(`artifact ${ref} ended before its declared byte count`);
     const bytes = chunk.subarray(0, bytesRead);
     hash.update(bytes);
     offset += bytesRead;
     yield bytes;
   }
+  signal?.throwIfAborted();
   const after = await opened.handle.stat();
+  signal?.throwIfAborted();
   assertOwnedImmutableFile(`artifact ${ref}`, after);
   if (expectedLinkCount !== null && after.nlink !== expectedLinkCount) throw new Error(`artifact ${ref} changed link count while it was streamed`);
   if (!sameInode(opened.info, after) || after.size !== expectedByteLength ||
@@ -229,8 +243,11 @@ async function* verifiedChunks(ref: ArtifactRef, opened: OpenedArtifact, expecte
   if (hash.digest('hex') !== ref) throw new Error(`artifact ${ref} is corrupt`);
 }
 
-async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact): Promise<ArtifactStat> {
-  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size)) { /* Exhaustion verifies the whole digest. */ }
+async function verifyOpened(ref: ArtifactRef, opened: OpenedArtifact, signal?: AbortSignal,
+  work?: InstalledAssemblyWorkSpan): Promise<ArtifactStat> {
+  signal?.throwIfAborted();
+  for await (const _chunk of verifiedChunks(ref, opened, opened.info.size, 1, signal, work)) { /* Exhaustion verifies the whole digest. */ }
+  signal?.throwIfAborted();
   return { ref, byteLength: opened.info.size };
 }
 
@@ -382,7 +399,134 @@ async function cleanupKnownTemporary(
     // Another publisher may recover this linked temporary after our lstat.
     if (!allowAlreadyRemoved || !isErrno(error, 'ENOENT')) throw error;
   }
-  await syncRoot(root, openedRoot);
+}
+
+function byteChunks(bytes: Buffer): AsyncIterable<Uint8Array> {
+  return (async function* () {
+    for (let offset = 0; offset < bytes.length; offset += ARTIFACT_CHUNK_BYTES)
+      yield bytes.subarray(offset, offset + ARTIFACT_CHUNK_BYTES);
+  })();
+}
+
+/** All actual mutations join before the common held-directory barrier, even
+ * when one mutation failed after taking effect. Recovery keeps its own syncs. */
+async function durableStage(root: string, openedRoot: RootHandle, operations: Promise<unknown>[]): Promise<void> {
+  let failure: { error: unknown } | undefined;
+  try { await joinResourceOperations(operations); }
+  catch (error) { failure = { error }; }
+  try { await syncRoot(root, openedRoot); }
+  catch (cause) {
+    throw new ResourceRetirementError('CAS namespace durability failed', failure
+      ? new AggregateError([failure.error, cause], 'CAS mutation and durability failed') : cause);
+  }
+  if (failure) throw failure.error;
+}
+
+async function writeTemporary(root: string, openedRoot: RootHandle, publication: Publication): Promise<void> {
+  const { source, maxByteLength, name } = publication;
+  const hash = crypto.createHash('sha256');
+  await assertRootPathStable(root, openedRoot);
+  const handle = await fs.open(path.join(root, name),
+    constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+  let streamFailure: { error: unknown } | undefined;
+  try {
+    for await (const chunk of source) {
+      if (!(chunk instanceof Uint8Array) || chunk.byteLength > ARTIFACT_CHUNK_BYTES ||
+          chunk.byteLength > maxByteLength - publication.byteLength)
+        throw new Error('artifact stream exceeds its chunk or total byte ceiling');
+      const bytes = Buffer.from(chunk);
+      hash.update(bytes);
+      try { await handle.writeFile(bytes); }
+      catch (error) {
+        if (error instanceof Error) joinedCasPublicationFailures.delete(error);
+        if (error instanceof Error && !(error instanceof ResourceRetirementError) &&
+            Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ENOSPC') publication.writeFailure = error;
+        throw error;
+      }
+      publication.byteLength += bytes.length;
+      await assertRootPathStable(root, openedRoot);
+    }
+    publication.ref = hash.digest('hex');
+    await handle.chmod(FILE_MODE);
+    const work = beginInstalledAssemblyWork('fileSync');
+    try { await handle.sync(); }
+    finally { if (work) settleInstalledAssemblyWork(work); }
+    publication.temporaryInfo = await handle.stat();
+    assertOwnedImmutableFile(`artifact temporary ${name}`, publication.temporaryInfo);
+    if (publication.temporaryInfo.nlink !== 1)
+      throw new Error(`artifact temporary ${name} has invalid link count ${publication.temporaryInfo.nlink}`);
+    if (publication.temporaryInfo.size !== publication.byteLength)
+      throw new Error('artifact temporary has an inconsistent streamed size');
+  } catch (error) {
+    if (error instanceof Error) joinedCasPublicationFailures.delete(error);
+    streamFailure = { error };
+    throw error;
+  } finally {
+    const retirementFailures: unknown[] = [];
+    try {
+      if (publication.temporaryInfo === undefined) {
+        await handle.chmod(FILE_MODE);
+        publication.temporaryInfo = await handle.stat();
+      }
+    } catch (cause) {
+      retirementFailures.push(new ResourceRetirementError('CAS interrupted temporary retirement could not establish its exact metadata', cause));
+    }
+    try { await closeCasHandle(handle); }
+    catch (error) { retirementFailures.push(error); }
+    if (retirementFailures.length !== 0) {
+      if (!streamFailure && retirementFailures.length === 1) throw retirementFailures[0];
+      throw new ResourceRetirementError('CAS streaming and descriptor retirement failed',
+        new AggregateError([...(streamFailure ? [streamFailure.error] : []), ...retirementFailures],
+          'artifact stream and retirement failures'));
+    }
+  }
+}
+
+async function renameTemporary(root: string, openedRoot: RootHandle, publication: Publication): Promise<void> {
+  await recoverLinkedTemporary(root, openedRoot, publication.ref);
+  // Retain both exact names if rename takes effect but reports failure. Cleanup
+  // may recognize only the original dev/ino, never a path or equal bytes.
+  publication.renameTarget = temporaryName(publication.ref);
+  await fs.rename(path.join(root, publication.name), path.join(root, publication.renameTarget));
+  publication.name = publication.renameTarget;
+  publication.renameTarget = undefined;
+}
+
+async function linkTemporary(root: string, openedRoot: RootHandle, publication: Publication): Promise<void> {
+  try {
+    await fs.link(path.join(root, publication.name), path.join(root, publication.ref));
+    publication.linked = true;
+  } catch (error) {
+    // A syscall wrapper may report failure after the actual link. Only the
+    // original inode at the final name permits another publisher's cleanup.
+    try {
+      const final = await fs.lstat(path.join(root, publication.ref));
+      publication.linked = sameInode(final, publication.temporaryInfo!);
+    } catch (cause) {
+      if (!isErrno(cause, 'ENOENT')) throw new ResourceRetirementError('CAS link outcome inspection failed', cause);
+    }
+    if (!isErrno(error, 'EEXIST')) throw error;
+    await recoverLinkedTemporary(root, openedRoot, publication.ref);
+  }
+}
+
+async function retireTemporary(root: string, openedRoot: RootHandle, publication: Publication): Promise<void> {
+  if (publication.temporaryInfo === undefined) return;
+  let name = publication.name;
+  if (publication.renameTarget !== undefined) {
+    const found: string[] = [];
+    for (const candidate of [publication.name, publication.renameTarget]) {
+      let info: Stats;
+      try { info = await fs.lstat(path.join(root, candidate)); }
+      catch (error) { if (isErrno(error, 'ENOENT')) continue; throw error; }
+      assertOwnedImmutableFile(`artifact temporary ${candidate}`, info);
+      if (!sameInode(info, publication.temporaryInfo)) throw new Error('CAS rename temporary changed before cleanup');
+      found.push(candidate);
+    }
+    if (found.length !== 1) throw new Error('CAS rename did not retain exactly one original temporary');
+    name = found[0]!;
+  }
+  await cleanupKnownTemporary(root, openedRoot, name, publication.temporaryInfo, publication.linked);
 }
 
 export class ContentAddressedStore {
@@ -410,144 +554,103 @@ export class ContentAddressedStore {
 
   async publish(source: Uint8Array): Promise<ArtifactRef> {
     const bytes = Buffer.from(source);
-    const result = await this.publishChunks((async function* () {
-      for (let offset = 0; offset < bytes.length; offset += ARTIFACT_CHUNK_BYTES) {
-        yield bytes.subarray(offset, offset + ARTIFACT_CHUNK_BYTES);
-      }
-    })(), bytes.length);
+    const result = await this.publishChunks(byteChunks(bytes), bytes.length);
     return result.ref;
+  }
+
+  /** Fixed admission data pairs retain the same four durable stages. */
+  async publishPair(sources: readonly [Uint8Array, Uint8Array]): Promise<readonly [ArtifactStat, ArtifactStat]> {
+    if (!Array.isArray(sources) || sources.length !== 2 ||
+        [0, 1].some(index => !(sources[index] instanceof Uint8Array)))
+      throw new TypeError('CAS requires exactly two byte objects');
+    const inputs = sources.map(source => {
+      const bytes = Buffer.from(source);
+      return { source: byteChunks(bytes), maxByteLength: bytes.length };
+    });
+    const results = await this.publishSources(inputs);
+    return [results[0]!, results[1]!];
+  }
+
+  /** Fixed admission data triples never expose one member before full join. */
+  async publishTriple(sources: readonly [Uint8Array, Uint8Array, Uint8Array]): Promise<readonly [ArtifactStat, ArtifactStat, ArtifactStat]> {
+    if (!Array.isArray(sources) || sources.length !== 3 ||
+        [0, 1, 2].some(index => !(sources[index] instanceof Uint8Array)))
+      throw new TypeError('CAS requires exactly three byte objects');
+    const inputs = sources.map(source => {
+      const bytes = Buffer.from(source);
+      return { source: byteChunks(bytes), maxByteLength: bytes.length };
+    });
+    const results = await this.publishSources(inputs);
+    return [results[0]!, results[1]!, results[2]!];
+  }
+
+  /** Exactly four immutable objects share each of the original four directory
+   * barriers, not their file syncs or full verification. This is not an atomic
+   * namespace transaction: failure may leave valid, unreferenced final objects. */
+  async publishFour(sources: readonly [Uint8Array, Uint8Array, Uint8Array, Uint8Array]):
+    Promise<readonly [ArtifactStat, ArtifactStat, ArtifactStat, ArtifactStat]> {
+    const work = beginInstalledAssemblyWork('publishFour');
+    try {
+      if (!Array.isArray(sources) || sources.length !== 4 ||
+          [0, 1, 2, 3].some(index => !(sources[index] instanceof Uint8Array)))
+        throw new TypeError('CAS requires exactly four byte objects');
+      const inputs = sources.map(source => {
+        const bytes = Buffer.from(source);
+        return { source: byteChunks(bytes), maxByteLength: bytes.length };
+      });
+      const results = await this.publishSources(inputs);
+      return [results[0]!, results[1]!, results[2]!, results[3]!];
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 
   /** The producer supplies observed chunks, not a caller-selected final digest.
    * Only a fully consumed, bounded, fsynced stream can publish an immutable ref. */
   async publishChunks(source: AsyncIterable<Uint8Array>, maxByteLength: number): Promise<ArtifactStat> {
     if (!Number.isSafeInteger(maxByteLength) || maxByteLength < 0) throw new TypeError('artifact stream requires a nonnegative safe byte ceiling');
+    return (await this.publishSources([{ source, maxByteLength }]))[0]!;
+  }
 
-    let writeFailure: Error | undefined, joinedFailure: Error | undefined;
+  private async publishSources(inputs: readonly { source: AsyncIterable<Uint8Array>; maxByteLength: number }[]): Promise<ArtifactStat[]> {
+    const publications: Publication[] = inputs.map(input => ({ ...input,
+      name: `.tmp-stream-${crypto.randomBytes(TEMPORARY_SUFFIX_LENGTH / 2).toString('hex')}`,
+      linked: false, ref: '', byteLength: 0 }));
+    let joinedFailure: Error | undefined;
     return this.withRoot(async (openedRoot) => {
-      let name = `.tmp-stream-${crypto.randomBytes(TEMPORARY_SUFFIX_LENGTH / 2).toString('hex')}`;
-      let temporaryPath = path.join(this.root, name);
-      let temporaryInfo: Stats | undefined;
-      let linked = false;
       let publicationError: unknown;
-      let ref!: ArtifactRef;
-      let byteLength = 0;
-      const hash = crypto.createHash('sha256');
-
       try {
-        await assertRootPathStable(this.root, openedRoot);
-        const handle = await fs.open(
-          temporaryPath,
-          constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
-          0o600
-        );
-        let streamFailure: { error: unknown } | undefined;
-        try {
-          for await (const chunk of source) {
-            if (!(chunk instanceof Uint8Array) || chunk.byteLength > ARTIFACT_CHUNK_BYTES ||
-                chunk.byteLength > maxByteLength - byteLength) {
-              throw new Error('artifact stream exceeds its chunk or total byte ceiling');
-            }
-            const bytes = Buffer.from(chunk);
-            hash.update(bytes);
-            try { await handle.writeFile(bytes); }
-            catch (error) {
-              if (error instanceof Error) joinedCasPublicationFailures.delete(error);
-              if (error instanceof Error && !(error instanceof ResourceRetirementError) &&
-                  Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ENOSPC')
-                writeFailure = error;
-              throw error;
-            }
-            byteLength += bytes.length;
-            await assertRootPathStable(this.root, openedRoot);
-          }
-          ref = hash.digest('hex');
-          await handle.chmod(FILE_MODE);
-          await handle.sync();
-          temporaryInfo = await handle.stat();
-          assertOwnedImmutableFile(`artifact temporary ${name}`, temporaryInfo);
-          if (temporaryInfo.nlink !== 1) {
-            throw new Error(`artifact temporary ${name} has invalid link count ${temporaryInfo.nlink}`);
-          }
-          if (temporaryInfo.size !== byteLength) throw new Error('artifact temporary has an inconsistent streamed size');
-        } catch (error) {
-          streamFailure = { error };
-          throw error;
-        } finally {
-          // Even an interrupted stream owns this one exact temporary. Give cleanup
-          // its immutable metadata, never unlink a replaced path or unknown inode.
-          const retirementFailures: unknown[] = [];
-          try {
-            if (temporaryInfo === undefined) {
-              await handle.chmod(FILE_MODE);
-              temporaryInfo = await handle.stat();
-            }
-          } catch (cause) {
-            retirementFailures.push(new ResourceRetirementError('CAS interrupted temporary retirement could not establish its exact metadata', cause));
-          }
-          try { await closeCasHandle(handle); }
-          catch (error) { retirementFailures.push(error); }
-          if (retirementFailures.length !== 0) {
-            if (!streamFailure && retirementFailures.length === 1) throw retirementFailures[0];
-            throw new ResourceRetirementError('CAS streaming and descriptor retirement failed',
-              new AggregateError([...(streamFailure ? [streamFailure.error] : []), ...retirementFailures],
-                'artifact stream and retirement failures'));
-          }
-        }
-        await syncRoot(this.root, openedRoot);
-
-        await recoverLinkedTemporary(this.root, openedRoot, ref);
-        const finalName = temporaryName(ref);
-        await fs.rename(temporaryPath, path.join(this.root, finalName));
-        name = finalName;
-        temporaryPath = path.join(this.root, name);
-        await syncRoot(this.root, openedRoot);
-
-        try {
-          await fs.link(temporaryPath, path.join(this.root, ref));
-          linked = true;
-          await syncRoot(this.root, openedRoot);
-        } catch (error) {
-          if (!isErrno(error, 'EEXIST')) throw error;
-          await recoverLinkedTemporary(this.root, openedRoot, ref);
-        }
+        await durableStage(this.root, openedRoot, publications.map(publication => writeTemporary(this.root, openedRoot, publication)));
+        await durableStage(this.root, openedRoot, publications.map(publication => renameTemporary(this.root, openedRoot, publication)));
+        await durableStage(this.root, openedRoot, publications.map(publication => linkTemporary(this.root, openedRoot, publication)));
       } catch (error) {
         if (error instanceof Error) joinedCasPublicationFailures.delete(error);
         publicationError = error;
       }
-
       let cleanupError: unknown;
-      if (temporaryInfo !== undefined) {
-        try {
-          await cleanupKnownTemporary(this.root, openedRoot, name, temporaryInfo, linked);
-        } catch (error) {
-          cleanupError = error;
-        }
-      }
-
+      try { await durableStage(this.root, openedRoot, publications.map(publication => retireTemporary(this.root, openedRoot, publication))); }
+      catch (error) { cleanupError = error; }
       if (publicationError !== undefined && cleanupError !== undefined) {
         throw new ResourceRetirementError('CAS publication and temporary retirement both failed',
           new AggregateError([publicationError, cleanupError], 'artifact publication and cleanup both failed'));
       }
       if (publicationError !== undefined) {
-        if (publicationError === writeFailure) {
-          try { await assertRootPathStable(this.root, openedRoot); joinedFailure = writeFailure; }
+        // This provenance belongs to one exact direct-write publication. The
+        // fixed-four authentication group never lends a sibling's error a
+        // business retry classification, even when Error objects are reused.
+        if (publications.length === 1 && publicationError === publications[0]!.writeFailure) {
+          try { await assertRootPathStable(this.root, openedRoot); joinedFailure = publicationError as Error; }
           catch { /* A failed identity recheck cannot classify the original error as joined. */ }
         }
         throw publicationError;
       }
       if (cleanupError !== undefined) throw new ResourceRetirementError('CAS temporary retirement failed', cleanupError);
-
-      const published = await openPublishedFile(this.root, openedRoot, ref);
-      try {
-        const verified = await verifyOpened(ref, published);
-        if (verified.byteLength !== byteLength) {
-          throw new Error(`artifact ${ref} has unexpected size after publication`);
-        }
-      } finally {
-        await closeCasHandle(published.handle);
-      }
-      return { ref, byteLength };
+      return joinResourceOperations(publications.map(async ({ ref, byteLength }) => {
+        const published = await openPublishedFile(this.root, openedRoot, ref);
+        try {
+          const verified = await verifyOpened(ref, published);
+          if (verified.byteLength !== byteLength) throw new Error(`artifact ${ref} has unexpected size after publication`);
+        } finally { await closeCasHandle(published.handle); }
+        return { ref, byteLength };
+      }));
     }).catch(error => {
       if (error instanceof Error) {
         // An error reused by a source/other failing publication cannot borrow
@@ -564,31 +667,76 @@ export class ContentAddressedStore {
 
   /** Chunks are staging bytes until the iterator is exhausted and its hash,
    * byte count and held-file metadata pass. Early return closes both handles. */
-  async *readChunks(ref: ArtifactRef, expectedByteLength: number): AsyncGenerator<Buffer> {
-    assertArtifactRef(ref);
-    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
-    const root = await openRoot(this.root);
+  async *readChunks(ref: ArtifactRef, expectedByteLength: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
+    const work = beginInstalledAssemblyWork('casRead');
     try {
-      const opened = await openPublishedFile(this.root, root, ref);
+      assertArtifactRef(ref);
+      if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0) throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
+      signal?.throwIfAborted();
+      const root = await openRoot(this.root);
       try {
-        for await (const chunk of verifiedChunks(ref, opened, expectedByteLength)) {
+        signal?.throwIfAborted();
+        const opened = await openPublishedFile(this.root, root, ref);
+        try {
+          for await (const chunk of verifiedChunks(ref, opened, expectedByteLength, 1, signal, work)) {
+            await assertRootPathStable(this.root, root);
+            signal?.throwIfAborted();
+            yield chunk;
+          }
           await assertRootPathStable(this.root, root);
-          yield chunk;
-        }
-        await assertRootPathStable(this.root, root);
-      } finally { await closeCasHandle(opened.handle); }
-    } finally { await closeCasHandle(root.handle); }
+          signal?.throwIfAborted();
+        } finally { await closeCasHandle(opened.handle); }
+      } finally { await closeCasHandle(root.handle); }
+      signal?.throwIfAborted();
+    } finally { if (work) settleInstalledAssemblyWork(work); }
   }
 
-  async read(ref: ArtifactRef): Promise<Buffer> {
+  async read(ref: ArtifactRef, signal?: AbortSignal): Promise<Buffer> {
+    const work = beginInstalledAssemblyWork('casRead');
+    try {
+      assertArtifactRef(ref);
+      signal?.throwIfAborted();
+      const bytes = await this.withRoot(async (openedRoot) => {
+        signal?.throwIfAborted();
+        const opened = await openPublishedFile(this.root, openedRoot, ref);
+        try {
+          const bytes = await readAndVerifyOpened(ref, opened, 1, signal, work);
+          await assertRootPathStable(this.root, openedRoot); signal?.throwIfAborted();
+          return bytes;
+        } finally {
+          await closeCasHandle(opened.handle);
+        }
+      });
+      signal?.throwIfAborted(); return bytes;
+    } finally { if (work) settleInstalledAssemblyWork(work); }
+  }
+
+  /** Exact original stream verification when the caller discards every chunk.
+   * Large reads keep all per-chunk root checks on a joined, bounded read thread.
+   * Retaining consumers continue to use readChunks and independent buffers. */
+  async verifyChunks(ref: ArtifactRef, expectedByteLength: number, signal?: AbortSignal): Promise<void> {
     assertArtifactRef(ref);
-    return this.withRoot(async (openedRoot) => {
-      const opened = await openPublishedFile(this.root, openedRoot, ref);
+    if (!Number.isSafeInteger(expectedByteLength) || expectedByteLength < 0)
+      throw new TypeError('artifact stream requires an exact nonnegative safe byte count');
+    signal?.throwIfAborted();
+    if (!isMainThread || expectedByteLength < 8_388_608) {
+      for await (const _chunk of this.readChunks(ref, expectedByteLength, signal)) { /* Complete original stream. */ }
+      return;
+    }
+    await withCasDiscardSlot(signal, async () => {
+      const work = beginInstalledAssemblyWork('casRead');
       try {
-        return await readAndVerifyOpened(ref, opened, 1);
-      } finally {
-        await closeCasHandle(opened.handle);
-      }
+        await this.withRoot(async root => {
+          signal?.throwIfAborted();
+          const opened = await openPublishedFile(this.root, root, ref);
+          try {
+            await discardCasChunks({ file: opened, rootPath: this.root, rootInfo: root.info, ref, byteLength: expectedByteLength },
+              signal, bytes => { if (work) noteInstalledAssemblyRead(work, bytes); });
+            await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+          } finally { await closeCasHandle(opened.handle); }
+        });
+        signal?.throwIfAborted();
+      } finally { if (work) settleInstalledAssemblyWork(work); }
     });
   }
 
@@ -604,12 +752,37 @@ export class ContentAddressedStore {
     });
   }
 
-  async verify(ref: ArtifactRef): Promise<ArtifactStat> {
-    assertArtifactRef(ref);
-    return this.withRoot(async root => {
-      const opened = await openPublishedFile(this.root, root, ref);
-      try { return await verifyOpened(ref, opened); }
-      finally { await closeCasHandle(opened.handle); }
+  async verify(ref: ArtifactRef, signal?: AbortSignal, retainBytesUpTo?: number): Promise<ArtifactStat & { bytes?: Buffer }> {
+    if (retainBytesUpTo !== undefined && (!Number.isSafeInteger(retainBytesUpTo) || retainBytesUpTo < 0))
+      throw new TypeError('artifact verification requires a nonnegative safe retention ceiling');
+    // Recovery often knows only a ref. Its original checked open supplies the
+    // exact length; large discard-only reads use the same joined reader as
+    // verifyChunks, without a second open or a completed-result cache. The
+    // slot includes both descriptor closes, even on cancellation or failure.
+    return withCasDiscardSlot(signal, async () => {
+      const work = beginInstalledAssemblyWork('casRead');
+      try {
+        assertArtifactRef(ref);
+        signal?.throwIfAborted();
+        const result = await this.withRoot(async root => {
+          signal?.throwIfAborted();
+          const opened = await openPublishedFile(this.root, root, ref);
+          try {
+            let result: ArtifactStat & { bytes?: Buffer };
+            if (retainBytesUpTo !== undefined && opened.info.size <= retainBytesUpTo) {
+              const bytes = await readAndVerifyOpened(ref, opened, 1, signal, work);
+              result = { ref, byteLength: bytes.length, bytes };
+            } else if (isMainThread && opened.info.size >= 8_388_608) {
+              await discardCasChunks({ file: opened, rootPath: this.root, rootInfo: root.info, ref, byteLength: opened.info.size },
+                signal, bytes => { if (work) noteInstalledAssemblyRead(work, bytes); });
+              result = { ref, byteLength: opened.info.size };
+            } else result = await verifyOpened(ref, opened, signal, work);
+            await assertRootPathStable(this.root, root); signal?.throwIfAborted();
+            return result;
+          } finally { await closeCasHandle(opened.handle); }
+        });
+        signal?.throwIfAborted(); return result;
+      } finally { if (work) settleInstalledAssemblyWork(work); }
     });
   }
 }

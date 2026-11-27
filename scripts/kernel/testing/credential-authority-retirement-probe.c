@@ -25,7 +25,9 @@ static int injected, reused_descriptor = -1, owned_descriptors[256];
 static unsigned int owned_count, expected_closes;
 static int expected_remaining[CREDENTIAL_ROLE_COUNT];
 static int available[CREDENTIAL_ROLE_COUNT];
-static const char *const fixed_roles[] = {"root", "credentials", "lock", "main", "wal", "journal", "runtime", "global"};
+static const char *const fixed_roles[] = {"root", "credentials", "lock", "main", "wal", "journal", "runtime"};
+static int account_descriptor = -1, account_injected;
+static struct stat account_identity;
 
 static void retirement_verify_at_exit(void) {
   credential_context *ctx = injected_context;
@@ -41,43 +43,66 @@ static void retirement_verify_at_exit(void) {
         (fstat(expected_remaining[role], &actual) != 0 ||
          !credential_same_object(&actual, &ctx->identities[role]))) _exit(98);
   }
+  if (account_injected) {
+    kernel_global_gate *gate = ctx->global_guard ? ctx->global_guard->owned_shared : NULL;
+    if (!ctx->retired || !gate || !gate->uncertain || !atomic_load(&kernel_global_poisoned) ||
+        gate->gate_fd != -1 || gate->retired ||
+        fstat(gate->home_fd, &actual) != 0 || !same_inode(&actual, &gate->home) ||
+        fstat(gate->parent_fd, &actual) != 0 || !same_inode(&actual, &gate->parent)) _exit(98);
+  } else {
+    kernel_global_gate *gate = ctx->global_guard ? ctx->global_guard->owned_shared : NULL;
+    if (!gate || gate->retired || gate->gate_fd < 0 ||
+        fstat(gate->gate_fd, &actual) != 0 || !same_inode(&actual, &gate->file)) _exit(98);
+  }
   if (fputs("CLIQ_CREDENTIAL_RETIREMENT_VERIFIED\n", stderr) < 0 || fflush(stderr) != 0) _exit(98);
 }
 static int retirement_native_resources(credential_context *ctx) {
   retiring = ctx;
   memcpy(available, ctx->descriptors, sizeof(available));
+  const char *requested = getenv("CLIQ_CREDENTIAL_RETIREMENT_ROLE");
+  int account = requested && strcmp(requested, "account-gate") == 0 &&
+      ctx->global_guard && ctx->global_guard->owned_shared;
+  if (account) {
+    account_descriptor = ctx->global_guard->owned_shared->gate_fd;
+    account_identity = ctx->global_guard->owned_shared->file;
+  }
   int result = credential_retire_resources(ctx);
-  retiring = NULL;
+  /* The account owner closes only after all production data guards retire. */
+  if (!account || result != 0) retiring = NULL;
   return result;
 }
 static int retirement_native_close(int descriptor) {
   credential_context *ctx = retiring;
   const char *requested = getenv("CLIQ_CREDENTIAL_RETIREMENT_ROLE");
   int target = CREDENTIAL_ROLE_COUNT;
+  int account = requested && strcmp(requested, "account-gate") == 0;
   if (requested != NULL) {
     for (int role = 0; role < CREDENTIAL_ROLE_COUNT; ++role) {
       if (strcmp(requested, fixed_roles[role]) == 0) target = role;
     }
   }
   struct stat actual;
-  if (injected || ctx == NULL || target == CREDENTIAL_ROLE_COUNT || ctx->live_files != 0 ||
-      ctx->uncertain || ctx->fenced || ctx->counts.closes == 0 || ctx->descriptors[target] != -1 ||
-      fstat(descriptor, &actual) != 0 || !credential_same_object(&actual, &ctx->identities[target]))
+  if (injected || ctx == NULL || (!account && target == CREDENTIAL_ROLE_COUNT) || ctx->live_files != 0 ||
+      ctx->uncertain || ctx->fenced || ctx->counts.closes == 0 ||
+      (account ? (!ctx->retired || descriptor != account_descriptor) : ctx->descriptors[target] != -1) ||
+      fstat(descriptor, &actual) != 0 ||
+      !credential_same_object(&actual, account ? &account_identity : &ctx->identities[target]))
     return close(descriptor);
   injected = 1;
   injected_context = ctx;
+  account_injected = account;
   reused_descriptor = descriptor;
   /* Independent fixed retirement order, not a snapshot recomputed from the
    * already-mutated implementation. Acquisition may own only a prefix set. */
   static const enum credential_role order[] = {CREDENTIAL_JOURNAL, CREDENTIAL_WAL,
     CREDENTIAL_CREDENTIALS, CREDENTIAL_ROOT, CREDENTIAL_MAIN, CREDENTIAL_LOCK,
-    CREDENTIAL_RUNTIME, CREDENTIAL_GLOBAL};
+    CREDENTIAL_RUNTIME};
   memcpy(expected_remaining, available, sizeof(expected_remaining));
   expected_closes = 0;
   for (size_t index = 0; index < sizeof(order) / sizeof(order[0]); ++index) {
     if (available[order[index]] >= 0) expected_closes++;
     expected_remaining[order[index]] = -1;
-    if ((int)order[index] == target) break;
+    if (!account && (int)order[index] == target) break;
   }
   if (close(descriptor) != 0 || atexit(retirement_verify_at_exit) != 0) _exit(98);
   while (owned_count < sizeof(owned_descriptors) / sizeof(owned_descriptors[0])) {

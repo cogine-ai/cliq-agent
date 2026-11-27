@@ -5,6 +5,44 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
+import { MessageChannel } from 'node:worker_threads';
+import { once } from 'node:events';
+import { createHook } from 'node:async_hooks';
+
+const idleDeliveryFailure = Symbol('private idle delivery refusal');
+function reportFailure(error) {
+  try { process.stderr.write('CLIQ_NATIVE_CALLBACK_FAILURE_V1:' + (error === idleDeliveryFailure ? 'idle_delivery' : 'other') + '\n'); }
+  finally { process.exitCode = 1; }
+}
+function checkHook(check) { try { check(); } catch (error) { reportFailure(error); } }
+const callbackContexts = new Map();
+createHook({
+  init(id, type) { if (['cliq credential platform callbacks', 'cliq model broker callbacks'].includes(type)) callbackContexts.set(id, { before: 0, after: 0, destroyed: 0 }); },
+  before(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.before++; } }); },
+  after(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.after++; } }); },
+  destroy(id) { checkHook(() => { const state = callbackContexts.get(id); if (state) { assert.equal(state.destroyed, 0); state.destroyed++; } }); },
+}).enable();
+process.once('beforeExit', () => {
+  if (process.exitCode) return; // Preserve the original lifecycle refusal as the RED diagnostic.
+  checkHook(() => {
+    assert(callbackContexts.size > 0);
+    for (const state of callbackContexts.values()) { assert(state.before > 0); assert.equal(state.before, state.after); assert.equal(state.destroyed, 1); }
+  });
+});
+async function idleDelivery(operation) {
+  const { port1, port2 } = new MessageChannel();
+  port1.on('message', () => assert.fail('the idle callback-lifetime handle must receive no messages')); port1.ref();
+  let watchdogFired = false;
+  const started = performance.now(), watchdog = setTimeout(() => { watchdogFired = true; }, 1500);
+  try {
+    const value = await operation();
+    if (!(!watchdogFired && performance.now() - started <= 1500)) throw idleDeliveryFailure;
+    return value;
+  } finally {
+    clearTimeout(watchdog);
+    const joined = Promise.all([once(port1, 'close'), once(port2, 'close')]); port1.close(); port2.close(); await joined;
+  }
+}
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const outcome = promise => promise.then(value => ({ kind: 'resolved', value }), error => ({ kind: 'rejected', error }));
@@ -39,6 +77,7 @@ function externalNotifications() {
 
 try {
   assert.equal(process.versions.node, '24.21.0');
+  assert.equal(typeof global.gc, 'function');
   assert(process.getuid() > 0);
   assert.equal(process.argv.length, 5);
   const platformModule = { exports: {} }, brokerModule = { exports: {} };
@@ -112,7 +151,7 @@ try {
     assert.throws(() => retained.acquireNoReleaseFence(binding), 'an unjoined live transport cannot prove no release');
     retained.retainDispatchFence(); fenceRetained = true;
     assert.throws(() => retained.retainDispatchFence(), 'one original transport cannot mint a second retained token');
-    const closure = await retained.close();
+    const closure = await idleDelivery(() => retained.close());
     assert.equal(closure.networkStarted, false); assert.equal(closure.requestStarted, false);
     assert.equal(closure.tokenRevoked, true); assert.equal(closure.matchingActiveReleaseCount, 0);
     assert.equal(closure.brokerFenceTokenDigest, binding.brokerFenceTokenDigest);
@@ -140,6 +179,29 @@ try {
         if (fenceRetained) retained.releaseDispatchFence();
       } finally { trust.fill(0); body.fill(0); }
     }
+  }
+  // No external notification or timer pump drives this normal prepared close.
+  // Its own Promise continuation drops the original guard/handle and forces GC
+  // while napi_close_callback_scope is still returning to the native owner.
+  let reentrant, reentrantRetained = false;
+  const reentrantTrust = await readFile(process.argv[4]), reentrantBody = Buffer.from('{"model":"component","messages":[]}');
+  try {
+    reentrant = broker.prepareModelTransport({ provider: 'openai-compatible', selector, expectedObservation: observed,
+      target: { hostAscii: 'localhost', port: 443, basePath: '/v1', serverNameAscii: 'localhost', spkiSha256Pins: ['3'.repeat(64)] },
+      trustStoreBytes: reentrantTrust, trustStoreDigest: digest(reentrantTrust), requestPath: '/chat/completions',
+      bodyBytes: reentrantBody, bodyBytesDigest: digest(reentrantBody) });
+    await reentrant.ready; reentrant.retainDispatchFence(); reentrantRetained = true;
+    const binding = { runId: 'callback-run', opId: 'callback-op', attempt: 0, dispatchId: 'callback-dispatch', dispatchJournalSeq: 2,
+      requestRef: '4'.repeat(64), requestDigest: '5'.repeat(64), targetRef: '6'.repeat(64), targetDigest: '7'.repeat(64), grantRef: '8'.repeat(64),
+      supervisorInstanceId: 'component-supervisor', stateOwnerEpoch: 1, leaseEpoch: 1, brokerFenceTokenDigest: reentrant.brokerFenceTokenDigest };
+    await idleDelivery(() => reentrant.close().then(value => {
+      assert.equal(value.networkStarted, false); assert.equal(value.requestStarted, false);
+      const guard = reentrant.acquireNoReleaseFence(binding); guard.assertHeld(); guard.close();
+      reentrant.releaseDispatchFence(); reentrantRetained = false; reentrant = undefined; global.gc(); return value;
+    }));
+  } finally {
+    try { if (reentrant) { await reentrant.close(); if (reentrantRetained) reentrant.releaseDispatchFence(); } }
+    finally { reentrantTrust.fill(0); reentrantBody.fill(0); }
   }
   // Return naturally while the same tracked process still owns a real mutex
   // guard. The fixture requires this exact child's normal exit and namespace
@@ -175,7 +237,5 @@ try {
   }
   } finally { trust.fill(0); body.fill(0); }
 } catch (error) {
-  // Only fixed local/native errors, never an external error payload or secret.
-  console.error(error);
-  process.exitCode = 1;
+  reportFailure(error);
 }

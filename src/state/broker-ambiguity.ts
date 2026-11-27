@@ -19,7 +19,7 @@ import { decodeBudgetSettlement, decodeRunSpec } from './decoders.js';
 import { KernelStorageError } from './errors.js';
 import { readModelGrantData } from './model-grant.js';
 import { MODEL_BROKER_ENTRY_ID, MODEL_BROKER_RELATIVE_PATH } from './model-broker-native.js';
-import { readHighestPreparedAttempt, readInvocationAttempt } from './repositories/journal.js';
+import { readHighestPreparedAttempt, readInvocationAttempt, readInvocationJournal } from './repositories/journal.js';
 import { readRun, readSessionPrincipalId } from './rows.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
@@ -28,6 +28,7 @@ import { assertInstalledModelBrokerProcess, withHeldInstalledRuntime, type HeldI
 import { stateRootIdentityForLock } from './native-owner.js';
 import { readRetainedStateOwnerHistory, type RetainedStateOwnerHistory } from './state-owner-history.js';
 import { stopInvocationHistory } from '../runtime/stop.js';
+import { assertDeliveryModelFreeCut } from './run-model-free.js';
 
 const same = (left: unknown, right: unknown) => canonicalSha256(left) === canonicalSha256(right);
 function invalid(): never { throw new KernelStorageError('RECOVERY_REQUIRED', 'installed broker ambiguity does not close its original permanent claim'); }
@@ -36,10 +37,22 @@ function isInstalledBroker(assembly: RunAssemblyV1): boolean { return assembly.p
 /** Reproduce the original admission's immutable model catalog/Bundle links.
  * Publisher authentication remains the installed admission/release gate; this
  * reader has no trust roots and never treats a catalog's own key as authority. */
-async function retainedRecipe(artifacts: ArtifactCatalog, run: Run, spec: RunSpec, assembly: RunAssemblyV1) {
+async function retainedRecipe(driver: SqliteDriver, artifacts: ArtifactCatalog, run: Run, spec: RunSpec, assembly: RunAssemblyV1) {
   if (spec.operation !== 'agent' || canonicalSha256(spec) !== run.specRef || canonicalSha256(assembly) !== spec.assemblyRef ||
-      assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered' ||
       assembly.provider.adapter.version !== '1' || assembly.provider.negotiation.streaming) invalid();
+  if (assembly.provider.name === 'ollama' && assembly.provider.endpoint.kind === 'local_zero_cost') {
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, assembly.runtime.runtimeBundleRef);
+    if (bundle.manifestDigest !== assembly.runtime.runtimeBundleManifestDigest) invalid();
+    const { readInstalledLocalRunModel } = await import('./local-inference-run-authority.js');
+    const child = run.parentRunId ? await (await import('./child-admission.js')).readChildAdmission(driver, artifacts, run.id) : undefined;
+    const original = child ? await (await import('./local-model-history.js')).readInheritedLocalModelAdmissionAssembly(artifacts, assembly, child) : assembly;
+    const local = await readInstalledLocalRunModel(artifacts, { bundle, bundleDigest: assembly.runtime.runtimeBundleRef }, driver, original);
+    if (local.provenance.value.createdAt !== (child?.rootOrigin.run.createdAt ?? run.createdAt) || local.provenance.value.validThrough < run.deadlineAt ||
+        local.registration.ownerPrincipalId !== readSessionPrincipalId(driver, run.sessionId)) invalid();
+    child?.rootOrigin.assertUnchanged(driver);
+    return;
+  }
+  if (assembly.provider.name !== 'openai-compatible' || assembly.provider.endpoint.kind !== 'registered') invalid();
   const capability = await readCanonicalArtifact<ModelCapabilityEvidenceV1>(artifacts, assembly.provider.negotiation.capabilityEvidenceRef);
   if (!exactKeys(capability, ['schemaVersion', 'format', 'provider', 'model', 'endpointIdentityDigest', 'adapter', 'source',
     'nativeToolCalling', 'streaming', 'trustedUsageEvidence', 'contextLimitTokens', 'maxOutputTokens', 'observedAt', 'validThrough', 'evidenceDigest']) ||
@@ -129,7 +142,7 @@ export async function prepareInstalledBrokerAmbiguity(driver: SqliteDriver, arti
   const assembly = decodeRetainedRunAssembly(raw);
   if (!isInstalledBroker(assembly)) return undefined;
   if (!input.claim) invalid();
-  await retainedRecipe(artifacts, input.run, spec, assembly);
+  await retainedRecipe(driver, artifacts, input.run, spec, assembly);
   const prototype = decodeBrokerInvocationAmbiguity(await readCanonicalArtifact(artifacts, input.evidenceRef));
   if (prototype.evidenceDigest !== input.evidenceDigest || prototype.observedAt > input.settledAt) invalid();
   const principalId = readSessionPrincipalId(driver, input.run.sessionId);
@@ -159,9 +172,16 @@ export async function prepareInstalledBrokerAmbiguity(driver: SqliteDriver, arti
 /** Historical unknowns bind their original grant/frontier and claiming owner,
  * not the current continuation or whichever Supervisor later opens the Run. */
 export async function validateInstalledBrokerAmbiguityHistory(input: { driver: SqliteDriver; artifacts: ArtifactCatalog;
-  run: Run; spec: RunSpec; assembly: RunAssemblyV1; journal: readonly InvocationJournalEntry[]; principalId: string }): Promise<void> {
+  run: Run; spec: RunSpec; assembly: RunAssemblyV1; journal: InvocationJournalEntry[];
+  childAllocations: RecoveryClosureV1['childAllocations']; principalId: string }): Promise<void> {
+  // Delivery inherits the original assembly, not its Agent model authority.
+  // Require the complete model-free cut before excluding Agent-only history.
+  if (input.spec.operation === 'delivery') {
+    assertDeliveryModelFreeCut({ run: input.run, runSpec: input.spec, journal: input.journal, childAllocations: input.childAllocations });
+    return;
+  }
   if (!isInstalledBroker(input.assembly)) return;
-  await retainedRecipe(input.artifacts, input.run, input.spec, input.assembly);
+  await retainedRecipe(input.driver, input.artifacts, input.run, input.spec, input.assembly);
   for (const unknown of input.journal.filter(entry => entry.opKind === 'model' && entry.phase === 'unknown')) {
     if (!unknown.evidenceRef || !unknown.evidenceDigest) invalid();
     const before = input.journal.filter(entry => entry.opId === unknown.opId && entry.attempt === unknown.attempt && entry.seq < unknown.seq);
@@ -191,12 +211,13 @@ function unusedUnknowns(journal: readonly InvocationJournalEntry[]): InvocationJ
 }
 
 async function terminalFrames(driver: SqliteDriver, artifacts: ArtifactCatalog, cut: RecoveryClosureV1): Promise<TerminalFrame[]> {
+  if (cut.runSpec.operation === 'delivery') assertDeliveryModelFreeCut(cut);
   const unknowns = unusedUnknowns(cut.journal);
   if (!unknowns.length) return [];
   const { run, runSpec: spec } = cut;
   const assembly = decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, spec.assemblyRef));
   if (!isInstalledBroker(assembly) || assembly.runtime.sandboxBackend !== 'linux_namespace') terminalFailure();
-  await retainedRecipe(artifacts, run, spec, assembly);
+  await retainedRecipe(driver, artifacts, run, spec, assembly);
   const principalId = readSessionPrincipalId(driver, run.sessionId);
   const frames: TerminalFrame[] = [];
   for (const unknown of unknowns) {
@@ -262,11 +283,41 @@ export type InstalledBrokerTerminalClosurePlan = Readonly<{
  * clock, credential, or proof. Generic loaded Runs cannot mint this branch. */
 export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver, artifacts: ArtifactCatalog,
   owner: StateOwnerContext, selected: HeldInstalledRuntime | undefined, cut: RecoveryClosureV1,
-  operation: (plan: InstalledBrokerTerminalClosurePlan) => Promise<T>): Promise<T> {
+  operation: (plan: InstalledBrokerTerminalClosurePlan) => Promise<T>,
+  terminalProposal?: import('./manual-reconciliation.js').ManualInvocationFinalization | import('./mcp-retry-terminal.js').McpRetryFinalization): Promise<T> {
+  if (cut.runSpec.operation === 'delivery') {
+    assertDeliveryModelFreeCut(cut);
+    assertActiveStateOwner(driver, owner);
+    const unchanged = (connection: SqliteConnection, current = readRun(connection, cut.run.id)) => {
+      assertActiveStateOwner(connection, owner);
+      if (!same(current, cut.run) || !same(readRun(connection, cut.run.id), cut.run) ||
+          !same(readInvocationJournal(connection, cut.run.id), cut.journal))
+        terminalFailure();
+    };
+    // This is absence of any model invocation in an independently verified
+    // model-free Run, not a claim that a token/process was killed or revoked.
+    // Publisher/verifier retirement remains a separate required closure.
+    unchanged(driver);
+    return operation(Object.freeze({ metadata: [], abandonedRetryInvocations: [],
+      reobserve(connection) { unchanged(connection); },
+      validate(connection, currentRun) { unchanged(connection, currentRun); }
+    }));
+  }
   if (!unusedUnknowns(cut.journal).length) return operation(Object.freeze({
     metadata: [], abandonedRetryInvocations: [], reobserve() {}, validate() {}
   }));
-  if (!selected || process.platform !== 'linux' || !cut.run.stopIntentRef) terminalFailure();
+  if (!selected || process.platform !== 'linux') terminalFailure();
+  if (!cut.run.stopIntentRef) {
+    if (!terminalProposal) terminalFailure();
+    const retry = await import('./mcp-retry-terminal.js');
+    const original = retry.isMcpRetryFinalization(terminalProposal)
+      ? retry.readMcpRetryFinalization(driver, artifacts, owner, terminalProposal, cut.run.id)
+      : (await import('./manual-reconciliation.js')).readManualInvocationFinalization(driver, owner, terminalProposal, cut.run.id);
+    // Only the existing unique terminal writer may stage its first Stop in
+    // this same original transaction. The brand does not replace any native
+    // model-token/death, process, owner, root, Journal or fresh-time check.
+    if (!same(original.cut, cut)) terminalFailure();
+  }
   return withHeldInstalledRuntime(selected, async installed => {
     assertInstalledModelBrokerProcess();
     // Brand lookup precedes caller properties. The native lock has its own
@@ -350,12 +401,15 @@ export async function withInstalledBrokerTerminalClosure<T>(driver: SqliteDriver
 export async function validateInstalledBrokerTerminalHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
   cut: RecoveryClosureV1, detail: TerminalDetail): Promise<Abandonments> {
   const frames = await terminalFrames(driver, artifacts, cut);
-  if (!Array.isArray(detail.abandonedRetryInvocations) || detail.abandonedRetryInvocations.length !== frames.length) terminalFailure();
+  if (!Array.isArray(detail.abandonedRetryInvocations)) terminalFailure();
+  const sequences = new Set(frames.map(frame => frame.unknown.seq));
+  const abandoned = detail.abandonedRetryInvocations.filter(entry => sequences.has(entry.unknownJournalSeq));
+  if (abandoned.length !== frames.length) terminalFailure();
   if (!frames.length) return [];
-  const closures = await Promise.all(detail.abandonedRetryInvocations.map(async entry =>
-    decodeBrokerProcessDomainDeathDispatchClosure(await readCanonicalArtifact(artifacts, entry.dispatchFenceOrDeathEvidenceRef))));
-  const deaths = await Promise.all(closures.map(async closure =>
-    decodeBrokerProcessDomainDeath(await readCanonicalArtifact(artifacts, closure.closure.brokerProcessDeathEvidenceRef))));
+  const closures = await artifacts.mapReads(abandoned, async entry =>
+    decodeBrokerProcessDomainDeathDispatchClosure(await readCanonicalArtifact(artifacts, entry.dispatchFenceOrDeathEvidenceRef)));
+  const deaths = await artifacts.mapReads(closures, async closure =>
+    decodeBrokerProcessDomainDeath(await readCanonicalArtifact(artifacts, closure.closure.brokerProcessDeathEvidenceRef)));
   const epoch = deaths[0]!.inspectorStateOwnerEpoch;
   if (deaths.some(evidence => evidence.inspectorStateOwnerEpoch !== epoch)) terminalFailure();
   const history = await readRetainedStateOwnerHistory(driver, artifacts, epoch);
@@ -379,8 +433,8 @@ export async function validateInstalledBrokerTerminalHistory(driver: SqliteDrive
         (inspecting.owner.state === 'terminal' && cut.run.updatedAt > inspecting.owner.releasedAt)) terminalFailure();
     const inspector = await readSupervisorInspector(artifacts, inspecting.owner, frame.assembly, evidence);
     if (!same(inspector, supervisorInspectorIdentity(inspecting.owner))) terminalFailure();
-    const entry = abandonment(frame, detail.abandonedRetryInvocations[index]!.dispatchFenceOrDeathEvidenceRef);
-    if (!same(entry, detail.abandonedRetryInvocations[index])) terminalFailure();
+    const entry = abandonment(frame, abandoned[index]!.dispatchFenceOrDeathEvidenceRef);
+    if (!same(entry, abandoned[index])) terminalFailure();
     expected.push(entry);
   }
   return expected;

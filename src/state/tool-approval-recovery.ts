@@ -49,5 +49,5 @@ export async function readToolApproval(driver: SqliteDriver, artifacts: Artifact
       response.result.snapshot.run.waitingOnRef !== undefined || response.result.snapshot.run.activeWorkerLaunchId !== undefined) {
     throw new TypeError('approval response substitutes its committed decision or Run snapshot');
   }
-  return { ...proof, decision, grant, response };
+  return { ...proof, decision, grant, response, control: row };
 }

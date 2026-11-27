@@ -1,46 +1,170 @@
+import { readQualificationSource, type FrozenQualificationSource } from './qualification-source.js';
+import { createInstalledQualificationPublisher, qualificationPublisherMaterial, type InstalledQualificationPublisher } from '../../../src/state/testing/qualification-publisher.js';
+import { schemaConversionProfile } from '../../../src/state/signed-schema.js';
+import { signedKernelSchemaProfile } from '../../../src/state/signed-schema.js';
 // Qualification-only signed package recipe, not a release publisher or I1.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { sign } from 'node:crypto';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { rootCertificates } from 'node:tls';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs';
+import { WORKER_BUILD_TIMEOUT_MS } from '../build-bubblewrap.mjs';
+import { STATE_OWNER_QUALIFICATION_COMPILE_TIMEOUT_MS } from './state-owner-compile-timeout.js';
 
 import { KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { sha256Bytes } from '../../../src/kernel/identity.js';
-import { policyProfile, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
+import { policyProfile, SINGLE_CAS_STREAMS_LAYOUT, verifyRuntimeBundle, type RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
 import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_RELATIVE_PATH } from '../../../src/state/native-owner.js';
-import { buildSupervisorSeaImage, prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
+import { buildSupervisorSeaImage, prepareInstalledSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 import { installedModelPackageEntries, writeInstalledModelAuthority, type InstalledModelPackageFixture } from './installed-model-package.js';
+import { buildInstalledModelPackageEntries, buildInstalledModelPrompts } from '../model-package.js';
+import { providerModelDefinition, writeInstalledProviderModelAuthority, type InstalledProviderModelDefinition } from '../installed-provider-model.js';
+import { encodeModelSetupProfiles, MODEL_SETUP_PROFILES_ASSET } from '../../../src/client/model-setup-profile.js';
+import { writeInstalledGuestToolchain } from './installed-guest-package.js';
+import { validateGuestToolchainMetadata } from '../../../src/state/guest-toolchain.js';
+import { buildSourceGitInspectorAsset } from './source-git-inspector-package.js';
+import { buildBuiltinToolsAsset } from './builtin-tools-package.js';
+import { buildMcpHttpAdminProbeAsset } from '../mcp-package.js';
+import { MCP_HTTP_BROKER_ENTRY_ID, MCP_HTTP_BROKER_RELATIVE_PATH } from '../../../src/state/mcp-broker-native.js';
+import { MCP_STDIO_BROKER_ENTRY_ID, MCP_STDIO_BROKER_RELATIVE_PATH } from '../../../src/state/mcp-stdio-broker-native.js';
+import { inspectMcpStaticLinuxExecutable } from '../../../src/sandbox/mcp-stdio-executable.js';
+import { buildInstalledMcpRecoveryPackage } from './installed-mcp-recovery-package.js';
+import { buildBundledSkillPackageData, type BundledSkillPackageInput } from './installed-skill-package.js';
+import { buildInstalledLocalInferencePackage } from './installed-local-inference-package.js';
+import { checkCanonicalBytes, validateBundle } from '../../../src/state/installed-artifacts.js';
+import { emitQualificationFailure } from './qualification-failure-diagnostic.js';
+
+type LocalInferenceBuildInput = Omit<Parameters<typeof buildInstalledLocalInferencePackage>[0], 'fixture' | 'publisher'>;
+type PackageBuildOptions = Readonly<{ source?: FrozenQualificationSource; publisher?: InstalledQualificationPublisher; upgradeSourceBundle?: RuntimeBundleManifest; bundledSkills?: readonly BundledSkillPackageInput[]; headlessSchemaVersion?: 3; guestToolchain?: 'node-test-v1'; guestImageProfile?: 'qualification_max'; previewTsx?: true; publicationRetirementDiagnostics?: true; credentialPhaseDiagnostics?: true; serverAuthenticationDiagnostics?: true; storeFailureDiagnostics?: true; resourceDiagnostics?: true; npmDependencyArchive?: Buffer; providerModel?: InstalledProviderModelDefinition; mcpHttp?: true; mcpStdio?: true; mcpRecovery?: true; localInference?: LocalInferenceBuildInput }>;
+import { buildInstalledNpmAdapterAsset, buildInstalledNpmDataAsset } from './installed-npm-package.js';
+import { DEPENDENCY_BROKER_ENTRY_ID, DEPENDENCY_BROKER_RELATIVE_PATH } from '../../../src/state/dependency-broker-native.js';
+import { NPM_DATA_RECIPE } from '../../../src/sandbox/npm-data-image.js';
 
 /** Construct the same actual SEA/helper package for independent Linux startup
  * and user-manager qualifiers. Real worker images are installed, not launched:
  * they do not qualify admission, execution, release signing or complete I1. */
-export async function buildInstalledSupervisorPackage(fixture: string,
-  variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture) {
-  const repository = fileURLToPath(new URL('../../..', import.meta.url));
-  const { nodeRoot, carrier } = await prepareSupervisorSeaCarrier(fixture);
-  const keys = generateKeyPairSync('ed25519');
-  const releaseKeys = [{ keyId: 'explicit-installed-startup-test-root',
-    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }];
+async function buildInstalledSupervisorPackageCore(fixture: string,
+  variant: 'complete' | 'retirement-native-missing' = 'complete', modelFixture?: InstalledModelPackageFixture,
+  options: PackageBuildOptions = {}, diagnostics={phase:0}) {
+  assert(Object.keys(options).every(key => key === 'source' || key === 'publisher' || key === 'upgradeSourceBundle' || key === 'bundledSkills' || key === 'headlessSchemaVersion' || key === 'guestToolchain' || key === 'guestImageProfile' || key === 'previewTsx' || key === 'publicationRetirementDiagnostics' || key === 'credentialPhaseDiagnostics' || key === 'serverAuthenticationDiagnostics' || key === 'storeFailureDiagnostics' || key === 'resourceDiagnostics' || key === 'npmDependencyArchive' || key === 'providerModel' || key === 'mcpHttp' || key === 'mcpStdio' || key === 'mcpRecovery' || key === 'localInference'));
+  assert(!(modelFixture && options.providerModel), 'owned fixture and real provider definitions cannot be combined');
+  const providerModel = options.providerModel === undefined ? undefined : providerModelDefinition(options.providerModel);
+  if (providerModel) assert(variant === 'complete', 'real provider qualification requires the complete signed native package');
+  const hasModel = modelFixture !== undefined || providerModel !== undefined;
+  assert(options.headlessSchemaVersion === undefined || options.headlessSchemaVersion === 3);
+  assert(options.guestToolchain === undefined || options.guestToolchain === 'node-test-v1');
+  // Publisher construction only: keep the original maximum-load qualifier
+  // separate from the default official compact image. No runtime flag exists.
+  assert(options.guestImageProfile === undefined || options.guestImageProfile === 'qualification_max');
+  if (options.previewTsx) assert(options.previewTsx === true && options.guestToolchain === 'node-test-v1' &&
+    options.npmDependencyArchive && !options.guestImageProfile && !options.source);
+  if (options.guestImageProfile) assert(options.guestToolchain === 'node-test-v1');
+  assert(options.publicationRetirementDiagnostics === undefined || options.publicationRetirementDiagnostics === true);
+  assert(options.credentialPhaseDiagnostics === undefined || options.credentialPhaseDiagnostics === true);
+  assert(options.serverAuthenticationDiagnostics === undefined || options.serverAuthenticationDiagnostics === true);
+  assert(options.storeFailureDiagnostics === undefined || options.storeFailureDiagnostics === true);
+  assert(options.resourceDiagnostics === undefined || options.resourceDiagnostics === true);
+  assert(options.mcpHttp === undefined || options.mcpHttp === true);
+  assert(options.mcpStdio === undefined || options.mcpStdio === true);
+  assert(options.mcpRecovery === undefined || options.mcpRecovery === true);
+  if (options.mcpRecovery) assert(options.mcpStdio === true && options.source === undefined,
+    'the fixed recovery publisher requires its same current complete signed stdio image, never an augmented historical source');
+  if (options.mcpStdio) assert(variant === 'complete' && hasModel,
+    'MCP stdio requires the complete signed native and model package');
+  if (options.mcpHttp) assert(variant === 'complete' && options.guestToolchain === 'node-test-v1' && hasModel,
+    'MCP HTTP requires the complete signed native, fixed Admin helper and guest Node package');
+  if (options.serverAuthenticationDiagnostics) assert(options.publicationRetirementDiagnostics === true,
+    'fixed server observations belong only to the explicit delayed delivery qualification image');
+  if (options.publicationRetirementDiagnostics) assert(options.guestToolchain === 'node-test-v1',
+    'fixed publication observations belong only to the installed delivery qualification image');
+  if (options.guestToolchain) assert(variant === 'complete' && (hasModel || options.localInference), 'installed verifier requires the complete model and native package');
+  if (options.localInference) assert(variant === 'complete' && options.guestToolchain === 'node-test-v1' && !options.source,
+    'local inference qualification requires the current complete signed tool and verifier package');
+  // Publisher-only fixed source. This is not a runtime flag, path, registry
+  // selector or interpreter choice. Validate the entire official source
+  // before starting any builder or publishing a signed dependency entry.
+  assert(options.npmDependencyArchive === undefined || Buffer.isBuffer(options.npmDependencyArchive) &&
+    options.npmDependencyArchive.length === NPM_DATA_RECIPE.archiveBytes, 'installed npm requires its exact bounded official source');
+  const npmData = options.npmDependencyArchive === undefined ? undefined : buildInstalledNpmDataAsset(Buffer.from(options.npmDependencyArchive));
+  if (npmData) assert(options.guestToolchain === 'node-test-v1' && variant === 'complete' && hasModel,
+    'installed npm requires its complete signed guest, model and native package');
+  diagnostics.phase=1;
+  const source = options.source === undefined ? undefined : await readQualificationSource(options.source);
+  const repository = source?.root ?? fileURLToPath(new URL('../../..', import.meta.url));
+  const schemaVersion = source?.schemaVersion ?? KERNEL_STATE_SCHEMA_VERSION;
+  if (providerModel && schemaVersion !== 8) throw new TypeError('real provider qualification requires the current signed schema8 recipe');
+  if (options.npmDependencyArchive !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later npm recipe');
+  if (options.upgradeSourceBundle && schemaVersion !== 8) throw new TypeError('conversion can only be signed by the target8 recipe');
+  if (options.bundledSkills !== undefined && schemaVersion !== 8) throw new TypeError('the original schema7 product cannot consume a later skills recipe');
+  if (options.mcpHttp && schemaVersion !== 8) throw new TypeError('MCP HTTP requires the current signed schema8 recipe');
+  if (options.mcpStdio && schemaVersion !== 8) throw new TypeError('MCP stdio requires the current signed schema8 recipe');
+  // An explicit old source compiles with that original product's actual SEA
+  // builder and its separately integrity-installed lock, never today's deps.
+  const sea = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/supervisor-sea-builder.ts')).href) as
+    Pick<typeof import('./supervisor-sea-builder.js'), 'prepareInstalledSupervisorSeaCarrier' | 'buildSupervisorSeaImage'>
+    : { prepareInstalledSupervisorSeaCarrier, buildSupervisorSeaImage };
+  // A real old product's serialized tool contracts must come from its same
+  // original verified source, just like its executable/native recipes. The
+  // current compiler cannot silently add a later handler to an old image.
+  const modelProducer = source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/testing/installed-model-package.ts')).href) as
+    Pick<typeof import('./installed-model-package.js'), 'installedModelPackageEntries'> : { installedModelPackageEntries };
+  const providerProducer = providerModel && source ? await import(pathToFileURL(path.join(repository, 'scripts/kernel/model-package.ts')).href) as
+    Pick<typeof import('../model-package.js'), 'buildInstalledModelPackageEntries'> : { buildInstalledModelPackageEntries };
+  diagnostics.phase=2;
+  // The existing qualification cache supplies only archive bytes. The same
+  // complete official checksum and fresh extraction still run unconditionally.
+  const { nodeRoot, carrier, supervisorCarrier } = await sea.prepareInstalledSupervisorSeaCarrier(
+    fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
+  diagnostics.phase=3;
+  const publisher = options.publisher ?? createInstalledQualificationPublisher();
+  const keys = qualificationPublisherMaterial(publisher);
+  const releaseKeys = [...keys.releaseKeys];
+  if (options.upgradeSourceBundle) verifyRuntimeBundle(options.upgradeSourceBundle, releaseKeys);
   const rootAsset = path.join(fixture, 'release-trust-roots.json');
   await writeFile(rootAsset, canonicalJsonBytes(releaseKeys), { flag: 'wx', mode: 0o400 });
+  // Public setup choices live in the same signed executable. No bundle refs,
+  // prices, credentials or qualification assertions enter this template. The
+  // installed host must derive and match its actual signed authority tuple.
+  const setupAssets: Record<string, string> = {};
+  const setupModel = providerModel ?? (source ? undefined : modelFixture);
+  if (setupModel) {
+    const setupProducer = source ? await import(pathToFileURL(path.join(repository, 'src/client/model-setup-profile.ts')).href) as
+      Pick<typeof import('../../../src/client/model-setup-profile.js'), 'encodeModelSetupProfiles'> : { encodeModelSetupProfiles };
+    const setupAsset = path.join(fixture, MODEL_SETUP_PROFILES_ASSET);
+    await writeFile(setupAsset, setupProducer.encodeModelSetupProfiles([{ schemaVersion: 1, id: 'default',
+      provider: setupModel.provider, model: setupModel.model, target: setupModel.target,
+      tls: { serverNameAscii: setupModel.tls.serverNameAscii, spkiSha256Pins: setupModel.tls.spkiSha256Pins } }]),
+    { flag: 'wx', mode: 0o400 });
+    setupAssets[MODEL_SETUP_PROFILES_ASSET] = setupAsset;
+  }
   const packageRoot = path.join(fixture, 'package');
   await mkdir(packageRoot, { mode: 0o700 });
-  const supervisorFile = await buildSupervisorSeaImage({ fixture, carrier,
+  diagnostics.phase=4;
+  const supervisorFile = await sea.buildSupervisorSeaImage({ fixture, carrier: supervisorCarrier,
     entryPoint: path.join(repository, 'src/state/installed-entry.ts'),
     executable: path.join(packageRoot, 'supervisor'), variant: 'installed-supervisor',
-    assets: { 'release-trust-roots.json': rootAsset } });
+    // Fixed observations belong only to explicitly selected qualifiers.
+    // Default installed campaigns retain their original stderr contract.
+    ...(options.guestToolchain === 'node-test-v1' || options.credentialPhaseDiagnostics ? { credentialPhaseDiagnostics: true as const } : {}),
+    ...(options.publicationRetirementDiagnostics ? { publicationRetirementDiagnostics: true as const } : {}),
+    ...(options.serverAuthenticationDiagnostics ? { serverAuthenticationDiagnostics: true as const } : {}),
+    ...(options.storeFailureDiagnostics ? { storeFailureDiagnostics: true as const } : {}),
+    ...(options.resourceDiagnostics ? { resourceDiagnostics: true as const } : {}),
+    ...(options.mcpHttp || options.mcpStdio ? { mcpAdminDiagnostics: true as const } : {}),
+    assets: { 'release-trust-roots.json': rootAsset, ...setupAssets } });
+  const supervisorBytes = await readFile(supervisorFile);
+  diagnostics.phase=5;
   const helper = path.join(packageRoot, STATE_OWNER_NATIVE_RELATIVE_PATH);
   await mkdir(path.dirname(helper), { recursive: true, mode: 0o700 });
   const sqliteInclude = await verifiedSqliteExtensionIncludes();
   const compilation = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread', '-shared', '-fPIC',
     '-I', sqliteInclude, '-I', path.join(nodeRoot, 'include/node'),
     path.join(repository, 'native/state-owner/state-owner.c'), '-o', helper],
-  { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+  { encoding: 'utf8', timeout: STATE_OWNER_QUALIFICATION_COMPILE_TIMEOUT_MS, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(compilation.error, undefined, `cc: ${compilation.error}`);
   assert.equal(compilation.status, 0, `cc: ${compilation.stderr}`);
   await chmod(helper, 0o500);
@@ -49,7 +173,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   const workerRoot = path.join(fixture, 'worker-images');
   const workers = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-worker.mjs'),
     workerRoot, path.join(nodeRoot, 'include/node')],
-  { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+  { encoding: 'utf8', timeout: WORKER_BUILD_TIMEOUT_MS + 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
   assert.equal(workers.error, undefined, 'production worker image construction did not join');
   assert.equal(workers.status, 0, `production worker image construction: ${workers.stderr}`);
   const credentialRoot = path.join(fixture, 'credential-platform-image');
@@ -59,7 +183,7 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   assert.equal(credentials.error, undefined, 'production credential platform construction did not join');
   assert.equal(credentials.status, 0, `production credential platform construction: ${credentials.stderr}`);
   let modelBrokerBytes: Buffer | undefined;
-  if (modelFixture) {
+  if (hasModel || options.localInference) {
     const brokerRoot = path.join(fixture, 'model-broker-image');
     const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-model-broker.mjs'),
       brokerRoot, path.join(nodeRoot, 'include/node')],
@@ -67,6 +191,60 @@ export async function buildInstalledSupervisorPackage(fixture: string,
     assert.equal(broker.error, undefined, 'production model broker construction did not join');
     assert.equal(broker.status, 0, `production model broker construction: ${broker.stderr}`);
     modelBrokerBytes = await readFile(path.join(brokerRoot, 'linux-model-broker.node'));
+  }
+  let dependencyBrokerBytes: Buffer | undefined;
+  let mcpBrokerBytes: Buffer | undefined;
+  let mcpStdioBrokerBytes: Buffer | undefined, mcpStdioServerBytes: Buffer | undefined;
+  let mcpRecoveryData: Awaited<ReturnType<typeof buildInstalledMcpRecoveryPackage>> | undefined;
+  let mcpAdminHelper: Awaited<ReturnType<typeof buildMcpHttpAdminProbeAsset>> | undefined;
+  if (options.mcpHttp) {
+    const brokerRoot = path.join(fixture, 'mcp-http-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-mcp-http-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production MCP HTTP broker construction did not join');
+    assert.equal(broker.status, 0, 'production MCP HTTP broker construction refused');
+    mcpBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-http-broker.node'));
+    mcpAdminHelper = await buildMcpHttpAdminProbeAsset(repository);
+  }
+  if (options.mcpStdio) {
+    const brokerRoot = path.join(fixture, 'mcp-stdio-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-mcp-stdio-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production MCP stdio broker construction did not join');
+    assert.equal(broker.status, 0, 'production MCP stdio broker construction refused');
+    mcpStdioBrokerBytes = await readFile(path.join(brokerRoot, 'linux-mcp-stdio-broker.node'));
+    const compileMcpFixture = async (statusOnly: boolean) => {
+      const filename = path.join(fixture, statusOnly ? 'mcp-static-status-adapter-fixture' : 'mcp-static-server-fixture');
+      const compiled = spawnSync('musl-gcc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror',
+        '-static', '-fno-ident', `-ffile-prefix-map=${repository}=.`, '-Wl,--build-id=none', '-s',
+        ...(statusOnly ? ['-DCLIQ_MCP_RECOVERY_STATUS_ONLY=1'] : []),
+        path.join(repository, 'native/linux/mcp-stdio-server-fixture.c'), '-o', filename],
+      { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+      assert.equal(compiled.error, undefined, 'actual static MCP fixture compiler did not join');
+      assert.equal(compiled.status, 0, 'actual static MCP fixture compilation refused');
+      await chmod(filename, 0o500);
+      const bytes = await readFile(filename);
+      inspectMcpStaticLinuxExecutable(bytes);
+      return { filename, bytes };
+    };
+    const server = await compileMcpFixture(false);
+    mcpStdioServerBytes = server.bytes;
+    if (options.mcpRecovery) {
+      const adapter = await compileMcpFixture(true);
+      mcpRecoveryData = await buildInstalledMcpRecoveryPackage({ server: server.filename, serverBytes: server.bytes,
+        adapter: adapter.filename, adapterBytes: adapter.bytes, publisher });
+    }
+  }
+  if (npmData) {
+    const brokerRoot = path.join(fixture, 'dependency-broker-image');
+    const broker = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-dependency-broker.mjs'),
+      brokerRoot, path.join(nodeRoot, 'include/node')],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(broker.error, undefined, 'production dependency broker construction did not join');
+    assert.equal(broker.status, 0, 'production dependency broker construction refused');
+    dependencyBrokerBytes = await readFile(path.join(brokerRoot, 'linux-dependency-broker.node'));
   }
   const workerEntries = await Promise.all(([
     ['linux_worker_native', 'platform_helper', 'linux-worker.node'],
@@ -77,49 +255,161 @@ export async function buildInstalledSupervisorPackage(fixture: string,
   ] as const).filter(([entryId]) => variant !== 'retirement-native-missing' || entryId !== 'linux_worker_native')
     .map(async ([entryId, role, filename]) => ({ entryId, role,
     relativePath: `workers/${filename}`, executable: true, bytes: await readFile(path.join(workerRoot, filename)) })));
-  const modelMaterial = modelFixture ? installedModelPackageEntries(modelFixture, modelBrokerBytes!,
-    workerEntries.find(entry => entry.entryId === 'edit')!.bytes) : undefined;
+  diagnostics.phase=6;
+  let guest: Awaited<ReturnType<typeof writeInstalledGuestToolchain>> | undefined;
+  if (options.guestToolchain) {
+    const guestImageRoot = path.join(fixture, 'guest-image');
+    const built = spawnSync(process.execPath, [path.join(repository, 'scripts/kernel/build-linux-guest-toolchain.mjs'),
+      guestImageRoot, workerRoot, carrier, ...(options.guestImageProfile ? ['--qualification-max'] : []), ...(options.previewTsx ? ['--preview-tsx'] : [])],
+    { encoding: 'utf8', timeout: 60_000, cwd: fixture, maxBuffer: 2 * 1024 * 1024 });
+    assert.equal(built.error, undefined, 'actual pinned guest image construction did not join');
+    assert.equal(built.status, 0, 'actual pinned guest image construction refused');
+    guest = await writeInstalledGuestToolchain({ packageRoot, guestImageRoot,
+      extractorPath: path.join(workerRoot, 'linux-guest-extractor.node'), publisherKeyId: releaseKeys[0]!.keyId, privateKey: keys.privateKey });
+  }
+  const builtinTools = guest ? await buildBuiltinToolsAsset(repository) : undefined;
+  const npmAdapter = npmData ? await buildInstalledNpmAdapterAsset(repository) : undefined;
+  const scriptMaterial = builtinTools && guest ? {
+      entry: builtinTools, supervisor: { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor',
+        executable: true, version: '1', digest: sha256Bytes(supervisorBytes), byteCount: supervisorBytes.length },
+      guest: { manifestRef: guest.manifestRef, manifest: guest.manifest }
+    } : undefined;
+  const editBytes = workerEntries.find(entry => entry.entryId === 'edit')!.bytes;
+  let localInference: Awaited<ReturnType<typeof buildInstalledLocalInferencePackage>> | undefined;
+  if (options.localInference) {
+    const modelBuild = path.join(fixture, 'local-inference-inputs');
+    await mkdir(modelBuild, { mode: 0o700 });
+    localInference = await buildInstalledLocalInferencePackage({ ...options.localInference, fixture: modelBuild, publisher });
+  }
+  const localModel = localInference && { provider: 'ollama' as const, model: localInference.modelManifest.model };
+  const modelMaterial = modelFixture ? modelProducer.installedModelPackageEntries(modelFixture, modelBrokerBytes!, editBytes, scriptMaterial)
+    : providerModel ? providerProducer.buildInstalledModelPackageEntries(providerModel, modelBrokerBytes!, editBytes, scriptMaterial)
+    : localModel ? buildInstalledModelPackageEntries(localModel, modelBrokerBytes!, editBytes, scriptMaterial) : undefined;
+  const localPrompts = localModel && hasModel ? buildInstalledModelPrompts(localModel,
+    scriptMaterial !== undefined) : undefined;
+  const modelEntries = modelMaterial?.entries ?? [];
+  const localPromptEntries = localPrompts?.entries.filter(entry => {
+    const shared = modelEntries.find(original => original.entryId === entry.entryId);
+    if (!shared) return true;
+    assert.equal(entry.role, 'bundle_object');
+    assert.deepEqual(shared, entry);
+    return false;
+  }) ?? [];
+  // Within each prompt kind, the fixed 'ollama' provider sorts before 'openai-compatible'.
+  const promptRoots = [...(localPrompts?.structuredArtifacts ?? []), ...(modelMaterial?.structuredArtifacts ?? [])];
   const profile = policyProfile();
+  const originalStructuredCount = 1 + (guest ? 1 : 0) + (localInference ? 1 : 0) + promptRoots.length;
+  if (options.bundledSkills && options.bundledSkills.length + originalStructuredCount > 65)
+    throw new TypeError('bundled skills exceed the unchanged total structured root bound');
+  const skillData = buildBundledSkillPackageData(options.bundledSkills ?? []);
+  const sourceInspector = guest ? await buildSourceGitInspectorAsset(repository) : undefined;
   const rootCore = { schemaVersion: 1, format: 'cliq-sandbox-root-profile-v1', protocol: 'cliq-fresh-empty-root-v1',
     filesystemKind: 'fresh_ephemeral_tmpfs', fixedDirectories: ['/home/cliq', '/tmp', '/work'], persistent: false, networkConfiguration: 'none' };
-  const contents = [
-    { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: await readFile(supervisorFile) },
+  const contents: Array<Omit<RuntimeBundleManifest['entries'][number], 'version' | 'digest' | 'byteCount'> & { version?: string; bytes: Buffer }> = [
+    { entryId: 'installed-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true, bytes: supervisorBytes },
     { entryId: STATE_OWNER_NATIVE_ENTRY_ID, role: 'platform_helper', relativePath: STATE_OWNER_NATIVE_RELATIVE_PATH,
       executable: true, bytes: await readFile(helper) },
     ...workerEntries,
+    ...(options.upgradeSourceBundle ? [{ entryId: 'schema_conversion', role: 'schema', relativePath: 'schema/convert-v7-to-v8.json', executable: false,
+      bytes: canonicalJsonBytes(schemaConversionProfile(options.upgradeSourceBundle)) }] : []),
+    ...(schemaVersion === 8 ? [{ entryId: 'kernel_schema', role: 'schema', relativePath: 'schema/kernel-v8.json', executable: false, bytes: canonicalJsonBytes(signedKernelSchemaProfile()) }] : []),
     { entryId: 'linux_credential_platform', role: 'platform_helper', relativePath: 'native/linux-x64/linux-credential-platform.node',
       executable: true, bytes: await readFile(path.join(credentialRoot, 'linux-credential-platform.node')) },
     { entryId: 'installed-policy', role: 'policy_engine', relativePath: 'profiles/policy.json', executable: false, bytes: canonicalJsonBytes(profile) },
     { entryId: 'default_https_trust_store', role: 'trust_store', relativePath: 'profiles/https-trust.pem', executable: false,
-      bytes: modelFixture ? Buffer.from(modelFixture.tls.caPem) : Buffer.from(rootCertificates.join('\n')) },
+      bytes: modelFixture && options.previewTsx
+        ? Buffer.concat([modelFixture.tls.caPem, Buffer.from('\n' + rootCertificates.join('\n'))])
+        : modelFixture ? Buffer.from(modelFixture.tls.caPem) : Buffer.from(rootCertificates.join('\n')) },
     { entryId: 'installed-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes({ ...rootCore, profileDigest: canonicalSha256(rootCore) }) },
-    ...(modelMaterial?.entries ?? []),
+    ...modelEntries,
+    ...localPromptEntries,
+    ...(localInference?.contents ?? []),
+    ...(builtinTools ? [{ entryId: builtinTools.entryId, role: builtinTools.role, relativePath: builtinTools.relativePath,
+      executable: builtinTools.executable, bytes: builtinTools.bytes }] : []),
+    ...(sourceInspector ? [{ entryId: sourceInspector.entryId, role: sourceInspector.role, relativePath: sourceInspector.relativePath,
+      executable: sourceInspector.executable, bytes: sourceInspector.bytes }] : []),
+    ...skillData.contents,
+    ...(mcpBrokerBytes && mcpAdminHelper ? [
+      { entryId: MCP_HTTP_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: MCP_HTTP_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: mcpBrokerBytes },
+      { entryId: mcpAdminHelper.entryId, role: mcpAdminHelper.role, relativePath: mcpAdminHelper.relativePath,
+        version: mcpAdminHelper.version, executable: mcpAdminHelper.executable, bytes: mcpAdminHelper.bytes },
+    ] : []),
+    ...(mcpStdioBrokerBytes && mcpStdioServerBytes ? [
+      { entryId: MCP_STDIO_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: MCP_STDIO_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: mcpStdioBrokerBytes },
+      { entryId: 'mcp-static-stdio-fixture-v1', role: 'mcp_server' as const, relativePath: 'mcp/static-stdio-fixture',
+        version: '1', executable: true, bytes: mcpStdioServerBytes },
+    ] : []),
+    ...(mcpRecoveryData?.contents ?? []),
+    ...(npmAdapter && npmData && dependencyBrokerBytes ? [
+      { entryId: DEPENDENCY_BROKER_ENTRY_ID, role: 'platform_helper' as const, relativePath: DEPENDENCY_BROKER_RELATIVE_PATH,
+        version: '1', executable: true, bytes: dependencyBrokerBytes },
+      ...[npmAdapter, npmData].map(({ entryId, role, relativePath, version, executable, bytes }) =>
+        ({ entryId, role, relativePath, version, executable, bytes }))
+    ] : []),
   ];
   for (const entry of contents.slice(2)) {
     const filename = path.join(packageRoot, entry.relativePath);
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     await writeFile(filename, entry.bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
   }
+  diagnostics.phase=7;
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
-    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
-    stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
-    entries: contents.map(({ bytes, ...entry }) => ({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+    ...(schemaVersion === 7 ? { schemaVersion: 1 as const } : { schemaVersion: 2 as const, installedLayout: SINGLE_CAS_STREAMS_LAYOUT }),
+    bundleVersion: providerModel ? 'installed-sea-provider-qualification-v1' : guest ? 'installed-sea-verifier-fixture-v1'
+      : modelFixture ? 'installed-sea-run-fixture-v1' : 'installed-sea-read-qualification-v1',
+    controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: options.headlessSchemaVersion ?? 1, max: options.headlessSchemaVersion ?? 1 },
+    stateSchemaRange: { min: 1, max: schemaVersion }, workerProtocolRange: { min: 1, max: 1 },
+    entries: [...contents.map(({ bytes, version, ...entry }) => ({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : entry.entryId === 'schema_conversion' ? '7-to-8' : version ?? '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength })),
+      ...(guest?.entries ?? [])],
     structuredArtifacts: [
-      ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'compaction_prompt') ?? []),
+      ...skillData.roots,
+      ...promptRoots.filter(root => root.kind === 'compaction_prompt'),
+      ...(guest ? [guest.root] : []),
+      ...(localInference ? [localInference.root] : []),
+      ...(mcpRecoveryData ? [mcpRecoveryData.root] : []),
       { kind: 'policy_engine_profile', artifactId: 'installed-policy', rootEntryId: 'installed-policy',
         artifactRef: canonicalSha256(profile), semanticDigest: profile.profileDigest, memberRefs: [] },
-      ...(modelMaterial?.structuredArtifacts.filter(root => root.kind === 'system_prompt') ?? []),
+      ...promptRoots.filter(root => root.kind === 'system_prompt'),
     ],
-    guestToolchainManifestRefs: [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
+    guestToolchainManifestRefs: guest ? [guest.manifestRef] : [], publisherKeyId: releaseKeys[0]!.keyId, manifestDigest: '', signature: '',
   };
   const { signature: _signature, manifestDigest: _digest, ...core } = bundle;
   bundle.manifestDigest = canonicalSha256(core);
   bundle.signature = sign(null, Buffer.from(`cliq-runtime-bundle-v1\0${bundle.manifestDigest}`), keys.privateKey).toString('base64');
   verifyRuntimeBundle(bundle, releaseKeys);
+  checkCanonicalBytes(canonicalJsonBytes(bundle)); validateBundle(bundle, releaseKeys);
+  if (guest) validateGuestToolchainMetadata(bundle, guest.manifestRef, canonicalJsonBytes(guest.manifest),
+    await readFile(path.join(packageRoot, `objects/sha256/${guest.manifest.signatureRef.slice(0, 2)}/${guest.manifest.signatureRef}`)), releaseKeys);
   await writeFile(path.join(packageRoot, 'manifest.json'), canonicalJsonBytes(bundle), { flag: 'wx', mode: 0o400 });
+  diagnostics.phase=8;
   const modelAuthority = modelFixture ? await writeInstalledModelAuthority({ packageRoot, bundle,
-    privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! }) : undefined;
-  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(modelAuthority ? { modelAuthority } : {}) };
+    privateKey: keys.privateKey, fixture: modelFixture, material: modelMaterial! })
+    : providerModel ? await writeInstalledProviderModelAuthority({ packageRoot, bundle,
+      privateKey: keys.privateKey, definition: providerModel, material: modelMaterial! }) : undefined;
+  if (options.source) { const current = await readQualificationSource(options.source);
+    assert.deepEqual(current, source, 'the original frozen source changed during actual package construction'); }
+  return { packageRoot, releaseKeys, bundle, contents, carrier, ...(source ? { sourceProvenance: source } : {}), ...(modelAuthority ? { modelAuthority } : {}),
+    ...(localInference ? { localInference: { modelPackageRoot: localInference.modelPackageRoot, modelManifest: localInference.modelManifest,
+      modelManifestRef: localInference.modelManifestRef } } : {}),
+    ...(guest ? { guestToolchain: { manifest: guest.manifest, manifestRef: guest.manifestRef,
+      manifestId: guest.manifestId, imageLayout: guest.imageLayout } } : {}) };
+}
+
+export async function buildInstalledSupervisorPackage(fixture:string,
+  variant:'complete'|'retirement-native-missing'='complete',modelFixture?:InstalledModelPackageFixture,options:PackageBuildOptions={}) {
+  const diagnostics={phase:0};
+  try { return await buildInstalledSupervisorPackageCore(fixture,variant,modelFixture,options,diagnostics); }
+  catch (error) { emitQualificationFailure('package',error,diagnostics.phase); throw error; }
+}
+
+/** A controlled real-provider experiment uses the original SEA/native/guest
+ * build and installer, with public CAs and compiled qualification roots. This
+ * does not publish an official release, call the model or persist its key. */
+export function buildInstalledProviderQualificationPackage(directory: string, definition: InstalledProviderModelDefinition,
+  options: Omit<PackageBuildOptions, 'providerModel' | 'headlessSchemaVersion' | 'guestToolchain'> = {}) {
+  return buildInstalledSupervisorPackage(directory, 'complete', undefined,
+    { ...options, providerModel: definition, headlessSchemaVersion: 3, guestToolchain: 'node-test-v1' });
 }

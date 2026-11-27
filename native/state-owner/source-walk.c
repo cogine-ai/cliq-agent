@@ -9,6 +9,8 @@ struct source_cursor {
     source_entry *parent;
     napi_ref root_ref, parent_ref;
     DIR *directory;
+    /* Fixed entrypoints only: 0 ordinary source, 1 AGENTS-only, 2 skill data.
+     * No caller-provided mode or execution authority is accepted. */
     int fd, closed, complete, finalized, instruction_only;
     struct stat before;
     char *path;
@@ -230,7 +232,7 @@ static napi_value source_entry_close(napi_env env, napi_callback_info info) {
 static napi_value source_entry_file(napi_env env, napi_callback_info info) {
     source_entry *entry = source_unwrap(env, info, &source_entry_tag); napi_value self;
     if (!entry) return NULL;
-    if (entry->cursor->instruction_only && strcmp(entry->name, "AGENTS.md"))
+    if (entry->cursor->instruction_only == 1 && strcmp(entry->name, "AGENTS.md"))
         return native_error(env, "instruction cursor may read only AGENTS.md");
     if (!source_entry_held(entry) || !source_entry_same_device(entry) || !S_ISREG(entry->before.st_mode) || entry->opened || entry->before.st_size < 0 ||
         entry->before.st_size > (off_t)9007199254740991LL || napi_get_cb_info(env, info, NULL, NULL, &self, NULL) != napi_ok)
@@ -393,4 +395,7 @@ static napi_value source_open_snapshot(napi_env env, napi_callback_info info) {
 }
 static napi_value source_open_instruction_snapshot(napi_env env, napi_callback_info info) {
     return source_open_cursor(env, info, 1);
+}
+static napi_value source_open_skill_snapshot(napi_env env, napi_callback_info info) {
+    return source_open_cursor(env, info, 2);
 }

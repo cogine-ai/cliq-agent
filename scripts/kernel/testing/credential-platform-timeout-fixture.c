@@ -364,7 +364,7 @@ int main(int argc, char **argv) {
     if (pipe2(notify, O_CLOEXEC) || pipe2(control, O_CLOEXEC)) goto failed;
     fixture.notify = notify[1];
   }
-  char *node_args[] = {argv[1], "--no-warnings", argv[2], argv[3], secret_mode ? argv[4] : NULL,
+  char *node_args[] = {argv[1], "--expose-gc", "--no-warnings", argv[2], argv[3], secret_mode ? argv[4] : NULL,
     fixture.broker_mode ? argv[5] : NULL, NULL};
   fixture.child = start_child(node_args, secret_mode ? control[1] : -1, secret_mode ? notify[0] : -1);
   if (fixture.child < 0) goto failed;

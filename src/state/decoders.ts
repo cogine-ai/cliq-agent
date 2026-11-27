@@ -1,12 +1,16 @@
+import { decodeSessionContextHead } from '../kernel/session-context-page-reader.js';
+import type { SessionContextHead } from '../kernel/session-context-pages.js';
 import {
   assertArtifactRef,
   digestOmitting,
   identityHash,
+  normalizeAbsolutePath,
   parseCanonicalTime,
   requiredSafeInteger,
   sha256Bytes
 } from '../kernel/identity.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { assertControlWireJson, controlWireRecord, controlWireText } from '../kernel/control-wire-data.js';
 import type {
   AdmittedContextManifest,
   BudgetSettlementV1,
@@ -37,6 +41,7 @@ import type {
   WorkspaceStateManifest
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { validateFrozenIgnoreRules } from '../workspace/frozen-ignore.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -128,15 +133,38 @@ export function decodeWorkspaceIdentity(value: unknown): WorkspaceIdentityV1 {
   return identity;
 }
 
-export function decodeSessionProjection(value: unknown): SessionContextProjection {
-  if (!isRecord(value) || value.format !== 'cliq-session-context-v1' || value.schemaVersion !== 1) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'session projection has the wrong schema');
+/** Retained Session context only. An unavailable historical locator is not a
+ * held workspace, permission grant or authority to admit or execute a Run. */
+export function decodeRetainedWorkspaceIdentity(value: unknown): WorkspaceIdentityV1 {
+  try {
+    assertControlWireJson(value);
+    if (isRecord(value) && value.kind === 'live') return decodeWorkspaceIdentity(value);
+    const identity = controlWireRecord(value, ['schemaVersion', 'format', 'ownerPrincipalId', 'platform', 'kind',
+      'legacyCanonicalRootPath', 'unavailableReason', 'observedAt', 'identityDigest']);
+    if (identity.schemaVersion !== 1 || identity.format !== 'cliq-workspace-identity-v1' || identity.kind !== 'legacy_unavailable')
+      throw new TypeError('retained workspace identity has the wrong schema');
+    controlWireText(identity.ownerPrincipalId);
+    requirePlatform(identity.platform, 'retained workspace platform');
+    const locator = controlWireText(identity.legacyCanonicalRootPath, 4096);
+    if (normalizeAbsolutePath(locator) !== locator)
+      throw new TypeError('retained workspace locator must be canonical');
+    if (!['missing', 'moved', 'unsupported_platform', 'identity_unverifiable'].includes(identity.unavailableReason as string))
+      throw new TypeError('retained workspace unavailable reason is invalid');
+    requireCanonicalTime(identity.observedAt, 'retained workspace observation');
+    requireDigest(identity.identityDigest, 'retained workspace digest');
+    if (digestOmitting(identity, 'identityDigest') !== identity.identityDigest)
+      throw new TypeError('retained workspace digest does not rehash');
+    return identity as unknown as WorkspaceIdentityV1;
+  } catch (error) {
+    if (error instanceof TypeError)
+      throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained workspace identity is not closed canonical context data', { cause: error });
+    throw error;
   }
-  const projection = value as SessionContextProjection;
-  if (digestOmitting(projection, 'projectionDigest') !== projection.projectionDigest) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'session projection digest does not rehash');
-  }
-  return projection;
+}
+
+export function decodeSessionProjection(value: unknown): SessionContextHead {
+  try { return decodeSessionContextHead(value); }
+  catch (cause) { if (cause instanceof TypeError) throw new KernelStorageError('ARTIFACT_MISMATCH', 'session projection has the wrong closed schema or digest', { cause }); throw cause; }
 }
 
 export function decodeControlChannel(value: unknown): LocalControlChannelIdentityV1 {
@@ -518,7 +546,7 @@ export function decodeStateOwnerAcquisitionEvidence(
     if (value.ownerTableObservation !== 'empty') {
       throw new KernelStorageError('ARTIFACT_MISMATCH', 'genesis owner table observation is invalid');
     }
-  } else if (value.kind === 'acquire_after_graceful_release' || value.kind === 'takeover_after_owner_death') {
+  } else if (value.kind === 'acquire_after_graceful_release' || value.kind === 'takeover_after_owner_death' || value.kind === 'runtime_upgrade') {
     rejectUnknownKeys(
       value,
       [
@@ -527,7 +555,8 @@ export function decodeStateOwnerAcquisitionEvidence(
         'priorTerminalRowDigest',
         'priorTransitionEvidenceRef',
         'priorTransitionEvidenceDigest',
-        'priorTerminalReason'
+        'priorTerminalReason',
+        ...(value.kind === 'runtime_upgrade' ? ['upgradeReceiptRef', 'upgradeReceiptDigest'] : [])
       ],
       'StateOwnerAcquisitionEvidence(successor)'
     );
@@ -535,7 +564,11 @@ export function decodeStateOwnerAcquisitionEvidence(
     requireDigest(value.priorTerminalRowDigest, 'StateOwnerAcquisitionEvidence.priorTerminalRowDigest');
     requireArtifactRef(value.priorTransitionEvidenceRef, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceRef');
     requireDigest(value.priorTransitionEvidenceDigest, 'StateOwnerAcquisitionEvidence.priorTransitionEvidenceDigest');
-    const expectedReason = value.kind === 'acquire_after_graceful_release'
+    if (value.kind === 'runtime_upgrade') {
+      requireArtifactRef(value.upgradeReceiptRef, 'StateOwnerAcquisitionEvidence.upgradeReceiptRef');
+      requireDigest(value.upgradeReceiptDigest, 'StateOwnerAcquisitionEvidence.upgradeReceiptDigest');
+    }
+    const expectedReason = value.kind !== 'takeover_after_owner_death'
       ? 'graceful_release'
       : 'superseded_after_owner_death';
     if (value.priorTerminalReason !== expectedReason) {
@@ -674,14 +707,8 @@ export function decodeContextManifest(value: unknown): ContextManifest {
 }
 
 export function decodeFrozenIgnoreRules(value: unknown): FrozenIgnoreRulesV1 {
-  if (!isRecord(value) || value.format !== 'cliq-frozen-ignore-rules-v1' || value.schemaVersion !== 1) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have the wrong schema');
-  }
-  const rules = value as FrozenIgnoreRulesV1;
-  if (digestOmitting(rules, 'rulesDigest') !== rules.rulesDigest) {
-    throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules digest does not rehash');
-  }
-  return rules;
+  try { return validateFrozenIgnoreRules(value); }
+  catch (cause) { throw new KernelStorageError('ARTIFACT_MISMATCH', 'frozen ignore rules have invalid fields or digest', { cause }); }
 }
 
 export function decodeSourceProjection(value: unknown): SourceProjectionSpec {

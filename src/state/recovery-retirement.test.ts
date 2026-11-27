@@ -1,27 +1,74 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { KERNEL_CAS_DIRECTORY } from '../config.js';
-import type { ToolContractManifestV1 } from '../kernel/types.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { AgentModelTurn, ToolCallInputV1 } from '../protocol/agent-ir.js';
-import { ResourceRetirementError } from './errors.js';
+import type { ModelRequestV1 } from '../model/request.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { openSqliteDriver } from './sqlite-driver.js';
+import { readRecoveryClosure } from './recovery-closure.js';
+import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
+import { openStateStore, type StateStoreRuntimeAuthority } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { createQueuedFixture, disposeFixture } from './testing/fixtures.js';
+import { createQueuedFixture, disposeFixture, makePrivateDir } from './testing/fixtures.js';
+import { ownerAt } from './testing/state-owner-process.js';
 import { batch } from './testing/tool-calls.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
 
-for (const operation of ['recovery read', 'agent opening'] as const) {
-  test(`a failed ${operation} joins every real CAS handle and retains any retirement failure`, async () => {
-    const agentFixture = operation === 'agent opening'
-      ? await createAgentFixture('agent-opening-join', undefined, { tools: ['edit', 'read'] }) : undefined;
-    const fixture = agentFixture ?? await createQueuedFixture('recovery-read-join');
+for (const closeFails of [false, true]) test(`nested recovery cancellation joins its real CAS read and preserves ${closeFails ? 'retirement failure' : 'the original reason'}`, async () => {
+  const fixture = await createAgentFixture('nested-recovery-cancellation');
+  const originalOpen = fs.open, abort = new AbortController();
+  const reason = new KernelStorageError('LEASE_FENCED', 'original recovery read is closing');
+  const failure = new Error('uncertainty after the actual close');
+  let entered!: () => void, release!: () => void, inHistory = false, settled = false;
+  const closing = new Promise<void>(resolve => { entered = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
+  let driver: ReturnType<typeof openSqliteDriver> | undefined, reading: Promise<unknown> | undefined;
+  try {
+    // Retained offline model data selects the real nested history reader.
+    // No tool, native worker or physical execution evidence is produced.
+    await batch(fixture, [{ name: 'read', input: { path: 'a' } }]);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    let missingRef = before.run.specRef, delayedRef = before.run.frontierRef!;
-    if (agentFixture) {
-      const manifest = await fixture.store.artifacts.readCanonical<ToolContractManifestV1>(agentFixture.authority.assembly.tools.manifestRef);
-      missingRef = manifest.entries[0]!.inputSchemaRef; delayedRef = manifest.entries[1]!.inputSchemaRef;
-    }
+    const prepared = before.journal.find(entry => entry.opKind === 'model' && entry.phase === 'prepared')!;
+    const request = await fixture.store.artifacts.readCanonical<ModelRequestV1>(prepared.requestRef);
+    // Nested history must physically reread the original serialized request.
+    // Repeated JSON metadata may already belong to this traversal's cache.
+    const filename = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, request.bodyBytesRef);
+    driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (inHistory && args[0] === filename) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close(); abort.abort(reason); entered(); await held;
+          if (closeFails) throw failure;
+        };
+      }
+      return handle;
+    }) as typeof fs.open;
+    reading = readRecoveryClosure(driver, fixture.store.artifacts.withReadSignal(abort.signal), fixture.runId,
+      phase => { if (phase === 'history') inHistory = true; });
+    void reading.then(() => { settled = true; }, () => { settled = true; });
+    await closing; await nextTurn();
+    assert.equal(settled, false, 'cancellation cannot discard an issued close');
+    release();
+    await assert.rejects(reading, error => closeFails
+      ? error instanceof ResourceRetirementError && error.cause === failure : error === reason);
+    assert(inHistory); fs.open = originalOpen; driver.close(); driver = undefined;
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally {
+    release(); await reading?.catch(() => {}); fs.open = originalOpen; driver?.close(); await disposeFixture(fixture);
+  }
+});
+
+for (const operation of ['recovery read'] as const) {
+  test(`a failed ${operation} joins every real CAS handle and retains any retirement failure`, async () => {
+    const fixture = await createQueuedFixture('recovery-read-join');
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const missingRef = before.run.specRef, delayedRef = before.run.frontierRef!;
     const missingPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, missingRef);
     const savedPath = `${missingPath}.fault-fixture`;
     const delayedPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, delayedRef);
@@ -46,8 +93,7 @@ for (const operation of ['recovery read', 'agent opening'] as const) {
       return handle;
     }) as typeof fs.open;
     try {
-      reading = agentFixture ? fixture.store.loadAgentRun({ runId: fixture.runId, material: agentFixture.authority.material })
-        : fixture.store.readRecoveryClosure(fixture.runId);
+      reading = fixture.store.readRecoveryClosure(fixture.runId);
       void reading.then(() => { settled = true; }, () => { settled = true; });
       await closing;
       await nextTurn();
@@ -66,6 +112,52 @@ for (const operation of ['recovery read', 'agent opening'] as const) {
     }
   });
 }
+
+test('a failed agent opening joins real CAS reads and retains the original owner until its process dies', async () => {
+  const directory = await makePrivateDir('.cliq-agent-opening-retirement-');
+  const child = fork(new URL('./testing/agent-opening-retirement-child.ts', import.meta.url), [directory], {
+    execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'inherit', 'ipc']
+  });
+  const exited = once(child, 'exit'), closed = once(child, 'close');
+  let successorResourcesRetired = false;
+  try {
+    const reply = async () => (await once(child, 'message', { signal: AbortSignal.timeout(30_000) }))[0] as {
+      state: string; stateRoot?: string; workspace?: string; runId?: string; beforeDigest?: string; epoch?: number;
+      authority?: StateStoreRuntimeAuthority; message?: string;
+    };
+    assert.equal((await reply()).state, 'ready');
+    const response = reply(); child.send('exercise');
+    const retained = await response;
+    assert.equal(retained.state, 'retained', retained.message);
+    assert(retained.stateRoot && retained.workspace && retained.runId && retained.beforeDigest && retained.authority && retained.epoch);
+    assert.equal(path.dirname(retained.stateRoot), directory);
+    assert.equal(path.dirname(retained.workspace), directory);
+    const original = ownerAt(retained.stateRoot);
+    assert.equal(original.state, 'active'); assert.equal(original.ownerEpoch, retained.epoch);
+    const native = await loadNativeStateOwner();
+    let incorrectlyAcquired: HeldStateOwnerLock | undefined;
+    try { incorrectlyAcquired = native.acquireLock(retained.stateRoot, false); }
+    catch (error) { assert.match(String(error), /OS lock is already held/); }
+    if (incorrectlyAcquired) {
+      incorrectlyAcquired.close();
+      assert.fail('a failed agent opening or Store.close released the real OS owner lock before its process died');
+    }
+    child.kill('SIGKILL');
+    assert.equal((await exited)[1], 'SIGKILL'); assert.equal((await closed)[1], 'SIGKILL');
+    // The old process really exited. A genuine successor acquires the same
+    // StateRoot, preserving the original ready cut rather than faking a join.
+    const successor = await openStateStore(retained.stateRoot, retained.authority);
+    try {
+      assert.equal(successor.ownerEpoch, original.ownerEpoch + 1);
+      assert.equal(canonicalSha256(await successor.readRecoveryClosure(retained.runId)), retained.beforeDigest);
+    } finally { await successor.close(); successorResourcesRetired = true; }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited; await closed;
+    if (successorResourcesRetired) await fs.rm(directory, { recursive: true, force: true });
+    else console.error(`preserving uncertain agent-opening fixture: ${directory}`);
+  }
+});
 
 test('typed recovery preserves actual CAS retirement failure without tagging a missing model input', async () => {
   const fixture = await createAgentFixture('typed-recovery-retirement');

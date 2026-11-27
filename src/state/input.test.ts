@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
 import type { ContextManifest, ContinuationItem, RunFrontier, RunSpec } from '../kernel/types.js';
@@ -9,7 +9,7 @@ import type { RunInput, UserInputPayloadV1, UserInputValue } from '../kernel/use
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { activateFixtureWorker, disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 import { openStateStore, publishInProcessChannel } from './store.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { validateUserInputRecovery } from './input-recovery.js';
@@ -19,7 +19,12 @@ import { contextSourceDigest } from '../runtime/context-compaction.js';
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const question = { prompt: 'Which name should I use?', responseKind: 'text', maximumResponseBytes: 128 };
 async function pendingInput(fixture: Fixture) {
-  const pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  let pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  if (pending.disposition === 'retirement_required') {
+    assert.equal(pending.reason, 'input');
+    await retireFixtureToolSelection(fixture, pending);
+    pending = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+  }
   assert.ok(pending.disposition === 'input_required');
   return pending;
 }
@@ -92,6 +97,49 @@ test('input survives restart and idempotent reply, then continues the same nativ
     assert.deepEqual(replay.response, reply.response);
     assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 1);
   } finally { await disposeFixture(fixture); }
+});
+
+test('a Store-loaded input replay refuses another genuine response from the same Run and preserves its first answer', async () => {
+  const fixture = await createAgentFixture('input-same-run-response-substitution', undefined, { mode: 'plan', tools: ['request_input'] });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await batch(fixture, [{ name: 'request_input', input: question }, { name: 'request_input', input: question }]);
+    await waitForInput(fixture);
+    const firstCommand = await command(fixture, { kind: 'text', value: 'first answer' });
+    const first = await fixture.agent.submitInput(firstCommand);
+    await waitForInput(fixture);
+    const secondCommand = await command(fixture, { kind: 'text', value: 'second answer' });
+    const second = await fixture.agent.submitInput(secondCommand);
+    assert.notEqual(firstCommand.requestId, secondCommand.requestId);
+    assert.notEqual(first.response.result.inputItemRef, second.response.result.inputItemRef);
+    assert.equal(first.run.id, second.run.id);
+    fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId,
+      material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+    const before = canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId));
+    const read = (requestId: string) => writer.prepare("SELECT response_ref FROM control_requests WHERE principal_id=? AND method='run.input' AND request_id=?")
+      .get<{ response_ref: string }>(firstCommand.principalId, requestId)!;
+    const original = read(firstCommand.requestId), other = read(secondCommand.requestId);
+    assert.equal(original.response_ref, canonicalSha256(first.response));
+    assert.equal(other.response_ref, canonicalSha256(second.response));
+    assert.notEqual(original.response_ref, other.response_ref);
+    try {
+      // Both original input items and responses are genuine. Corruption only
+      // substitutes an existing response locator for the first control row.
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.input' AND request_id=?")
+        .run(other.response_ref, firstCommand.principalId, firstCommand.requestId);
+      await assert.rejects(fixture.agent.submitInput({ ...firstCommand, ...await publishInProcessChannel(fixture.store) }),
+        { code: 'RECOVERY_REQUIRED' });
+      assert.equal(read(firstCommand.requestId).response_ref, other.response_ref);
+    } finally {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.input' AND request_id=?")
+        .run(original.response_ref, firstCommand.principalId, firstCommand.requestId);
+    }
+    const replay = await fixture.agent.submitInput({ ...firstCommand, ...await publishInProcessChannel(fixture.store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(first.response));
+    assert.deepEqual(canonicalJsonBytes(await fixture.store.readRecoveryClosure(fixture.runId)), before);
+    assert.equal(fixture.store.getRun(fixture.runId).budgetConsumed.toolCalls, 0);
+  } finally { writer.close(); await disposeFixture(fixture); }
 });
 
 test('successive text and schema-bound JSON answers can wait worker-free and resume with cause input', async () => {
@@ -178,6 +226,8 @@ test('input rejects stale, foreign, malformed, oversized, cancelled and expired 
     await waitForInput(fixture);
     const input = await command(fixture, { kind: 'text', value: '李明' });
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    await assert.rejects(fixture.agent.submitInput({ ...input, waitingOnRef: canonicalSha256('foreign-input-wait') }), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     for (const change of [{ expectedRunRevision: input.expectedRunRevision - 1 }, { waitingOnRef: canonicalSha256('other-wait') },
       { principalId: 'foreign' }, { channelIdentityDigest: canonicalSha256('other-channel') }, { requestId: 'invalid' }, { extra: true },
       { input: { kind: 'text', value: '1234567' } }, { input: { kind: 'text', value: 'e\u0301' } }, { input: { kind: 'text', value: '\0' } },
@@ -202,20 +252,30 @@ test('input wait and reply commit faults roll back worker retirement, request, r
   const fault = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
     await batch(fixture, [{ name: 'request_input', input: question }]);
-    const pending = await pendingInput(fixture);
-    await assert.rejects(fixture.agent.waitForInput({ expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef }), /retirement proof/);
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
-    const wait = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint };
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision, leaseEpoch: fixture.leaseEpoch });
+    assert(selection.disposition === 'retirement_required');
+    await assert.rejects(fixture.agent.retireToolSelection({ expectedRunRevision: selection.run.revision,
+      checkpointId: selection.checkpointId, checkpoint: {} as never }));
+    const proof = await quiescedToolCheckpoint(fixture, selection.checkpointId);
+    const retirement = { expectedRunRevision: selection.run.revision, checkpointId: selection.checkpointId, checkpoint: proof.checkpoint };
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
     const death = await fixture.store.artifacts.readCanonical<Record<string, unknown>>(proof.checkpoint.retirementEvidenceRef);
     (death.owner as Record<string, unknown>).workerLaunchId = 'foreign-launch';
     death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
     const foreign = await fixture.store.artifacts.publishCanonical(death, 'cliq-process-containment-death-evidence-v1');
-    await assert.rejects(fixture.agent.waitForInput({ ...wait, checkpoint: { ...wait.checkpoint, retirementEvidenceRef: foreign.ref } }), /retired worker owner/);
+    await assert.rejects(fixture.agent.retireToolSelection({ ...retirement, checkpoint: { ...retirement.checkpoint, retirementEvidenceRef: foreign.ref } }), /retired worker owner/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     fault.exec("CREATE TRIGGER fail_input_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected input checkpoint failure'); END");
-    await assert.rejects(fixture.agent.waitForInput(wait), /injected input checkpoint failure/);
+    await assert.rejects(fixture.agent.retireToolSelection(retirement), /injected input checkpoint failure/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    fault.exec('DROP TRIGGER fail_input_checkpoint');
+    await fixture.agent.retireToolSelection(retirement);
+    const pending = await pendingInput(fixture);
+    const wait = { expectedRunRevision: pending.run.revision, waitingOnRef: pending.waitingOnRef };
+    const beforeWait = await fixture.store.readRecoveryClosure(fixture.runId);
+    fault.exec("CREATE TRIGGER fail_input_checkpoint BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected input checkpoint failure'); END");
+    await assert.rejects(fixture.agent.waitForInput(wait), /injected input checkpoint failure/);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeWait);
     fault.exec('DROP TRIGGER fail_input_checkpoint');
     await fixture.agent.waitForInput(wait);
     const input = await command(fixture, { kind: 'text', value: 'Alice' });

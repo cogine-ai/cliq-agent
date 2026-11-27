@@ -1,6 +1,12 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { closeSync, constants, fstatSync, lstatSync, openSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
+import { channel } from 'node:diagnostics_channel';
+import { KERNEL_SQLITE_BUSY_TIMEOUT_MS } from '../config.js';
+import { beginHeldKernelArchiveBackup, assertHeldKernelArchive, assertHeldKernelArchiveSource, type HeldKernelArchive, type KernelArchiveBackupJoin } from './native-owner.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
 export type SqliteInputValue = null | number | bigint | string | NodeJS.ArrayBufferView;
 export type SqliteOutputValue = null | number | bigint | string | Uint8Array;
@@ -26,6 +32,7 @@ export interface SqliteStatement {
   run(...parameters: SqliteInputValue[]): SqliteRunResult;
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined;
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[];
+  iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row>;
 }
 
 export interface SqliteConnection {
@@ -52,7 +59,118 @@ export interface SqliteDriver extends SqliteConnection {
   close(): void;
 }
 
+/** Actual Node backup page observations only. The diagnostic grants no
+ * authority, source handle, timing, cancellation permission or retry. Trusted
+ * subscribers catch their own errors, as with existing installed diagnostics. */
+export const KERNEL_ARCHIVE_PROGRESS_CHANNEL = 'cliq.installed.archive.progress.v1';
+const archiveProgress = channel(KERNEL_ARCHIVE_PROGRESS_CHANNEL);
+function observeArchiveSqliteStep(value: Readonly<{ totalPages: number; remainingPages: number }>): void {
+  if (!archiveProgress.hasSubscribers || !Number.isSafeInteger(value.totalPages) || !Number.isSafeInteger(value.remainingPages) ||
+      value.totalPages < 1 || value.remainingPages < 0 || value.remainingPages > value.totalPages) return;
+  try { archiveProgress.publish(Object.freeze({ phase: 'sqlite_step', totalPages: value.totalPages, remainingPages: value.remainingPages })); }
+  catch { /* Observation never changes the actual backup or its native join. */ }
+}
+
+type OriginalArchiveSource = { database: DatabaseSync; databasePath: string; readOnly: boolean; assertCurrent(): void; liveBackups: number };
+const originalArchiveSources = new WeakMap<SqliteDriver, OriginalArchiveSource>();
+// A failed actual native join must keep both the original source connection
+// and destination holder alive after the rejecting Promise has settled.
+const unretiredArchiveSources = new Set<Readonly<{ driver: SqliteDriver; source: OriginalArchiveSource; archive: HeldKernelArchive }>>();
+
+/** Source authentication shared by the complete productive-cut audit. It
+ * returns no handle and accepts only the same genuine original destination. */
+export function assertOriginalKernelArchiveSource(driver: SqliteDriver, archive: HeldKernelArchive): void {
+  const source = originalArchiveSources.get(driver);
+  if (!source || source.readOnly || connectionIssuers.get(driver)?.driver !== driver)
+    throw new TypeError('archive requires its genuine writable original source driver');
+  source.assertCurrent(); assertHeldKernelArchiveSource(archive, source.databasePath);
+}
+
+/** Fixed original-source friend, not a generic backup/path API. Only the
+ * genuine archive issuer can provide the one native nonce-bound destination.
+ * Node22 shared imports remain valid; builtin backup is resolved lazily only
+ * in the fixed installed Linux Node24 branch. */
+export async function backupOriginalSqliteToKernelArchive(driver: SqliteDriver, archive: HeldKernelArchive,
+  signal?: AbortSignal): Promise<KernelArchiveBackupJoin> {
+  const source = originalArchiveSources.get(driver);
+  if (!source || source.readOnly || source.liveBackups !== 0 || connectionIssuers.get(driver)?.driver !== driver)
+    throw new TypeError('archive source requires its genuine writable original driver without another backup');
+  source.assertCurrent(); assertHeldKernelArchiveSource(archive, source.databasePath); signal?.throwIfAborted();
+  if (process.platform !== 'linux' || process.versions.node !== '24.21.0')
+    throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'original online archive requires the fixed installed Linux Node24 backend');
+  source.liveBackups++;
+  let target: Awaited<ReturnType<typeof beginHeldKernelArchiveBackup>> | undefined;
+  let joined: KernelArchiveBackupJoin | undefined, failure: unknown, failed = false, cancellationFailure: unknown;
+  const cancel = () => { try { target?.requestCancel(); } catch (error) { cancellationFailure ??= error; } };
+  try {
+    const sqlite = await import('node:sqlite');
+    const backup: unknown = Reflect.get(sqlite, 'backup');
+    if (typeof backup !== 'function') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'fixed Node24 builtin online backup is unavailable');
+    source.assertCurrent(); signal?.throwIfAborted();
+    target = await beginHeldKernelArchiveBackup(archive);
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    if (!signal?.aborted) {
+      // No source reconnect/checkpoint/rename, caller progress callback/SQL,
+      // alternate path or timeout. Fixed progress only emits actual Node page
+      // observations; it never decides a backup outcome or replaces cancel/join.
+      // The actual live source remains available to
+      // its original maintenance/time-fence code, whose latency needs physical
+      // qualification under real backup-update/fsync contention.
+      await (backup as (source: DatabaseSync, path: string, options: Readonly<{
+        source: 'main'; target: 'main'; rate: 64;
+        progress(value: Readonly<{ totalPages: number; remainingPages: number }>): void;
+      }>) => Promise<unknown>)(source.database, target.uri,
+        { source: 'main', target: 'main', rate: 64, progress: observeArchiveSqliteStep });
+    }
+  } catch (error) { failed = true; failure = error; cancel(); }
+  finally {
+    // This finally runs only after the actual Node operation settled, never
+    // after a JS race/timeout. The native observation also requires every
+    // real xClose and retired journal. Keep source.close refused if uncertain.
+    signal?.removeEventListener('abort', cancel);
+    try { if (target) joined = target.join(); }
+    catch (error) {
+      unretiredArchiveSources.add({ driver, source, archive });
+      throw new ResourceRetirementError('original SQLite archive callbacks did not actually join',
+        failed ? new AggregateError([failure, error]) : error);
+    }
+    if (!target && failure instanceof ResourceRetirementError) {
+      unretiredArchiveSources.add({ driver, source, archive }); throw failure;
+    }
+    source.liveBackups--;
+  }
+  if (cancellationFailure !== undefined) throw new ResourceRetirementError('original archive cancellation was not observed', cancellationFailure);
+  // Only a real cancelled native join can classify a simultaneously
+  // rejected SQLite task as cancellation. Preserve both original reasons;
+  // transport close, signal state or SQLITE_IOERR alone proves no join.
+  if (failed && signal?.aborted && joined?.outcome === 'cancelled')
+    throw new AggregateError([signal.reason, failure], signal.reason instanceof Error ? signal.reason.message :
+      'Kernel archive cancellation joined', { cause: signal.reason });
+  if (failed) throw failure;
+  signal?.throwIfAborted(); source.assertCurrent(); assertHeldKernelArchive(archive);
+  if (!joined || joined.outcome !== 'commit_phase_two_observed' || joined.mainOpens !== 1 || joined.mainCloses !== 1)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'online archive lacks its actual single main lease and commit-phase-two observation');
+  return joined;
+}
+
 const rolledBackTransactionFailures = new WeakMap<SqliteDriver, WeakSet<Error>>();
+const connectionIssuers = new WeakMap<SqliteConnection, { driver: SqliteDriver; assertUsable?(): void }>();
+
+/** Issuer identity only. Scope usability and all authority remain separate. */
+export function sqliteConnectionBelongsTo(driver: SqliteDriver, connection: SqliteConnection): boolean {
+  const issuer = connectionIssuers.get(connection);
+  return issuer !== undefined && issuer.driver === driver && connectionIssuers.get(driver)?.driver === driver;
+}
+
+/** Internal SQL friend: a structural, foreign or expired connection cannot
+ * replace this driver's genuine current scope. This grants no Run authority. */
+export function assertSqliteConnectionOwnedBy(driver: SqliteDriver, connection: SqliteConnection): void {
+  const issuer = connectionIssuers.get(connection);
+  if (!issuer || !sqliteConnectionBelongsTo(driver, connection))
+    throw new TypeError('SQLite connection requires its genuine active issuing driver');
+  issuer.assertUsable?.();
+}
 
 /** Exact native mutation failure after this driver's successful rollback and
  * scope cleanup. It grants no authority to replay an invocation or callback. */
@@ -60,11 +178,13 @@ export function isRolledBackSqliteTransactionFailure(driver: SqliteDriver, error
   return error instanceof Error && rolledBackTransactionFailures.get(driver)?.has(error) === true;
 }
 
+type NativeSqliteFailureObserver = (error: unknown, method: keyof SqliteStatement | 'exec' | 'commit') => void;
+
 class NodeSqliteStatement implements SqliteStatement {
   constructor(
     private readonly statement: StatementSync,
     private readonly requireUsable: () => void = () => undefined,
-    private readonly onRunFailure?: (error: unknown) => void
+    private readonly onFailure?: NativeSqliteFailureObserver
   ) {
     statement.setReadBigInts(true);
   }
@@ -72,17 +192,28 @@ class NodeSqliteStatement implements SqliteStatement {
   run(...parameters: SqliteInputValue[]): SqliteRunResult {
     this.requireUsable();
     try { return this.statement.run(...parameters) as SqliteRunResult; }
-    catch (error) { this.onRunFailure?.(error); throw error; }
+    catch (error) { this.onFailure?.(error, 'run'); throw error; }
   }
 
   get<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row | undefined {
     this.requireUsable();
-    return this.statement.get(...parameters) as Row | undefined;
+    try { return this.statement.get(...parameters) as Row | undefined; }
+    catch (error) { this.onFailure?.(error, 'get'); throw error; }
   }
 
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[] {
     this.requireUsable();
-    return this.statement.all(...parameters) as Row[];
+    try { return this.statement.all(...parameters) as Row[]; }
+    catch (error) { this.onFailure?.(error, 'all'); throw error; }
+  }
+  *iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row> {
+    this.requireUsable();
+    try {
+      for (const row of iterateNodeSqliteStatement(this.statement, ...parameters)) {
+        this.requireUsable(); yield row as Row;
+      }
+      this.requireUsable();
+    } catch (error) { this.onFailure?.(error, 'iterate'); throw error; }
   }
 }
 
@@ -105,6 +236,13 @@ class TransactionScopedStatement implements SqliteStatement {
   all<Row = SqliteRow>(...parameters: SqliteInputValue[]): Row[] {
     this.requireActive();
     return this.statement.all<Row>(...parameters);
+  }
+  *iterate<Row = SqliteRow>(...parameters: SqliteInputValue[]): IterableIterator<Row> {
+    this.requireActive();
+    for (const row of this.statement.iterate<Row>(...parameters)) {
+      this.requireActive(); yield row;
+    }
+    this.requireActive();
   }
 }
 
@@ -196,32 +334,32 @@ function assertNoTransactionControl(sql: string, readOnly = false): void {
 }
 
 class TransactionScopedConnection implements SqliteConnection {
-  private active = true;
-
   constructor(private readonly database: DatabaseSync, private readonly readOnly = false,
-    private readonly onRunFailure?: (error: unknown) => void) {}
+    private readonly onFailure?: NativeSqliteFailureObserver) {}
 
   deactivate(): void {
-    this.active = false;
+    connectionIssuers.delete(this);
   }
 
   exec(sql: string): void {
     this.requireActive();
     assertNoTransactionControl(sql, this.readOnly);
-    this.database.exec(sql);
+    try { this.database.exec(sql); }
+    catch (error) { this.onFailure?.(error, 'exec'); throw error; }
   }
 
   prepare(sql: string): SqliteStatement {
     this.requireActive();
     assertNoTransactionControl(sql, this.readOnly);
     return new TransactionScopedStatement(
-      new NodeSqliteStatement(this.database.prepare(sql), undefined, this.onRunFailure),
+      new NodeSqliteStatement(this.database.prepare(sql), undefined, this.onFailure),
       this.requireActive
     );
   }
 
   private readonly requireActive = (): void => {
-    if (!this.active) {
+    if (!connectionIssuers.has(this) || this.database.isTransaction === false) {
+      this.deactivate();
       throw new Error('SQLite transaction scope is no longer active');
     }
   };
@@ -243,12 +381,15 @@ class NodeSqliteDriver implements SqliteDriver {
   private transactionActive = false;
   private poisoned = false;
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, readOnly = false) {
     this.database = new DatabaseSync(databasePath, {
       allowExtension: false,
+      readOnly,
       enableDoubleQuotedStringLiterals: false,
       enableForeignKeyConstraints: true
     });
+    connectionIssuers.set(this, { driver: this, assertUsable: this.requireNoActiveTransaction });
+    originalArchiveSources.set(this, { database: this.database, databasePath, readOnly, assertCurrent: this.requireNoActiveTransaction, liveBackups: 0 });
   }
 
   exec(sql: string): void {
@@ -286,36 +427,50 @@ class NodeSqliteDriver implements SqliteDriver {
       throw error;
     }
     this.transactionActive = true;
-    let nativeFailure: Error | undefined;
-    const recordNativeFailure = (error: unknown) => {
+    let nativeFailure: Error | undefined, automaticRollback: Error | undefined;
+    const recordNativeFailure: NativeSqliteFailureObserver = (error, method) => {
+      if (automaticRollback) return;
       if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
-      nativeFailure = !readOnly && error instanceof Error &&
+      const nativeError = error instanceof Error &&
         Object.getOwnPropertyDescriptor(error, 'code')?.value === 'ERR_SQLITE_ERROR' ? error : undefined;
+      // A genuine statement error can end its entire transaction (e.g.
+      // SQLITE_FULL). Only the original native state before COMMIT proves
+      // this rollback. A failed COMMIT may have an uncertain outcome.
+      if (nativeError && method !== 'commit' && this.database.isTransaction === false) {
+        automaticRollback = nativeError;
+        deactivateScope();
+      }
+      nativeFailure = !readOnly && nativeError &&
+        (automaticRollback || method === 'run' || method === 'commit') ? nativeError : undefined;
     };
     const scopedConnection = new TransactionScopedConnection(this.database, readOnly, recordNativeFailure);
+    connectionIssuers.set(scopedConnection, { driver: this });
+    // Capture revocation before the callback can replace a scope method.
+    const deactivateScope = scopedConnection.deactivate.bind(scopedConnection);
     let primaryError: unknown, rolledBack = false;
     try {
       const result = operation(scopedConnection) as ReturnType<Operation>;
-      scopedConnection.deactivate();
+      deactivateScope();
       if (isThenable(result)) {
         observeRejectedThenable(result);
         throw new TypeError(`SQLite ${readOnly ? 'read snapshot' : 'transaction'} callback must be synchronous`);
       }
+      if (automaticRollback) throw automaticRollback;
       try { this.database.exec('COMMIT'); }
-      catch (error) { recordNativeFailure(error); throw error; }
+      catch (error) { recordNativeFailure(error, 'commit'); throw error; }
       return result;
     } catch (error) {
       primaryError = error;
       if (error instanceof Error) rolledBackTransactionFailures.get(this)?.delete(error);
-      scopedConnection.deactivate();
+      deactivateScope();
       try {
-        this.database.exec('ROLLBACK');
+        if (!automaticRollback || this.database.isTransaction !== false) this.database.exec('ROLLBACK');
         rolledBack = true;
       } catch (rollbackError) {
         this.poisoned = true;
         rolledBackTransactionFailures.delete(this);
         try {
-          this.database.close();
+          if ((originalArchiveSources.get(this)?.liveBackups ?? 0) === 0) this.database.close();
         } catch {
           // The transaction outcome is already uncertain. Closing is best
           // effort; the public connection remains permanently unusable.
@@ -324,7 +479,7 @@ class NodeSqliteDriver implements SqliteDriver {
       }
       throw error;
     } finally {
-      scopedConnection.deactivate();
+      deactivateScope();
       this.transactionActive = false;
       if (restoreQueryOnly && !this.poisoned) this.restoreWritableConnection(primaryError);
       if (rolledBack && !this.poisoned && nativeFailure !== undefined && primaryError === nativeFailure) {
@@ -339,7 +494,8 @@ class NodeSqliteDriver implements SqliteDriver {
     catch (error) {
       this.poisoned = true;
       rolledBackTransactionFailures.delete(this);
-      try { this.database.close(); } catch { /* Permanently refuse the uncertain connection. */ }
+      try { if ((originalArchiveSources.get(this)?.liveBackups ?? 0) === 0) this.database.close(); }
+      catch { /* Permanently refuse the uncertain connection. */ }
       throw new AggregateError(primaryError === undefined ? [error] : [primaryError, error],
         'SQLite read snapshot could not restore connection settings');
     }
@@ -347,8 +503,10 @@ class NodeSqliteDriver implements SqliteDriver {
 
   close(): void {
     this.requireNoActiveTransaction();
+    if ((originalArchiveSources.get(this)?.liveBackups ?? 0) !== 0)
+      throw new ResourceRetirementError('original SQLite source has a live or unjoined archive backup', undefined);
     try { this.database.close(); }
-    finally { rolledBackTransactionFailures.delete(this); }
+    finally { rolledBackTransactionFailures.delete(this); connectionIssuers.delete(this); originalArchiveSources.delete(this); }
   }
 
   private readonly requireNoActiveTransaction = (): void => {
@@ -445,7 +603,7 @@ function precreatePrivateDatabase(databasePath: string, effectiveUid: number): v
   }
 }
 
-function prepareDatabasePath(databasePath: string): void {
+function prepareDatabasePath(databasePath: string, allowCreate = true): void {
   const effectiveUid = requireEffectiveUid();
   const databaseExists = validateExistingPrivateFile(
     databasePath,
@@ -462,6 +620,7 @@ function prepareDatabasePath(databasePath: string): void {
   }
 
   if (!databaseExists) {
+    if (!allowCreate) throw new Error('read-only kernel database is missing');
     precreatePrivateDatabase(databasePath, effectiveUid);
   }
 }
@@ -472,4 +631,47 @@ export function openSqliteDriver(databasePath: string): SqliteDriver {
   }
   prepareDatabasePath(databasePath);
   return new NodeSqliteDriver(databasePath);
+}
+
+/** Data-only installed selection/history cut. It cannot create a missing DB or
+ * mutate the original database even if a caller submits a writing statement. */
+export function openReadOnlySqliteDriver(databasePath: string): SqliteDriver {
+  if (!path.isAbsolute(databasePath) || path.normalize(databasePath) !== databasePath)
+    throw new TypeError('SQLite reader requires a normalized absolute file-backed database path');
+  prepareDatabasePath(databasePath, false);
+  return new NodeSqliteDriver(databasePath, true);
+}
+
+/** Installed upgrade selection can race a live writer in rollback-journal
+ * mode. Retry only a real read-only BUSY, after retiring each connection.
+ * Use the existing SQLite budget without blocking the Supervisor event loop. */
+export async function readInstalledUpgradeDatabase<T>(
+  databasePath: string, read: (driver: SqliteDriver) => T | Promise<T>, signal?: AbortSignal
+): Promise<T> {
+  const deadline = performance.now() + KERNEL_SQLITE_BUSY_TIMEOUT_MS;
+  for (;;) {
+    signal?.throwIfAborted();
+    let driver: SqliteDriver | undefined;
+    let busy: Error;
+    try {
+      driver = openReadOnlySqliteDriver(databasePath);
+      const result = await read(driver);
+      signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      const code = error instanceof Error && Object.getOwnPropertyDescriptor(error, 'code')?.value;
+      const sqliteCode = error instanceof Error && Object.getOwnPropertyDescriptor(error, 'errcode')?.value;
+      if (!(error instanceof Error) || code !== 'ERR_SQLITE_ERROR' || !Number.isSafeInteger(sqliteCode) ||
+          sqliteCode < 0 || sqliteCode % 256 !== 5) throw error;
+      busy = error;
+    } finally {
+      driver?.close();
+    }
+    signal?.throwIfAborted();
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw busy;
+    try { await delay(Math.min(20, remaining), undefined, { signal }); }
+    catch (error) { signal?.throwIfAborted(); throw error; }
+    if (performance.now() >= deadline) throw busy;
+  }
 }

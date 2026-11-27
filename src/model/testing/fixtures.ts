@@ -127,6 +127,8 @@ export function testFixture(provider: ProviderName = 'openai', nativeToolCalling
       ownerPrincipalId: 'owner',
       provider: 'ollama',
       model,
+      localModelRegistrationRef: ref(77),
+      localModelRegistrationDigest: ref(78),
       serviceSpecRef: ref(70),
       serviceSpecDigest: ref(71),
       stableServiceIdentityDigest: ref(74),

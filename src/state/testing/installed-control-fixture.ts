@@ -1,3 +1,4 @@
+import { signedKernelSchemaProfile } from '../signed-schema.js';
 import { generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -16,7 +17,8 @@ import { STATE_OWNER_NATIVE_ENTRY_ID, STATE_OWNER_NATIVE_PATH, STATE_OWNER_NATIV
  * release root. The installed bootstrap is not executed, and this is not SEA,
  * worker, headless-output, admission/model or complete I1 qualification.
  * The independently signed opaque worker is never exec'ed or dlopened. */
-export async function writeInstalledControlPackage(packageRoot: string, options: { modelAuthority?: boolean } = {}) {
+export async function writeInstalledControlPackage(packageRoot: string,
+  options: { modelAuthority?: boolean; credentialPlatform?: string } = {}) {
   await mkdir(packageRoot, { mode: 0o700 });
   const profile = policyProfile();
   const rootCore = {
@@ -26,6 +28,7 @@ export async function writeInstalledControlPackage(packageRoot: string, options:
   };
   const rootRecipe = { ...rootCore, profileDigest: canonicalSha256(rootCore) };
   const contents = [
+    { entryId: 'kernel_schema', role: 'schema', relativePath: 'schema/kernel-v8.json', executable: false, bytes: canonicalJsonBytes(signedKernelSchemaProfile()) },
     { entryId: 'native-control-supervisor', role: 'supervisor', relativePath: 'supervisor', executable: true,
       bytes: await readFile(process.execPath) },
     { entryId: 'unused-control-worker', role: 'worker', relativePath: 'workers/worker', executable: true,
@@ -39,6 +42,9 @@ export async function writeInstalledControlPackage(packageRoot: string, options:
     { entryId: 'control-empty-root', role: 'sandbox_root_profile', relativePath: 'profiles/empty-root.json', executable: false,
       bytes: canonicalJsonBytes(rootRecipe) },
   ];
+  if (options.credentialPlatform) contents.push({ entryId: 'linux_credential_platform', role: 'platform_helper',
+    relativePath: 'native/linux-x64/linux-credential-platform.node', executable: true,
+    bytes: await readFile(options.credentialPlatform) });
   if (options.modelAuthority) contents.push({ entryId: 'unused-control-provider', role: 'provider_adapter',
     relativePath: 'adapters/unused-control-provider', executable: true,
     bytes: Buffer.from('signed control fixture opaque provider adapter; never execute or load\n') });
@@ -47,11 +53,11 @@ export async function writeInstalledControlPackage(packageRoot: string, options:
     const filename = path.join(packageRoot, entry.relativePath);
     await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
     await writeFile(filename, bytes, { flag: 'wx', mode: entry.executable ? 0o500 : 0o400 });
-    entries.push({ ...entry, version: '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
+    entries.push({ ...entry, version: entry.entryId === 'kernel_schema' ? '8' : '1', digest: sha256Bytes(bytes), byteCount: bytes.byteLength });
   }
   const keys = generateKeyPairSync('ed25519');
   const bundle: RuntimeBundleManifest = {
-    schemaVersion: 1, bundleVersion: 'native-uds-read-fixture-v1',
+    schemaVersion: 2, installedLayout: 'single_cas_streams_v1', bundleVersion: 'native-uds-read-fixture-v1',
     controlProtocolRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 },
     stateSchemaRange: { min: 1, max: KERNEL_STATE_SCHEMA_VERSION }, workerProtocolRange: { min: 1, max: 1 },
     entries,
@@ -73,7 +79,7 @@ export async function writeInstalledControlPackage(packageRoot: string, options:
   // Independent expected payloads from the signed source package. These are
   // audit values only, never an allowlist or authority passed to StateStore.
   const seedObjects = [manifestBytes, ...contents.filter(entry =>
-    ['policy_engine', 'trust_store', 'sandbox_root_profile'].includes(entry.role)).map(entry => entry.bytes)]
+    ['policy_engine', 'trust_store', 'sandbox_root_profile', 'schema'].includes(entry.role)).map(entry => entry.bytes)]
     .map(bytes => ({ artifactRef: sha256Bytes(bytes), bytes }));
   const modelAuthority = options.modelAuthority ? await writeControlCompanion(packageRoot, bundle, keys.privateKey) : undefined;
   if (modelAuthority) {

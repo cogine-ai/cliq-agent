@@ -13,6 +13,22 @@ The strong support matrix and three security layers remain unchanged.
 
 This work package is implementable without further product decisions. The visible risks are the signed macOS microVM supply chain, Linux cgroup delegation, Git edge cases, and workspace-image cost; none permits a fallback to host-process detached mutation.
 
+The fixed ordinary-tool script is signed data at
+`adapters/builtin-tools.mjs`, never an executable adapter or user script.
+Its distinct `cliq-builtin-tools-v1` launch uses only the original signed guest
+Node and, for Bash, the separately admitted same-image `/bin/bash`; it never
+uses host spawn, ambient environment/PATH, startup files, network or legacy
+ToolDefinition execution. The exact normalized call and original profile
+limits pass through sealed private input, not argv or a new business manifest.
+Read/search use read-only/no-exec `/work`; Bash uses read-write/no-exec `/work`.
+Per-action permission remains independent from Workspace Trust and the OS
+boundary. Every invocation retains its own claim/release identity and requires
+complete output/descriptor/domain join. Read/search cannot use a private
+rollback to gain write authority or redispatch UNKNOWN. A stopped UNKNOWN can
+close only with the original complete ready Checkpoint, true whole-domain
+retirement, quarantine and actual rollback in the existing terminal reducer;
+its fully charged UNKNOWN and original BudgetSettlement remain unchanged.
+
 ### Source
 
 Brief / issue / roadmap item:
@@ -72,6 +88,8 @@ In:
 - Require every `run.submit|run.apply`, including read-only and text-only requests, to resolve `RunAssemblyV1.sandboxBackend` as exactly `macos_vm|linux_namespace` and pass the corresponding strong-backend, worker identity, and pinned-executable probes before Run creation. Reject native Windows and any supported host without a complete working backend. Non-Git roots use the same strong private-generation path rather than a weak read mode.
 - Capture a content-addressed base workspace manifest without mutating the user's index or working tree.
 - Own pre-admission capture through the RFC's `source_inspection_attempts` reservation and fixed read-only Git recipe. A process plan must reserve the exact backend before `prepared`; cancellation and successor cleanup require joined local resources, exact staging removal/parent fsync, and no-spawn or whole-containment death as applicable. Source inspection creates no accepted Run and cannot relax strong Run admission.
+- Prepare an ordinary Git Checkpoint through the same original `preparing` WorkerLaunch, actual generation birth, controller and WorkerReservation. Root the exact canonical metadata leaf in that controller's original SQL registration. The versioned native prelude binds the complete original owner/Run/Session/Checkpoint/generation/repository/profile identities and actual Supervisor PID/start, then accepts only four complete sealed CAS leaves into the signed fixed CAS-only Git helper. It freshly verifies index-pack/fsck/type/reachability/all-and-only closure, retains the original byte identities, and actually joins every reader/CAS/runtime/process/containment resource before minting the original completion. Only that same opaque completion permits private generation payload copying; complete data, old source proof, current-checker cleanup, or an arbitrary callback never does. Stream packs and compare the physical all-and-only metadata by complete hashes/counts without loading whole packs in the Supervisor. Independently retain the admitted classification index and current private index. Half-written prefixes remain cleanup/wait, never not-attempted or successor final BIND; cancellation joins native preparation before releasing the generation/reservation under the original two-second stop deadline.
+- Persist the original Git tracked-path snapshot as `SourceProjectionSpec.classificationIndexRef`; Git requires it, non-Git forbids it. Every result/recovery/Delivery matcher revalidates that full snapshot and frozen rule contents. Current private or A metadata indices remain independent and never redefine classification. Publication's existing approval/claim owns a fixed genuine native `.git/index` read and actual EOF/identity/close/join, followed by canonical-byte/entry/tree equality to A. Keep captured/observed snapshot ref/digest pairs equal. Its closed observation distinguishes a true present single-link file from actual ENOENT; absence is equivalent only to A's exact fully verified empty canonical v2 index under the same object format, never to a nonempty snapshot or a fabricated old FD. Replacement, byte/identity drift, unsupported object or uncertain close remains rejected/fenced. No read-scope, source-cursor, effect or retry authority is widened.
 - Consume only work package 1's exact immutable `WorkspaceIdentityV1.kind='live'` plus its exact `RepositoryIdentityV1` iff Git: descriptor-reopen the NFC absolute root and literal in-root `.git` no-follow for every capture/apply/publication, validate principal/platform/owner/device/file/object-format identities, keep 64-bit device/file ids as canonical unsigned decimal strings, fail root/`.git` replacement with `ARTIFACT_MISMATCH`, and reject `legacy_unavailable` Sessions/forks from execution.
 - Freeze the RFC `SourceProjectionSpec` into `RunSpec.sourceProjectionRef`, including `cliq-exact-path-v1` selectors, frozen admission-time ignore rules, hard exclusions, authorization refs for ignored in-root includes, rejection of every outside-root selector, and result size/count ceilings.
 - Materialize a unique private workspace generation for every mutating worker lease, with an independent `.git` directory and no writable alias to the real repository.
@@ -176,7 +194,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
           runtimeBundleRef: ArtifactRef
           runtimeBundleManifestDigest: string
           executableId: string
-          role: 'worker' | 'tool_adapter' | 'mcp_server' | 'local_inference' | 'platform_helper'
+          role: 'worker' | 'tool_adapter' | 'mcp_server' | 'mcp_recovery_adapter' | 'local_inference' | 'platform_helper'
           executionPath: string
           executableDigest: string
         }
@@ -207,89 +225,106 @@ SQLite recovery reducer, and does not advance this work package's completion.
     }
 
     type SandboxProcessInvocationV1 =
+  | {
+      kind: 'worker_entrypoint'
+      purpose: 'worker_activation'
+      recipe: 'cliq-worker-entrypoint-v1'
+      runtimeSource: 'launch_runtime'
+      executableSource: 'launch_executable'
+      argvSource: 'fixed_empty'
+      cwdSource: 'generation_root'
+      stdio: {
+        stdin: 'closed'
+        stdout: 'captured'
+        stderr: 'captured'
+        extraFileDescriptors: 'authenticated_worker_channel_only'
+      }
+    }
+  | {
+      kind: 'source_inspection'
+      purpose: 'source_inspection'
+      recipe: 'cliq-source-git-inspection-v1'
+      targetRef: ArtifactRef
+      targetDigest: string
+      inputRef: ArtifactRef
+      inputDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+      stdio: SandboxCapturedStdioV1
+    }
+  | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: { stdin: 'mcp_framed'; stdout: 'mcp_framed'; stderr: 'captured'; extraFileDescriptors: 'none' }
+    }
+  | {
+      kind: 'local_inference_entrypoint'
+      purpose: 'local_inference_service'
+      recipe: 'cliq-local-inference-entrypoint-v1'
+      runtimeSource: 'launch_runtime'
+      executableSource: 'launch_executable'
+      modelManifestSource: 'service_spec'
+      argvSource: 'trusted_recipe_decode_of_service_spec'
+      cwdSource: 'isolated_root'
+      stdio: SandboxCapturedStdioV1
+    }
+  | ({
+      kind: 'run_request'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
+    } & (
+      | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
       | {
-          kind: 'worker_entrypoint'
-          purpose: 'worker_activation'
-          recipe: 'cliq-worker-entrypoint-v1'
-          runtimeSource: 'launch_runtime'
-          executableSource: 'launch_executable'
-          argvSource: 'fixed_empty'
-          cwdSource: 'generation_root'
+          purpose: 'tool'
+          recipe: 'cliq-builtin-tools-v1'
+          privateGitProtection: 'existing_read_only'
+          stdio: SandboxCapturedStdioV1
+        }
+      | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
+      | {
+          purpose: 'mcp_stdio'
+          recipe: 'cliq-mcp-stdio-launch-v1'
           stdio: {
-            stdin: 'closed'
-            stdout: 'captured'
+            stdin: 'mcp_framed'
+            stdout: 'mcp_framed'
             stderr: 'captured'
-            extraFileDescriptors: 'authenticated_worker_channel_only'
+            extraFileDescriptors: 'none'
+          }
+        }
+      | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
+    ))
+  | ({
+      kind: 'admin_probe'
+      targetRef: ArtifactRef
+      targetDigest: string
+      probePayloadCoreRef: ArtifactRef
+      argvCwdSource: 'trusted_recipe_decode_of_admin_target_and_probe_core'
+    } & (
+      | {
+          purpose: 'admin_mcp_stdio_probe'
+          recipe: 'cliq-admin-mcp-stdio-probe-v1'
+          stdio: {
+            stdin: 'mcp_framed'
+            stdout: 'mcp_framed'
+            stderr: 'captured'
+            extraFileDescriptors: 'none'
           }
         }
       | {
-          kind: 'source_inspection'
-          purpose: 'source_inspection'
-          recipe: 'cliq-source-git-inspection-v1'
-          targetRef: ArtifactRef
-          targetDigest: string
-          inputRef: ArtifactRef
-          inputDigest: string
-          argvCwdSource: 'trusted_recipe_decode_of_frozen_source_input'
+          purpose: 'admin_mcp_http_probe'
+          recipe: 'cliq-admin-mcp-http-probe-v1'
           stdio: SandboxCapturedStdioV1
         }
-      | {
-          kind: 'local_inference_entrypoint'
-          purpose: 'local_inference_service'
-          recipe: 'cliq-local-inference-entrypoint-v1'
-          runtimeSource: 'launch_runtime'
-          executableSource: 'launch_executable'
-          modelManifestSource: 'service_spec'
-          argvSource: 'trusted_recipe_decode_of_service_spec'
-          cwdSource: 'isolated_root'
-          stdio: SandboxCapturedStdioV1
-        }
-      | ({
-          kind: 'run_request'
-          requestRef: ArtifactRef
-          requestDigest: string
-          targetRef: ArtifactRef
-          targetDigest: string
-          argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
-        } & (
-          | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
-          | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
-          | {
-              purpose: 'mcp_stdio'
-              recipe: 'cliq-mcp-stdio-launch-v1'
-              stdio: {
-                stdin: 'mcp_framed'
-                stdout: 'mcp_framed'
-                stderr: 'captured'
-                extraFileDescriptors: 'none'
-              }
-            }
-          | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
-          | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
-        ))
-      | ({
-          kind: 'admin_probe'
-          targetRef: ArtifactRef
-          targetDigest: string
-          probePayloadCoreRef: ArtifactRef
-          argvCwdSource: 'trusted_recipe_decode_of_admin_target_and_probe_core'
-        } & (
-          | {
-              purpose: 'admin_mcp_stdio_probe'
-              recipe: 'cliq-admin-mcp-stdio-probe-v1'
-              stdio: {
-                stdin: 'mcp_framed'
-                stdout: 'mcp_framed'
-                stderr: 'captured'
-                extraFileDescriptors: 'none'
-              }
-            }
-          | {
-              purpose: 'admin_mcp_http_probe'
-              recipe: 'cliq-admin-mcp-http-probe-v1'
-              stdio: SandboxCapturedStdioV1
-            }
-        ))
+    ))
     type SanitizedSandboxEnvironmentV1 = {
       schemaVersion: 1
       format: 'cliq-sanitized-sandbox-environment-v1'
@@ -338,6 +373,14 @@ SQLite recovery reducer, and does not advance this work package's completion.
           purpose: 'input'
         }
       | {
+          kind: 'source_git_inspection_input'
+          inputRef: ArtifactRef
+          inputDigest: string
+          targetPath: '/scratch/input'
+          access: 'read_only'
+          purpose: 'input'
+        }
+      | {
           kind: 'run_generation'
           generationRef: ArtifactRef
           canonicalRootRelativePath: string
@@ -372,89 +415,112 @@ SQLite recovery reducer, and does not advance this work package's completion.
     }
 
     type SandboxLaunchSpecV1 =
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'worker_activation' }>
-          purpose: 'worker_activation'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'worker_entrypoint' }>
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'run_invocation' }>
-          purpose: 'tool' | 'verifier' | 'mcp_stdio' | 'dependency' | 'publication'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'run_request' }>
-          operationGrantRef: ArtifactRef
-          requestRef: ArtifactRef
-          requestDigest: string
-          targetRef: ArtifactRef
-          targetDigest: string
-          parentWorkerContainmentRef: ArtifactRef
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
-          purpose: 'admin_mcp_stdio_probe' | 'admin_mcp_http_probe'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'admin_probe' }>
-          adminTargetRef: ArtifactRef
-          adminTargetDigest: string
-          probePayloadCoreRef: ArtifactRef
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
-          purpose: 'source_inspection'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
-          sourceInspectionTargetRef: ArtifactRef
-          sourceInspectionTargetDigest: string
-          sourceInspectionInputRef: ArtifactRef
-          sourceInspectionInputDigest: string
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-          serviceSpecRef?: never
-          serviceSpecDigest?: never
-        })
-      | (SandboxLaunchBaseV1 & {
-          owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
-          purpose: 'local_inference_service'
-          processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'local_inference_entrypoint' }>
-          serviceSpecRef: ArtifactRef
-          serviceSpecDigest: string
-          operationGrantRef?: never
-          requestRef?: never
-          requestDigest?: never
-          targetRef?: never
-          targetDigest?: never
-          parentWorkerContainmentRef?: never
-          adminTargetRef?: never
-          adminTargetDigest?: never
-          probePayloadCoreRef?: never
-        })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'worker_activation' }>
+      purpose: 'worker_activation'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'worker_entrypoint' }>
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'run_invocation' }>
+      purpose: 'tool' | 'verifier' | 'mcp_stdio' | 'dependency' | 'publication'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'run_request' }>
+      operationGrantRef: ArtifactRef
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      parentWorkerContainmentRef: ArtifactRef
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
+      purpose: 'admin_mcp_stdio_probe' | 'admin_mcp_http_probe'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'admin_probe' }>
+      adminTargetRef: ArtifactRef
+      adminTargetDigest: string
+      probePayloadCoreRef: ArtifactRef
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      executable: Extract<SandboxExecutableIdentityV1, { kind: 'runtime_bundle' }> & { role: 'mcp_recovery_adapter' }
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
+      purpose: 'source_inspection'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'source_inspection' }>
+      sourceInspectionTargetRef: ArtifactRef
+      sourceInspectionTargetDigest: string
+      sourceInspectionInputRef: ArtifactRef
+      sourceInspectionInputDigest: string
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'local_inference_service' }>
+      purpose: 'local_inference_service'
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'local_inference_entrypoint' }>
+      serviceSpecRef: ArtifactRef
+      serviceSpecDigest: string
+      operationGrantRef?: never
+      requestRef?: never
+      requestDigest?: never
+      targetRef?: never
+      targetDigest?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+    })
     ```
 
    `runtimeDigest = SHA-256(JCS(runtime with runtimeDigest omitted))`, `environmentDigest = SHA-256(JCS(environment with environmentDigest omitted))`, `mountsDigest = SHA-256(JCS(mounts))`, `resourcesDigest = SHA-256(JCS(resources))`, and `launchSpecDigest = SHA-256(JCS(the complete launch spec, including processInvocation, with launchSpecDigest omitted))`. `containmentPlanDigest` and `sandboxProfileDigest` equal the decoded referenced artifacts. Mounts are unique, byte-sorted by `targetPath`, nonoverlapping, and sourced only from verified CAS, the exact named Run generation, or a Supervisor-created private ephemeral root. Targets are absolute canonical guest/sandbox paths; generation source selectors are `cliq-exact-path-v1`. There is no raw host path, symlink-following source, writable runtime/CAS mount, persistent admin/MCP mount, ambient credential root, device, socket, or untyped mount.
 
    Owner equality is exhaustive. `worker_activation` owner bytes equal the reserved `WorkerLaunch` Run/intended epoch/launch id; its plan owner is identical, plan parent is absent, filesystem is the exact Run generation in `preactivated_readonly`, executable equals the Run assembly's signed worker identity (and the signed guest worker on macOS), and every invocation/admin/service/source-inspection field is structurally forbidden. Its `processInvocation` is exactly `worker_entrypoint`, selects only the launch's already digest-bound runtime/executable, fixes empty argv/generation-root cwd/captured output, and exposes only the authenticated worker channel, which remains activation-blocked until the launch CAS; the launcher accepts no caller-supplied process field. `run_invocation` owner bytes equal the permanent Journal claim and exact `OperationGrantV1`; its plan has the identical owner and `parentContainmentRef=parentWorkerContainmentRef` ending at the active worker containment. Its generation/filesystem/mounts equal the grant's typed target: verifier source is read-only with only declared ephemeral writes, stdio MCP is `isolated_empty_root` with no Run-generation mount, and a mutating tool can write only its activated generation. Its `processInvocation.kind='run_request'`, purpose equals the outer purpose, request/target refs and digests equal both the launch fields and exact grant, and recipe is the one closed purpose mapping above. `admin_probe` owner bytes equal the exact AdminOperation attempt/principal/method/request/target/Supervisor; its plan has that identical owner, no parent, `isolated_empty_root`, no Run generation, and every Run/lease/worker/frontier/Journal/`OperationGrantV1` field is structurally absent. Its `processInvocation.kind='admin_probe'`, purpose/target/`probePayloadCoreRef` equal the outer launch and exact `McpAdminProbeTargetV1` plus a static signed/typed probe program published before preactivation. That core contains no admin-operation phase, containment, lease, `probeRequestDigest`, or `dispatchId`; after containment and claim exist, `AdminProbeBrokerRequest.payloadRef` must equal this same core ref. Stdio uses only the exact target argv and MCP frames, while HTTP uses only the fixed signed trusted-adapter recipe. `local_inference_service` is top-level with `isolated_empty_root`; owner/service spec/launch/principal/Supervisor bytes equal the exact `LocalInferenceServiceLaunchV1`, its process kind is `local_inference_entrypoint`, and runtime/executable/model/profile/resources/loopback-only recipe equal the exact signed `LocalInferenceServiceSpecV1`. It has no Run, worker, Journal, grant, admin target, credential, or external-network field. `source_inspection` owner bytes equal the sole `SourceInspectionAttemptV1` inspection id/literal attempt `1`/principal/target/original Supervisor; its plan owner is identical, parent is absent, and filesystem is `isolated_empty_root` with no Run generation. Its outer purpose and `processInvocation.kind` are `source_inspection`, recipe is exactly `cliq-source-git-inspection-v1`, and invocation `targetRef`/`targetDigest`/`inputRef`/`inputDigest` equal the launch's `sourceInspectionTargetRef`/`sourceInspectionTargetDigest`/`sourceInspectionInputRef`/`sourceInspectionInputDigest` and the exact retained target/input artifacts. It has exactly one read-only `source_inspection_input` mount at `/input` bound to that frozen input, only digest-verified signed runtime/toolchain executable closures as additional read-only mounts, and declared private ephemeral writes; every Run/lease/worker/frontier/Journal/grant/admin/service field is structurally absent. Credentials remain broker handles outside environment/mount/payload bytes. The trusted launcher itself decodes the typed source artifacts using the named signed recipe and accepts no out-of-band argv, cwd, stdin/stdout/stderr mode, file descriptor, payload, or adapter IPC override. Any process source, recipe, argument, working directory, channel, or equality mismatch fails before containment creation.
+
+   The preceding `/input` source mount is historical InputV1 only. Fresh InputV2 uses the distinct `source_git_inspection_input` at `/scratch/input` plus one fresh `/scratch` private aggregate; that exact pair alone permits a read-only child of the aggregate. InputV1 is not an alternate pathname/schema for InputV2. The aggregate's fixed repository/output/home/tmp are private writable scratch, not host paths; every original input writer/alias closes before the immutable input mount and fixed Git execution. The same signed non-executable helper mounts read-only at `/runtime/cliq-source-git-inspector.mjs`; fixed `/usr/bin/node` and `/usr/bin/git` come from the same fully verified guest closure. This adds no arbitrary script/interpreter choice or nested-mount permission. Fixed output metadata is an artifact bounded by the original invocation/single-file minimum and graph inventory ceiling, not a replacement or relaxation of the control/inline strict-JSON limits.
 
    Runtime/executable/profile equality is also closed. RuntimeBundle and GuestToolchain refs/digests equal the admitted Run assembly, exact admin target closure, or exact local-inference service spec; the backend equals both that owner closure/profile and containment plan; executable path/id/role/digest resolves byte-for-byte from the signed manifest. Verifier cannot select RuntimeBundle; RuntimeBundle stdio MCP is only role `mcp_server`; a managed local service selects only a RuntimeBundle entry whose signed role is exactly `local_inference`. `resources` equals the decoded canonical `sandboxProfileRef`, with no caller-selected increase. Environment variables are unique and byte-sorted by name. `variables` rejects the exact names `PATH|HOME|TMPDIR|LANG`, every `LC_*`, `CLIQ_BROKER_*`, `CLIQ_CREDENTIAL_*`, `CLIQ_ACTIVATION_*`, and `CLIQ_SUPERVISOR_*` name; dedicated closed fields supply the non-secret runtime values, while trusted-broker secrets never become environment entries. Every path/home/tmp/locale/literal is profile-validated, and `inheritedHostEnvironment=false`, `secretMaterial='none'`, and `brokerAccessAtSpawn='none'` are invariant. Worker/admin/service preactivation remains blocked and powerless; each Run invocation or admin probe receives its exact release only after its second dispatch gate, while local model traffic begins only after its separate active launch/boundary-evidence CAS. Any digest, equality, forbidden-field, mount, executable-role, resource, or environment mismatch fails before containment creation or target I/O.
 
@@ -635,6 +701,7 @@ SQLite recovery reducer, and does not advance this work package's completion.
    `run.submit dependency.mode='locked'` resolves public endpoint/credential ids to immutable registration/grant refs, freezes canonical HTTPS endpoint and TLS-policy digests plus exact authority/service revision, secret generation, and external subject, and accepts exactly literal root `package.json` plus exactly one literal root lockfile and a compatible pinned guest package manager. `packageManifest.contentRef/contentDigest` and the lockfile ref/digest rehash those exact candidate `SourceManifest` entries. `package-lock.json` selects only `npm-ci-v1`; `pnpm-lock.yaml` only `pnpm-frozen-v1`; `yarn.lock` only `yarn-immutable-v1`. A `workspaces` member, nested package manifest or lockfile, second supported root lockfile, adapter/path mismatch, missing integrity, ambiguity, unlocked resolution, unsupported layout, or target mismatch fails before any package-manager process. `planDigest=SHA-256(JCS(plan with planDigest omitted))`. Re-registering an id cannot redirect an accepted Run; each FinalCandidate plan copies the frozen byte-sorted endpoint/grant projection unchanged and the broker redeems only the exact still-current frozen-generation item against that target. Rotation or subject drift returns authorization-required before I/O. Trusted code derives a fresh plan from that candidate's source/package manifest/lockfile under the policy and binds it into `VerifierPlan`; it never installs an admission-time plan against changed candidate bytes.
 
    If install scripts are admitted, the admission transaction consumes the exact active `AuthorizationGrantV1` whose target is `dependency_install_scripts` for the identical workspace/lockfile path/digest and publishes the RFC-exact `DependencyInstallScriptsAuthorizationTemplateV1`; `DependencyPolicy.installScriptsGrantRef` names only that template, never the user authorization row. The template must repeat the exact source receipt, guest toolchain, allowed adapters, lockfile ref/path/digest, registry-target digest, `maxCandidateGenerations = RunSpec.budgets.repairAttempts + 1`, `maxDispatchedAttemptsPerPlan=1`, and `expiresAt=Run.deadlineAt`. Every script-bearing candidate's `OperationGrantV1` uses only `provenance.kind='dependency_install_scripts_template'`, matches that policy/template/plan, and consumes one previously unused candidate ordinal in `0..maxCandidateGenerations-1`; there is no resettable counter. A changed lock digest, registry projection, toolchain, adapter, policy, or exhausted ordinal cannot reuse the template: scripts remain denied until an exact new candidate approval path exists, or fail in noninteractive deny mode.
+   Complete source/interpreter conditions and exact `sourceInspectionId` bind the captured AUTH refusal and the later admission consumer. A changed candidate has its own registered `dependency_install_scripts` wait/decision/first-response provenance and TTL; the initial RunSpec policy is immutable, scriptless mode stays scriptless, coarse policy allow cannot replace exact-source consent, and a claimed/UNKNOWN attempt cannot acquire a new template or retry. Historical and active authority contexts remain separate. The policy item excludes the reconstructed template ref to keep the first-response graph acyclic. See the RFC dependency script-consent contract and `docs/kernel/dependency-script-authorization.md`.
 
    Defaults/maxima are 50,000/200,000 packages and 5/20 GiB download. Repository registry configuration supplies declarative endpoints only. The trusted broker fetches only HTTPS lockfile URL+integrity artifacts into CAS and may retry only the bounded integrity-GET exception, then the bundled adapter performs a networkless frozen-lockfile install in the private generation. Install scripts execute integrity-pinned package code inside the same secretless/networkless strong containment without host access.
 
@@ -650,9 +717,21 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
    `SourceProjectionSpec.schemaVersion` is literal `1`, `projectionDigest` omits itself under JCS, and SourceManifest/WorkspaceState projection values decode/repeat it. Its frozen-ignore ref/digest decodes only canonical `FrozenIgnoreRulesV1`: repository-bound or canonical non-Git empty form; descriptor-held `.git/info/exclude` then root-to-deep/path-ordered `.gitignore` sources; exact UTF-8 content refs/digests; contiguous parsed `cliq-git-wildmatch-v1` rules; ancestor-base applicability and last-match wins. Mutable files/ambient Git are never reread on recovery. Every `explicitIncludes[].authorizationRef` decodes only canonical `SourceIncludeAuthorizationV1`. Its principal/Run/Session/live workspace/selector/admission-intent fields and omission-rule digest must match admission. The builtin branch is legal only with the exact `SourceIncludeClassificationEvidenceV1` ref/digest: unique byte-sorted descriptor observations exactly cover the selected captured entries, each WorkspaceEntry digest/device/file/link identity matches the later SourceManifest, and each entry is proven either tracked by the identical retained Git index or nonignored by the frozen rules. An ignored selector requires the exact principal/workspace/path/scope `read_scope` grant and matching `AuthorizationConsumptionReceiptV1(run_admission)` whose consumer binds the same Run and pre-resolution `admissionIntentDigest`, never the final admitted digest. Consume/receipt/final-digest/projection/Run/Checkpoint/control response commit atomically. Missing/unnecessary/mismatched grants, cross-Run refs, and outside-root selectors fail rather than falling through.
 
-3. **Capture one authoritative base manifest.** Before reading source, decode the Session's exact `WorkspaceIdentityV1` and require `kind='live'`; `legacy_unavailable` and every fork retaining it are context-only and cannot enter capture/admission/apply. Descriptor-walk `canonicalRootPath` without symlinks and require the same principal/platform/owner/device/file tuple. `rootIdentity.deviceId/fileId` are compared as canonical unsigned decimal strings and never converted through JS number; `ownerUid` is a safe integer. For Git, decode the exact `RepositoryIdentityV1`, require workspace ref+digest together, open literal in-root directory `.git` from the held root, and match its owner/device/file plus normalized `sha1|sha256` object format; `.git` file/link/outside/linked forms are rejected. Non-Git requires both repository fields absent. `run.submit.workspacePath` must descriptor-resolve to this same live identity. `run.apply` accepts no path and derives/reopens the source Run's live Session root. Root/`.git` move or replacement or any workspace/repository digest mismatch returns `ARTIFACT_MISMATCH`, creates no Run/effect, and requires a new Session.
+3. **Capture one authoritative base manifest.** Before reading source, decode the Session's exact `WorkspaceIdentityV1` and require `kind='live'`; `legacy_unavailable` and every fork retaining it are context-only and cannot enter capture/admission/apply. Descriptor-walk `canonicalRootPath` without symlinks and require the same principal/platform/owner/device/file tuple. `rootIdentity.deviceId/fileId` are compared as canonical unsigned decimal strings and never converted through JS number; `ownerUid` is a safe integer. Fresh Git Sessions remain Session V1 but reference exact descriptor-only `RepositoryIdentityV2` under RFC source-inspection rules: literal `.git` must be an in-root held directory with the same owner/device/file. No config/HEAD/index/ref/object observation precedes inspection consent. V1 historical identity remains exact, including its original normalized object format; no missing V1 member is interpreted as V2. `.git` file/link/outside/linked forms are rejected. Non-Git requires both repository fields absent. `run.submit.workspacePath` must descriptor-resolve to this same live identity. `run.apply` accepts no path and derives/reopens the source Run's live Session root. Root/`.git` move or replacement or any workspace/repository digest mismatch returns `ARTIFACT_MISMATCH`, creates no Run/effect, and requires a new Session.
 
-   For Git, use NUL-safe plumbing plus `lstat`/content hashing to record repository identity, `HEAD`, index identity, every tracked working-tree byte (including dirty files), ordinary non-ignored untracked files, symlink targets without following them, executable bits, and configured root-relative explicit includes. Descriptor-read `.git/config` only to publish the exact closed artifact below; any unrecognized key rejects capture rather than being copied or interpreted:
+   For Git, the original `capturing` transaction consumes the exact default-deny `source_git_inspection` grant/receipt once. Prepared InputV2 is the consent-bound descriptor/recipe/resource intent, not a raw CAS tree or an already sealed snapshot. Native active capture owns all raw metadata/config/object bytes in the original bounded sealed-shard execution domain; only the same fixed signed inspector may consume them after the original active and sealed-ready fresh fences. Restart is cleanup-only. Raw config/URLs/unreachable object payload and raw per-object input listings never enter durable CAS or a generation. This inspection grant does not authorize ignored/include source bytes, which keep their independent read-scope/final-admission rules. See the RFC for exact versioning, consumption, alias closure and original resource/deadline requirements.
+
+   The original first capturing transaction also freezes the exact InputV2 ref/digest, before any native input borrow or reservation. Prepared/active retain that same pair; no same-phase setter, second ledger or SQL-trigger relaxation is used. Source-native retirement retains the complete original birth/progress and actual reader/CAS join, with distinct original-owner and successor-checker provenance. Only the actual original program can prove `input_not_started`; a successor never substitutes absent/half/replaced birth for no-spawn, even if staging is already absent. Uncertain joins preserve staging and birth evidence.
+
+   A retained plan always requires reopening the actual original containment-plan and SandboxLaunchSpec CAS, recomputing both semantic digests and comparing the full fixed recipe against the original owner/target/input/reservation and complete signed root/toolchain/helper closure. This applies even to a native prefix before blocked creation. Inspector/StateOwner identity is checked first; matching row/ref strings or a rehashed row cannot replace missing launch bytes or authenticate a new runtime.
+
+   Closing uses the same attempt's once-only `retirementHandoffRef`: original joined result/refusal, complete pre-handoff row, original inspector and native v2 lifecycle bytes are durable before staging removal. Schema 7 adds only this narrow same-phase retirement edge to the existing trigger; input remains frozen and no handed-off attempt can continue or recapture. A successor proves real original owner/controller death and uses only cleanup. Present birth must retain its original device/inode even for equal-byte replacement. Already-absent staging additionally requires the exact registered complete snapshot, current original-locator/CG/process absence, real parent fsync and checker join, with distinct registered-absent provenance. Partial/missing/unregistered evidence still waits. No new ledger, nonce, execution authority, deadline or retry is added.
+
+   Ignore-rule inputs do not borrow that inspection permission. Optional unique `ignoreReadGrantIds` selects only independently authorized exact `.git/info/exclude`/`.gitignore` entry reads. TargetV2 retains their original grant/receipt/digest tuples and the same capturing transaction consumes them once, with rollback/expiry/Session/principal checks and no new ledger. They grant only freezing their own rule bytes; ignored source includes keep a separate final-admission consumption. Tracked rule files can use only the independently validated retained index's ordinary tracked-source permission. Frozen rule data has the exact parser ceilings and complete content reparse specified by the RFC; pure matcher tests do not establish a native input or a permission grant.
+
+   An existing ungranted `.git/info/exclude` is a metadata-only refusal before payload open/access, never a successful absent-rule result. Ordinary projection applies the original tracked-or-nonignored rule, keeps explicit/hard exclusions, and prunes ignored untracked subtrees before opening them. A symbolic SourceManifest HEAD additionally resolves the object id from its exact retained refs; it is distinct from the private manifest's symbolic ref alone.
+
+   Use fixed NUL-safe Git plumbing plus descriptor/content hashing to record `HEAD`, canonical staged index separately from dirty worktree, exact reachable object closure, every authorized tracked/ordinary nonignored worktree byte, symlink targets without following them, executable bits, and configured authorized root-relative includes. Only the contained fixed helper parses raw config. It may parse/discard inert remote URL/pushurl/fetch, branch remote/merge, and user name/email; none is returned, persisted, executed or passed to Git. Safety/unknown keys remain strict, including inherited property names; includes/helpers/hooks/aliases/filters/drivers/ambient config and external paths cannot be enabled by Trust/yolo. The only retained config is the exact closed sanitized artifact below:
 
     ```ts
     type GitIndexSnapshotV1 = {
@@ -750,47 +829,62 @@ SQLite recovery reducer, and does not advance this work package's completion.
 
     ```ts
     type ProcessContainmentOwner =
-      | {
-          kind: 'worker_activation'
-          runId: string
-          intendedLeaseEpoch: number
-          workerLaunchId: string
-        }
-      | {
-          kind: 'run_invocation'
-          runId: string
-          intendedLeaseEpoch: number
-          workerLaunchId: string
-          opId: string
-          attempt: number
-          dispatchId: string
-        }
-      | {
-          kind: 'admin_probe'
-          adminOperationId: string
-          attempt: number
-          principalId: string
-          method: 'mcp.register' | 'mcp.refresh'
-          originalRequestDigest: string
-          targetRef: ArtifactRef
-          supervisorInstanceId: string
-        }
-      | {
-          kind: 'local_inference_service'
-          serviceId: string
-          serviceLaunchId: string
-          ownerPrincipalId: string
-          serviceSpecRef: ArtifactRef
-          supervisorInstanceId: string
-        }
-      | {
-          kind: 'source_inspection'
-          inspectionId: string
-          attempt: 1
-          principalId: string
-          targetRef: ArtifactRef
-          supervisorInstanceId: string
-        }
+  | {
+      kind: 'worker_activation'
+      runId: string
+      intendedLeaseEpoch: number
+      workerLaunchId: string
+    }
+  | {
+      kind: 'run_invocation'
+      runId: string
+      intendedLeaseEpoch: number
+      workerLaunchId: string
+      opId: string
+      attempt: number
+      dispatchId: string
+    }
+  | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
+    }
+  | {
+      kind: 'admin_probe'
+      adminOperationId: string
+      attempt: number
+      principalId: string
+      method: 'mcp.register' | 'mcp.refresh'
+      originalRequestDigest: string
+      targetRef: ArtifactRef
+      supervisorInstanceId: string
+    }
+  | {
+      kind: 'local_inference_service'
+      serviceId: string
+      serviceLaunchId: string
+      ownerPrincipalId: string
+      serviceSpecRef: ArtifactRef
+      supervisorInstanceId: string
+    }
+  | {
+      kind: 'source_inspection'
+      inspectionId: string
+      attempt: 1
+      principalId: string
+      targetRef: ArtifactRef
+      supervisorInstanceId: string
+    }
     type SandboxRootProfileV1 = {
       schemaVersion: 1
       format: 'cliq-sandbox-root-profile-v1'
@@ -1284,6 +1378,9 @@ SQLite recovery reducer, and does not advance this work package's completion.
       format: 'cliq-mcp-admin-probe-target-v1'
       ownerPrincipalId: string
       registrationId: string
+      originalRequestRef: ArtifactRef
+      channelIdentityRef: ArtifactRef
+      channelIdentityDigest: string
       method: 'mcp.register' | 'mcp.refresh'
       expectedRegistryRevision?: number
       sourceRegistryRevisionRef?: ArtifactRef
@@ -1616,6 +1713,26 @@ Preserve / do not touch:
 
 ### Implementation refinement — 2026-09-26
 
+Initial ordinary non-Git entries/rules/projection/source metadata uses the RFC's
+fixed quartet; raw streams remain earlier independent publications. The internal
+publisher sees only immutable native-read manifest data, and original capture
+resources stay held through actual group completion, full signal-bound entries
+reread, metadata recheck and close/join. Delivery keeps its earlier entries and
+same-held-scan rules/projection/source/topology quartet. Original source attempt,
+retirement inspector and handoff similarly share one fixed triple, before any
+handoff SQL or staging cleanup. Fresh real observation time and the unchanged
+same-transaction owner/staging/row/fence/five-second checks remain mandatory.
+No planned hash, callback or isolated CAS artifact grants source or cleanup
+authority; failure joins every issued operation. Instruction
+capture similarly retains every original raw file/text/source/manifest, with
+at-most-four text groups and a final zero/one/two-text plus source/manifest
+closure. Planning refs establishes no durability. Full file sync/readback,
+four CAS boundaries and actual join precede return; every held descriptor and
+currentness check remains, including a complete recheck after each group.
+Git/frozen-result paths, capture ownership, native retirement, material and
+admission checks and all original limits remain unchanged. Component sync
+measurements do not qualify the installed 30-second request or two-second stop.
+
 **Make the execution boundary a deep module.** Supervisor callers provide the
 canonical closed launch/request and current typed authority. WP03 owns native
 descriptor handling, environment construction, process creation, I/O fencing,
@@ -1707,6 +1824,7 @@ as file/network denial. Redaction is not the secret boundary.
 - [ ] New ordinary non-ignored source files, tracked deletions, binary changes, executable modes, and safe in-root symlinks appear deterministically in `resultSourceRef`; unsafe, colliding, special, or over-limit paths fail result construction with an exact reason.
 - [ ] `cliq-exact-path-v1` rejects glob/regex/`..`/separator/normalization ambiguity, matches entry/subtree component boundaries byte-exactly without following symlinks, and applies exclude precedence deterministically.
 - [ ] Repository-requested ignored in-root selectors remain inert without exact user policy/durable grants; Workspace Trust alone cannot copy them into CAS, worker, model context, or `resultSourceRef`. Every selector is root-relative, and all outside-root selectors, external filesystem inputs, config includes, symlink escapes, and arbitrary mounts are rejected rather than authorized.
+- [ ] Explicit includes consume/register only in the original first SourceInspection transaction before payload. Both authorization branches retain the exact original full typed entries ref/tree; user includes also bind the complete consumed-grant snapshot. Optional expectedDigest means one regular file's complete bytes; constrained subtrees refuse before consumption and missing/non-file entries refuse. Fresh Delivery checks its fresh constraint against actual A while preserving B's projection; child/result readers keep original capture provenance. Original inline authorization/page caps and independent installed Linux qualification remain unchanged.
 - [ ] Every generation ref decodes exact `WorkspaceGenerationIdentityV1`; source Checkpoint/state/tree and platform locator revalidate, and `generationId` follows the canonical Run/Checkpoint/state/nonce formula. `workspace_generations` alone stores exact `WorkspaceGenerationStateV1`; CASes enforce the full success spine, worker-loss `fenced_reconciling` wait binding, every closed failure/quarantine edge, branch XOR, positive row version, launch/epoch equality, and same-transaction WorkerLaunch projection. Snapshot evidence proves descriptor rewalk plus all fsyncs. Quarantine binds current `sourceRowVersion`, the deterministic sole target, exact complete-tree-or-unreadable observed state, and the full materialization/preactivation/launch-abort/launch-death/worker-recovery/checkpoint-failure matrix. Both worker-recovery dispositions quarantine the old fenced row; restore additionally requires a distinct `preactivated_readonly` generation from a ready Checkpoint. Retirement is exact sealed+death XOR quarantined+current literal zero authority counts. No branch reopens the old identity.
 - [ ] `quiesceGeneration` blocks new dispatch, reaches the authenticated barrier, terminates and reaps every contained descendant, acquires the exclusive checkpoint write token, revalidates and double-checks the complete manifest, then publishes context/Checkpoint/Run/event plus any pending Journal result/item/budget settlement in one state transaction. Every Run-visible workspace effect includes its mandatory Journal/result/settlement in that transaction; no ready Checkpoint or workspace result exists without the sequence.
 - [ ] Crashes or failures at every materialization/preactivation/quiesce/death-proof/snapshot/fsync/SQLite boundary leave the prior ready Checkpoint authoritative, publish no Run-visible result, and allow the dirty generation to enter quarantine only through exact `WorkspaceGenerationQuarantineEvidenceV1`. No replacement worker uses it; retirement requires exact `WorkspaceGenerationRetirementEvidenceV1`, and incomplete evidence remains recoverable rather than being inferred from a path or timeout.
@@ -1788,6 +1906,33 @@ Rollback (only for hard-to-reverse changes):
 
 - None. Platform support, mandatory strong backend for every Git/non-Git Run, signed guest identity, locked dependency acquisition, call-scoped stdio MCP, tools-disabled durable compaction brokering, canonical five-owner containment, non-adoptable worker/admin/local-service preactivation, local no-spawn/death retirement and stable replacement identity, Run and embedded-admin dual authority gates, admin HTTP secret placement, all-descendant/no-live-I/O proof, quiescent Checkpoint publication, workspace/result separation, durable dispatch singleflight, grant expiry, and fail-closed behavior are closed by this Kernel Cut. Changing one requires a new RFC.
 
+### Signed MCP read-only recovery domain
+
+The RFC `reconciliation_probe` containment owner uses the fixed Linux native purpose 3 and `cliq-mcp-readonly-status-v1` recipe. Its exact original signed server/profile/template, distinct status operation, stable logical key, original nonce/deadline and full source intent must be reproduced before every release. It has no Worker parent, Run/Admin effect grant, credential, network or persistent writable mount. Only initialize, initialized, complete tools/list and the distinct signed read-only status call are allowed; the original effect is never resent.
+
+The original `mcp_server` stays in the signed registration and profile.
+Purpose 3 launches the distinct signed `mcp_recovery_adapter` as the actual
+stdio executable. Its sealed image, executable mount, launch spec and native
+recipe agree on the original adapter bytes. The fixed worker init helper
+keeps its own executable and digest. A native reservation or history with
+interchanged adapter and helper or server identities is rejected.
+
+A closeable receiver is registered before the first await and owns every issued image/controller/native job. READY remains five seconds, stop remains two seconds and the probe's original deadline remains thirty seconds. Safe responses enter original custody before projection; all process/pipe/output/FD jobs join before release. A missing/partial/replaced original birth cannot be adopted by path, content or absence. Same-owner closure requires its original irreversible native fence plus zero matching releases and complete join. A strictly newer StateOwner may instead prove actual original PID/start domain death and perform the dedicated real retained-input cleanup; separate current-checker raw/projection records never mutate the old lifecycle or manufacture its mutex/join receipt. An old creator still alive leaves recovery waiting.
+
+The original purpose-3 broker may discard a complete bounded malformed or
+NoEcho-refused payload while continuing the authenticated ACK, EOF and client
+join sequence. The unavailable-response guard requires the original revoked
+token, zero active releases and complete physical, descriptor and output
+retirement within Stop2. The audit keeps the fixed refusal and exact lifecycle
+and retirement references. Its timeout or owning cancellation keeps the
+original effect unknown, full charge and probe schedule. A successor requires
+complete original kind-9 refused-output retirement, actual old PID/start
+death and its own real cleanup. A refused-response closure cannot carry a
+status capture or the refused bytes or digest. Native IPC, capacity,
+allocation and uncertain retirement failures leave recovery waiting.
+
+These rules apply only to the MCP status domain. The independent model UNKNOWN broker fence/death checks, original charges, HTTP three-dispatch ceiling, stdio two-launch ceiling and original native call deadline are unchanged. Static/native-data/compiler tests do not qualify installed probe creation, successor cleanup, cancellation or Stop2; missing real Linux campaign evidence remains explicit and keeps the feature gate closed.
+
 ### GitHub Issue Body
 
 **Title:** `feat: add trusted execution and private Run workspaces`
@@ -1826,3 +1971,48 @@ settlement completes. No reported boolean substitutes for the live native guard.
 These are implementation contracts, not qualification evidence. The exact-SHA
 Linux reports must independently pass; unexecuted cuts and full I1 remain
 explicitly unqualified.
+
+The ordinary script recipe preflights its original signed guest and unchanged
+profile before admission/grant/claim: Node requires at least 32 processes,
+the actual guest image must fit the original single-file ceiling (at most
+256 MiB), and Bash requires the exact admitted `/bin/bash` root. The fixed
+tool description names only the signed Node/Git/Bash executables, Bash
+builtins, no network and no direct execution from workspace/tmp. Unsupported
+external commands fail honestly; host executables are never a fallback.
+The new recipe's `privateGitProtection='existing_read_only'` is a mandatory
+closed constraint. Bash uses fixed `GIT_OPTIONAL_LOCKS=0`; an actual existing
+private `.git` is independently held and OS-mounted read-only, so status/diff
+may read it while attempted index/config/ref writes remain denied even after
+an environment override. Non-Git generations retain true absence: no fake
+directory is mounted and the basename is not a general write-protection
+mechanism. Creating or replacing `.git` is unsupported; the unchanged complete
+Checkpoint comparison rejects it and requires original physical retirement /
+old-Checkpoint recovery or explicit waiting, never an invented no-effect result,
+ignored hash mismatch or automatic redispatch. Mutable Git metadata/commit
+support remains a stated gap.
+Each genuine result retains full raw outputs, actual termination and separate
+invocation death; only the bounded model projection is clipped, with original
+completeness and native/model truncation distinguished. Supervisor-driven
+`controller_stop` does not imply a user StopIntent or no effect.
+After both original raw output publications fully join, the exact inspector /
+invocation containment / whole-invocation death / capture data quartet may use
+the RFC's existing four-stage CAS publisher. All real files still sync, fully
+rehash and join before its receipt escapes or the unique settlement proceeds;
+failure retains the one original result/fence and cannot re-execute the claim.
+No authority, clock or transaction point is moved, and the physical Linux stop
+deadline still requires independent real validation.
+
+## First installed Node dependency profile
+
+The approved fixed `npm-ci-v1` implementation follows
+[the complete installed profile](../../kernel/installed-node-dependencies.md).
+It uses one original Journal/native owner for public integrity-GET and the once
+only offline npm process, exact root/source consent, real parent retirement,
+atomic Ready/settlement and required verification. The managed subtree digest
+is checked inside the full original M/Checkpoint proof. Child ready data reuse
+and identical-source Delivery verification use the explicit XOR origins, never
+fake local GET, script permission or materialization. Original source identity,
+all complete reads, 16R, JSON/output/file/transfer limits, 2/5/30/60-second
+guards and all-issued joins remain unchanged. This first profile does not
+qualify private registries, other ecosystems, arbitrary direct `.bin` execution
+or native add-ons. Actual Linux/installed fault-cut evidence remains required.

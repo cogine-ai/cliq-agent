@@ -1,5 +1,19 @@
 export type ArtifactRef = string;
 
+export type { BundledSkillClosureV1, SkillSourceFileBytesV1, DescriptorCapturedSkillSourceFileV1,
+  BundledSkillSourceFileV1, SkillSourceIdentityBaseV1, SkillSourceIdentityV1, SkillManifestV1 } from './skill.js';
+
+export type { DependencyPolicy, DependencyAcquisitionPlan, DependencyInstallScriptsAuthorizationTemplateV1,
+  PackageCacheFetchAttemptV1, PackageCacheEntryV1, PackageCacheManifestV1, DependencyReadyItem,
+  DependencyGypConditionV1, DependencyGypSourceV1, DependencyScriptConditionsV1, DependencyPackageDescriptorV1 } from './dependency.js';
+
+export type { DeliveryMergeItem, DeliveryMergeConflictItem, DeliveryDecisionItem } from './delivery.js';
+export type { DeliveryPlan, PublicationOperation, PublicationAbortOperation, PublicationProofV1,
+  PublicationPathProgressItem, PublicationPathResultItem, PublicationLateObservationItem, DeliveryTerminalProjectionEvidence } from './publication.js';
+
+export type { FinalCandidateItem, FinalCandidateItemBase, VerifierPlan, VerificationClosureV1, RunResult,
+  WorkspaceDiffV1, WorkspaceDiffOperationV1 } from './result.js';
+
 export type { BrokerProcessDomainDeathEvidenceV1 } from './broker-process-domain-death.js';
 
 export type {
@@ -16,6 +30,9 @@ export type {
   ToolResultPayloadV1, ToolResultModelContentV1, RunContextCompactionPlan,
   RunContextCompactionItem, ContinuationItem
 } from './continuation.js';
+
+export type { ChildCapabilityGrantV1, DelegateRequest, AwaitChildrenRequest, ChildHandleItem, DelegateResult, AwaitChildrenResult,
+  ChildPatchManifest, ChildResultModelContentV1, ChildWaitSet, ChildResultItem, ChildMergeBatchItem, ChildMergeResultItem } from './children.js';
 
 export type ProviderName =
   | 'openrouter'
@@ -307,6 +324,7 @@ export type Run = {
   terminalReason?: RunTerminalReason;
   terminalDetailRef?: ArtifactRef;
   stopIntentRef?: ArtifactRef;
+  parentCancellationRef?: ArtifactRef;
   cancelRequested: boolean;
   createdAt: string;
   deadlineAt: string;
@@ -460,6 +478,50 @@ export type RepositoryIdentityV1 = {
   };
   objectFormat: 'sha1' | 'sha256';
   repositoryIdentityDigest: string;
+};
+
+/** Descriptor identity only. No configuration, HEAD, index or object byte has
+ * been read or authorized by this artifact. V1 retains its historical meaning. */
+export type RepositoryIdentityV2 = Omit<RepositoryIdentityV1, 'schemaVersion' | 'format' | 'objectFormat'> & {
+  schemaVersion: 2;
+  format: 'cliq-repository-identity-v2';
+};
+export type RepositoryIdentity = RepositoryIdentityV1 | RepositoryIdentityV2;
+
+export type SanitizedGitConfigV1 = {
+  schemaVersion: 1;
+  format: 'cliq-sanitized-git-config-v1';
+  core: { repositoryFormatVersion: 0 | 1; fileMode: boolean; bare: false;
+    logAllRefUpdates?: boolean; ignoreCase?: boolean; precomposeUnicode?: boolean };
+  extensions?: { objectFormat: 'sha1' | 'sha256' };
+  configDigest: string;
+};
+
+export type GitIndexSnapshotV1 = {
+  schemaVersion: 1; format: 'cliq-git-index-snapshot-v1'; repositoryIdentityDigest: string;
+  objectFormat: 'sha1' | 'sha256'; canonicalIndexVersion: 2;
+  entries: Array<{ canonicalRootRelativePath: string; stage: 0; mode: 33188 | 33261 | 40960;
+    objectId: string; assumeValid: boolean; skipWorktree: false }>;
+  canonicalIndexBytesRef: ArtifactRef; canonicalIndexBytesDigest: string; canonicalIndexByteCount: number;
+  indexTreeObjectId: string; snapshotDigest: string;
+};
+export type GitObjectPackV1 = {
+  schemaVersion: 1; format: 'cliq-git-object-pack-v1'; objectFormat: 'sha1' | 'sha256';
+  packBytesRef: ArtifactRef; packBytesDigest: string; packByteCount: number; packTrailerObjectHash: string;
+  packIndexBytesRef: ArtifactRef; packIndexBytesDigest: string; packIndexByteCount: number;
+  packIndexVersion: 2; objectCount: number; objectIds: string[]; packDigest: string;
+};
+export type GitObjectClosureV1 = {
+  schemaVersion: 1; format: 'cliq-git-object-closure-v1'; repositoryIdentityDigest: string; objectFormat: 'sha1' | 'sha256';
+  packs: Array<{ packRef: ArtifactRef; packDigest: string; packTrailerObjectHash: string }>;
+  reachableObjectIds: string[]; closureDigest: string;
+};
+export type PrivateGitStateManifest = {
+  schemaVersion: 1; format: 'cliq-private-git-v1';
+  head: { kind: 'unborn'; branch: string } | { kind: 'symbolic'; ref: string } | { kind: 'detached'; objectId: string };
+  indexRef: ArtifactRef; refs: Array<{ name: string; objectId: string }>;
+  objectClosureRef: ArtifactRef; objectClosureDigest: string; sanitizedConfigRef: ArtifactRef; sanitizedConfigDigest: string;
+  manifestDigest: string;
 };
 
 export type WorkspaceIdentityV1 = {
@@ -650,6 +712,8 @@ export type FrozenIgnoreRulesV1 = {
 };
 
 export type SourceProjectionSpec = {
+  /** Original admitted tracked-path classification, independent of A/current metadata. */
+  classificationIndexRef?: ArtifactRef;
   schemaVersion: 1;
   matcherVersion: 'cliq-exact-path-v1';
   frozenIgnoreRulesRef: ArtifactRef;
@@ -1223,6 +1287,19 @@ export type StateOwnerAcquisitionEvidenceV1 = {
       ownerTableObservation?: never;
     }
   | {
+      kind: 'runtime_upgrade';
+      priorOwnerEpoch: number;
+      priorTerminalRowDigest: string;
+      priorTransitionEvidenceRef: ArtifactRef;
+      priorTransitionEvidenceDigest: string;
+      priorTerminalReason: 'graceful_release';
+      upgradeReceiptRef: ArtifactRef;
+      upgradeReceiptDigest: string;
+      kernelGenerationIdentityRef?: never;
+      kernelGenerationIdentityDigest?: never;
+      ownerTableObservation?: never;
+    }
+  | {
       kind: 'takeover_after_owner_death';
       priorOwnerEpoch: number;
       priorTerminalRowDigest: string;
@@ -1309,7 +1386,7 @@ export type InvocationJournalEntry = {
   seq: number;
   runId: string;
   opId: string;
-  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish';
+  opKind: 'model' | 'tool' | 'mcp-server' | 'mcp' | 'verifier' | 'publish' | 'child_admission' | 'child_merge' | 'child_await' | 'skill_resource';
   attempt: number;
   leaseEpoch: number;
   phase: InvocationPhase;
@@ -1332,6 +1409,8 @@ export type InvocationJournalEntry = {
   budgetDelta: BudgetUsage;
   budgetSettlementRef?: ArtifactRef;
   timestamp: string;
+  /** Local atomic operations only: actual final commit sample, never a lease. */
+  localCommittedAt?: string;
 };
 
 export type BudgetSettlementV1 = {
@@ -1396,7 +1475,7 @@ export type WorkerPreparation = {
   generationCreationNonceDigest: string;
   generationId: string;
   generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
-  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string; privateGitInputRef?: ArtifactRef };
   reservation?: { deviceId: string; fileId: string; ownerUid: number };
 };
 
@@ -1619,19 +1698,43 @@ export type RecoveryClosureV1 = {
   childAllocations: ChildAllocationV1[];
 };
 
+export type ArtifactDescriptorV1 = {
+  schemaVersion: 1; ref: ArtifactRef; digest: string; sizeBytes: number; mediaType: string;
+};
+export type ResultUnavailableControlErrorV1 = {
+  schemaVersion: 1; code: 'RESULT_UNAVAILABLE'; messageCode: string;
+} & ({ retryable: true; runId: string; status: 'queued' | 'running' | 'waiting'; currentRevision: number } |
+  { retryable: false; runId: string; status: 'failed' | 'cancelled'; terminalDetailRef: ArtifactRef });
+
 export type ControlResultV1 =
   | { method: 'session.create'; snapshot: SessionSnapshotV1 }
+  | { method: 'mcp.register'; registry: import('./mcp.js').McpRegistrySummaryV1 }
+  | { method: 'mcp.refresh'; registry: import('./mcp.js').McpRegistrySummaryV1 }
+  | { method: 'mcp.list'; registrations: import('./mcp.js').McpRegistrySummaryV1[] }
+  | { method: 'authorization.create'; grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
+  | { method: 'authorization.revoke'; disposition: 'revoked' | 'already_revoked' | 'already_consumed';
+      grant: import('./authorization.js').AuthorizationGrantSummaryV1 }
   | {
       method: 'session.get';
       snapshot: SessionSnapshotV1;
       items: SessionItem[];
       highWaterItemSeq: number;
       nextItemSeq: number;
+      contextPage?: Readonly<{ contextProjectionRef: ArtifactRef; contextRevision: number; path: readonly number[];
+        artifact: ArtifactDescriptorV1; bytesBase64: string }>;
     }
   | { method: 'run.submit'; snapshot: RunSnapshotV1 }
+  | { method: 'run.apply'; snapshot: RunSnapshotV1 }
   | { method: 'run.approve'; snapshot: RunSnapshotV1; decisionRef: ArtifactRef }
   | { method: 'run.input'; snapshot: RunSnapshotV1; inputItemRef: ArtifactRef }
   | { method: 'run.cancel'; snapshot: RunSnapshotV1 }
+  | { method: 'run.reconcile'; snapshot: RunSnapshotV1;
+      resolution: { kind: 'probe_enqueued'; dispatchDigest: string; userProbeCount: number } |
+        { kind: 'abandoned_run'; attestationRef: ArtifactRef; terminalDetailRef: ArtifactRef } }
+  | { method: 'run.result'; runId: string; result: ArtifactDescriptorV1; verificationClosureRef: ArtifactRef }
+  | { method: 'run.diff'; runId: string; diff: ArtifactDescriptorV1 }
+  | { method: 'artifact.get'; artifact: ArtifactDescriptorV1; offset: number;
+      bytesBase64: string; nextOffset: number; eof: boolean }
   | {
       method: 'run.get';
       snapshot: RunSnapshotV1;
@@ -1657,8 +1760,10 @@ export type ControlResultV1 =
 
 export type { StopIntent, TerminalReasonDetail, TerminalDetail, SessionRunTerminalItem, RunCancel } from './stop.js';
 export type { WorkerRecoveryEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationInspectorTaskClosureV1,
-  ReconciliationProbeTimeoutClosureV1, ReconciliationProbeEvidenceV1, ReconciliationLastProbeEvidenceV1,
+  ReconciliationProbeTimeoutClosureV1, ReconciliationProbeCancellationClosureV1, ReconciliationProbeEvidenceV1, ReconciliationLastProbeEvidenceV1,
   ReconciliationProbeStateV1 } from './reconciliation.js';
+export type { McpReconciliationSubject, McpInvocationWaitV1, McpRecoveryProbeEvidenceV1, McpReconciledEffectResultV1,
+  McpStatusProbePreparationV1 } from './mcp-status.js';
 
 export type ControlApplicationResponseV1 =
   | { protocolVersion: 1; ok: true; result: ControlResultV1 }

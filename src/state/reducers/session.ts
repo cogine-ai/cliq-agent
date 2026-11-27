@@ -1,4 +1,6 @@
+import { publishSessionContextGraph } from '../session-context-graph.js';
 import path from 'node:path';
+import { decodeSessionCreatePublicRequest } from '../../kernel/control-wire.js';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
@@ -76,26 +78,9 @@ type InstalledSessionRequest = {
 
 function readSessionCreatePublicRequest(request: unknown,
   errorCode: 'INVALID_REQUEST' | 'RECOVERY_REQUIRED' = 'INVALID_REQUEST') {
-  try {
-    const value = immutableSnapshot(request) as Record<string, unknown>;
-    if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        !exactKeys(value, ['protocolVersion', 'method', 'requestId', 'requestDigest', 'admissionKey', 'workspacePath',
-          ...(Object.hasOwn(value, 'name') ? ['name'] : [])]) || value.protocolVersion !== 1 || value.method !== 'session.create' ||
-        typeof value.requestId !== 'string' || typeof value.admissionKey !== 'string' || typeof value.workspacePath !== 'string' ||
-        (Object.hasOwn(value, 'name') && typeof value.name !== 'string'))
-      throw new TypeError('session.create requires its exact public inline contract');
-    const { requestDigest, ...core } = value;
-    if (typeof requestDigest !== 'string' || requestDigest !== canonicalSha256(core))
-      throw new TypeError('session.create public request digest differs');
-    assertRequestId(value.requestId); assertAdmissionKey(value.admissionKey);
-    normalizeAbsolutePath(value.workspacePath);
-    if (value.name !== undefined) normalizeBoundedText(value.name as string, 1, 256);
-    return { core: core as SessionCreatePublicCore, requestDigest };
-  } catch (cause) {
-    throw new KernelStorageError(errorCode, 'session.create public request is invalid', { cause });
-  }
+  try { return decodeSessionCreatePublicRequest(request); }
+  catch (cause) { throw new KernelStorageError(errorCode, 'session.create public request is invalid', { cause }); }
 }
-
 async function publishSessionCreatePublicCore(artifacts: ArtifactCatalog, installed: InstalledSessionRequest): Promise<PublishedArtifact> {
   const artifact = await artifacts.publishCanonical(installed.core, 'cliq-session-create-request-core-v1');
   if (artifact.ref !== installed.requestDigest)
@@ -158,12 +143,8 @@ async function replayCreateSession(
   installed?: InstalledSessionRequest
 ): Promise<CreateSessionResult | undefined> {
   const existingControl = readControlRequest(driver, input.principalId, 'session.create', input.requestId);
-  if (existingControl !== undefined) {
-    if (existingControl.requestDigest !== requestDigest) {
-      throw new KernelStorageError('REQUEST_ID_CONFLICT', 'session.create requestId was reused with different bytes');
-    }
-    const response = await readPublishedResponse(artifacts, existingControl.responseRef);
-    return { replayed: true, session: response.result.snapshot.session, response };
+  if (existingControl !== undefined && existingControl.requestDigest !== requestDigest) {
+    throw new KernelStorageError('REQUEST_ID_CONFLICT', 'session.create requestId was reused with different bytes');
   }
 
   const existingAdmission = readAdmissionReplay(
@@ -181,7 +162,17 @@ async function replayCreateSession(
       );
     }
     if (existingAdmission.admissionRequestId === null) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission has no original control request');
+      // Pre-link history can replay an already registered exact request,
+      // but cannot manufacture an admission-key alias or borrow another row.
+      if (existingControl === undefined) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission has no original control request');
+      }
+      const response = await readPublishedResponse(artifacts, existingControl.responseRef);
+      const session = response.result.snapshot.session;
+      if (session.id !== existingAdmission.id) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session retained request response names another admission');
+      }
+      return { replayed: true, session, response };
     }
     const originalRequestId = existingAdmission.admissionRequestId;
     const original = readControlRequest(driver, input.principalId, 'session.create', originalRequestId);
@@ -202,6 +193,12 @@ async function replayCreateSession(
     const session = response.result.snapshot.session;
     if (session.id !== existingAdmission.id) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'session admission original response names another Session');
+    }
+    if (existingControl !== undefined) {
+      if (existingControl.responseRef !== original.responseRef) {
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'session replay substitutes its original admission response');
+      }
+      return { replayed: true, session, response };
     }
     const channel = await validateControlChannelClosure(artifacts, owner, input);
     const requestArtifact = installed ? await publishSessionCreatePublicCore(artifacts, installed) : undefined;
@@ -240,6 +237,9 @@ async function replayCreateSession(
       throw new KernelStorageError('INVALID_REQUEST', 'canonical clock has regressed; admission replay binding is paused');
     }
     return { replayed: true, session, response };
+  }
+  if (existingControl !== undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'session replay has no exact original admission');
   }
   return undefined;
 }
@@ -337,7 +337,7 @@ async function createSessionWithin(
     if (captured.repository !== undefined) {
       const repositoryArtifact = await artifacts.publishCanonical(
         captured.repository,
-        'cliq-repository-identity-v1'
+        captured.repository.format
       );
       published.push(repositoryArtifact);
       workspaceIdentity = {
@@ -355,19 +355,9 @@ async function createSessionWithin(
 
     const now = sampleCanonicalNow();
     const sessionId = identityHash('cliq-session-id-v1', input.principalId, 'session.create', input.admissionKey);
-    const projection: SessionContextProjection = {
-      schemaVersion: 1,
-      format: 'cliq-session-context-v1',
-      sessionId,
-      contextRevision: 1,
-      throughItemSeq: 0,
-      segments: [],
-      projectionDigest: ''
-    };
-    projection.projectionDigest = digestOmitting(projection, 'projectionDigest');
-    const projectionArtifact = await artifacts.publishCanonical(projection, 'cliq-session-context-v1');
+    const { head: projection, artifact: projectionArtifact } = await publishSessionContextGraph(artifacts,
+      { sessionId, contextRevision: 1, throughItemSeq: 0, segments: [] });
     published.push(projectionArtifact);
-    decodeSessionProjection(projection);
 
     const session: Session = {
       schemaVersion: 1,

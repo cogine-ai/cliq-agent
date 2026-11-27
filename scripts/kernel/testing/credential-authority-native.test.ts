@@ -1,4 +1,6 @@
-// Actual fixed native image + supplied Node SQLite API. Not signed-install or key-store qualification.
+// Actual fixed native image + supplied Node SQLite API. The real account gate
+// writes only a deliberately provisioned disposable Linux account's NSS home.
+// This is not signed-install, key-store or complete migration qualification.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -9,7 +11,17 @@ import { fileURLToPath } from 'node:url';
 import { verifiedSqliteExtensionIncludes } from '../sqlite-extension-headers.mjs';
 import { prepareSupervisorSeaCarrier } from './supervisor-sea-builder.js';
 
-test('original-root native credential scope uses one SQLite image and healthy generations invalidate old tokens', { timeout: 180000 }, async () => {
+test('original-root native credential scope uses one SQLite image and healthy generations invalidate old tokens', {
+  timeout: 180000
+}, async () => {
+  // This opt-in permits a fixture, never a different production lock locator.
+  // A caller-supplied HOME/CLIQ_HOME cannot turn a normal host account into it.
+  const account = os.userInfo();
+  assert.equal(process.platform, 'linux');
+  assert.equal(process.env.CLIQ_DISPOSABLE_ACCOUNT_QUALIFICATION, '1', 'real disposable-account campaign must be provisioned; no skipped qualification');
+  assert.equal(account.username, 'cliq-kernel-gate-test');
+  assert.equal(account.homedir, '/home/cliq-kernel-gate-test');
+  assert.ok(account.uid >= 1000); assert.equal(account.uid, process.geteuid?.());
   const fixture = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-native-'));
   try {
     const carrier = await prepareSupervisorSeaCarrier(fixture, process.env.CLIQ_QUALIFICATION_CARRIER_ARCHIVE);
@@ -61,8 +73,38 @@ test('original-root native credential scope uses one SQLite image and healthy ge
       const fd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
       const s = fs.fstatSync(fd, {bigint:true}); const tuple = [s.dev,s.ino,s.uid,s.gid,s.mode];
       assert.throws(() => native.acquireCredentialScope(fd, root, [s.dev,s.ino+1n,s.uid,s.gid,s.mode]), /identity/);
-      assert.throws(() => native.acquireCredentialScope(fd, root, tuple, 'forbidden'), /identity/);
+      assert.throws(() => native.acquireCredentialScope(fd, root, tuple, 'forbidden'), e=>e.code==='ERR_CLIQ_CREDENTIAL_SCOPE' && /gate/.test(e.message));
       assert.equal(fs.existsSync(root+'/credentials'),false);
+      assert.throws(()=>native.acquireKernelGlobalExclusive(root),/arguments|locator/);
+      const accountHome=require('node:os').userInfo().homedir;
+      const accountParent=accountHome+'/.cliq', accountLeaf=accountParent+'/kernel-global-v1.lock';
+      const parentBefore=fs.existsSync(accountParent), leafBefore=fs.existsSync(accountLeaf);
+      const before=leafBefore ? fs.statSync(accountLeaf,{bigint:true}) : null;
+      const inspected=native.inspectKernelGlobalGate();
+      assert.equal(fs.existsSync(accountParent),parentBefore); assert.equal(fs.existsSync(accountLeaf),leafBefore);
+      if(!leafBefore) assert.equal(inspected,null);
+      if(before) {const after=fs.statSync(accountLeaf,{bigint:true});for(const key of ['dev','ino','mode','uid','nlink','size','mtimeNs','ctimeNs'])assert.equal(after[key],before[key]);}
+      if(inspected) {inspected.assertHeld();inspected.close();}
+      const exclusive=native.acquireKernelGlobalExclusive(); exclusive.assertHeld();
+      assert.throws(()=>native.acquireCredentialScope(fd,root,tuple),e=>e.code==='ERR_CLIQ_CREDENTIAL_BUSY');
+      assert.equal(fs.existsSync(root+'/credentials'),false);
+      const owner=native.acquireLock(root,true);
+      assert.throws(()=>native.bindMigrationCredentialGate({},exclusive),/original/);
+      assert.throws(()=>native.acquireCredentialScope(fd,root,tuple,exclusive),/gate/);
+      const bound=native.bindMigrationCredentialGate(owner,exclusive); bound.assertHeld();
+      const borrowed=native.acquireCredentialScope(fd,root,tuple,bound); borrowed.assertHeld();
+      assert.throws(()=>exclusive.close(),e=>e.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
+      assert.throws(()=>bound.close(),e=>e.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
+      assert.throws(()=>owner.close(),e=>e.code==='ERR_CLIQ_RESOURCE_RETIREMENT');
+      borrowed.assertHeld(); owner.assertHeld(); exclusive.assertHeld(); borrowed.close();
+      const otherRoot=root+'-foreign'; fs.mkdirSync(otherRoot,{mode:0o700});
+      const otherFd=fs.openSync(otherRoot,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);
+      const other=fs.fstatSync(otherFd,{bigint:true});
+      assert.throws(()=>native.acquireCredentialScope(otherFd,otherRoot,[other.dev,other.ino,other.uid,other.gid,other.mode],bound),/gate/);
+      assert.equal(fs.existsSync(otherRoot+'/credentials'),false); fs.closeSync(otherFd);
+      assert.throws(()=>native.acquireCredentialScope(fd,root,tuple,{assertHeld(){},close(){}}),/gate/);
+      bound.assertHeld(); bound.close(); owner.assertHeld(); exclusive.assertHeld();
+      exclusive.close(); owner.close();
       const a = native.acquireCredentialScope(fd, root, tuple);
       assert.equal(typeof a.generation, 'string'); a.assertHeld();
       if (process.platform === 'linux') {
@@ -140,11 +182,14 @@ test('original-root native credential scope uses one SQLite image and healthy ge
       })().catch(error=>{console.error(error);process.exitCode=1;});
     `], { encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
     assert.equal(child.error, undefined); assert.equal(child.signal, null); assert.equal(child.status, 0, child.stderr);
-    const gateHolder = path.join(fixture, 'global-gate-holder');
-    const gateSource = fileURLToPath(new URL('credential-global-gate-holder.c', import.meta.url));
-    const gateCompiled = spawnSync('cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', gateSource, '-o', gateHolder],
-      { encoding: 'utf8', timeout: 60000 });
-    assert.equal(gateCompiled.error, undefined); assert.equal(gateCompiled.status, 0, gateCompiled.stderr);
+    // The contender uses the actual production factory, not the old per-root
+    // HOME/runtime helper, whose evidence does not qualify the account gate.
+    const exclusiveHoldingScript = `
+      const loaded={exports:{}};process.dlopen(loaded,${JSON.stringify(helper)});
+      const gate=loaded.exports.acquireKernelGlobalExclusive();gate.assertHeld();
+      process.stdout.write('READY\\n');process.stdin.once('data',()=>{gate.close();process.stdin.destroy();});
+      setTimeout(()=>process.exit(97),12000).unref();
+    `;
     const retirementHelper = path.join(fixture, 'state-owner-retirement.node');
     const retirementSource = fileURLToPath(new URL('credential-authority-retirement-probe.c', import.meta.url));
     const retirementCompiled = spawnSync('cc', ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
@@ -170,7 +215,7 @@ test('original-root native credential scope uses one SQLite image and healthy ge
           const loaded={exports:{}}; process.dlopen(loaded, ${JSON.stringify(helper)}); const native=loaded.exports;
           const root=${JSON.stringify(canonical)}; const fd=fs.openSync(root,fs.constants.O_RDONLY|fs.constants.O_DIRECTORY|fs.constants.O_NOFOLLOW);
           const s=fs.fstatSync(fd,{bigint:true}), tuple=[s.dev,s.ino,s.uid,s.gid,s.mode];
-          const holder=${JSON.stringify(heldRole)}==='global' ? spawn(${JSON.stringify(gateHolder)},[],{env:{...process.env,HOME:root}})
+          const holder=${JSON.stringify(heldRole)}==='global' ? spawn(process.execPath,['--no-warnings','-e',${JSON.stringify(exclusiveHoldingScript)}],{env:{...process.env,HOME:root,CLIQ_HOME:root}})
             : spawn(process.execPath,['--no-warnings','-e',${JSON.stringify(holdingScript)}]);
           let output='', errors=''; const joined=new Promise((resolve,reject)=>{holder.once('error',reject);holder.once('close',(code,signal)=>resolve({code,signal}));});
           void joined.catch(()=>{}); const ready=new Promise((resolve,reject)=>{
@@ -217,7 +262,7 @@ test('original-root native credential scope uses one SQLite image and healthy ge
     `], { env: { ...process.env, CLIQ_CREDENTIAL_RETIREMENT_ROLE: 'root' }, encoding: 'utf8', timeout: 15000, maxBuffer: 65536 });
     assert.equal(cleanup.error, undefined); assert.equal(cleanup.signal, null); assert.equal(cleanup.status, 0, cleanup.stderr);
     assert.match(cleanup.stderr, /CLIQ_CREDENTIAL_RETIREMENT_VERIFIED/u);
-    for (const role of ['journal', 'wal', 'credentials', 'root', 'main', 'lock', 'runtime', 'global']) {
+    for (const role of ['journal', 'wal', 'credentials', 'root', 'main', 'lock', 'runtime', 'account-gate']) {
       const failureRoot = path.join(fixture, `retirement-${role}`);
       await mkdir(path.join(failureRoot, 'runtime'), { recursive: true, mode: 0o700 });
       await chmod(failureRoot, 0o700); await chmod(path.join(failureRoot, 'runtime'), 0o700);

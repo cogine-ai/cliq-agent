@@ -40,6 +40,7 @@ if (process.platform === 'linux') test('credential scope distinguishes real pend
     const joined = assert.rejects(pending,
       error => error instanceof KernelStorageError && error.code === 'UNSUPPORTED_PLATFORM');
     try {
+      assert.throws(() => installation.assertInstalledManagerObservationAvailable(selected!), { name: 'CredentialScopeBusyError' });
       assert.throws(() => installation.withCredentialAuthorityLock(selected!, async () => { entered = true; }), error => {
         assert(error instanceof TypeError);
         assert.equal(error.name, 'CredentialScopeBusyError');

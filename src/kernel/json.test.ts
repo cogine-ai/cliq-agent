@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { assertBoundedJsonValue, parseJsonStrict, StrictJsonError } from './json.js';
+import { assertBoundedJsonValue, measureBoundedJsonValue, parseJsonStrict, StrictJsonError } from './json.js';
 
 test('parseJsonStrict decodes the complete JSON domain without object prototypes', () => {
   const value = parseJsonStrict('{"text":"ok\\n","number":-1.5e2,"array":[true,false,null]}') as Record<string, unknown>;
@@ -44,4 +44,18 @@ test('assertBoundedJsonValue applies the same bounds to already-decoded values',
   for (let index = 0; index < 33; index += 1) nested = [nested];
   assert.throws(() => assertBoundedJsonValue(nested), /exceeds JSON depth 32/u);
   assert.throws(() => assertBoundedJsonValue(Array.from({ length: 10_001 }, () => null)), /more than 10000/u);
+});
+
+test('shared JSON measurement counts the complete wrapper exactly against the unchanged parser bounds', () => {
+  assert.deepEqual(measureBoundedJsonValue({ a: [{ b: null }, true], c: [] }), { containerEntries: 5, maxContainerDepth: 3 });
+  const inclusive = { items: Array.from({ length: 9999 }, () => null) };
+  assert.equal(measureBoundedJsonValue(inclusive).containerEntries, 10000);
+  assert.doesNotThrow(() => parseJsonStrict(JSON.stringify(inclusive)));
+  const oversized = { items: [...inclusive.items, null] };
+  assert.throws(() => measureBoundedJsonValue(oversized), /more than 10000/u);
+  assert.throws(() => parseJsonStrict(JSON.stringify(oversized)), /more than 10000/u);
+  let nested: unknown = 0;
+  for (let depth = 0; depth < 32; depth++) nested = [nested];
+  assert.equal(measureBoundedJsonValue(nested).maxContainerDepth, 32);
+  assert.throws(() => measureBoundedJsonValue([nested]), /depth 32/u);
 });

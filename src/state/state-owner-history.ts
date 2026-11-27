@@ -1,8 +1,11 @@
+import { readRuntimeUpgradeBoundary } from './runtime-upgrade-history.js';
+import type { SignedSchemaConversionV1 } from '../kernel/runtime-upgrade.js';
+import { readSignedSchemaConversion, readSignedKernelSchema } from './signed-schema.js';
 // Retained data only. This reader never acquires a lock, observes a process or
 // supplies authority for a live observation. Owning callers retain those gates.
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { KERNEL_CAS_DIRECTORY, KERNEL_SQLITE_APPLICATION_ID, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
-import { assertArtifactRef, digestOmitting, identityHash, normalizeAbsolutePath, requiredSafeInteger, sha256Bytes } from '../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, identityHash, normalizeAbsolutePath, requiredSafeInteger } from '../kernel/identity.js';
 import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1,
   StateOwnerRecordV1, StateOwnerTransitionEvidenceV1, StateLockIdentityV1, StateRootIdentityV1, KernelGenerationIdentityV1 } from '../kernel/types.js';
 import { immutableSnapshot } from '../model/immutable.js';
@@ -15,13 +18,63 @@ import { decodePlatformProcessIdentity, decodeStateLockIdentity, decodeStateRoot
 import { KernelStorageError } from './errors.js';
 import { decodeSandboxRootProfile } from './execution-closure.js';
 import { checkCanonicalBytes, validateInstalledStructuredArtifacts, validateTrustStore } from './installed-artifacts.js';
-import { KERNEL_AUTHORITY_TABLES, KERNEL_SCHEMA_SQL } from './schema.js';
+import { kernelSchemaBirthRecipe } from './schema.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
+import { decodeGuestToolchainManifest, guestToolchainMembers, guestToolchainRoots } from './guest-toolchain.js';
+import { GUEST_EXTRACTOR_RECIPE } from '../sandbox/guest-toolchain.js';
 import { hostPlatform } from './workspace-identity.js';
+import { bundledSkillMemberRoles, bundledSkillRoots, validateBundledSkillReferences } from './bundled-skills.js';
+import { decodeBundledSkillClosure, SKILL_RESOURCE_BYTES, type BundledSkillClosureV1 } from '../kernel/skill.js';
+import { isNpmAdapterEntry, isNpmDataEntry } from '../sandbox/dependency-recipe.js';
+import { decodeOwnedKernelArchiveWitness, type KernelRollbackRestoringControlV1, type OwnedKernelArchiveWitnessV1 } from '../kernel/kernel-rollback-records.js';
+import type { KernelRollbackArchiveReadyControlV1 } from '../kernel/kernel-rollback-handoff.js';
+import { assertHeldMigrationTailArtifacts, type MigrationTailArtifacts } from './installed-runtime.js';
 
 type Entry = { owner: StateOwnerRecordV1; process: PlatformProcessIdentityV1;
   acquisition: StateOwnerAcquisitionEvidenceV1; transition?: StateOwnerTransitionEvidenceV1 };
+declare const rollbackHistoryBrand: unique symbol;
+export type StateOwnerRollbackHistory = Readonly<{ [rollbackHistoryBrand]: true }>;
+const rollbackHistories = new WeakMap<StateOwnerRollbackHistory, Readonly<{
+  tail: MigrationTailArtifacts; archive: OwnedKernelArchiveWitnessV1;
+}>>();
+
+/** Used only in the explicitly fenced restoring startup. The archive
+ * witness's Owner is the fixed boundary between productive and tail objects. */
+export async function bindStateOwnerRollbackHistory(tail: MigrationTailArtifacts,
+  control: KernelRollbackRestoringControlV1 | KernelRollbackArchiveReadyControlV1): Promise<StateOwnerRollbackHistory> {
+  assertHeldMigrationTailArtifacts(tail);
+  const archive = decodeOwnedKernelArchiveWitness(await tail.readCanonical(control.archivedKernelGenerationRef));
+  if (canonicalSha256(archive) !== control.archivedKernelGenerationRef || archive.witnessDigest !== control.archivedKernelGenerationDigest ||
+      archive.migrationId !== control.migrationId || archive.archiveId !== control.archiveId ||
+      archive.kernelGenerationId !== control.kernelGenerationId || archive.drainingControlRef !== control.drainingControlRef ||
+      archive.drainingControlDigest !== control.drainingControlDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'rollback Owner history differs from its exact archived cut');
+  assertHeldMigrationTailArtifacts(tail);
+  const scope = Object.freeze({}) as StateOwnerRollbackHistory;
+  rollbackHistories.set(scope, { tail, archive }); return scope;
+}
+
+function rollbackHistory(scope: StateOwnerRollbackHistory) {
+  const held = rollbackHistories.get(scope);
+  if (!held) throw new TypeError('rollback Owner history requires its genuine original source');
+  assertHeldMigrationTailArtifacts(held.tail);
+  return held;
+}
+
+export function rollbackStateOwnerTail(scope: StateOwnerRollbackHistory): MigrationTailArtifacts {
+  return rollbackHistory(scope).tail;
+}
+
+function readOwnerArtifact(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, ref: string,
+  purpose: 'frame' | 'transition', rollback?: StateOwnerRollbackHistory): Promise<unknown> {
+  if (rollback) {
+    const { archive, tail } = rollbackHistory(rollback);
+    if (owner.ownerEpoch > archive.ownerEpoch || purpose === 'transition' && owner.ownerEpoch === archive.ownerEpoch)
+      return tail.readCanonical(ref);
+  }
+  return readCanonicalArtifact(artifacts, ref);
+}
 export type RetainedStateOwnerHistory = Readonly<{
   throughEpoch: number; entries: readonly Entry[];
   lockIdentity: StateLockIdentityV1; rootIdentity: StateRootIdentityV1;
@@ -32,12 +85,13 @@ export type RetainedStateOwnerHistory = Readonly<{
 function invalid(message: string): never { throw new KernelStorageError('RECOVERY_REQUIRED', message); }
 
 type BirthMember = { artifactRef: string; byteCount: number };
-/** Same fixed data bounds/roles as the original installer. No executable is a
+/** Same fixed data bounds/roles as the original installer. No standalone executable is a
  * CAS edge, and no current selection or self-selected signing key is read. */
 async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   generation: Extract<KernelGenerationIdentityV1, { origin: 'fresh_installed' }>, members: readonly BirthMember[]): Promise<void> {
   const smallBytes = 1_048_576, trustBytes = 16 * smallBytes;
-  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'schema', 'trust_store']);
+  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object',
+    'guest_toolchain', 'schema', 'trust_store', 'skill_bundle', 'mcp_recovery_profile']);
   const inventory = new Map(members.map(member => [member.artifactRef, member.byteCount]));
   const expected = new Map<string, number>(), buffers = new Map<string, Buffer>();
   const requireMember = (ref: string, byteCount: number) => {
@@ -62,11 +116,26 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   if (!bundle || typeof bundle !== 'object' || !Array.isArray(bundle.entries) || !Array.isArray(bundle.structuredArtifacts) ||
       canonicalSha256(bundle) !== bundleRef || bundle.manifestDigest !== first.owner.runtimeBundleManifestDigest)
     invalid('retained installed genesis RuntimeBundle differs');
-  const data = bundle.entries.filter(entry => dataRoles.has(entry.role));
+  const data = bundle.entries.filter(entry => dataRoles.has(entry.role) || entry.role === 'tool_adapter' && !entry.executable);
   for (const entry of data) {
     if (entry.executable) invalid('retained installed seed data entry is executable');
     requireMember(entry.digest, entry.byteCount);
   }
+  const guests = [];
+  for (const root of guestToolchainRoots(bundle)) {
+    const size = inventory.get(root.artifactRef);
+    if (size === undefined) invalid('retained installed genesis lacks its original guest manifest');
+    const manifest = decodeGuestToolchainManifest(checkCanonicalBytes(await read(root.artifactRef, size, smallBytes)));
+    guestToolchainMembers(bundle, root.artifactRef, manifest); guests.push(manifest);
+  }
+  const guestImages = new Set(guests.map(manifest => manifest.guestImageRef));
+  const guestSignatures = new Set(guests.map(manifest => manifest.signatureRef));
+  const skillClosures = new Map<string, Readonly<BundledSkillClosureV1>>();
+  for (const root of bundledSkillRoots(bundle)) {
+    const size = inventory.get(root.artifactRef); if (size === undefined) invalid('retained installed genesis lacks an original skill closure');
+    skillClosures.set(root.artifactRef, decodeBundledSkillClosure(checkCanonicalBytes(await read(root.artifactRef, size, smallBytes))));
+  }
+  const skillMembers = bundledSkillMemberRoles(bundle, skillClosures);
   const source = generation.modelAuthoritySource;
   if (!source || typeof source !== 'object' || (source.kind === 'none'
     ? !exactKeys(source, ['kind'])
@@ -82,15 +151,52 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
     for (const object of companion.objects) requireMember(object.artifactRef, object.byteCount);
   }
   if (expected.size !== inventory.size) invalid('retained installed genesis has missing or extra original seed objects');
-  for (const entry of data) {
-    const bytes = await read(entry.digest, entry.byteCount, entry.role === 'trust_store' ? trustBytes : smallBytes);
-    if (entry.role === 'trust_store') validateTrustStore(bytes);
+  // These are independent retained data checks. Bound their concurrent reads
+  // with the existing catalog group and join all issued work before decoding
+  // the complete structured closure; no completed proof crosses this call.
+  await artifacts.mapReadGroups(data, async (artifacts, entry) => {
+    if (isNpmDataEntry(entry)) {
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
+    }
+    if (guestImages.has(entry.digest)) {
+      if (entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
+        invalid('retained installed guest image exceeds its original recipe bound');
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
+    }
+    if (skillMembers.resources.has(entry.digest) && !skillMembers.instructions.has(entry.digest) && !guestSignatures.has(entry.digest)) {
+      if (entry.byteCount > SKILL_RESOURCE_BYTES) invalid('retained installed skill resource exceeds its original bound');
+      await artifacts.verifyChunks(entry.digest, entry.byteCount);
+      return;
+    }
+    const bytes = await read(entry.digest, entry.byteCount, guestSignatures.has(entry.digest) ? 64 : entry.role === 'trust_store' ? trustBytes : smallBytes);
+    if (guestSignatures.has(entry.digest)) {
+      if (bytes.length !== 64) invalid('retained installed guest signature is not complete');
+      return;
+    }
+    if (skillMembers.instructions.has(entry.digest)) {
+      // SKILL.md is source text, not canonical JSON. The common structured
+      // consumer below rederives its exact instruction from complete bytes.
+    } else if (entry.role === 'tool_adapter') {
+      if (!isNpmAdapterEntry(entry) && (entry.entryId !== 'builtin_tools' || entry.version !== '1' || entry.relativePath !== 'adapters/builtin-tools.mjs' || bytes.length < 1))
+        invalid('retained installed tool script differs from its fixed original data role');
+    } else if (entry.role === 'trust_store') validateTrustStore(bytes);
     else {
       const value = checkCanonicalBytes(bytes);
       if (entry.role === 'sandbox_root_profile') decodeSandboxRootProfile(value);
     }
-  }
-  validateInstalledStructuredArtifacts(bundle, buffers);
+  });
+  await validateBundledSkillReferences(skillClosures, async (ref, byteCount) => {
+    const retained = buffers.get(ref); if (retained) return retained;
+    requireMember(ref, byteCount);
+    if (byteCount > SKILL_RESOURCE_BYTES) invalid('retained skill textual resource exceeds its original bound');
+    const chunks: Buffer[] = []; let count = 0;
+    for await (const chunk of artifacts.readChunks(ref, byteCount)) { count += chunk.length; if (count > byteCount) invalid('retained skill resource length changed'); chunks.push(Buffer.from(chunk)); }
+    if (count !== byteCount) invalid('retained skill resource is incomplete');
+    return Buffer.concat(chunks);
+  });
+  validateInstalledStructuredArtifacts(bundle, buffers, artifacts.releaseTrustRoots());
   if (companion) {
     const objects = new Map<string, Buffer>();
     for (const object of companion.objects) objects.set(object.artifactRef,
@@ -101,13 +207,30 @@ async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   // opening/owning installation gate independently authenticates trusted keys.
 }
 
-/** Only the two actually implemented current-schema birth recipes. This is
+/** Only the two actually implemented birth origins and exact known schemas. This is
  * historical rehashing, not another pristine-namespace or migration bootstrap. */
-async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: StateLockIdentityV1): Promise<void> {
+async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: StateLockIdentityV1,
+  runtimeKind: 'schema' | 'signed', conversion?: SignedSchemaConversionV1): Promise<void> {
   if (first.acquisition.kind !== 'genesis') invalid('StateOwner history has no exact genesis');
   const acquisition = first.acquisition;
   const generation = await readCanonicalArtifact<KernelGenerationIdentityV1>(artifacts, acquisition.kernelGenerationIdentityRef);
   if (generation.origin !== 'fresh_empty' && generation.origin !== 'fresh_installed') invalid('unsupported retained StateOwner genesis origin');
+  const recipe = kernelSchemaBirthRecipe(generation.stateSchemaVersion);
+  if (conversion && generation.stateSchemaVersion !== 7) invalid('signed conversion cannot reinterpret another original birth version');
+  if (runtimeKind === 'schema') {
+    if (generation.origin !== 'fresh_empty' || generation.pristineSchemaManifestRef !== first.owner.runtimeBundleRef ||
+        generation.pristineSchemaManifestDigest !== first.owner.runtimeBundleManifestDigest)
+      invalid('retained schema-only genesis differs from its original runtime schema');
+  } else if (generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION && !(
+      generation.stateSchemaVersion === 7 && conversion?.source.runtimeBundleRef === first.owner.runtimeBundleRef &&
+      conversion.source.runtimeBundleManifestDigest === first.owner.runtimeBundleManifestDigest &&
+      conversion.source.schemaManifestRef === generation.pristineSchemaManifestRef &&
+      conversion.source.schemaManifestDigest === generation.pristineSchemaManifestDigest &&
+      conversion.source.schemaDigest === generation.pristineSchemaDigest)) {
+    // Existing signed births have no exact historical signed-schema source.
+    // A supported DDL recipe or broad compatibility range cannot supply it.
+    invalid('retained signed schema upgrade requires its original schema authority');
+  }
   if (!exactKeys(generation, ['schemaVersion', 'format', 'generationId', 'stateRootIdentityRef', 'stateRootIdentityDigest',
     'databaseImageRef', 'databaseImageDigest', 'databaseIdentityDigest', 'databaseContentDigest', 'casNamespaceManifestRef',
     'casNamespaceManifestDigest', 'casNamespaceId', 'casRootDigest', 'stateSchemaVersion', 'generationDigest', 'origin',
@@ -117,8 +240,7 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
       generation.generationDigest !== acquisition.kernelGenerationIdentityDigest ||
       generation.generationDigest !== digestOmitting(generation, 'generationDigest') ||
       generation.stateRootIdentityRef !== lock.stateRootIdentityRef || generation.stateRootIdentityDigest !== lock.stateRootIdentityDigest ||
-      generation.stateSchemaVersion !== KERNEL_STATE_SCHEMA_VERSION ||
-      generation.pristineSchemaDigest !== sha256Bytes(Buffer.from(KERNEL_SCHEMA_SQL, 'utf8')))
+      generation.pristineSchemaDigest !== recipe.schemaDigest)
     invalid('retained StateOwner genesis is outside the implemented birth recipe');
   for (const key of ['databaseImageRef', 'databaseImageDigest', 'databaseIdentityDigest', 'databaseContentDigest',
     'casNamespaceManifestRef', 'casNamespaceManifestDigest', 'casRootDigest', 'pristineSchemaManifestRef',
@@ -132,16 +254,14 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
   const schema = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.pristineSchemaManifestRef);
   if (!exactKeys(schema, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'schemaDigest', 'manifestDigest']) ||
       schema.schemaVersion !== 1 || schema.format !== 'cliq-kernel-schema-manifest-v1' ||
-      schema.applicationId !== KERNEL_SQLITE_APPLICATION_ID || schema.userVersion !== KERNEL_STATE_SCHEMA_VERSION ||
+      schema.applicationId !== KERNEL_SQLITE_APPLICATION_ID || schema.userVersion !== recipe.userVersion ||
       schema.schemaDigest !== generation.pristineSchemaDigest || schema.manifestDigest !== generation.pristineSchemaManifestDigest ||
       schema.manifestDigest !== digestOmitting(schema, 'manifestDigest')) invalid('retained StateOwner pristine schema does not match');
   const database = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.databaseImageRef);
-  const expectedContent = canonicalSha256({ applicationId: KERNEL_SQLITE_APPLICATION_ID,
-    userVersion: KERNEL_STATE_SCHEMA_VERSION, tables: KERNEL_AUTHORITY_TABLES.length });
   if (!exactKeys(database, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'contentDigest']) ||
       database.schemaVersion !== 1 || database.format !== 'cliq-kernel-empty-database-v1' ||
-      database.applicationId !== KERNEL_SQLITE_APPLICATION_ID || database.userVersion !== KERNEL_STATE_SCHEMA_VERSION ||
-      database.contentDigest !== expectedContent || database.contentDigest !== generation.databaseContentDigest ||
+      database.applicationId !== KERNEL_SQLITE_APPLICATION_ID || database.userVersion !== recipe.userVersion ||
+      database.contentDigest !== recipe.emptyDatabaseContentDigest || database.contentDigest !== generation.databaseContentDigest ||
       generation.databaseImageDigest !== generation.databaseImageRef || generation.databaseIdentityDigest !== generation.databaseImageRef)
     invalid('retained StateOwner empty database birth does not match');
   const namespace = await readCanonicalArtifact<Record<string, unknown>>(artifacts, generation.casNamespaceManifestRef);
@@ -175,18 +295,20 @@ async function readGenesis(artifacts: ArtifactCatalog, first: Entry, lock: State
 async function readRuntime(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<'schema' | 'signed'> {
   const value = await readCanonicalArtifact<RuntimeBundleManifest & { format?: string }>(artifacts, owner.runtimeBundleRef);
   if (value.format === 'cliq-kernel-schema-manifest-v1') {
+    const recipe = kernelSchemaBirthRecipe(Reflect.get(value, 'userVersion'));
     if (!exactKeys(value, ['schemaVersion', 'format', 'applicationId', 'userVersion', 'schemaDigest', 'manifestDigest']) ||
         value.schemaVersion !== 1 || Reflect.get(value, 'applicationId') !== KERNEL_SQLITE_APPLICATION_ID ||
-        Reflect.get(value, 'userVersion') !== KERNEL_STATE_SCHEMA_VERSION ||
-        Reflect.get(value, 'schemaDigest') !== sha256Bytes(Buffer.from(KERNEL_SCHEMA_SQL, 'utf8')) ||
+        Reflect.get(value, 'schemaDigest') !== recipe.schemaDigest ||
         value.manifestDigest !== owner.runtimeBundleManifestDigest ||
         value.manifestDigest !== digestOmitting(value, 'manifestDigest') || owner.supervisorEntryId !== 'state-store' ||
         owner.supervisorEntryVersion !== 'm2') invalid('retained schema-only StateOwner runtime does not match');
     return 'schema';
   }
-  if (!exactKeys(value, ['schemaVersion', 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
+  const singleCas = value.schemaVersion === 2;
+  if (!exactKeys(value, ['schemaVersion', ...(singleCas ? ['installedLayout'] : []), 'bundleVersion', 'controlProtocolRange', 'headlessSchemaRange',
     'stateSchemaRange', 'workerProtocolRange', 'entries', 'structuredArtifacts', 'guestToolchainManifestRefs',
-    'publisherKeyId', 'manifestDigest', 'signature']) || value.schemaVersion !== 1 || !Array.isArray(value.entries))
+    'publisherKeyId', 'manifestDigest', 'signature']) ||
+      (singleCas ? value.installedLayout !== 'single_cas_streams_v1' : value.schemaVersion !== 1) || !Array.isArray(value.entries))
     invalid('retained StateOwner runtime manifest is invalid');
   const { signature: _signature, manifestDigest: _digest, ...core } = value;
   const supervisors = value.entries.filter(entry => entry.role === 'supervisor');
@@ -199,9 +321,9 @@ async function readRuntime(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1
   return 'signed';
 }
 
-async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<Entry> {
-  const processIdentity = decodePlatformProcessIdentity(await readCanonicalArtifact(artifacts, owner.processIdentityRef));
-  const acquisition = decodeStateOwnerAcquisitionEvidence(await readCanonicalArtifact(artifacts, owner.acquisitionEvidenceRef));
+async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1, rollback?: StateOwnerRollbackHistory): Promise<Entry> {
+  const processIdentity = decodePlatformProcessIdentity(await readOwnerArtifact(artifacts, owner, owner.processIdentityRef, 'frame', rollback));
+  const acquisition = decodeStateOwnerAcquisitionEvidence(await readOwnerArtifact(artifacts, owner, owner.acquisitionEvidenceRef, 'frame', rollback));
   if (processIdentity.identityDigest !== owner.processIdentityDigest ||
       processIdentity.executableImageDigest !== owner.supervisorExecutableDigest ||
       typeof process.geteuid !== 'function' || processIdentity.ownerUid !== process.geteuid() ||
@@ -218,13 +340,14 @@ async function readFrame(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1):
 }
 
 /** The original one-frame check used when constructing an already-owned Store context. */
-export async function readRetainedStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1): Promise<PlatformProcessIdentityV1> {
-  return (await readFrame(artifacts, owner)).process;
+export async function readRetainedStateOwnerProcess(artifacts: ArtifactCatalog, owner: StateOwnerRecordV1,
+  rollback?: StateOwnerRollbackHistory): Promise<PlatformProcessIdentityV1> {
+  return (await readFrame(artifacts, owner, rollback)).process;
 }
 
 async function readTransition(artifacts: ArtifactCatalog, prior: Extract<StateOwnerRecordV1, { state: 'terminal' }>,
-  successor?: StateOwnerRecordV1): Promise<StateOwnerTransitionEvidenceV1> {
-  const transition = decodeStateOwnerTransitionEvidence(await readCanonicalArtifact(artifacts, prior.transitionEvidenceRef));
+  successor?: StateOwnerRecordV1, rollback?: StateOwnerRollbackHistory): Promise<StateOwnerTransitionEvidenceV1> {
+  const transition = decodeStateOwnerTransitionEvidence(await readOwnerArtifact(artifacts, prior, prior.transitionEvidenceRef, 'transition', rollback));
   if (transition.kind !== prior.terminalReason || transition.evidenceDigest !== prior.transitionEvidenceDigest ||
       transition.priorOwnerEpoch !== prior.ownerEpoch || transition.priorSupervisorInstanceId !== prior.supervisorInstanceId ||
       transition.priorProcessIdentityRef !== prior.processIdentityRef || transition.priorProcessIdentityDigest !== prior.processIdentityDigest ||
@@ -255,8 +378,8 @@ function readRows(connection: SqliteConnection, throughEpoch: number): StateOwne
 /** A single consistent SQL prefix followed by immutable artifact rewalks.
  * The synchronous comparator is a CAS guard, never a physical proof. */
 export async function readRetainedStateOwnerHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  throughEpoch: number): Promise<RetainedStateOwnerHistory> {
-  try { return await readHistory(driver, artifacts, throughEpoch); }
+  throughEpoch: number, rollback?: StateOwnerRollbackHistory): Promise<RetainedStateOwnerHistory> {
+  try { return await readHistory(driver, artifacts, throughEpoch, rollback); }
   catch (error) {
     if (error instanceof TypeError || error instanceof SyntaxError)
       throw new KernelStorageError('RECOVERY_REQUIRED', 'retained StateOwner history is not a closed typed graph', { cause: error });
@@ -267,7 +390,7 @@ export async function readRetainedStateOwnerHistory(driver: SqliteDriver, artifa
 }
 
 async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  throughEpoch: number): Promise<RetainedStateOwnerHistory> {
+  throughEpoch: number, rollback?: StateOwnerRollbackHistory): Promise<RetainedStateOwnerHistory> {
   if (!Number.isSafeInteger(throughEpoch) || throughEpoch < 1) invalid('invalid retained StateOwner history epoch');
   const owners = driver.readSnapshot(connection => {
     const prefix = readRows(connection, throughEpoch), last = prefix.at(-1)!;
@@ -278,9 +401,16 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
     }
     return prefix;
   });
+  if (rollback) {
+    const { archive } = rollbackHistory(rollback);
+    const original = owners[archive.ownerEpoch - 1];
+    if (!original || original.acquisitionEvidenceRef !== archive.ownerAcquisitionEvidenceRef ||
+        original.acquisitionEvidenceDigest !== archive.ownerAcquisitionEvidenceDigest)
+      invalid('rollback Owner history has no exact archive-producing Owner');
+  }
   const casThroughEpoch = owners.length;
   const entries: Entry[] = [];
-  for (const owner of owners) entries.push(await readFrame(artifacts, owner));
+  for (const owner of owners) entries.push(await readFrame(artifacts, owner, rollback));
   const first = entries[0]!.owner;
   const lockIdentity = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, first.stateLockIdentityRef));
   const rootIdentity = decodeStateRootIdentity(await readCanonicalArtifact(artifacts, lockIdentity.stateRootIdentityRef));
@@ -289,16 +419,39 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
       rootIdentity.canonicalAbsolutePath !== normalizeAbsolutePath(rootIdentity.canonicalAbsolutePath) ||
       rootIdentity.ownerUid !== entries[0]!.process.ownerUid || rootIdentity.platform !== entries[0]!.process.platform ||
       lockIdentity.ownerUid !== rootIdentity.ownerUid) invalid('retained StateOwner root/lock does not match');
-  await readGenesis(artifacts, entries[0]!, lockIdentity);
   const runtimeKind = await readRuntime(artifacts, first);
+  const boundaries = entries.filter(entry => entry.acquisition.kind === 'runtime_upgrade');
+  if (boundaries.length > 1) invalid('only the exact signed7-to8 boundary is implemented');
+  const boundary = boundaries[0];
+  const conversionTarget = boundary?.owner.runtimeBundleRef ?? artifacts.runtimeConversionSourceRef();
+  let conversion: SignedSchemaConversionV1 | undefined;
+  if (runtimeKind === 'signed') {
+    const bundle = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, first.runtimeBundleRef);
+    if (conversionTarget) {
+      const target = await readCanonicalArtifact<RuntimeBundleManifest>(artifacts, conversionTarget);
+      conversion = await readSignedSchemaConversion(artifacts, bundle, target, artifacts.releaseTrustRoots());
+    } else await readSignedKernelSchema(artifacts, bundle, artifacts.releaseTrustRoots());
+  } else if (conversionTarget) invalid('signed conversion cannot replace a schema-only runtime');
+  await readGenesis(artifacts, entries[0]!, lockIdentity, runtimeKind, conversion);
   for (const [index, entry] of entries.entries()) {
-    if (entry.owner.stateLockIdentityRef !== first.stateLockIdentityRef || entry.owner.stateLockIdentityDigest !== first.stateLockIdentityDigest ||
-        entry.owner.runtimeBundleRef !== first.runtimeBundleRef || entry.owner.runtimeBundleManifestDigest !== first.runtimeBundleManifestDigest ||
-        entry.owner.supervisorEntryId !== first.supervisorEntryId || entry.owner.supervisorEntryVersion !== first.supervisorEntryVersion ||
-        (runtimeKind === 'signed' && entry.owner.supervisorExecutableDigest !== first.supervisorExecutableDigest) ||
-        entry.process.ownerUid !== rootIdentity.ownerUid || entry.process.platform !== rootIdentity.platform)
-      invalid('retained StateOwner history changed root/lock/runtime');
     const prior = entries[index - 1]?.owner;
+    const originalRuntime = prior ?? first;
+    const upgrade = entry.acquisition.kind === 'runtime_upgrade';
+    if (entry.owner.stateLockIdentityRef !== first.stateLockIdentityRef || entry.owner.stateLockIdentityDigest !== first.stateLockIdentityDigest ||
+        (!upgrade && (entry.owner.runtimeBundleRef !== originalRuntime.runtimeBundleRef ||
+          entry.owner.runtimeBundleManifestDigest !== originalRuntime.runtimeBundleManifestDigest ||
+          entry.owner.supervisorEntryId !== originalRuntime.supervisorEntryId || entry.owner.supervisorEntryVersion !== originalRuntime.supervisorEntryVersion ||
+          (runtimeKind === 'signed' && entry.owner.supervisorExecutableDigest !== originalRuntime.supervisorExecutableDigest))) ||
+        entry.process.ownerUid !== rootIdentity.ownerUid || entry.process.platform !== rootIdentity.platform)
+      invalid('retained StateOwner history changed root/lock/runtime without an exact upgrade');
+    if (entry.acquisition.kind === 'runtime_upgrade') {
+      if (!prior || entries[0]!.acquisition.kind !== 'genesis') invalid('runtime upgrade lacks its original genesis');
+      const upgradeData = await readRuntimeUpgradeBoundary(driver, artifacts, prior, entry.owner, entry.acquisition, entries[0]!.acquisition);
+      if (upgradeData.receipt.stateRootIdentityRef !== lockIdentity.stateRootIdentityRef ||
+          upgradeData.receipt.stateRootIdentityDigest !== lockIdentity.stateRootIdentityDigest)
+        invalid('runtime upgrade substituted its original StateRoot');
+      await readRuntime(artifacts, entry.owner);
+    }
     if (entry.acquisition.kind !== 'genesis') {
       const acquisition = entry.acquisition;
       if (!prior || prior.state !== 'terminal' || prior.rowDigest !== acquisition.priorTerminalRowDigest ||
@@ -308,7 +461,7 @@ async function readHistory(driver: SqliteDriver, artifacts: ArtifactCatalog,
         invalid('StateOwner acquisition does not match its retained predecessor');
     }
     if (index < throughEpoch && entry.owner.state === 'terminal')
-      entry.transition = await readTransition(artifacts, entry.owner, entries[index + 1]?.owner);
+      entry.transition = await readTransition(artifacts, entry.owner, entries[index + 1]?.owner, rollback);
   }
   const retained = immutableSnapshot({ throughEpoch, entries: entries.slice(0, throughEpoch), lockIdentity, rootIdentity,
     ...(entries[throughEpoch] ? { successorWitness: entries[throughEpoch] } : {}) });

@@ -1,0 +1,499 @@
+// Wiring/contract regressions only. These never constitute installed Delivery
+// qualification; the fixed Linux campaign must execute the genuine entry.
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import ts from 'typescript';
+
+const source = name => readFileSync(new URL(name, import.meta.url), 'utf8');
+
+test('post-restart verifier diagnostics bind the live successor before ordinary tools and never reuse the old lifetime', async () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('journey.ts', text, ts.ScriptTarget.Latest, true);
+  const blocks = [];
+  const visit = node => {
+    if (ts.isIfStatement(node) && node.expression.getText(parsed) === 'storeFailureDiagnostics' &&
+        node.thenStatement.getText(parsed).includes('afterRestart.MainPID')) blocks.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(blocks.length, 1);
+  const block = blocks[0], body = block.getText(parsed);
+  assert(block.pos > text.indexOf("assert.equal(ownerHistory.owners[1]!.runtimeBundleRef, bundleDigest);"));
+  assert(block.end < text.indexOf("await createSource('ordinary_tools');"));
+  const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const execute = new (Object.getPrototypeOf(async () => {}).constructor)('context',
+    `with (context) { ${compiled}; return storeFailureBinding; }`);
+  const original = Object.freeze({ pid: 10, processStartToken: 'old', invocationId: 'old', windowOpenedAt: 1 });
+  for (const fault of ['none', 'owner', 'start', 'pid', 'invocation']) {
+    let reads = 0;
+    const owner = { state: 'active', runtimeBundleRef: 'bundle' };
+    const context = { assert, storeFailureDiagnostics: true, storeFailureBinding: original, storeBindingFailureStage: undefined,
+      signed: { bundle: { entries: [{ role: 'supervisor', digest: 'digest' }] } },
+      afterRestart: { MainPID: '20', InvocationID: 'new' }, ownerHistory: { owners: [{}, owner] },
+      recipe: { stateRoot: 'state' }, ledger: { uid: 42 }, installedImage: 'image', services: { supervisorUnit: 'unit' },
+      Date: { now: () => 100 },
+      async qualifyInstalledOwnerProcess(input, selected) {
+        reads++; assert.deepEqual(input, { stateRoot: 'state', uid: 42, pid: 20, selectedImage: 'image', imageDigest: 'digest' });
+        assert.equal(selected, owner); if (fault === 'owner') throw new Error('inert qualification refusal');
+        return { processStartToken: 'linux-proc-start-ticks:123' };
+      },
+      async fixtureProcess(pid, uid) { assert.equal(pid, 20); assert.equal(uid, 42); return fault === 'start' ? '456' : '123'; },
+      show(unit) { assert.equal(unit, 'unit'); return { MainPID: fault === 'pid' ? '30' : '20', InvocationID: fault === 'invocation' ? 'other' : 'new' }; }
+    };
+    const result = await execute(context); assert.equal(reads, 1);
+    if (fault === 'none') {
+      assert.deepEqual(result, { pid: 20, processStartToken: 'linux-proc-start-ticks:123', invocationId: 'new', windowOpenedAt: 100 });
+      assert(Object.isFrozen(result));
+    } else assert.equal(result, undefined, 'a failed successor observation cannot retain the old diagnostic source');
+  }
+});
+
+test('automatic successor selection waits for the same running Type=exec invocation before its strict identity checks', () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const conditions = [];
+  const visit = node => {
+    if (ts.isIfStatement(node) && node.thenStatement.kind === ts.SyntaxKind.BreakStatement &&
+        node.expression.getText(parsed).includes('successorUnit.InvocationID')) conditions.push(node.expression.getText(parsed));
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(conditions.length, 1);
+  const ready = Function('successorUnit', 'shown', 'return ' + conditions[0]);
+  const old = { MainPID: '10', InvocationID: 'old' };
+  const running = { MainPID: '20', ExecMainPID: '20', InvocationID: 'new', ActiveState: 'active', SubState: 'running' };
+  assert.equal(ready(running, old), true);
+  for (const changed of [{ MainPID: '0' }, { MainPID: '10' }, { ExecMainPID: '10' }, { InvocationID: 'old' },
+    { ActiveState: 'activating' }, { ActiveState: 'failed' }, { SubState: 'start' }, { SubState: 'dead' }])
+    assert.equal(ready({ ...running, ...changed }, old), false);
+  assert(text.includes("for (const field of ['MainPID', 'ExecMainPID', 'InvocationID', 'ActiveState']) assert.equal(confirmed[field], shown[field]);"));
+  assert(text.includes("assert(Date.now() < restartBy, 'actual cleanup crash restart exceeded the original 30-second budget');"));
+});
+
+test('successor readiness waits for the original third-owner commit under the unchanged restart deadline', async () => {
+  const text = source('./installed-node-journey.ts');
+  const parsed = ts.createSourceFile('installed-node-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const declarations = [];
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(parsed) === 'waitForSuccessorOwnerHistory') declarations.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed); assert.equal(declarations.length, 1); assert(declarations[0].initializer);
+  const body = ts.transpileModule('return ' + declarations[0].initializer.getText(parsed), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  const bind = (read, pause) => Function('waitForInstalledOwnerHistory', 'recipe', 'assert', 'delay', body)
+    (read, { stateRoot: 'inert-readiness-input' }, assert, pause);
+  const reads = [], sleeps = [], final = [1, 2, 3]; let calls = 0;
+  const wait = bind(async (...args) => { reads.push(args); return { owners: ++calls < 3 ? [1, 2] : final }; },
+    async milliseconds => { sleeps.push(milliseconds); });
+  assert.equal(await wait(123), final); assert.deepEqual(sleeps, [20, 20]);
+  assert.deepEqual(reads, Array(3).fill(['inert-readiness-input', 123]));
+  for (const owners of [[], [1], [1, 2, 3, 4]])
+    await assert.rejects(bind(async () => ({ owners }), async () => assert.fail('invalid history cannot retry'))(123));
+  const failure = new Error('original absolute deadline exhausted');
+  await assert.rejects(bind(async () => { throw failure; }, async () => assert.fail())(123), error => error === failure);
+  assert.equal(text.match(/const history = await waitForSuccessorOwnerHistory\(restartBy\)/gu)?.length, 2);
+  assert(text.includes('const observed = await waitForSuccessorOwnerHistory(restartBy);'));
+});
+
+test('Delivery cancellation compares every budget dimension from actual strict-parser bytes', async () => {
+  const load = async name => {
+    const compiled = ts.transpileModule(source(name), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+    }).outputText;
+    return import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'));
+  };
+  const [{ parseJsonStrict }, { canonicalJsonBytes }] = await Promise.all([
+    load('../../../src/kernel/json.ts'), load('../../../src/kernel/canonical.ts'),
+  ]);
+  const text = source('./installed-delivery-journey.ts');
+  const file = ts.createSourceFile('installed-delivery-journey.ts', text, ts.ScriptTarget.Latest, true);
+  const checks = [];
+  const visit = node => {
+    if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) &&
+        /^assert(?:\.\w+)?$/u.test(node.expression.expression.getText(file)) &&
+        /stoppedRun\.budget(?:Consumed|Reserved)\b/u.test(node.getText(file))) checks.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert.equal(checks.length, 2);
+  const verify = Function('stoppedRun', 'canonicalJsonBytes', 'assert', 'ZERO', checks.map(node => node.getText(file)).join('\n'));
+  const zero = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+  const original = { budgetConsumed: { ...zero, toolCalls: 1 }, budgetReserved: zero };
+  const parsed = value => parseJsonStrict(canonicalJsonBytes(value).toString('utf8'));
+  const actual = parsed(original);
+  assert.equal(Object.getPrototypeOf(actual.budgetConsumed), null);
+  assert.equal(Object.getPrototypeOf(actual.budgetReserved), null);
+  assert.doesNotThrow(() => verify(actual, canonicalJsonBytes, assert, zero));
+  for (const field of ['budgetConsumed', 'budgetReserved']) {
+    for (const dimension of Object.keys(zero)) {
+      const changed = structuredClone(original); changed[field][dimension]++;
+      assert.throws(() => verify(parsed(changed), canonicalJsonBytes, assert, zero), dimension);
+    }
+    for (const fault of ['missing', 'extra', 'text']) {
+      const changed = structuredClone(original);
+      if (fault === 'missing') delete changed[field].modelTokens;
+      else if (fault === 'extra') changed[field].authority = true;
+      else changed[field].toolCalls = String(changed[field].toolCalls);
+      assert.throws(() => verify(parsed(changed), canonicalJsonBytes, assert, zero), fault);
+    }
+  }
+});
+
+// Execute only the existing private poller's pure control flow. These inert
+// public-cut values are not a Run, StateOwner, resource or native proof.
+function terminalPoller(get, context, clock, delay, check = assert) {
+  const text = source('./installed-delivery-journey.ts');
+  const file = ts.createSourceFile('installed-delivery-journey.ts', text, ts.ScriptTarget.Latest, true);
+  let initializer;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === 'terminal') {
+      assert.equal(initializer, undefined); initializer = node.initializer;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file); assert(initializer && ts.isArrowFunction(initializer));
+  const compiled = ts.transpileModule(`const terminal = ${initializer.getText(file)};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
+  return Function('get', 'context', 'Date', 'delay', 'assert', `${compiled}\nreturn terminal;`)(get, context, clock, delay, check);
+}
+
+test('actual Delivery deadline diagnosis uses only its already obtained cut and preserves the original assertion', async () => {
+  const cut = { snapshot: { operation: 'delivery', run: { status: 'queued' } } };
+  let gets = 0, samples = 0, delays = 0, calls = 0, original;
+  const diagnosisFailure = new Error('an optional data projection cannot replace the deadline failure');
+  const terminal = terminalPoller(async () => { gets++; return cut; }, {
+    onTerminalDeadline(caseKind, value) {
+      calls++; assert.equal(caseKind, 'delivery_publish'); assert.equal(value, cut); throw diagnosisFailure;
+    },
+  }, { now() { samples++; return Date.now(); } }, async () => { delays++; }, (...args) => {
+    try { assert(...args); } catch (error) { original = error; throw error; }
+  });
+  await assert.rejects(terminal('inert-run-id', 0, 'delivery_publish'), error => error === original && error !== diagnosisFailure &&
+    error.code === 'ERR_ASSERTION' && error.message === 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window');
+  assert.deepEqual({ gets, samples, delays, calls }, { gets: 1, samples: 1, delays: 0, calls: 1 });
+});
+
+test('actual terminal success never invokes failure diagnosis or adds a clock sample or query', async () => {
+  const cut = { snapshot: { operation: 'delivery', run: { status: 'succeeded' } } };
+  let gets = 0;
+  const terminal = terminalPoller(async () => { gets++; return cut; }, {
+    onTerminalDeadline() { throw new Error('terminal success has no failure diagnosis'); },
+  }, { now() { throw new Error('no deadline clock is needed for an already terminal cut'); } }, async () => { throw 0; });
+  assert.equal(await terminal('inert-run-id', Number.MAX_SAFE_INTEGER, 'delivery_publish'), cut);
+  assert.equal(gets, 1);
+});
+
+test('owner history readiness shares the original status and restart absolute budgets without changing SQLite blocking policy', () => {
+  const shared = source('./installed-node-journey.ts'), reader = source('./installed-read-control.ts');
+  assert(shared.includes('const readinessBy = Date.now() + 5000, statusRemaining = readinessBy - Date.now();'));
+  assert(shared.includes("assert(statusRemaining > 0, 'public control readiness exceeded the original five-second budget');"));
+  assert(shared.includes("await send({ protocolVersion: 1, method: 'supervisor.status' }, 'supervisor.status', statusRemaining)"));
+  assert(shared.includes('const originalOwner = await waitForInstalledOwnerHistory(recipe.stateRoot, readinessBy);'));
+  const restart = shared.slice(shared.indexOf('restart: async () => {'), shared.indexOf('originalStop: async (source, operation) => {'));
+  assert(restart.includes('by = Date.now() + 30000;'));
+  assert(restart.includes('await selectedSupervisor(services!.supervisorUnit, after, installedImage, by);'));
+  assert(restart.includes('const owners = await waitForInstalledOwnerHistory(recipe.stateRoot, by);'));
+  const wait = reader.slice(reader.indexOf('export async function waitForInstalledOwnerHistory('), reader.indexOf('/** One readiness observation'));
+  assert(!/Date\.now\(\)\s*\+|5000|30000/u.test(wait), 'the caller deadline is never restarted within the reader');
+  assert(wait.includes('const history = observeInstalledOwnerHistory(stateRoot, observer);'));
+  assert(wait.includes('if (history !== undefined)'));
+  assert.equal((wait.match(/Date\.now\(\) < by/gu) ?? []).length, 2, 'a completed read cannot be accepted after the original budget');
+  assert(!/busy_timeout|timeout\s*:|setBusyTimeout/u.test(reader));
+  assert(reader.includes('{ readOnly: true, allowExtension: false }'));
+});
+
+test('the optional actual Delivery deadline projection is synchronous and remains separate from Run authority and shutdown', () => {
+  const shared = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
+  const callback = shared.slice(shared.indexOf('onTerminalDeadline: (caseKind, cut) => {'), shared.indexOf('send: async (body, timeout = 5000) => {'));
+  assert(callback.includes('report.runProgressAtTerminalDeadline = projectInstalledRunProgress({ caseKind, cut, postCount });'));
+  assert(!/\bawait\b|Date\.|readCas|\.send\(|\.close\(|setTimeout/u.test(callback));
+  assert(delivery.includes("kind === 'merge' ? 'delivery_merge' : 'delivery_publish'"));
+  assert(delivery.includes("terminal(cancellationAdmission.runId, undefined, 'delivery_cancel')"));
+  assert.equal((delivery.match(/assert\(Date\.now\(\) < by, 'actual explicit Delivery did not reach terminal within its fixed 90-second qualification window'\)/gu) ?? []).length, 1);
+  assert(delivery.includes('try { context.onTerminalDeadline?.(caseKind, cut); }'));
+});
+
+test('every installed Run driver accepts exactly the emitted fixed recipe and verifies the one root-owned publication helper', () => {
+  const expected = ['buildFixture', 'controlDirectory', 'installerEntry', 'observer', 'packageRoot', 'publicationObserver',
+    'releaseKeysFile', 'reportFile', 'stateRoot', 'storeFixture', 'workspace'].sort();
+  const shell = source('../qualify-systemd-user.sh'), start = shell.indexOf('const runJourney =');
+  assert(start >= 0);
+  const producer = ts.createSourceFile('runJourney.ts', shell.slice(start, shell.indexOf('\nwriteFileSync(file,', start)), ts.ScriptTarget.Latest, true);
+  const declaration = producer.statements[0].declarationList.declarations[0];
+  assert.equal(declaration.name.getText(producer), 'runJourney');
+  assert(ts.isConditionalExpression(declaration.initializer)); assert(ts.isObjectLiteralExpression(declaration.initializer.whenTrue));
+  const emitted = declaration.initializer.whenTrue.properties.map(property => {
+    assert(ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)); return property.name.text;
+  }).sort();
+  assert.deepEqual(emitted, expected);
+  for (const filename of ['../qualify-installed-run-journey.ts', './installed-node-journey.ts']) {
+    const text = source(filename), file = ts.createSourceFile(filename, text, ts.ScriptTarget.Latest, true);
+    const checks = [], types = [];
+    const visit = node => {
+      if (ts.isCallExpression(node) && node.expression.getText(file) === 'assert.deepEqual' &&
+          node.arguments[0]?.getText(file) === 'Object.keys(recipe).sort()') checks.push(node);
+      if (ts.isTypeAliasDeclaration(node) && node.name.text === 'Recipe') types.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(file); assert.equal(checks.length, 1, filename); assert.equal(types.length, 1, filename);
+    const sorted = checks[0].arguments[1];
+    assert(ts.isCallExpression(sorted) && sorted.arguments.length === 0 && ts.isPropertyAccessExpression(sorted.expression) && sorted.expression.name.text === 'sort');
+    const keys = sorted.expression.expression; assert(ts.isArrayLiteralExpression(keys));
+    assert(keys.elements.every(key => ts.isStringLiteral(key)));
+    assert.deepEqual(keys.elements.map(key => key.text).sort(), expected, filename + ' must not reject the actual emitted recipe');
+    assert(ts.isTypeLiteralNode(types[0].type));
+    assert.deepEqual(types[0].type.members.map(member => {
+      assert(ts.isPropertySignature(member) && ts.isIdentifier(member.name) && !member.questionToken); return member.name.text;
+    }).sort(), expected, filename + ' must require every fixed field');
+    for (const guard of [
+      "assert.equal(recipe.publicationObserver, path.join(ledger.fixture, 'cliq-publication-cleanup-crash-observer'))",
+      'const publicationObserver = await lstat(recipe.publicationObserver)',
+      'publicationObserver.isFile() && !publicationObserver.isSymbolicLink() && publicationObserver.uid === 0 && publicationObserver.gid === 0 &&',
+      'publicationObserver.nlink === 1 && (publicationObserver.mode & 0o7777) === 0o555',
+      'open(filename, constants.O_RDONLY | constants.O_NOFOLLOW)',
+    ]) assert(text.includes(guard), filename + ' must retain the same fixed helper identity and file guards');
+  }
+});
+
+test('verifier and Delivery are fixed consumers of one real installed lifecycle', () => {
+  const shared = source('./installed-node-journey.ts');
+  for (const [file, kind, mode] of [['../qualify-installed-verifier-journey.ts', 'verifier', '--verifier-campaign'],
+    ['../qualify-installed-delivery-journey.ts', 'delivery', '--delivery-campaign']]) {
+    const entry = source(file);
+    assert(entry.includes(`assert.equal(mode, '${mode}')`));
+    const invocation = kind === 'verifier'
+      ? "await runInstalledNodeJourney(filename, 'verifier', npmDependencyArchive ? { npmDependencyArchive } : {})"
+      : "await runInstalledNodeJourney(filename, 'delivery')";
+    assert(entry.includes(invocation), 'each fixed consumer must call the same owner with only its exact closed options');
+    assert(!entry.includes('buildInstalledSupervisorPackage('));
+  }
+  assert.equal((shared.match(/await buildInstalledSupervisorPackage\(/gu) ?? []).length, 1);
+  assert.equal((shared.match(/const setup = await joinedFixtureCommand\(/gu) ?? []).length, 1);
+  assert.equal((shared.match(/await runOwnedEnrollDiagnostic\(/gu) ?? []).length, 1);
+  assert.equal((shared.match(/await scanCredentialSecretCorpus\(/gu) ?? []).length, 1);
+  for (const assertion of ["assert.equal(stopped.TimeoutStopUSec, '2s')", 'const enrollmentDeadline = delayedBootstrap ? 180_000 : 60_000;', 'originalDeadlineMs: enrollmentDeadline',
+    "'actual candidate/verifier/result did not reach terminal within its fixed 90-second qualification window'",
+    "'installed image handoff exceeded the original 30-second restart budget'"])
+    assert(shared.includes(assertion), 'original deadline/retirement assertion remains in the actual shared owner');
+  assert(!/INSTALLED_DELIVERY_COMPOSITION_COMPLETE|supportsInstalledDelivery\s*=|featureOverride/gu.test(shared));
+});
+
+test('the root harness chooses only the fixed Delivery entry', () => {
+  const shell = source('../qualify-systemd-user.sh');
+  assert(/--run-delivery-journey\)\s*probe_campaign_kind=run-journey;\s*probe_run_driver_mode=--delivery-campaign;\s*shift\s*;;/u.test(shell));
+  assert(shell.includes('readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"'));
+  assert(!/probe_run_driver=\$[12]/u.test(shell));
+});
+
+test('controlled delayed storage is a fixed free-VM qualification mode, never a production feature switch', () => {
+  const shell = source('../qualify-systemd-user.sh'), entry = source('../qualify-installed-delivery-journey.ts');
+  const fixture = source('./installed-node-journey.ts');
+  const workflow = source('../../../.github/workflows/kernel-foundation.yml');
+  assert(shell.includes('--run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;'));
+  assert(shell.includes('"$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms'));
+  assert(entry.includes("mode === '--delivery-delay-campaign'"));
+  assert(entry.includes("await runInstalledNodeJourney(filename, 'delivery', { publicationRetirementDiagnostics: true })"));
+  assert(fixture.includes('publicationRetirementDiagnostics: options.publicationRetirementDiagnostics'));
+  assert(fixture.includes('latePublicationResultQualified: false, preciseInFlightPublicationStopQualified: false'));
+  const controlled = workflow.slice(workflow.indexOf('\n  linux-installed-delivery-delayed-volume:'));
+  assert(controlled.startsWith('\n  linux-installed-delivery-delayed-volume:'));
+  assert(controlled.includes('runs-on: ubuntu-22.04')); assert(controlled.includes('timeout-minutes: 20'));
+  assert(controlled.includes('test "$RUNNER_ENVIRONMENT" = github-hosted'));
+  assert(controlled.includes('test "$RUNNER_OS" = Linux')); assert(controlled.includes('test "$RUNNER_ARCH" = X64'));
+  assert(controlled.includes('sudo /usr/sbin/modprobe dm_delay'));
+  assert(controlled.includes('sudo "$probe_node" --test --test-concurrency=1 --import tsx scripts/kernel/testing/installed-publication-crash-observer.test.ts'));
+  assert(controlled.includes('--delay-volume --run-delivery-delay-journey'));
+  assert(!/self-hosted|modprobe -r|dmsetup (?:remove_all|suspend|reload)|drop_caches/u.test(controlled));
+});
+
+test('Delivery keeps retained proof reads distinct from the actual public downloads and does not invent coverage', () => {
+  const shared = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
+  assert(shared.includes('readRetainedArtifact: readCas, downloadPublicArtifact: readPublicArtifact'));
+  assert(shared.includes("reason: supported ? 'not_yet_executed' : 'production_composition_not_advertised'"));
+  assert(shared.includes('qualified: false, attemptStarted: false, capabilityAdvertised: supported'));
+  const started = shared.indexOf("report.delivery = { ...report.delivery, attemptStarted: true, reason: 'in_progress' }");
+  assert(started >= 0 && started < shared.indexOf('report.delivery = await runInstalledDeliveryCases({'));
+  assert(!shared.includes('executed: false'), 'a failed in-progress campaign cannot assert that no effect executed');
+  assert(shared.includes('assertWorkerRetired(runId, launchId,'));
+  assert(delivery.includes('context.downloadPublicArtifact(result.deliveryTerminalProjectionEvidenceRef)'));
+  assert(delivery.includes('context.downloadPublicArtifact(entry.blobRef)'));
+  assert(delivery.includes('context.downloadPublicArtifact(ref)'));
+  assert(delivery.includes('for (const action of [context.reconnect, context.restart])'));
+  assert(delivery.includes('assert.deepEqual(await reads(entry.cut), entry.queries)'));
+  for (const field of ['interactiveApprovalQualified: false', 'preciseClaimedCloseCutQualified: false',
+    'allCrashCutsQualified: false', 'completeI1Qualified: false', 'completeI4Qualified: false',
+    'verifierReleaseBeforeCancelObserved: false', 'preciseInFlightVerifierCancelQualified: false']) assert(delivery.includes(field));
+  assert(delivery.includes("context.mark('delivery_cancel_after_observed_verifier_claim')"));
+  assert(!delivery.includes('delivery_cancel_real_inflight_verifier'));
+  assert(delivery.includes('cancellation: { request: cancellation, response: cancellationResponse }'));
+  assert(delivery.includes('await context.assertVerifierProcessesAbsent(identity)'));
+  assert(shared.includes('readOwnerHistory: async (observe?: (stage: InstalledOwnerHistoryReadStage) => void) => (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1000, observe)).owners'));
+  assert(!/new StateStore|\.transaction\(|new DatabaseSync|loadNativeStateOwner|process\.env/u.test(delivery));
+});
+
+test('source and Delivery reuse one complete verifier-retirement graph and independently observe process lifetimes', () => {
+  const sourceVerifier = source('./installed-verifier-result.ts'), delivery = source('./installed-delivery-result.ts');
+  const shared = source('./installed-verifier-evidence.ts'), fixture = source('./installed-node-journey.ts');
+  assert(sourceVerifier.includes('await assertInstalledVerifierRetirement('));
+  assert(delivery.includes('await assertInstalledVerifierRetirement('));
+  assert(delivery.includes('await assertInstalledDeliveryPublication({ cut, readRetainedArtifact: bytes, readOwnerHistory: input.readOwnerHistory,'));
+  for (const edge of ['launch.parentWorkerContainmentRef', 'retirement.snapshotEvidenceRef', 'retirement.parentRetirementEvidenceRef',
+    'retirement.deathEvidenceRef', 'retirement.containmentRef', 'snapshot.quiescenceEvidenceRef', 'validateMatchingWorkerDeath',
+    "role: 'namespace_init'", "role: 'monitor'", "role: 'subreaper'"]) assert(shared.includes(edge));
+  assert(fixture.includes('for (const retirement of proof.retirementIdentities) await assertVerifierProcessesAbsent(retirement)'));
+  assert(fixture.includes('assert.notEqual(await processStart(identity.pid), identity.startTicks)'));
+});
+
+test('Delivery connects the actual handoff seal to readonly SQL retirement and independent process checks', () => {
+  const result = source('./installed-delivery-result.ts'), delivery = source('./installed-delivery-journey.ts');
+  const fixture = source('./installed-node-journey.ts');
+  assert(result.includes('plan.forwardOperations.length ? deliveryPublicationTerminalCheckpointId(run.id, merged.deliveryPlanRef)'));
+  assert(result.includes('publicationWorkerRetirement: publication.publicationWorkerRetirement'));
+  assert.equal((delivery.match(/retirements\([^\n]*proof\.publicationWorkerRetirement\)/gu) ?? []).length, 2);
+  assert(delivery.includes('const { verifierRetirementIdentities, publicationWorkerRetirement, ...proof } = entry.proof'));
+  assert(fixture.includes('retirement: publicationRetirement'));
+  assert(fixture.includes('selected.launchIds.includes(publicationRetirement.launchId)'));
+});
+
+test('the cleanup crash is an additional strict physical subcase, never another source or a timing pause', () => {
+  const fixture = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts'),
+    observer = source('./publication-cleanup-crash-observer.c'), shell = source('../qualify-systemd-user.sh');
+  assert(delivery.includes('await context.cleanupCrash(first)'));
+  assert.equal((delivery.match(/await context.createSource\(/gu) ?? []).length, 5);
+  assert(fixture.includes('assert.equal(postCount, 10)')); assert(fixture.includes('assert.equal(originalPublicResultBytes.size, 10)'));
+  assert(fixture.includes('assert.equal(crash.originalReceiptCommitted, false'));
+  assert(fixture.includes('assert.deepEqual(crash.journal.slice(0, 2), claimed.journal)'));
+  assert(fixture.includes('joinedAt <= proof.probeStartedAt'));
+  assert(fixture.includes('await observer.close()')); assert(fixture.includes('originalReceiptCasObjectAbsenceQualified: false, rebootQualified: false'));
+  assert(shell.includes('readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"'));
+  const cleanup = observer.slice(observer.indexOf('int main(int argc, char **argv) {'));
+  const rollback = observer.slice(observer.indexOf('static int rollback_cut('), observer.indexOf('int main(int argc, char **argv) {'));
+  assert(cleanup.includes('if (rollback) return rollback_cut('));
+  assert.equal((cleanup.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
+  assert.equal((rollback.match(/SYS_pidfd_send_signal, process, SIGKILL/gu) ?? []).length, 1);
+  assert(observer.includes('IN_CREATE | IN_DELETE | IN_ONLYDIR')); assert(observer.includes('named.st_nlink != 0'));
+  assert(!/SIGSTOP|SIGCONT|ptrace\(|process\.kill\(|kill\(/u.test(observer));
+});
+
+test('cleanup after the normal restart joins only an inspection client that is still held', () => {
+  const fixture = source('./installed-node-journey.ts'), delivery = source('./installed-delivery-journey.ts');
+  const restart = fixture.slice(fixture.indexOf('restart: async () => {'), fixture.indexOf('cleanupCrash: async source => {'));
+  const crash = fixture.slice(fixture.indexOf('cleanupCrash: async source => {'));
+  assert(restart.includes('await inspectionClient!.close(); inspectionClient = undefined'));
+  assert(delivery.indexOf('for (const action of [context.reconnect, context.restart])') < delivery.indexOf('await context.cleanupCrash(first)'));
+  assert(crash.includes('await inspectionClient?.close(); inspectionClient = undefined;'),
+    'the normal restart already joined and cleared the original inspection consumer');
+  assert(!crash.includes('inspectionClient!.close()'));
+  assert(!crash.includes('inspectionClient = await persistentClient()'), 'the cut must not open an unnecessary second authenticated consumer');
+});
+
+// Execute the actual observation loop with inert response data. This checks
+// fixture scheduling/deadlines only, never creates installed Run authority.
+function sourceObservationLoop() {
+  const text = source('./installed-node-journey.ts');
+  const start = text.indexOf('      let cut: Record<string, any>;');
+  const end = text.indexOf("      const sessionCut = await send(", start);
+  assert(start >= 0 && end > start);
+  const body = ts.transpileModule(text.slice(start, end) + '\nreturn cut;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText;
+  return Function('assert', 'Date', 'performance', 'send', 'delay', 'sourceKind', 'by', 'report', 'bindings',
+    `return (async () => {
+      const admitted = {id: 'inert-run'}, responderFailure = undefined, toolsCase = bindings?.toolsCase ?? false;
+      const {stoppedTools = false, readParentSupervisor, inspectInstalledWorkerIdentity,
+        InstalledWorkerIdentityObservationSupersededError, fixtureProcess, recipe, ledger} = bindings ?? {};
+      let readParent, readParentAttempts = 0, readParentSuperseded = 0;
+      const activeCases = new Map([[sourceKind, {posts: 1}]]);
+      const projectInstalledRunProgress = input => ({status: input.cut.snapshot.run.status});
+      ${body}
+    })();`);
+}
+
+test('ordinary completion observation yields in proportion to its actual read without changing precise probe cadence', async () => {
+  for (const [kind, readMs, expected] of [['ordinary_tools', 1000, 2000], ['ordinary_tools', 10, 250],
+    ['ordinary_tools', 3000, 5000], ['ordinary_git', 1000, 2000], ['required_pass', 1000, 2000],
+    ['required_repair', 1000, 2000], ['advisory_failure', 1000, 2000], ['required_timeout', 1000, 2000],
+    ['ordinary_tools_restart', 1000, 50], ['ordinary_tools_cancel', 1000, 50]]) {
+    let now = 0, reads = 0; const pauses = [], report = {};
+    await sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+      now += readMs; return {snapshot: {run: {status: ++reads === 2 ? 'succeeded' : 'running'}}};
+    }, async ms => { pauses.push(ms); now += ms; }, kind, 90000, report);
+    assert.deepEqual(pauses, [expected], kind);
+    assert.deepEqual(report.sourceObservationWork, {diagnosticOnly: true, caseKind: kind, observations: 2,
+      readMs: readMs * 2, yieldMs: expected, elapsedMs: readMs * 2 + expected, deadlineMs: 90000});
+    assert.equal(reads, 2);
+  }
+});
+
+for (const kind of ['ordinary_tools', 'ordinary_git', 'required_pass', 'required_repair', 'advisory_failure', 'required_timeout'])
+test(`${kind}: a late terminal response fails the original source-case deadline and retains its actual cut`, async () => {
+  const report = {}; let now = 89999;
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now = 90000; return {snapshot: {run: {status: 'succeeded'}}};
+  }, async () => assert.fail('a late result cannot schedule another observation'), kind, 90000, report),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.deepEqual(report.runProgressAtTerminalDeadline, {status: 'succeeded'});
+});
+
+// The observer yields only the remaining time; it cannot mint another budget.
+test('ordinary completion yield remains clipped to the original deadline', async () => {
+  let now = 0, reads = 0; const pauses = [], report = {};
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now += 1000; reads++; return {snapshot: {run: {status: 'running'}}};
+  }, async ms => {pauses.push(ms); now += ms;}, 'ordinary_git', 1500, report),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.deepEqual(pauses, [500]); assert.equal(reads, 2);
+  assert.equal(report.sourceObservationWork.yieldMs, 500);
+  assert.equal(report.sourceObservationWork.readMs, 2000);
+});
+
+
+function identityObservationBindings(inspect) {
+  class Superseded extends Error {}
+  return { toolsCase: true, readParentSupervisor: {supervisorInstanceId: 'original-owner'},
+    InstalledWorkerIdentityObservationSupersededError: Superseded,
+    inspectInstalledWorkerIdentity: (root, expected) => inspect(root, expected, Superseded),
+    fixtureProcess: async () => '500', recipe: {stateRoot: 'inert-root'}, ledger: {uid: 123} };
+}
+function identityObservationCut(revision, status = 'running') {
+  return {snapshot: {run: {status, id: 'inert-run', revision, activeWorkerLaunchId: 'original-launch',
+    leaseEpoch: 1, deadlineAt: 'inert-deadline'}}, journal: Array.from({length: 2}, () => ({opKind: 'tool', phase: 'completed'}))};
+}
+
+test('the actual polling loop refuses superseded identity data and obtains a fresh exact public cut', async () => {
+  let now = 0, reads = 0; const revisions = [], report = {}, pauses = [];
+  const bindings = identityObservationBindings((_root, expected, Superseded) => {
+    revisions.push(expected.runRevision); assert.equal(expected.supervisorInstanceId, 'original-owner');
+    if (revisions.length === 1) throw new Superseded();
+    return {pid: 123, processStartToken: 'linux-proc-start-ticks:500'};
+  });
+  await sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async frame => {
+    assert.equal(frame.method, 'run.get', 'no intervening authenticated status request ages this cut');
+    now += 100; return identityObservationCut(++reads, reads === 3 ? 'succeeded' : 'running');
+  }, async ms => {now += ms; pauses.push(ms);}, 'ordinary_tools', 90000, report, bindings);
+  assert.deepEqual(revisions, [1, 2]); assert.deepEqual(pauses, [250, 250]);
+  assert.deepEqual(report.readParentObservation, {diagnosticOnly: true, attempts: 2, superseded: 1});
+});
+
+test('identity corruption and lookalike stale errors still stop the original polling loop', async () => {
+  for (const name of ['Error', 'InstalledWorkerIdentityObservationSupersededError']) {
+    const failure = new Error('fixed refusal'); failure.name = name;
+    const bindings = identityObservationBindings(() => {throw failure;});
+    let reads = 0;
+    await assert.rejects(sourceObservationLoop()(assert, {now: () => 0}, {now: () => 0}, async () => {
+      reads++; return identityObservationCut(1);
+    }, async () => assert.fail('invalid evidence cannot request another observation'), 'ordinary_tools', 90000, {}, bindings), error => error === failure);
+    assert.equal(reads, 1);
+  }
+});
+
+test('superseded identity observations cannot extend the original terminal deadline', async () => {
+  let now = 0, reads = 0; const report = {};
+  const bindings = identityObservationBindings((_root, _expected, Superseded) => {throw new Superseded();});
+  await assert.rejects(sourceObservationLoop()(assert, {now: () => now}, {now: () => now}, async () => {
+    now += 1000; return identityObservationCut(++reads);
+  }, async ms => {now += ms;}, 'ordinary_tools', 1500, report, bindings),
+  error => error.code === 'ERR_ASSERTION' && error.message.includes('fixed 90-second qualification window'));
+  assert.equal(reads, 2); assert.equal(report.readParentObservation.attempts, 1);
+  assert.equal(report.sourceObservationWork.yieldMs, 500);
+});

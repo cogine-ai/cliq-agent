@@ -1,13 +1,26 @@
 // Private installed ABI. Only the held, signed provider-adapter image creates
 // these handles; a structural value is not a release or retirement proof.
 import type { SecretServiceObservation, SecretServiceSelector } from './credential-platform.js';
+import type { NativeLocalInferencePeer } from './local-inference-native.js';
 import { KernelStorageError } from './errors.js';
 
 /** Fixed diagnosis from the actual installed native adapter, never authority,
  * a transport outcome proof, remote text, or permission to refund/retry. */
+export const MODEL_BROKER_REFUSAL_REASONS = Object.freeze(['broker_response_refused', 'broker_tls_refused',
+  'broker_transport_interrupted', 'broker_cancelled_or_expired', 'broker_release_fenced',
+  'broker_worker_unavailable', 'credential_redemption_refused', 'broker_operation_refused'] as const);
+export type ModelBrokerRefusalReason = typeof MODEL_BROKER_REFUSAL_REASONS[number];
+export function modelBrokerRefusalReason(value: unknown): ModelBrokerRefusalReason | undefined {
+  return typeof value === 'string' && (MODEL_BROKER_REFUSAL_REASONS as readonly string[]).includes(value)
+    ? value as ModelBrokerRefusalReason : undefined;
+}
 export class InstalledModelBrokerRefusalError extends KernelStorageError {
-  readonly reason = 'broker_response_refused' as const;
-  constructor() { super('RECOVERY_REQUIRED', 'installed model broker refused the response'); }
+  constructor(readonly reason: ModelBrokerRefusalReason = 'broker_response_refused') {
+    super('RECOVERY_REQUIRED', 'installed model broker refused an operation');
+  }
+}
+export class InstalledLocalModelNotListeningError extends KernelStorageError {
+  constructor() { super('RECOVERY_REQUIRED', 'the original private local inference listener is not ready'); }
 }
 
 export const MODEL_BROKER_ENTRY_ID = 'openai-compatible-broker-v1';
@@ -44,10 +57,24 @@ export type NativeModelTransport = Readonly<{
 }>;
 export type NativeModelBrokerBinding = Readonly<{
   interfaceVersion: 3;
+  localModelInterfaceVersion?: 1;
+  prepareLocalModelTransport?(input: NativeLocalModelRequest): NativeModelTransport;
+  prepareLocalHealthTransport?(input: NativeLocalHealthRequest): NativeLocalHealthTransport;
   prepareModelTransport(input: Readonly<{
     provider: 'openai-compatible'; selector: SecretServiceSelector; expectedObservation: SecretServiceObservation;
     target: Readonly<{ hostAscii: string; port: number; basePath: string; serverNameAscii: string; spkiSha256Pins: readonly string[] }>;
     trustStoreBytes: Buffer; trustStoreDigest: string; requestPath: '/chat/completions';
     bodyBytes: Buffer; bodyBytesDigest: string;
   }>): NativeModelTransport;
+}>;
+export type NativeLocalModelRequest = Readonly<{
+  provider: 'ollama'; peer: NativeLocalInferencePeer; bodyBytes: Buffer; bodyBytesDigest: string;
+}>;
+export type NativeLocalHealthRequest = Readonly<{ provider: 'ollama'; peer: NativeLocalInferencePeer }> & (
+  Readonly<{ requestKind: 'version' }> |
+  Readonly<{ requestKind: 'model_show'; bodyBytes: Buffer; bodyBytesDigest: string }>
+);
+export type NativeLocalHealthTransport = Readonly<{
+  result: ReturnType<NativeModelTransport['releaseBody']>;
+  close(): Promise<ModelBrokerClosed>;
 }>;

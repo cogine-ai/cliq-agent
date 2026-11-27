@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import type { ProviderName } from '../kernel/types.js';
 import type { AgentNegotiatedMode } from '../protocol/agent-ir.js';
 import { MODEL_RESPONSE_LIMIT_BYTES } from './attempt.js';
-import { observeProviderResponse, type ObserveProviderResponseInput } from './provider-observation.js';
+import { createProviderResponseObserver, observeProviderResponse, type ObserveProviderResponseInput } from './provider-observation.js';
 
 const OBSERVED_AT = '2026-09-05T00:00:00.000Z';
 
@@ -147,6 +147,72 @@ test('OpenAI-family JSON preserves valid values and exact malformed argument fra
     encoding: 'utf8_json_fragment',
     utf8: '{bad'
   });
+});
+
+test('compatible reasoning preserves JSON presence and does not migrate other Chat adapters', () => {
+  for (const value of ['raw\r\n组合e\u0301🧠', '', null, undefined]) {
+    const message = { content: 'done', ...(value === undefined ? {} : { reasoning_content: value }) };
+    for (const provider of ['openai-compatible', 'openrouter', 'zhipu'] as const) {
+      const result = observe(provider, { model: 'model-1', choices: [{ index: 0, finish_reason: 'stop', message }] });
+      assert.equal(result.observation.kind, 'decoded');
+      if (result.observation.kind !== 'decoded') continue;
+      assert.deepEqual(result.observation.continuation, provider === 'openai-compatible' && value !== undefined
+        ? { provider, model: 'model-1', items: [{ type: 'reasoning_content', reasoning_content: value }] } : undefined);
+    }
+  }
+});
+
+test('compatible SSE retains raw reasoning through single-byte UTF-8 boundaries, not partial terminals', () => {
+  const head = { provider: 'openai-compatible' as const, model: 'model-1', negotiatedMode: 'native-tools' as const,
+    status: 200, mediaType: 'text/event-stream' };
+  const event = (delta: unknown, finish_reason: string | null = null) =>
+    `data: ${JSON.stringify({ model: 'model-1', choices: [{ index: 0, delta, finish_reason }] })}\r\n\r\n`;
+  for (const fragments of [[], ['思🧠\r\n', 'e\u0301'], [''], [null], [null, 'x', null]]) {
+    const wire = Buffer.from(fragments.map(reasoning_content => event({ reasoning_content })).join('') +
+      event({ content: 'done' }, 'stop') + 'data: [DONE]\r\n\r\n');
+    const reader = createProviderResponseObserver(head);
+    for (const byte of wire) reader.push(Uint8Array.of(byte));
+    const result = reader.finish(OBSERVED_AT);
+    assert.equal(result.observation.kind, 'decoded');
+    if (result.observation.kind !== 'decoded') continue;
+    const expected = fragments.every(value => value === null) ? null : fragments.filter(value => value !== null).join('');
+    assert.deepEqual(result.observation.continuation, fragments.length === 0 ? undefined : {
+      provider: head.provider, model: head.model,
+      items: [{ type: 'reasoning_content', reasoning_content: expected }] });
+  }
+  for (const suffix of ['', 'data: [DONE]\n\n']) {
+    const wire = Buffer.from(event({ reasoning_content: 'incomplete' }) + suffix);
+    const reader = createProviderResponseObserver(head); reader.push(wire);
+    assert.equal(reader.finish(OBSERVED_AT).observation.kind, 'malformed');
+    const cancelled = createProviderResponseObserver(head); cancelled.push(wire);
+    const result = cancelled.finish(OBSERVED_AT, true);
+    assert.equal(result.observation.kind, 'decoded');
+    if (result.observation.kind === 'decoded') {
+      assert.equal(result.observation.stopReason, 'cancelled');
+      assert.equal(result.observation.continuation, undefined);
+      assert.deepEqual(result.observation.toolCalls, []);
+    }
+  }
+});
+
+test('compatible reasoning remains subject to response bytes and strict aggregate/depth JSON bounds', () => {
+  const base = { model: 'model-1', choices: [{ index: 0, finish_reason: 'stop',
+    message: { content: 'done', reasoning_content: 'trace' } }] };
+  const raw = JSON.stringify(base);
+  assert.equal(observe('openai-compatible', raw + ' '.repeat(MODEL_RESPONSE_LIMIT_BYTES - Buffer.byteLength(raw))).observation.kind, 'decoded');
+  assert.equal(observe('openai-compatible', raw + ' '.repeat(MODEL_RESPONSE_LIMIT_BYTES + 1 - Buffer.byteLength(raw))).observation.kind, 'prefix_over_limit');
+  for (const [count, kind] of [[9991, 'decoded'], [9992, 'malformed']] as const)
+    assert.equal(observe('openai-compatible', { ...base, padding: Array.from({ length: count }, () => null) }).observation.kind, kind);
+  for (const [depth, kind] of [[31, 'decoded'], [32, 'malformed']] as const) {
+    let padding: unknown = null;
+    for (let index = 0; index < depth; index++) padding = [padding];
+    assert.equal(observe('openai-compatible', { ...base, padding }).observation.kind, kind);
+  }
+  for (const value of [0, false, {}, [], { type: 'reasoning_content', reasoning_content: 'x' }]) {
+    const invalid = structuredClone(base); Object.assign(invalid.choices[0]!.message, { reasoning_content: value });
+    assert.equal(observe('openai-compatible', invalid).observation.kind, 'malformed');
+  }
+  assert.equal(observe('openai-compatible', { ...base, model: 'another-model' }).observation.kind, 'capability_shape_mismatch');
 });
 
 test('OpenAI streaming reconstructs three interleaved calls without reordering fragments', () => {

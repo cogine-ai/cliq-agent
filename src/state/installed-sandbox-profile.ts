@@ -2,14 +2,8 @@ import { digestOmitting } from '../kernel/identity.js';
 import type { SandboxProfileV1, SandboxResourceSpec } from '../kernel/execution.js';
 import { immutableSnapshot } from '../model/immutable.js';
 import { decodeSandboxProfile } from './execution-closure.js';
-
-// Resource defaults are data, not the signed empty-root filesystem recipe or
-// a Workspace Trust / tool permission decision.
-export const DEFAULT_SANDBOX_RESOURCES: Readonly<SandboxResourceSpec> = Object.freeze({
-  maxProcesses: 256, memoryBytes: 4 * 1024 ** 3, cpuQuotaMicrosPerSecond: 400_000,
-  maxOpenFiles: 1024, maxSingleFileBytes: 256 * 1024 ** 2, maxGenerationBytes: 20 * 1024 ** 3,
-  maxInvocationOutputBytes: 16 * 1024 ** 2, maxIpcFrameBytes: 16 * 1024 ** 2, maxQueuedIpcBytes: 64 * 1024 ** 2,
-});
+import { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
+export { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
 
 /** Fixed installed recipe. Public input can select only already-normalized
  * bounded resources, never filesystem/network/credential/environment flags. */

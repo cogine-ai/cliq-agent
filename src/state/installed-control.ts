@@ -1,111 +1,42 @@
 import { randomUUID } from 'node:crypto';
-import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { CONTROL_FRAME_BYTES as FRAME_BYTES, CONTROL_METHODS_V1 as METHODS, INSTALLED_CONTROL_FEATURES, decodeControlHelloRequest as hello,
+  decodeControlFrame, decodeInstalledControlRequest, type ControlRangeV1 as Range, type ControlMethodV1,
+  type InstalledControlErrorV1, type InstalledControlResponseV1, type InstalledMigrationProgressV1,
+  type InstalledMigrationRequestV1 } from '../kernel/control-wire.js';
+export type { RuntimeBundlePublicSummaryV1, SupervisorHelloV1, SupervisorStatusV1,
+  ControlMethodV1, InstalledControlResultV1, InstalledControlErrorV1, InstalledControlResponseV1 } from '../kernel/control-wire.js';
 import { normalizeBoundedText, sha256Bytes } from '../kernel/identity.js';
-import { parseJsonStrict } from '../kernel/json.js';
-import type { RunSnapshotV1, SessionSnapshotV1, ControlResultV1 } from '../kernel/types.js';
-import type { LocalControlConnection } from './control-channel.js';
-import { EventCursorExpiredError, type ReadControlRequest, type ReadControlResult } from './control-read.js';
-import { CredentialFinalizationTimeError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
+import type { AuthenticatedControlIdentity, LocalControlConnection } from './control-channel.js';
+import { EventCursorExpiredError, ResultUnavailableError, type ReadControlRequest } from './control-read.js';
+import { CredentialFinalizationTimeError, InstalledMigrationQuiescenceError, InstalledModelAuthorizationError, KernelStorageError, ResourceRetirementError, RunTerminalError } from './errors.js';
 import type { StateStore } from './store.js';
-import type { CredentialAuthorityOperationV1 } from '../kernel/credential-authority.js';
 import type { CredentialFinalizeRequest } from './installed-credential-client.js';
 import { InstalledRunAuthorityError } from './installed-run.js';
 import { InstalledRunCapacityError } from './installed-run-capacity.js';
 import { CredentialScopeBusyError } from './installed-runtime.js';
-
-export type RuntimeBundlePublicSummaryV1 = Readonly<{
-  schemaVersion: 1;
-  runtimeBundleRef: string;
-  bundleDigest: string;
-  bundleVersion: string;
-}>;
-
-export type SupervisorHelloV1 = Readonly<{
-  supervisorInstanceId: string;
-  activeRuntimeBundle: RuntimeBundlePublicSummaryV1;
-  headlessSchemaRange: Readonly<{ min: number; max: number }>;
-}>;
-
-export type SupervisorStatusV1 = Readonly<{
-  method: 'supervisor.status';
-  health: 'starting' | 'ready' | 'draining' | 'degraded';
-  supervisorInstanceId: string;
-  queue: Readonly<{ queuedRuns: number; runningRuns: number; capacity: number }>;
-  stateSchemaVersion: number;
-  activeRuntimeBundle: RuntimeBundlePublicSummaryV1;
-  installedRuntimeBundles: readonly RuntimeBundlePublicSummaryV1[];
-  incompatiblePinnedRunCount: number;
-}>;
+import { VerifierAuthorizationError, McpStdioAuthorizationError } from './authorization-artifacts.js';
+import { ListCursorError, ListCutCapacityError, ListCutBusyError } from './list-read-cut.js';
+import { sessionContextRequestLimitRefusal } from './session-context-limit.js';
 
 export type InstalledControlService = Readonly<{ close(): Promise<void> }>;
-
-const METHODS = ['control.hello', 'session.create', 'session.list', 'session.get', 'session.fork',
-  'session.compact', 'session.handoff.create', 'run.submit', 'run.list', 'run.get', 'run.attach',
-  'run.cancel', 'run.approve', 'run.input', 'run.reconcile', 'run.diff', 'run.result', 'run.apply',
-  'authorization.create', 'authorization.list', 'authorization.revoke', 'mcp.register',
-  'mcp.refresh', 'mcp.list', 'artifact.get', 'supervisor.status', 'credential.finalize'] as const;
-export type ControlMethodV1 = typeof METHODS[number];
-type Range = { min: number; max: number };
-type HelloRequest = { protocolVersion: 1; method: 'control.hello'; clientBuild: string;
-  controlSchemaRange: Range; headlessSchemaRange: Range; requestedFeatureIds: string[] };
-export type InstalledControlResultV1 = ReadControlResult | Extract<ControlResultV1, { method: 'session.create' | 'run.submit' | 'run.cancel' }> |
-  SupervisorStatusV1 | { method: 'credential.finalize'; operation: CredentialAuthorityOperationV1 } | (SupervisorHelloV1 & {
-  method: 'control.hello'; protocolVersion: 1; serverBuild: string;
-  controlSchemaRange: { min: 1; max: 1 }; enabledFeatureIds: string[];
-});
-type ErrorBase = { schemaVersion: 1; messageCode: string };
-type InvalidError = ErrorBase & { code: 'INVALID_REQUEST'; retryable: false;
-  issues: Array<{ path: string; issueCode: string }> };
-export type InstalledControlErrorV1 = InvalidError
-  | InstalledRunCapacityError['controlError']
-  | CredentialScopeBusyError['controlError']
-  | (ErrorBase & { code: 'INCOMPATIBLE_PROTOCOL'; retryable: false;
-      supportedControlRange: { min: 1; max: 1 }; supportedHeadlessRange: Range;
-      upgradeAction: 'upgrade_client' | 'upgrade_supervisor' })
-  | (ErrorBase & { code: 'EVENT_CURSOR_EXPIRED'; retryable: false;
-      earliestEventSeq: number; latestEventSeq: number; snapshot: RunSnapshotV1 })
-  | (ErrorBase & { code: 'INTERNAL'; retryable: false; errorId: string })
-  | (ErrorBase & { code: 'REVISION_CONFLICT'; retryable: true; currentRevision: number;
-      conflict: { resourceKind: 'session'; currentSnapshot: SessionSnapshotV1 } | { resourceKind: 'run'; currentSnapshot: RunSnapshotV1 } })
-  | (ErrorBase & { code: 'NOT_FOUND' | 'AUTHORIZATION_REQUIRED' | 'ARTIFACT_MISMATCH' | 'UNSUPPORTED_PLATFORM' |
-      'REQUEST_ID_CONFLICT' | 'ADMISSION_KEY_CONFLICT' | 'MODEL_COST_UNKNOWN' | 'BUDGET_EXHAUSTED' | 'CANCEL_REQUESTED' | 'RUN_TERMINAL'; retryable: false });
-export type InstalledControlResponseV1 =
-  | { protocolVersion: 1; ok: true; result: InstalledControlResultV1 }
-  | { protocolVersion: 1; ok: false; method: ControlMethodV1; error: InstalledControlErrorV1 }
-  | { protocolVersion: 1; ok: false; rejectedMethodDigest: string; error: InvalidError };
-
-const FRAME_BYTES = 1024 * 1024;
+type InvalidError = Extract<InstalledControlErrorV1, { code: 'INVALID_REQUEST' }>;
 const MAX_OUTSTANDING = 64;
 // All owned partial/request/response bodies share this budget. Each connection
 // has four-byte input/output headers; Store metadata is separately bounded.
 const BUFFER_BYTES = (MAX_OUTSTANDING + 1) * FRAME_BYTES;
-const FEATURES = ['session.get', 'run.get', 'run.attach', 'supervisor.status', 'credential.finalize', 'session.create', 'run.submit', 'run.cancel'];
-const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel'];
+const FEATURES: readonly string[] = INSTALLED_CONTROL_FEATURES;
+const RUN_FEATURES = ['session.create', 'run.submit', 'run.cancel', 'run.approve', 'run.input'];
+const DELIVERY_FEATURES = ['run.apply', 'run.reconcile'];
+const SESSION_FEATURES = ['session.list', 'session.fork', 'session.compact', 'session.handoff.create'];
+const LIST_FEATURES = ['run.list', 'authorization.list'];
+const MCP_FEATURES = ['mcp.register', 'mcp.refresh', 'mcp.list'];
+const MIGRATION_FEATURES = ['state.migrate', 'state.rollback'];
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 function text(value: unknown): string {
   if (typeof value !== 'string' || normalizeBoundedText(value, 1, 128) !== value) throw new TypeError('invalid bounded text');
   return value;
-}
-function exact(value: Record<string, unknown>, keys: readonly string[]): void {
-  if (Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) throw new TypeError('unknown or missing field');
-}
-function range(value: unknown): Range {
-  if (!record(value)) throw new TypeError('invalid schema range');
-  exact(value, ['min', 'max']);
-  if (!Number.isSafeInteger(value.min) || !Number.isSafeInteger(value.max) ||
-      (value.min as number) < 1 || (value.max as number) < (value.min as number)) throw new TypeError('invalid schema range');
-  return { min: value.min as number, max: value.max as number };
-}
-function hello(value: Record<string, unknown>): HelloRequest {
-  exact(value, ['protocolVersion', 'method', 'clientBuild', 'controlSchemaRange', 'headlessSchemaRange', 'requestedFeatureIds']);
-  if (value.protocolVersion !== 1 || !Array.isArray(value.requestedFeatureIds) || value.requestedFeatureIds.length > 64) {
-    throw new TypeError('invalid hello');
-  }
-  const featureIds = value.requestedFeatureIds.map(text);
-  if (new Set(featureIds).size !== featureIds.length) throw new TypeError('duplicate requested feature');
-  return { protocolVersion: 1, method: 'control.hello', clientBuild: text(value.clientBuild),
-    controlSchemaRange: range(value.controlSchemaRange), headlessSchemaRange: range(value.headlessSchemaRange), requestedFeatureIds: featureIds };
 }
 const invalid = (): InvalidError => ({ schemaVersion: 1, code: 'INVALID_REQUEST', retryable: false,
   messageCode: 'control.invalid_request', issues: [{ path: 'request', issueCode: 'invalid_request' }] });
@@ -126,7 +57,7 @@ let controlRetirementFailure: ResourceRetirementError | undefined;
 /** Bounded v1 native UDS service. Installed composition alone advertises the
  * fixed Run recipe; authenticated channels never supply principal authority. */
 export function openInstalledControl(store: StateStore,
-  options: Readonly<{ serverBuild: string }>, onError: (error: Error) => void): InstalledControlService {
+  options: Readonly<{ serverBuild: string; onRollbackComplete?: () => void }>, onError: (error: Error) => void): InstalledControlService {
   if (controlRetirementFailure) throw controlRetirementFailure;
   const serverBuild = text(options.serverBuild);
   if (typeof onError !== 'function') throw new TypeError('control service requires an error reporter');
@@ -137,9 +68,22 @@ export function openInstalledControl(store: StateStore,
   let closing: Promise<void> | undefined;
   let stopped = false;
   let retirementFailure: ResourceRetirementError | undefined;
+  let rollbackReply: Connection | undefined;
+  let rollbackReplyTimer: ReturnType<typeof setTimeout> | undefined;
+  let rollbackExitQueued = false;
   const report = (error: unknown) => {
     try { onError(error instanceof Error ? error : new Error('control service failed', { cause: error })); }
     catch { /* A consumer reporter cannot escape a socket/native callback. */ }
+  };
+  const finishRollbackReply = () => {
+    clearTimeout(rollbackReplyTimer);
+    rollbackReplyTimer = undefined;
+    if (closing || rollbackExitQueued) return;
+    rollbackExitQueued = true;
+    stopped = true;
+    queueMicrotask(() => {
+      try { options.onRollbackComplete?.(); } catch (error) { report(error); }
+    });
   };
   const retire = (connection: Connection) => {
     if (connection.closed) return;
@@ -162,8 +106,11 @@ export function openInstalledControl(store: StateStore,
       // retrying consumed native descriptors or calling retirement successful.
       if (!connection.channel.socket.destroyed) connection.channel.socket.destroy();
     }
+    if (connection === rollbackReply) finishRollbackReply();
   };
   const errorResult = (error: unknown, credential = false): InstalledControlErrorV1 => {
+    if (error instanceof ListCursorError || error instanceof ListCutCapacityError || error instanceof ListCutBusyError) return error.controlError;
+    if (error instanceof ResultUnavailableError) return error.controlError;
     if (error instanceof ResourceRetirementError) {
       retirementFailure ??= error;
       controlRetirementFailure ??= error;
@@ -174,6 +121,10 @@ export function openInstalledControl(store: StateStore,
       latestEventSeq: error.latestEventSeq, snapshot: error.snapshot };
     if (error instanceof RunTerminalError) return { schemaVersion: 1, code: 'RUN_TERMINAL', retryable: false,
       messageCode: 'control.run_terminal' };
+    if (error instanceof VerifierAuthorizationError) return { schemaVersion: 1, code: error.refusalCode, retryable: false,
+      messageCode: 'authorization.verifier_identity_refused' };
+    if (error instanceof McpStdioAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false,
+      messageCode: 'authorization.mcp_stdio_identity_refused' };
     if (error instanceof InstalledModelAuthorizationError) return { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
       retryable: false, messageCode: 'run.model_authority_refused' };
     if (error instanceof InstalledRunAuthorityError) return { schemaVersion: 1,
@@ -200,12 +151,70 @@ export function openInstalledControl(store: StateStore,
     report(error);
     return { schemaVersion: 1, code: 'INTERNAL', retryable: false, messageCode: 'control.internal', errorId: randomUUID() };
   };
+  const writeFrame = async (connection: Connection, value: InstalledControlResponseV1 | InstalledMigrationProgressV1): Promise<void> => {
+    if (controlRetirementFailure) throw controlRetirementFailure;
+    if (connection.closed || stopped) return;
+    const body = canonicalJsonBytes(value);
+    if (body.byteLength > FRAME_BYTES || reservedBytes + body.byteLength > BUFFER_BYTES) throw new Error('control response exceeds the wire bound');
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.byteLength);
+    reservedBytes += body.byteLength;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let remaining = 2;
+        let failure: unknown;
+        const done = (error?: Error | null) => {
+          failure ??= error ?? undefined;
+          if (--remaining === 0) failure ? reject(failure) : resolve();
+        };
+        // Join both original writes even if socket destruction fails one first.
+        for (const bytes of [header, body]) {
+          try { connection.channel.socket.write(bytes, done); }
+          catch (error) { done(error instanceof Error ? error : new Error('control write failed', { cause: error })); }
+        }
+      });
+    } finally { reservedBytes -= body.byteLength; }
+  };
+  const migrate = async (connection: Connection, request: InstalledMigrationRequestV1,
+    identity: AuthenticatedControlIdentity): Promise<InstalledControlResponseV1> => {
+    const operation = request.method === 'state.migrate'
+      ? store.migrateInstalledLegacy(request, identity).then(result => result.response)
+      : store.rollbackInstalledKernel(request, identity).then(receipt => ({
+        method: 'state.rollback' as const, requestId: request.requestId, receiptRef: canonicalSha256(receipt), receipt
+      }));
+    let progressSequence = 0;
+    let writing: Promise<void> | undefined;
+    const pulse = () => {
+      if (writing || connection.closed || stopped) return;
+      const next = async () => {
+        store.assertInstalledMigrationProgress(identity);
+        await writeFrame(connection, { protocolVersion: 1, method: request.method, requestId: request.requestId,
+          progressSequence: ++progressSequence });
+      };
+      writing = next().catch(error => {
+        if (!connection.closed && !stopped) { report(error); retire(connection); }
+      }).finally(() => { writing = undefined; });
+    };
+    const timer = setInterval(pulse, 10_000);
+    pulse();
+    try {
+      const result = await operation;
+      if (request.method === 'state.rollback') {
+        rollbackReply = connection;
+        if (connection.closed) finishRollbackReply();
+        else rollbackReplyTimer = setTimeout(() => { retire(connection); }, 30_000);
+      }
+      return { protocolVersion: 1, ok: true, result };
+    } finally {
+      clearInterval(timer);
+      await writing;
+    }
+  };
   const respond = async (pending: Pending): Promise<void> => {
     if (controlRetirementFailure) throw controlRetirementFailure;
     const connection = pending.connection;
-    const source = new TextDecoder('utf-8', { fatal: true }).decode(pending.body);
-    const request = parseJsonStrict(source);
-    if (!record(request) || !pending.body.equals(canonicalJsonBytes(request))) throw new TypeError('noncanonical application frame');
+    const request = decodeControlFrame(pending.body);
+    if (!record(request)) throw new TypeError('control application frame requires a record');
     const method = text(request.method);
     const response = await connection.channel.dispatch(async identity => {
       if (!METHODS.includes(method as ControlMethodV1)) return { protocolVersion: 1, ok: false,
@@ -223,30 +232,64 @@ export function openInstalledControl(store: StateStore,
           return { protocolVersion: 1, ok: true, result: { ...observed, method: 'control.hello', protocolVersion: 1,
             serverBuild, controlSchemaRange: { min: 1, max: 1 }, enabledFeatureIds: candidate.requestedFeatureIds.filter(feature =>
               FEATURES.includes(feature) && (feature !== 'credential.finalize' || store.supportsCredentialFinalization()) &&
+              (!SESSION_FEATURES.includes(feature) || store.supportsSessionContinuity()) &&
+              (!LIST_FEATURES.includes(feature) || store.supportsSessionContinuity()) &&
+              (!DELIVERY_FEATURES.includes(feature) || store.supportsInstalledDelivery()) &&
+              (!MCP_FEATURES.includes(feature) || store.supportsInstalledMcp()) &&
+              (!MIGRATION_FEATURES.includes(feature) || (options.onRollbackComplete !== undefined && store.supportsInstalledMigration())) &&
               (!RUN_FEATURES.includes(feature) || store.supportsInstalledRuns())) }
           } satisfies InstalledControlResponseV1;
         }
         if (!connection.handshaken) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.hello_required' } } satisfies InstalledControlResponseV1;
         if (request.protocolVersion !== 1) throw new TypeError('protocol version must be 1');
+        if (SESSION_FEATURES.includes(method) && !store.supportsSessionContinuity()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (LIST_FEATURES.includes(method) && !store.supportsSessionContinuity()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
         if (RUN_FEATURES.includes(method) && !store.supportsInstalledRuns()) return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (DELIVERY_FEATURES.includes(method) && !store.supportsInstalledDelivery()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (MCP_FEATURES.includes(method) && !store.supportsInstalledMcp()) return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+        if (method === 'state.migrate' || method === 'state.rollback') {
+          if (!options.onRollbackComplete || !store.supportsInstalledMigration()) return { protocolVersion: 1, ok: false, method,
+            error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
+          const migration = decodeInstalledControlRequest(request);
+          if (migration.method !== method) throw new TypeError('invalid installed migration method');
+          return await migrate(connection, migration, identity);
+        }
+        if (method === 'mcp.register' || method === 'mcp.refresh') return await store.mutateMcpRegistration(decodeInstalledControlRequest(request) as import('../kernel/mcp.js').McpMutationRequestV1, identity);
+        if (method === 'mcp.list') return await store.listMcpRegistrations(decodeInstalledControlRequest(request) as import('../kernel/control-wire.js').McpListRequestV1, identity);
         if (method === 'session.create') return (await store.createInstalledSession(request, identity)).response;
+        if (SESSION_FEATURES.includes(method)) return await store.sessionContinuity(request, identity);
+        if (LIST_FEATURES.includes(method)) return await store.listControl(request, identity);
         if (method === 'run.submit') return (await store.submitInstalledRun(request, identity)).response;
+        if (method === 'run.apply') return (await store.applyInstalledRun(request, identity)).response;
+        if (method === 'run.approve') return (await store.approveInstalledRun(request, identity)).response;
+        if (method === 'run.input') return (await store.inputInstalledRun(request, identity)).response;
+        if (method === 'run.reconcile') return (await store.reconcileInstalledRun(request, identity)).response;
         if (method === 'run.cancel') return (await store.cancelInstalledRun(request, identity)).response;
+        if (method === 'authorization.create') return (await store.createAuthorization(request, identity)).response;
+        if (method === 'authorization.revoke') return (await store.revokeAuthorization(request, identity)).response;
         if (method === 'credential.finalize') return { protocolVersion: 1, ok: true,
           result: { method: 'credential.finalize', operation: await store.finalizeCredential(request as CredentialFinalizeRequest, identity) }
         } satisfies InstalledControlResponseV1;
-        if (method === 'session.get' || method === 'run.get' || method === 'run.attach') {
+        if (method === 'session.get' || method === 'run.get' || method === 'run.attach' || method === 'run.result' || method === 'run.diff' || method === 'artifact.get') {
           return { protocolVersion: 1, ok: true, result: await store.readControl(request as ReadControlRequest, identity) } satisfies InstalledControlResponseV1;
         }
         if (method === 'supervisor.status') {
-          exact(request, ['protocolVersion', 'method']);
+          decodeInstalledControlRequest(request);
           return { protocolVersion: 1, ok: true, result: await store.readSupervisorStatus(identity) } satisfies InstalledControlResponseV1;
         }
         return { protocolVersion: 1, ok: false, method: knownMethod,
           error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED', retryable: false, messageCode: 'control.method_not_enabled' } } satisfies InstalledControlResponseV1;
       } catch (error) {
+        if (method === 'state.migrate' && error instanceof InstalledMigrationQuiescenceError) {
+          return { protocolVersion: 1, ok: false, method, error: { schemaVersion: 1, code: 'AUTHORIZATION_REQUIRED',
+            retryable: false, messageCode: 'migration.legacy_quiescence_required' } } satisfies InstalledControlResponseV1;
+        }
         if ((method === 'run.submit' || method === 'credential.finalize') && error instanceof CredentialScopeBusyError) {
           return { protocolVersion: 1, ok: false, method: knownMethod, error: error.controlError } satisfies InstalledControlResponseV1;
         }
@@ -254,9 +297,9 @@ export function openInstalledControl(store: StateStore,
           // Read a fresh authenticated authoritative snapshot, not the stale
           // producer cut or a fabricated metadata-only conflict response.
           try {
-            const observed = method === 'run.submit'
+            const observed = method === 'run.submit' || method === 'session.get' && Object.hasOwn(request, 'contextPage') || ['session.fork', 'session.compact', 'session.handoff.create'].includes(method)
               ? await store.readControl({ protocolVersion: 1, method: 'session.get', sessionId: request.sessionId as string }, identity)
-              : method === 'run.cancel'
+              : method === 'run.cancel' || method === 'run.approve' || method === 'run.input' || method === 'run.reconcile'
                 ? await store.readControl({ protocolVersion: 1, method: 'run.get', runId: request.runId as string }, identity) : undefined;
             if (observed?.method === 'session.get') return { protocolVersion: 1, ok: false, method: knownMethod,
               error: { schemaVersion: 1, code: 'REVISION_CONFLICT', retryable: true, messageCode: 'control.revision_conflict',
@@ -268,37 +311,16 @@ export function openInstalledControl(store: StateStore,
                 conflict: { resourceKind: 'run', currentSnapshot: observed.snapshot } } } satisfies InstalledControlResponseV1;
           } catch (snapshotFailure) { return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(snapshotFailure) } satisfies InstalledControlResponseV1; }
         }
-        return { protocolVersion: 1, ok: false, method: knownMethod, error: errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
+        return { protocolVersion: 1, ok: false, method: knownMethod,
+          error: sessionContextRequestLimitRefusal(knownMethod, error) ?? errorResult(error, method === 'credential.finalize') } satisfies InstalledControlResponseV1;
       }
     });
-    if (controlRetirementFailure) throw controlRetirementFailure;
-    if (connection.closed || stopped) return;
-    const body = canonicalJsonBytes(response);
-    if (body.byteLength > FRAME_BYTES || reservedBytes + body.byteLength > BUFFER_BYTES) throw new Error('control response exceeds the wire bound');
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(body.byteLength);
-    reservedBytes += body.byteLength;
-    try {
-      await new Promise<void>((resolve, reject) => {
-        let remaining = 2;
-        let failure: unknown;
-        const done = (error?: Error | null) => {
-          failure ??= error ?? undefined;
-          if (--remaining === 0) failure ? reject(failure) : resolve();
-        };
-        // Avoid an extra large concat allocation. Both writes are joined,
-        // including when socket destruction rejects one before the other.
-        for (const bytes of [header, body]) {
-          try { connection.channel.socket.write(bytes, done); }
-          catch (error) { done(error instanceof Error ? error : new Error('control write failed', { cause: error })); }
-        }
-      });
-    } finally { reservedBytes -= body.byteLength; }
+    await writeFrame(connection, response);
   };
   const work = (connection: Connection) => {
-    if (connection.running || stopped || connection.closed) return;
+    if (connection.running || stopped || connection.closed || rollbackReply) return;
     const running = (async () => {
-      while (!stopped && !connection.closed && connection.queued.length > 0) {
+      while (!stopped && !connection.closed && !rollbackReply && connection.queued.length > 0) {
         const body = connection.queued.shift()!;
         try { await respond({ connection, body }); }
         catch (error) { report(error); retire(connection); }
@@ -319,7 +341,7 @@ export function openInstalledControl(store: StateStore,
     if (stopped || controlRetirementFailure) { retire(connection); return; }
     channel.socket.once('close', () => retire(connection));
     channel.socket.on('data', (chunk: Buffer) => {
-      if (stopped || connection.closed) return;
+      if (stopped || connection.closed || rollbackReply) return;
       try {
         let offset = 0;
         while (offset < chunk.byteLength && !connection.closed) {
@@ -350,6 +372,7 @@ export function openInstalledControl(store: StateStore,
     if (this !== service) return Promise.reject(new TypeError('invalid control service'));
     if (closing) return closing;
     stopped = true;
+    clearTimeout(rollbackReplyTimer);
     for (const connection of connections) retire(connection);
     closing = (async () => {
       const results = await Promise.allSettled([...active, Promise.resolve().then(() => listener.close())]);

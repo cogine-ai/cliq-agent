@@ -1,20 +1,469 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 
-import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
+import { decodeControlFrame, decodeInstalledControlResponse } from '../kernel/control-wire.js';
 import { addCanonicalDuration, digestOmitting } from '../kernel/identity.js';
-import type { Checkpoint, InvocationJournalEntry, RunItemReferenceV1, SessionContextProjection, SessionItem } from '../kernel/types.js';
-import { EventCursorExpiredError } from './control-read.js';
+import type { Checkpoint, InvocationJournalEntry, LocalControlChannelIdentityV1, RunItemReferenceV1, SessionContextProjection, SessionItem } from '../kernel/types.js';
+import { insertArtifactMetadata } from './artifacts.js';
+import { EventCursorExpiredError, ResultUnavailableError } from './control-read.js';
 import { KernelStorageError } from './errors.js';
 import { openSqliteDriver, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
+import { loadNativeStateOwner, type HeldStateOwnerLock } from './native-owner.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
-import { admissionKey, createActiveFixture, disposeFixture, uuidv7 } from './testing/fixtures.js';
+import { admissionKey, createActiveFixture, disposeFixture, makePrivateDir, uuidv7 } from './testing/fixtures.js';
 import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { openInstalledControl } from './installed-control.js';
 
 const isCode = (code: KernelStorageError['code']) => (error: unknown) => error instanceof KernelStorageError && error.code === code;
+
+async function readPagePeer(t: TestContext, socketPath: string) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import net from 'node:net';
+    const socket=net.createConnection(process.argv[1],()=>process.send({kind:'ready'}));
+    let input=Buffer.alloc(0);
+    socket.on('data',chunk=>{input=Buffer.concat([input,chunk]);while(input.length>=4){
+      const length=input.readUInt32BE(0);if(length<1||length>1048576)throw new Error('invalid frame');
+      if(input.length<length+4)break;process.send({kind:'frame',body:input.subarray(4,length+4).toString('base64')});
+      input=input.subarray(length+4);}});
+    socket.on('error',()=>{});process.on('message',body=>socket.write(Buffer.from(body,'base64')));
+    process.on('disconnect',()=>{socket.destroy();process.exit(0);});`, socketPath], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+  const exited = once(child, 'exit');
+  t.after(async () => { if (child.connected) child.disconnect(); await exited; });
+  await once(child, 'message');
+  return async (request: object) => {
+    const received = once(child, 'message');
+    const body = canonicalJsonBytes(request), header = Buffer.alloc(4); header.writeUInt32BE(body.length);
+    child.send(Buffer.concat([header, body]).toString('base64'));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const [frame] = await Promise.race([received, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('real read page timed out')), 30_000);
+      })]);
+      return decodeControlFrame(Buffer.from((frame as { body: string }).body, 'base64'));
+    } finally { clearTimeout(timer); }
+  };
+}
+
+test('real UDS run pages fit the unchanged strict frame parser and retain every Journal row across pages', async t => {
+  const fixture = await createActiveFixture('pg');
+  t.after(() => disposeFixture(fixture));
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  t.after(() => driver.close());
+  const run = fixture.store.getRun(fixture.runId);
+  const initial = (await fixture.store.readRecoveryClosure(run.id)).latestCheckpoint;
+  const checkpoints = [initial, ...Array.from({ length: 999 }, (_, index) => ({ ...initial, id: `page-checkpoint-${String(index).padStart(4, '0')}` }))]
+    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  const journal: InvocationJournalEntry[] = Array.from({ length: 1000 }, (_, index) => ({ seq: index + 1,
+    runId: run.id, opId: `op-${index}`, opKind: 'tool', attempt: 0, leaseEpoch: 1, phase: 'prepared', target: 'tool',
+    requestRef: run.specRef, replayClass: 'retry', budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, timestamp: run.createdAt }));
+  driver.transaction(connection => {
+    for (const entry of journal) connection.prepare(`INSERT INTO run_journal
+      (run_id,seq,op_id,op_kind,attempt,phase,entry_json) VALUES(?,?,?,?,?,?,?)`).run(run.id, entry.seq,
+        entry.opId, entry.opKind, entry.attempt, entry.phase, canonicalJsonBytes(entry).toString('utf8'));
+    for (const checkpoint of checkpoints) if (checkpoint.id !== initial.id) connection.prepare(`INSERT INTO checkpoints
+      (id,schema_version,run_id,based_on_run_revision,run_item_seq,context_manifest_ref,journal_seq,workspace_state_ref,created_at,reason)
+      VALUES(?,1,?,?,?,?,?,?,?,?)`).run(checkpoint.id, run.id, checkpoint.basedOnRunRevision, checkpoint.runItemSeq,
+        checkpoint.contextManifestRef, checkpoint.journalSeq, checkpoint.workspaceStateRef, checkpoint.createdAt, checkpoint.reason);
+    // Retained display rows only: no workflow transition, Run authority or
+    // execution proof is fabricated by this bounded page fixture.
+    connection.prepare('DELETE FROM run_events WHERE run_id = ?').run(run.id);
+    for (let seq = 1; seq <= 1000; seq++) {
+      const event = { schemaVersion: 1, kind: 'state_changed', runId: run.id, eventSeq: seq, runRevision: 1,
+        status: 'queued', nextStep: 'agent', frontierRef: run.frontierRef!, latestRunItemSeq: 0, occurredAt: run.createdAt };
+      connection.prepare('INSERT INTO run_events(run_id,event_seq,payload_json,occurred_at) VALUES(?,?,?,?)')
+        .run(run.id, seq, canonicalJsonBytes(event).toString('utf8'), event.occurredAt);
+    }
+  });
+  const errors: Error[] = [], service = openInstalledControl(fixture.store, { serverBuild: 'read-page-fixture' }, error => errors.push(error));
+  t.after(() => service.close());
+  const exchange = await readPagePeer(t, path.join(fixture.stateRoot, 'runtime/control-v1.sock'));
+  await exchange({ protocolVersion: 1, method: 'control.hello', clientBuild: 'read-page-fixture',
+    controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: 1, max: 1 }, requestedFeatureIds: ['run.get', 'run.attach'] });
+  const observed: InvocationJournalEntry[] = [];
+  let afterJournalSeq = 0, pages = 0;
+  do {
+    const request = { protocolVersion: 1, method: 'run.get', runId: run.id, journalLimit: 1000, afterJournalSeq } as const;
+    const response = decodeInstalledControlResponse(await exchange(request), request);
+    assert(response.ok && response.result.method === 'run.get');
+    assert.equal(response.result.highWaterJournalSeq, 1000);
+    assert(response.result.journal.length > 0);
+    assert.equal(response.result.journal[0]!.seq, afterJournalSeq + 1);
+    if (pages === 0) {
+      const next = journal[response.result.nextJournalSeq]!;
+      assert(next);
+      const over = { ...response, result: { ...response.result, journal: [...response.result.journal, next], nextJournalSeq: next.seq } };
+      assert.throws(() => decodeControlFrame(canonicalJsonBytes(over)), /more than 10000/u,
+        'the first omitted row must really exceed the complete frame member budget');
+    }
+    observed.push(...response.result.journal); afterJournalSeq = response.result.nextJournalSeq; pages++;
+  } while (afterJournalSeq < 1000);
+  assert(pages > 1, 'the strict container bound requires a real shorter first page');
+  assert.deepEqual(observed, journal);
+  const seenCheckpoints: Checkpoint[] = [];
+  let checkpointCursor: string | undefined, checkpointPages = 0;
+  do {
+    const request = { protocolVersion: 1, method: 'run.get', runId: run.id, afterJournalSeq: 1000,
+      checkpointLimit: 1000, ...(checkpointCursor ? { checkpointCursor } : {}) } as const;
+    const response = decodeInstalledControlResponse(await exchange(request), request);
+    assert(response.ok && response.result.method === 'run.get');
+    assert(response.result.checkpoints.length > 0);
+    seenCheckpoints.push(...response.result.checkpoints); checkpointCursor = response.result.nextCheckpointCursor; checkpointPages++;
+    if (checkpointCursor === response.result.highWaterCheckpointCursor) break;
+  } while (checkpointPages < 10);
+  assert(checkpointPages > 1); assert.deepEqual(seenCheckpoints, checkpoints);
+  let afterEventSeq = 0, eventPages = 0;
+  const eventSequences: number[] = [];
+  do {
+    const request = { protocolVersion: 1, method: 'run.attach', runId: run.id, afterEventSeq, limit: 1000 } as const;
+    const response = decodeInstalledControlResponse(await exchange(request), request);
+    assert(response.ok && response.result.method === 'run.attach');
+    assert(response.result.events.length > 0);
+    eventSequences.push(...response.result.events.map(event => event.eventSeq));
+    afterEventSeq = response.result.nextEventSeq; eventPages++;
+  } while (afterEventSeq < 1000);
+  assert(eventPages > 1); assert.deepEqual(eventSequences, Array.from({ length: 1000 }, (_, index) => index + 1));
+  assert.deepEqual(errors, []);
+});
+
+test('artifact.get returns short verified registered-CAS pages and exact EOF without changing authority', async () => {
+  const fixture = await createActiveFixture('control-read-artifact');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    const bytes = Buffer.from(Array.from({ length: 70_013 }, (_, index) => index % 251));
+    const artifact = await fixture.store.artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-query-data-fixture-v1');
+    driver.transaction(connection => insertArtifactMetadata(connection, artifact, fixture.store.getRun(fixture.runId).createdAt));
+    const footprint = () => ({ fence: driver.prepare('SELECT * FROM canonical_time_fence').get(),
+      requests: driver.prepare('SELECT count(*) AS n FROM control_requests').get(), run: fixture.store.getRun(fixture.runId) });
+    const before = footprint();
+    const request = { protocolVersion: 1 as const, method: 'artifact.get' as const, digest: artifact.ref, offset: 0, length: 4 * 1024 * 1024 };
+    const first = await fixture.store.readControl(request, identity);
+    assert.ok(first.method === 'artifact.get');
+    assert.deepEqual(first, { method: 'artifact.get', artifact: { schemaVersion: 1, ref: artifact.ref, digest: artifact.ref,
+      sizeBytes: bytes.length, mediaType: 'application/octet-stream' }, offset: 0,
+      bytesBase64: bytes.subarray(0, 65_536).toString('base64'), nextOffset: 65_536, eof: false });
+    const last = await fixture.store.readControl({ ...request, offset: first.nextOffset }, identity);
+    assert.ok(last.method === 'artifact.get');
+    assert.equal(last.bytesBase64, bytes.subarray(65_536).toString('base64'));
+    assert.equal(last.nextOffset, bytes.length);
+    assert.equal(last.eof, true);
+    const end = await fixture.store.readControl({ ...request, offset: bytes.length, length: 1 }, identity);
+    assert.ok(end.method === 'artifact.get');
+    assert.equal(end.offset, bytes.length);
+    assert.equal(end.nextOffset, bytes.length);
+    assert.equal(end.bytesBase64, '');
+    assert.equal(end.eof, true);
+    assert.deepEqual(footprint(), before);
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
+
+test('artifact.get rejects unregistered bytes, foreign principals and invalid ranges without treating catalog labels as authority', async () => {
+  const fixture = await createActiveFixture('control-read-artifact-bounds');
+  const foreign = await createActiveFixture('control-read-artifact-foreign');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const identity = await publishInProcessChannel(fixture.store), foreignIdentity = await publishInProcessChannel(foreign.store);
+    const artifact = await fixture.store.artifacts.publishBytes(Buffer.alloc(0), 'application/octet-stream', 'not-an-access-control-label');
+    const request = { protocolVersion: 1 as const, method: 'artifact.get' as const, digest: artifact.ref, offset: 0, length: 1 };
+    await assert.rejects(fixture.store.readControl(request, identity), isCode('NOT_FOUND'));
+    driver.transaction(connection => insertArtifactMetadata(connection, artifact, fixture.store.getRun(fixture.runId).createdAt));
+    const empty = await fixture.store.readControl(request, identity);
+    assert.deepEqual(empty, { method: 'artifact.get', artifact: { schemaVersion: 1, ref: artifact.ref, digest: artifact.ref,
+      sizeBytes: 0, mediaType: 'application/octet-stream' }, offset: 0, bytesBase64: '', nextOffset: 0, eof: true });
+    await assert.rejects(fixture.store.readControl(request, { ...identity, principalId: foreignIdentity.principalId }), isCode('ARTIFACT_MISMATCH'));
+    // Even complete genuine foreign channel/principal bytes remain data, not
+    // this root's authenticated identity. Do not rely on a missing CAS file.
+    const foreignChannel = await foreign.store.artifacts.readCanonical<LocalControlChannelIdentityV1>(foreignIdentity.channelIdentityRef);
+    await fixture.store.artifacts.publishCanonical(foreignChannel, foreignChannel.format);
+    await fixture.store.artifacts.publishCanonical(await foreign.store.artifacts.readCanonical(foreignChannel.principalIdentityRef), 'cliq-local-principal-identity-v1');
+    await assert.rejects(fixture.store.readControl(request, foreignIdentity), isCode('ARTIFACT_MISMATCH'));
+    const foreignRef = foreign.store.getRun(foreign.runId).specRef;
+    await assert.rejects(fixture.store.readControl({ ...request, digest: foreignRef }, identity), isCode('NOT_FOUND'));
+    const malformed: unknown[] = [
+      { ...request, digest: 'A'.repeat(64) }, { ...request, digest: 'sha256:' + artifact.ref },
+      ...[-1, 1.5, true, '0', null, Number.MAX_SAFE_INTEGER + 1].map(offset => ({ ...request, offset })),
+      ...[0, -1, 1.5, true, '1', null, 4 * 1024 * 1024 + 1].map(length => ({ ...request, length })),
+      ...['requestId', 'principalId', 'schemaKind', 'channelIdentityRef'].map(key => ({ ...request, [key]: 'not-accepted' })),
+      { protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0 },
+      { ...request, offset: 1 }, { ...request, offset: Number.MAX_SAFE_INTEGER }
+    ];
+    let getterReads = 0;
+    malformed.push(Object.create(request), Object.defineProperty({ ...request }, 'hidden', { value: true }),
+      { ...request, [Symbol('hidden')]: true }, Object.defineProperty({ ...request }, 'digest', {
+        enumerable: true, get() { getterReads += 1; return artifact.ref; }
+      }));
+    for (const value of malformed) await assert.rejects(fixture.store.readControl(value as never, identity), isCode('INVALID_REQUEST'));
+    assert.equal(getterReads, 0, 'query normalization must not execute caller accessors');
+  } finally { driver.close(); await disposeFixture(foreign); await disposeFixture(fixture); }
+});
+
+test('closing the original Store cancels a control closure read after its actual I/O joins', async t => {
+  const fixture = await createActiveFixture('control-read-original-close');
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    let entered!: () => void, release!: () => void;
+    const inRead = new Promise<void>(resolve => { entered = resolve; });
+    const readGate = new Promise<void>(resolve => { release = resolve; });
+    const open = fs.open;
+    let reads = 0, closes = 0, queryJoined = false, storeJoined = false;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await open(...args);
+      if (!String(args[0]).endsWith('/' + identity.channelIdentityRef)) return handle;
+      const read = handle.read.bind(handle), close = handle.close.bind(handle);
+      t.mock.method(handle, 'read', async (...input: Parameters<typeof handle.read>) => {
+        const result = await Reflect.apply(read, handle, input);
+        if (++reads === 1) { entered(); await readGate; }
+        return result;
+      });
+      t.mock.method(handle, 'close', async () => { await close(); closes++; });
+      return handle;
+    });
+    const query = fixture.store.readControl({ protocolVersion: 1, method: 'run.get', runId: fixture.runId }, identity);
+    const rejected = assert.rejects(query, isCode('LEASE_FENCED')).finally(() => { queryJoined = true; });
+    await inRead;
+    const closing = fixture.store.close().then(() => { storeJoined = true; });
+    await nextTurn();
+    assert.equal(queryJoined, false); assert.equal(storeJoined, false);
+    assert.equal(closes, 0, 'the original FileHandle must remain held while its real read is outstanding');
+    release();
+    await Promise.all([rejected, closing]);
+    assert.equal(reads, 1, 'cancelled closure verification must issue no next chunk or EOF read');
+    assert.equal(closes, 1); assert.equal(queryJoined, true); assert.equal(storeJoined, true);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('artifact.get snapshots the caller request and verifies bytes beyond the selected page before returning it', async () => {
+  const fixture = await createActiveFixture('control-read-artifact-integrity');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    const original = Buffer.alloc(131_081, 97);
+    const artifact = await fixture.store.artifacts.publishBytes(original, 'application/octet-stream', 'cliq-query-data-fixture-v1');
+    driver.transaction(connection => insertArtifactMetadata(connection, artifact, fixture.store.getRun(fixture.runId).createdAt));
+    const request = { protocolVersion: 1 as const, method: 'artifact.get' as const, digest: artifact.ref, offset: 1, length: 7 };
+    const reading = fixture.store.readControl(request, identity);
+    request.digest = '0'.repeat(64); request.offset = 100; request.length = 4;
+    const result = await reading;
+    assert.ok(result.method === 'artifact.get');
+    assert.equal(result.artifact.ref, artifact.ref);
+    assert.equal(result.offset, 1);
+    assert.equal(result.bytesBase64, original.subarray(1, 8).toString('base64'));
+    const target = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, artifact.ref);
+    const corrupt = Buffer.from(original); corrupt[corrupt.length - 1] = 98;
+    await fs.chmod(target, 0o600); await fs.writeFile(target, corrupt); await fs.chmod(target, 0o400);
+    await assert.rejects(fixture.store.readControl({ ...request, digest: artifact.ref, offset: 0, length: 1 }, identity), isCode('ARTIFACT_MISMATCH'));
+    // Restore the test-owned bytes, not an alternate artifact or grant.
+    await fs.chmod(target, 0o600); await fs.writeFile(target, original); await fs.chmod(target, 0o400);
+    driver.prepare("UPDATE artifacts SET media_type = '' WHERE ref = ?").run(artifact.ref);
+    await assert.rejects(fixture.store.readControl({ ...request, digest: artifact.ref, offset: 0, length: 1 }, identity), isCode('RECOVERY_REQUIRED'));
+    driver.prepare('UPDATE artifacts SET media_type = ? WHERE ref = ?').run(artifact.mediaType, artifact.ref);
+    await fixture.store.close();
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    const reconnected = await publishInProcessChannel(fixture.store);
+    assert.equal(reconnected.principalId, identity.principalId);
+    const after = await fixture.store.readControl({ ...request, digest: artifact.ref, offset: 1, length: 7 }, reconnected);
+    assert.deepEqual(after, result);
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
+
+test('StateStore close cancels and joins the original artifact query before releasing its owner', async () => {
+  const fixture = await createActiveFixture('control-read-artifact-join');
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const originalOpen = fs.open;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let entered!: () => void;
+  const closingHandle = new Promise<void>(resolve => { entered = resolve; });
+  let reading: Promise<unknown> | undefined, closing: Promise<void> | undefined;
+  try {
+    const identity = await publishInProcessChannel(fixture.store);
+    const artifact = await fixture.store.artifacts.publishBytes(Buffer.alloc(65_539, 7), 'application/octet-stream', 'cliq-query-data-fixture-v1');
+    driver.transaction(connection => insertArtifactMetadata(connection, artifact, fixture.store.getRun(fixture.runId).createdAt));
+    const target = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, artifact.ref);
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (args[0] === target) {
+        const actualClose = handle.close.bind(handle);
+        handle.close = async () => { await actualClose(); entered(); await held; };
+      }
+      return handle;
+    }) as typeof fs.open;
+    reading = fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, identity);
+    const observedRead = assert.rejects(reading, isCode('LEASE_FENCED'));
+    await closingHandle;
+    let closed = false;
+    closing = fixture.store.close().then(() => { closed = true; });
+    await nextTurn();
+    assert.equal(closed, false, 'verified staging bytes cannot outlive an unjoined original CAS close');
+    assert.equal(driver.prepare("SELECT state FROM state_owners WHERE state='active'").get()?.state, 'active');
+    await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, identity), isCode('LEASE_FENCED'));
+    release();
+    await observedRead; await closing;
+    assert.equal(closed, true);
+    fs.open = originalOpen;
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    const successor = await publishInProcessChannel(fixture.store);
+    const reread = await fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, successor);
+    assert.ok(reread.method === 'artifact.get');
+    assert.equal(reread.bytesBase64, 'Bw==', 'the cancelled original query must preserve the registered bytes for its genuine successor');
+  } finally {
+    release(); await reading?.catch(() => {}); await closing?.catch(() => {});
+    fs.open = originalOpen; driver.close(); await disposeFixture(fixture);
+  }
+});
+
+test('a driver publication-prefix read cannot open CAS after Store shutdown has begun', async () => {
+  const fixture = await createAgentFixture('publication-driver-read-closed');
+  const originalOpen = fs.open; let opens = 0;
+  try {
+    fixture.store.beginClose();
+    fs.open = (async (...args: Parameters<typeof fs.open>) => { opens++; return originalOpen(...args); }) as typeof fs.open;
+    const driver = fixture.store as unknown as { readInstalledPublicationCut(runId: string): Promise<unknown> };
+    await assert.rejects(driver.readInstalledPublicationCut(fixture.runId), isCode('LEASE_FENCED'));
+    assert.equal(opens, 0, 'a read started after synchronous revocation must not escape the original abort traversal');
+  } finally { fs.open = originalOpen; await disposeFixture(fixture); }
+});
+
+test('Store shutdown revokes a cached continuation reader after its initial load producer has finished', async () => {
+  const fixture = await createAgentFixture('cached-continuation-read-close');
+  const originalOpen = fs.open; let opens = 0;
+  try {
+    const readAbort = new AbortController(), view = fixture.store.artifacts.withReadSignal(readAbort.signal);
+    // Only the in-memory read-scope lifetime is under test. Reuse a genuine
+    // loaded Agent, not a fabricated Delivery, source, receipt or native owner.
+    const held = fixture.store as unknown as {
+      installedAgents: Map<string, { agent: typeof fixture.agent; readAbort?: AbortController }>;
+    };
+    held.installedAgents.set(fixture.runId, { agent: fixture.agent, readAbort });
+    const specRef = fixture.store.getRun(fixture.runId).specRef;
+    fixture.store.beginClose();
+    fs.open = (async (...args: Parameters<typeof fs.open>) => { opens++; return originalOpen(...args); }) as typeof fs.open;
+    assert.equal(readAbort.signal.aborted, true, 'a cached reader must not lose cancellation when its load task leaves the producer set');
+    await assert.rejects(view.readCanonical(specRef), isCode('LEASE_FENCED'));
+    assert.equal(opens, 0);
+  } finally { fs.open = originalOpen; await disposeFixture(fixture); }
+});
+
+test('the driver publication-prefix read cancels and joins its actual CAS close before releasing StateOwner', async () => {
+  // Exercise only the existing genuine Store/CAS read lifecycle. This Agent
+  // fixture cannot supply a verified Delivery, claim, receipt or native seal.
+  const fixture = await createAgentFixture('publication-driver-read-join');
+  const observer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const originalOpen = fs.open;
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const actualCloseReached = new Promise<void>(resolve => { entered = resolve; });
+  let reading: Promise<unknown> | undefined, cancelled: Promise<void> | undefined, closing: Promise<void> | undefined;
+  try {
+    const target = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, fixture.store.getRun(fixture.runId).specRef);
+    let closes = 0;
+    fs.open = (async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      if (args[0] === target) {
+        const actualClose = handle.close.bind(handle);
+        handle.close = async () => { await actualClose(); closes++; entered(); await held; };
+      }
+      return handle;
+    }) as typeof fs.open;
+    const driver = fixture.store as unknown as { readInstalledPublicationCut(runId: string): Promise<unknown> };
+    reading = driver.readInstalledPublicationCut(fixture.runId);
+    cancelled = assert.rejects(reading, error => error instanceof KernelStorageError && error.code === 'LEASE_FENCED' &&
+      error.cause === undefined);
+    await actualCloseReached;
+    let closed = false;
+    closing = fixture.store.close().then(() => { closed = true; });
+    await nextTurn();
+    assert.equal(closed, false, 'driver graph reads must join even before a native execution scope has opened');
+    assert.equal(observer.prepare("SELECT state FROM state_owners WHERE state='active'").get()?.state, 'active');
+    release(); await cancelled; await closing;
+    assert.equal(closes, 1, 'cancellation must not reopen or finish the original full graph after its first joined CAS object');
+    assert.equal(closed, true);
+    fs.open = originalOpen;
+    fixture.store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
+    assert.equal((await fixture.store.readRecoveryClosure(fixture.runId)).run.id, fixture.runId);
+  } finally {
+    release(); await reading?.catch(() => {}); await cancelled?.catch(() => {}); await closing?.catch(() => {});
+    fs.open = originalOpen; observer.close(); await disposeFixture(fixture);
+  }
+});
+
+test('an uncertain actual artifact close overrides shutdown cancellation and retains the original Store owner until process death', async () => {
+  const directory = await makePrivateDir('.cliq-artifact-query-retirement-');
+  // Same real Store/CAS seam in an independent process: the injected negative
+  // observation follows FileHandle.close; it never fabricates death or a join.
+  const script = `import assert from 'node:assert/strict';
+    import { promises as fs } from 'node:fs';
+    import path from 'node:path';
+    import { openStateStore, publishInProcessChannel } from ${JSON.stringify(new URL('./store.ts', import.meta.url).href)};
+    import { openSqliteDriver } from ${JSON.stringify(new URL('./sqlite-driver.ts', import.meta.url).href)};
+    import { insertArtifactMetadata } from ${JSON.stringify(new URL('./artifacts.ts', import.meta.url).href)};
+    import { ResourceRetirementError } from ${JSON.stringify(new URL('./errors.ts', import.meta.url).href)};
+    import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from ${JSON.stringify(new URL('../config.ts', import.meta.url).href)};
+    const exercise = async () => {
+      const root = process.argv[1], store = await openStateStore(root);
+      const identity = await publishInProcessChannel(store);
+      const artifact = await store.artifacts.publishBytes(Buffer.from('actual immutable query bytes'), 'application/octet-stream', 'cliq-query-data-fixture-v1');
+      const writer = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+      try { writer.transaction(connection => insertArtifactMetadata(connection, artifact, '2026-10-01T00:00:00.000Z')); }
+      finally { writer.close(); }
+      const originalOpen = fs.open, target = path.join(root, KERNEL_CAS_DIRECTORY, artifact.ref);
+      const failure = Object.assign(new Error('uncertainty after actual query FileHandle.close'), { code: 'EIO' });
+      let actualCloses = 0, retained;
+      fs.open = async (...args) => {
+        const handle = await originalOpen(...args);
+        if (args[0] === target) {
+          const actualClose = handle.close.bind(handle);
+          handle.close = async () => {
+            await actualClose(); actualCloses += 1;
+            store.beginClose();
+            throw failure;
+          };
+        }
+        return handle;
+      };
+      try { await assert.rejects(store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: artifact.ref, offset: 0, length: 1 }, identity), error => {
+        assert.ok(error instanceof ResourceRetirementError); assert.equal(error.cause, failure); retained = error; return true;
+      }); } finally { fs.open = originalOpen; }
+      assert.equal(actualCloses, 1);
+      for (let retry = 0; retry < 2; retry += 1) await assert.rejects(store.close(), error => error === retained);
+      process.send({ state: 'retained', actualCloses });
+    };
+    process.on('message', message => { if (message === 'exercise') void exercise().catch(() => process.send({ state: 'failed' })); });
+    process.send({ state: 'ready' });`;
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script, directory],
+    { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+  const exited = once(child, 'exit'), closed = once(child, 'close');
+  let successorClosed = false;
+  const reply = async () => (await once(child, 'message', { signal: AbortSignal.timeout(30_000) }))[0] as { state: string; actualCloses?: number };
+  try {
+    assert.equal((await reply()).state, 'ready');
+    const pending = reply(); child.send('exercise');
+    assert.deepEqual(await pending, { state: 'retained', actualCloses: 1 });
+    const native = await loadNativeStateOwner();
+    let wronglyAcquired: HeldStateOwnerLock | undefined;
+    try { wronglyAcquired = native.acquireLock(directory, false); }
+    catch (error) { assert.match(String(error), /OS lock is already held/); }
+    if (wronglyAcquired) { wronglyAcquired.close(); assert.fail('an uncertain query close released the real original owner'); }
+    child.kill('SIGKILL');
+    assert.equal((await exited)[1], 'SIGKILL'); await closed;
+    const successor = await openStateStore(directory);
+    try { assert.equal(successor.ownerEpoch, 2); }
+    finally { await successor.close(); successorClosed = true; }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited; await closed;
+    if (successorClosed) await fs.rm(directory, { recursive: true, force: true });
+    else console.error(`preserving uncertain artifact query fixture: ${directory}`);
+  }
+});
 
 test('control reads expose the empty Session and the admitted Run initial checkpoint without payload bytes', async () => {
   const fixture = await createActiveFixture('control-read-initial');
@@ -55,6 +504,17 @@ test('control reads expose the empty Session and the admitted Run initial checkp
     assert.equal(caughtUp.highWaterCheckpointCursor, cursor);
     const attached = await fixture.store.readControl({ protocolVersion: 1, method: 'run.attach', runId: run.id, afterEventSeq: 0 }, identity);
     assert.ok(attached.method === 'run.attach');
+    for (const method of ['run.result', 'run.diff'] as const) {
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: run.id }, identity), error => {
+        assert.ok(error instanceof ResultUnavailableError);
+        assert.deepEqual(error.controlError, { schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable',
+          retryable: true, runId: run.id, status: run.status, currentRevision: run.revision });
+        return true;
+      });
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: 'unknown-run' }, identity), isCode('NOT_FOUND'));
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: run.id, requestId: uuidv7() } as never, identity),
+        isCode('INVALID_REQUEST'));
+    }
     // Query authority is read-only: it does not advance canonical time or allocate mutator replay rows.
     assert.deepEqual(footprint(), before);
   } finally { inspector.close(); await disposeFixture(fixture); }
@@ -245,85 +705,65 @@ async function assertMetadataCap(exact: boolean): Promise<void> {
   const fixture = await createActiveFixture(`control-read-byte-${exact ? 'exact' : 'priority'}`);
   const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
   try {
-    const identity = await publishInProcessChannel(fixture.store);
-    const run = fixture.store.getRun(fixture.runId);
+    const identity = await publishInProcessChannel(fixture.store), run = fixture.store.getRun(fixture.runId);
     const payload = await fixture.store.artifacts.publishCanonical({ fixture: 'metadata-cap', body: 'not-embedded' }, 'cliq-query-metadata-fixture-v1');
     const items: RunItemReferenceV1[] = Array.from({ length: 1000 }, (_, index) => ({ schemaVersion: 1,
       itemId: `item-${index + 1}`.padEnd(128, 'i'), itemSeq: index + 1, payloadRef: payload.ref, payloadDigest: payload.ref, createdAt: run.createdAt }));
-    // Closed-decodable retained metadata only: this golden fixture does not claim real dispatch,
-    // settlement or sandbox qualification. Real reducer-generated Journal/reopen is tested separately.
-    const journalEntry = (seq: number, target?: string): InvocationJournalEntry => {
-      const op = Math.floor((seq - 1) / 3) + 1;
-      // Same target within each three-phase attempt; all ids remain within 128 UTF-8 bytes.
-      const padding = exact ? (op <= 2 ? 127 : op === 196 ? 102 : 0) : (op === 1 ? 100 : op === 2 ? 66 : 0);
-      const phase = (['prepared', 'dispatch_claimed', 'completed'] as const)[(seq - 1) % 3]!;
-      const entry: InvocationJournalEntry = { seq, runId: run.id, opId: `op-${op}`.padEnd(128, 'o'), opKind: 'tool',
-        attempt: 0, leaseEpoch: 1, phase, target: target ?? 't' + 'p'.repeat(padding), requestRef: payload.ref,
-        replayClass: 'retry', idempotencyKey: 'i'.repeat(128), grantRef: payload.ref,
-        budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, timestamp: run.createdAt };
-      if (phase !== 'prepared') Object.assign(entry, { sandboxLaunchSpecRef: payload.ref, dispatchId: 'd'.repeat(128),
-        supervisorInstanceId: 's'.repeat(128), stateOwnerEpoch: 1, brokerFenceTokenDigest: payload.ref });
-      if (phase === 'completed') Object.assign(entry, { resultRef: payload.ref, receiptRef: payload.ref, budgetSettlementRef: payload.ref });
-      return entry;
-    };
-    const journal = Array.from({ length: 588 }, (_, index) => journalEntry(index + 1));
-    const insertJournal = (connection: SqliteConnection, entry: InvocationJournalEntry) =>
-      connection.prepare(`INSERT INTO run_journal (run_id, seq, op_id, op_kind, attempt, phase, entry_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(run.id, entry.seq, entry.opId, entry.opKind, entry.attempt, entry.phase, canonicalJsonBytes(entry).toString('utf8'));
+    // Closed retained metadata only, not a claim of dispatch or execution.
+    const entry = (seq: number, target = 't'): InvocationJournalEntry => ({ seq, runId: run.id, opId: `op-${seq}`, opKind: 'tool',
+      attempt: 0, leaseEpoch: 1, phase: 'prepared', target, requestRef: payload.ref, replayClass: 'retry',
+      budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, timestamp: run.createdAt });
+    const journal = [entry(1), entry(2, 's'.repeat(2000))];
+    const insertJournal = (connection: SqliteConnection, value: InvocationJournalEntry) =>
+      connection.prepare('INSERT INTO run_journal(run_id,seq,op_id,op_kind,attempt,phase,entry_json) VALUES(?,?,?,?,?,?,?)')
+        .run(run.id, value.seq, value.opId, value.opKind, value.attempt, value.phase, canonicalJsonBytes(value).toString('utf8'));
     driver.transaction(connection => {
-      for (const item of items) connection.prepare(`INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at)
-        VALUES (?, NULL, ?, ?, 'model_turn', ?, ?)`).run(item.itemId, run.id, item.itemSeq, item.payloadRef, item.createdAt);
-      for (const entry of journal) insertJournal(connection, entry);
+      for (const item of items) connection.prepare(`INSERT INTO items(item_id,session_id,run_id,item_seq,kind,payload_ref,created_at)
+        VALUES(?,NULL,?,?,'model_turn',?,?)`).run(item.itemId, run.id, item.itemSeq, item.payloadRef, item.createdAt);
     });
-    const request = { protocolVersion: 1 as const, method: 'run.get' as const, runId: run.id, itemLimit: 1000, journalLimit: 1000, checkpointLimit: 1000 };
-    const defaults = await fixture.store.readControl({ protocolVersion: 1, method: 'run.get', runId: run.id }, identity);
-    assert.ok(defaults.method === 'run.get');
-    assert.equal(defaults.items.length, 100);
-    assert.equal(defaults.journal.length, 100);
-    assert.equal(defaults.nextItemSeq, 100);
-    assert.equal(defaults.nextJournalSeq, 100);
-    assert.equal(defaults.checkpoints.length, 1);
+    const request = { protocolVersion: 1 as const, method: 'run.get' as const, runId: run.id,
+      itemLimit: 1000, journalLimit: 1000, checkpointLimit: 1000 };
+    const probe = await fixture.store.readControl(request, identity);
+    assert(probe.method === 'run.get'); assert.equal(probe.items.length, 1000);
+    const { nextCheckpointCursor: _cursor, ...withoutCheckpointCursor } = probe;
+    const firstFrame = (target: string) => ({ protocolVersion: 1, ok: true, result: {
+      ...withoutCheckpointCursor, journal: [entry(1, target)], checkpoints: [], highWaterJournalSeq: 2, nextJournalSeq: 1 } });
+    const gap = exact ? 0 : 1000;
+    const remaining = 1_048_576 - gap - canonicalJsonBytes(firstFrame('t')).byteLength;
+    assert(remaining > 0);
+    journal[0] = entry(1, 't'.repeat(remaining + 1));
+    driver.transaction(connection => { for (const value of journal) insertJournal(connection, value); });
     const capped = await fixture.store.readControl(request, identity);
-    const count = 587;
-    assert.ok(capped.method === 'run.get');
-    assert.equal(capped.journal.length, count);
-    assert.deepEqual(capped.items, items);
-    assert.deepEqual(capped.journal, journal.slice(0, count));
-    assert.deepEqual(capped.checkpoints, []);
-    assert.equal(capped.nextItemSeq, 1000);
-    assert.equal(capped.highWaterItemSeq, 1000);
-    assert.equal(capped.nextJournalSeq, count);
-    assert.equal(capped.highWaterJournalSeq, 588);
-    assert.equal(capped.nextCheckpointCursor, undefined);
-    const arrays = { items: capped.items, journal: capped.journal, checkpoints: capped.checkpoints };
-    assert.equal(canonicalJsonBytes(arrays).byteLength, exact ? 1_048_576 : 1_048_108);
-    assert.ok(canonicalJsonBytes({ ...arrays, journal: journal.slice(0, count + 1) }).byteLength > 1_048_576);
-    const checkpoint = await fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: 588 }, identity);
-    assert.ok(checkpoint.method === 'run.get');
-    assert.equal(checkpoint.checkpoints.length, 1);
-    // The checkpoint would fit, but may not leapfrog the earlier oversized Journal candidate.
-    if (!exact) assert.ok(canonicalJsonBytes({ ...arrays, checkpoints: checkpoint.checkpoints }).byteLength <= 1_048_576);
-    const rest = await fixture.store.readControl({ ...request, afterItemSeq: capped.nextItemSeq, afterJournalSeq: capped.nextJournalSeq }, identity);
-    assert.ok(rest.method === 'run.get');
-    assert.deepEqual(rest.items, []);
-    assert.deepEqual(rest.journal, journal.slice(count));
-    assert.deepEqual(rest.checkpoints, checkpoint.checkpoints);
-    assert.equal(rest.nextItemSeq, 1000);
-    assert.equal(rest.nextJournalSeq, 588);
-    assert.equal(rest.nextCheckpointCursor, rest.highWaterCheckpointCursor);
-    const end = await fixture.store.readControl({ ...request, afterItemSeq: rest.nextItemSeq, afterJournalSeq: rest.nextJournalSeq,
+    assert(capped.method === 'run.get');
+    assert.deepEqual(capped.items, items); assert.deepEqual(capped.journal, journal.slice(0, 1)); assert.deepEqual(capped.checkpoints, []);
+    assert.equal(capped.nextItemSeq, 1000); assert.equal(capped.highWaterItemSeq, 1000);
+    assert.equal(capped.nextJournalSeq, 1); assert.equal(capped.highWaterJournalSeq, 2); assert.equal(capped.nextCheckpointCursor, undefined);
+    const frame = { protocolVersion: 1, ok: true, result: capped };
+    assert.equal(canonicalJsonBytes(frame).byteLength, 1_048_576 - gap);
+    assert.doesNotThrow(() => decodeControlFrame(canonicalJsonBytes(frame)));
+    assert(canonicalJsonBytes({ ...frame, result: { ...capped, journal, nextJournalSeq: 2 } }).byteLength > 1_048_576);
+    const checkpoint = await fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: 2 }, identity);
+    assert(checkpoint.method === 'run.get'); assert.equal(checkpoint.checkpoints.length, 1);
+    // A later Checkpoint may fit but cannot leapfrog the first non-fitting Journal row.
+    if (!exact) assert(canonicalJsonBytes({ ...frame, result: { ...capped, checkpoints: checkpoint.checkpoints,
+      nextCheckpointCursor: checkpoint.nextCheckpointCursor } }).byteLength <= 1_048_576);
+    const rest = await fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: capped.nextJournalSeq }, identity);
+    assert(rest.method === 'run.get'); assert.deepEqual(rest.items, []); assert.deepEqual(rest.journal, journal.slice(1));
+    assert.deepEqual(rest.checkpoints, checkpoint.checkpoints); assert.equal(rest.nextJournalSeq, 2);
+    const end = await fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: 2,
       checkpointCursor: rest.nextCheckpointCursor }, identity);
-    assert.ok(end.method === 'run.get');
-    assert.deepEqual([end.items, end.journal, end.checkpoints], [[], [], []]);
-    assert.equal(end.nextItemSeq, 1000);
-    assert.equal(end.nextJournalSeq, 588);
-    // Malformed retained metadata cannot force an unbounded response or a forever-empty middle page.
-    insertJournal(driver, journalEntry(589, 'x'.repeat(1_048_576)));
-    await assert.rejects(fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: 588 }, identity), isCode('RECOVERY_REQUIRED'));
+    assert(end.method === 'run.get'); assert.deepEqual([end.items, end.journal, end.checkpoints], [[], [], []]);
+    // The row itself is under 1 MiB, but cannot fit even alone once the actual
+    // snapshot and final envelope are included. Refuse instead of an empty loop.
+    const oversized = entry(3);
+    oversized.target = 'x'.repeat(1_048_575 - canonicalJsonBytes(oversized).byteLength + 1);
+    assert.equal(canonicalJsonBytes(oversized).byteLength, 1_048_575);
+    insertJournal(driver, oversized);
+    await assert.rejects(fixture.store.readControl({ ...request, afterItemSeq: 1000, afterJournalSeq: 2 }, identity), isCode('RECOVERY_REQUIRED'));
   } finally { driver.close(); await disposeFixture(fixture); }
 }
 
-test('run.get caps exact JCS metadata bytes inclusively and stops all streams at the first non-fitting candidate', async () => {
+test('run.get budgets complete strict frames inclusively and stops before the first non-fitting candidate', async () => {
   await assertMetadataCap(false);
   await assertMetadataCap(true);
 });

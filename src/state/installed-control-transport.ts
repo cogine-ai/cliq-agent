@@ -1,0 +1,379 @@
+import { closeSync, constants } from 'node:fs';
+import { lstat, open } from 'node:fs/promises';
+import { Socket } from 'node:net';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { CONTROL_FRAME_BYTES as FRAME_BYTES, INSTALLED_CONTROL_FEATURES, decodeControlFrame, decodeInstalledControlRequest, decodeInstalledControlResponse,
+  controlWireText, decodeInstalledMigrationProgress, type InstalledControlMethod, type InstalledControlRequestV1, type InstalledControlResponseFor,
+  type InstalledControlResultFor } from '../kernel/control-wire.js';
+import { immutableSnapshot } from '../model/immutable.js';
+import { KernelStorageError, ResourceRetirementError } from './errors.js';
+import { assertInstalledManagerObservationAvailable, openInstalledControlClient, withHeldInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
+import type { HeldInstalledControlClient } from './native-owner.js';
+import { loadInstalledSupervisorObserver, type InstalledCredentialSupervisorObservation } from './installed-services.js';
+import { noteInstalledClientPhase } from './installed-diagnostics.js';
+import { beginInstalledRequestDiagnostic } from './installed-request-diagnostics.js';
+import { installedControlCloseError } from './installed-control-close-error.js';
+
+/** Internal common transport: only genuine held installed selections can open
+ * it. The fixed credential purpose is the existing explicit ensure-start path;
+ * normal clients observe the installed service without starting it. */
+export type InstalledControlTransport = Readonly<{
+  hello: InstalledControlResultFor<'control.hello'>;
+  reobserve(): Promise<void>;
+  request<M extends InstalledControlMethod>(request: Extract<InstalledControlRequestV1, { method: M }>): Promise<InstalledControlResponseFor<M>>;
+  close(): Promise<void>;
+}>;
+let retirementFailure: ResourceRetirementError | undefined;
+const retainedGuards = new Set<HeldInstalledControlClient>();
+function refuse(message: string, cause?: unknown): never {
+  throw new KernelStorageError('RECOVERY_REQUIRED', message, cause === undefined ? undefined : { cause });
+}
+function same(left: unknown, right: unknown): boolean { return canonicalJsonBytes(left).equals(canonicalJsonBytes(right)); }
+/** Pure response-data seam. The original is the complete immutable hello
+ * already decoded by this connection; equality grants no live authority. */
+export function decodeInstalledControlRehello(response: unknown,
+  request: Extract<InstalledControlRequestV1, { method: 'control.hello' }>,
+  original: InstalledControlResultFor<'control.hello'>): InstalledControlResultFor<'control.hello'> {
+  const decoded = decodeInstalledControlResponse(response, request);
+  if (!decoded.ok) refuse('installed Supervisor refused the authenticated control handshake');
+  if (!same(decoded.result, original)) refuse('installed Supervisor hello changed on its original connection');
+  return decoded.result;
+}
+function invocation(observation: InstalledCredentialSupervisorObservation): void {
+  for (const unit of [observation.keeper, observation.supervisor]) {
+    if (unit.ActiveState !== 'active' || unit.SubState !== 'running' || unit.MainPID < 1 || unit.MainPID !== unit.ExecMainPID ||
+        unit.ControlPID !== 0 || !/^[0-9a-f]{32}$/u.test(unit.InvocationID) || !unit.ControlGroup.startsWith('/') ||
+        unit.ControlGroup.split('/').includes('..') || !unit.ControlGroup.endsWith(`/${unit.Id}`))
+      refuse('installed services are not in a current running invocation');
+  }
+}
+function stable(before: InstalledCredentialSupervisorObservation, after: InstalledCredentialSupervisorObservation): void {
+  invocation(after);
+  if (!same(before.bus, after.bus) || !same(before.manager, after.manager) || before.uid !== after.uid || before.gid !== after.gid ||
+      before.stateRoot !== after.stateRoot || [before.keeper, before.supervisor].some((unit, index) => {
+        const current = [after.keeper, after.supervisor][index]!;
+        return unit.Id !== current.Id || unit.MainPID !== current.MainPID || unit.ExecMainPID !== current.ExecMainPID ||
+          unit.InvocationID !== current.InvocationID || unit.ControlGroup !== current.ControlGroup;
+      })) refuse('installed manager or service invocation changed');
+}
+
+/** Actual peer PID comes only from the held native socket. Its native check
+ * fences lifetime and the selected original image before and after this read. */
+async function peerBinding(native: HeldInstalledControlClient, observation: InstalledCredentialSupervisorObservation): Promise<void> {
+  native.assertHeld(); invocation(observation);
+  if (native.server.pid !== observation.supervisor.MainPID || native.server.uid !== observation.uid || native.server.gid !== observation.gid)
+    refuse('connected installed Supervisor differs from its current manager invocation');
+  const handle = await open(`/proc/${native.server.pid}/cgroup`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const bytes = Buffer.alloc(8193); let count = 0;
+    for (;;) {
+      const read = await handle.read(bytes, count, bytes.length - count, null); count += read.bytesRead;
+      if (count === bytes.length) refuse('installed Supervisor cgroup observation exceeds its bound');
+      if (!read.bytesRead) break;
+    }
+    const lines = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, count)).trim().split('\n').filter(line => line.startsWith('0::'));
+    const group = observation.supervisor.ControlGroup;
+    if (lines.length !== 1 || (lines[0] !== `0::${group}` && !lines[0]!.startsWith(`0::${group}/`)))
+      refuse('connected installed Supervisor is outside its current manager cgroup');
+    native.assertHeld();
+  } finally {
+    try { await handle.close(); }
+    catch (error) { retirementFailure ??= new ResourceRetirementError('installed peer observation descriptor did not retire', error); throw retirementFailure; }
+  }
+}
+
+
+export async function openInstalledControlTransport(selected: HeldInstalledRuntime,
+  purpose: 'control' | 'credential', headlessSchemaVersion?: 1 | 3): Promise<InstalledControlTransport> {
+  if (purpose !== 'control' && purpose !== 'credential') throw new TypeError('invalid installed control purpose');
+  if (headlessSchemaVersion !== undefined && headlessSchemaVersion !== 1 && headlessSchemaVersion !== 3)
+    throw new TypeError('invalid installed control schema');
+  if (retirementFailure) throw retirementFailure;
+  // The fixed friend authenticates the selection before any caller property.
+  const observer = await loadInstalledSupervisorObserver(selected, purpose);
+  noteInstalledClientPhase('manager_observer_loaded');
+  let observed = await observer.observe(purpose === 'credential');
+  noteInstalledClientPhase('initial_current_observed');
+  const deadline = performance.now() + 30000;
+  let candidateIdentity: string | undefined;
+  let nextObservationAt = 0;
+  let firstHint = true;
+  for (;;) {
+    // Preserve synchronous close/retirement/held-metadata refusal even while
+    // this negative scheduling poll has no authority-bearing observation.
+    assertInstalledManagerObservationAvailable(selected);
+    if (performance.now() >= deadline || [observed.supervisor, observed.keeper].some(unit => unit.ActiveState === 'failed'))
+      refuse('installed Supervisor startup did not reach authenticated readiness');
+    // A named socket is only a wake-up hint, not a peer, service invocation
+    // or StateOwner. Negative polls must not repeatedly hash the entire
+    // installed guest image while its real Supervisor is still starting.
+    const socket = await lstat(path.join(observed.stateRoot, 'runtime/control-v1.sock'), { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined; throw error;
+    });
+    assertInstalledManagerObservationAvailable(selected);
+    if (performance.now() >= deadline)
+      refuse('installed Supervisor startup did not reach authenticated readiness');
+    // Preserve the original already-running fast path without adding another
+    // complete image walk. Only this first hint may use the just-completed
+    // initial observation; a negative hint permanently ends that scheduling
+    // shortcut, so a socket appearing later always requires a fresh cut.
+    const initiallyReady = firstHint && socket?.isSocket() &&
+      observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active';
+    firstHint = false;
+    if (initiallyReady) break;
+    if (socket?.isSocket()) {
+      const identity = `${socket.dev}:${socket.ino}`;
+      if (identity !== candidateIdentity || performance.now() >= nextObservationAt) {
+        candidateIdentity = identity;
+        // Even a previously present/stale socket needs a fresh complete cut.
+        // A manager may leave activating without changing that socket inode;
+        // retry only this readiness observation after a fixed cooldown, never
+        // a connection, request or mutation. The absolute budget is unchanged.
+        observed = await observer.observe();
+        if (performance.now() >= deadline || [observed.supervisor, observed.keeper].some(unit => unit.ActiveState === 'failed'))
+          refuse('installed Supervisor startup did not reach authenticated readiness');
+        if (observed.supervisor.ActiveState === 'active' && observed.keeper.ActiveState === 'active') break;
+        nextObservationAt = performance.now() + 1000;
+      }
+    } else candidateIdentity = undefined;
+    await delay(Math.min(20, Math.max(0, deadline - performance.now())));
+  }
+  invocation(observed);
+  const selection = await withHeldInstalledRuntime(selected, async installed => immutableSnapshot({
+    bundleDigest: installed.bundleDigest, bundleVersion: installed.bundle.bundleVersion, headlessSchemaRange: installed.bundle.headlessSchemaRange }));
+  // Credential finalization remains the same native v1 application method.
+  // Its private client follows the verified bundle's declared frontend range;
+  // public clients choose their version explicitly and never downgrade.
+  headlessSchemaVersion ??= purpose === 'credential' && selection.headlessSchemaRange.min <= 3 &&
+    selection.headlessSchemaRange.max >= 3 ? 3 : 1;
+  const native = await openInstalledControlClient(selected);
+  let socket: Socket;
+  let fd: number | undefined;
+  try {
+    fd = native.takeSocketFd(); socket = new Socket({ fd, readable: true, writable: true }); fd = undefined;
+  } catch (cause) {
+    if (cause instanceof ResourceRetirementError) { retainedGuards.add(native); retirementFailure ??= cause; throw retirementFailure; }
+    if (fd !== undefined) {
+      try { closeSync(fd); }
+      catch (error) { retainedGuards.add(native); retirementFailure ??= new ResourceRetirementError('installed control transferred descriptor did not retire', new AggregateError([cause, error])); throw retirementFailure; }
+    }
+    try { native.close(); } catch (error) { retainedGuards.add(native); retirementFailure ??= new ResourceRetirementError('installed native control acquisition did not retire', new AggregateError([cause, error])); throw retirementFailure; }
+    throw cause;
+  }
+  noteInstalledClientPhase('native_connected');
+  const socketClosed = new Promise<void>(resolve => socket.once('close', () => resolve()));
+  let failure: unknown; let stopped = false; let retiring: Promise<void> | undefined; let closing: Promise<void> | undefined;
+  let running: Promise<unknown> | undefined;
+  let waiter: { resolve(value: unknown): void; reject(error: unknown): void;
+    progress?: { accept(value: unknown): void; deadline(): number } } | undefined;
+  // The first observed failing part of this original exchange only. These
+  // fixed labels carry no exception text, resource proof or retry permission.
+  let exchangeFailureBoundary: import('./installed-request-diagnostics.js').InstalledRequestFailure['boundary'] | undefined;
+  const header = Buffer.alloc(4); let headerCount = 0; let body: Buffer | undefined; let bodyCount = 0;
+  const fail = (error: unknown, boundary?: typeof exchangeFailureBoundary) => {
+    if (boundary) exchangeFailureBoundary ??= boundary;
+    if (error instanceof ResourceRetirementError) { retainedGuards.add(native); retirementFailure ??= error; failure = retirementFailure; }
+    else failure ??= error;
+    stopped = true; waiter?.reject(failure); waiter = undefined; body = undefined; socket.destroy();
+  };
+  const responseTimedOut = () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control response timed out'), 'exchange_timeout');
+  socket.on('error', () => fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control socket failed'), 'exchange_socket_error'));
+  socket.on('close', () => { if (!stopped) fail(new KernelStorageError('RECOVERY_REQUIRED', 'installed control peer closed'), 'exchange_peer_closed'); });
+  socket.on('data', (chunk: Buffer) => {
+    if (stopped) return;
+    let boundary: typeof exchangeFailureBoundary = 'exchange_frame';
+    try {
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (!waiter) throw new TypeError('unsolicited installed control response');
+        if (!body) {
+          const count = Math.min(4 - headerCount, chunk.length - offset); chunk.copy(header, headerCount, offset, offset + count);
+          offset += count; headerCount += count; if (headerCount < 4) continue;
+          const length = header.readUInt32BE(0); if (length < 1 || length > FRAME_BYTES) throw new TypeError('invalid installed response bound');
+          body = Buffer.alloc(length); bodyCount = 0; headerCount = 0;
+        }
+        const count = Math.min(body.length - bodyCount, chunk.length - offset); chunk.copy(body, bodyCount, offset, offset + count);
+        offset += count; bodyCount += count;
+        if (bodyCount === body.length) {
+          if (waiter.progress && performance.now() >= waiter.progress.deadline()) { responseTimedOut(); return; }
+          boundary = 'exchange_native_response';
+          native.assertHeld();
+          boundary = 'exchange_frame';
+          const value = decodeControlFrame(body);
+          const complete = waiter; body = undefined;
+          if (value !== null && typeof value === 'object' && Object.hasOwn(value, 'progressSequence')) {
+            if (!complete.progress) throw new TypeError('unsolicited installed migration progress');
+            complete.progress.accept(value);
+          } else {
+            waiter = undefined;
+            complete.resolve(value);
+          }
+        }
+      }
+    } catch (error) { fail(error instanceof ResourceRetirementError ? error : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response or native peer is invalid'), boundary); }
+  });
+  const retire = (): Promise<void> => retiring ??= (async () => {
+    stopped = true; waiter?.reject(failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing')); waiter = undefined;
+    socket.destroy(); let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([socketClosed, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('installed control socket did not join')), 5000);
+      })]);
+    } catch (error) { retainedGuards.add(native); retirementFailure ??= new ResourceRetirementError('installed control socket retirement is uncertain; native guards retained', error); throw retirementFailure; }
+    finally { clearTimeout(timer); }
+    if (retirementFailure) { retainedGuards.add(native); throw retirementFailure; }
+    try { native.close(); }
+    catch (error) { retainedGuards.add(native); retirementFailure ??= error instanceof ResourceRetirementError ? error : new ResourceRetirementError('installed native control descriptors did not retire', error); throw retirementFailure; }
+  })();
+  const exchange = async (request: InstalledControlRequestV1, diagnosis?: ReturnType<typeof beginInstalledRequestDiagnostic>): Promise<unknown> => {
+    if (stopped || waiter || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control connection is closed or busy');
+    diagnosis?.at('exchange_native_before');
+    native.assertHeld();
+    const bytes = canonicalJsonBytes(request); if (!bytes.length || bytes.length > (purpose === 'credential' ? 65536 : FRAME_BYTES)) throw new TypeError('installed control request exceeds its bound');
+    const frame = Buffer.alloc(4); frame.writeUInt32BE(bytes.length);
+    exchangeFailureBoundary = undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined, nextProgress = 1, responseDeadline = 0;
+    const responseTimeoutMs = request.method === 'run.apply' ? 300_000 : 30_000;
+    const awaitFrame = () => {
+      clearTimeout(timer);
+      responseDeadline = performance.now() + responseTimeoutMs;
+      timer = setTimeout(responseTimedOut, responseTimeoutMs);
+    };
+    const progress = request.method === 'state.migrate' || request.method === 'state.rollback'
+      ? { accept(value: unknown) { decodeInstalledMigrationProgress(value, request, nextProgress++); awaitFrame(); },
+          deadline: () => responseDeadline } : undefined;
+    const response = new Promise<unknown>((resolve, reject) => { waiter = { resolve, reject, progress }; });
+    awaitFrame();
+    try {
+      diagnosis?.at('exchange_response');
+      const writes = [frame, bytes].map(value => new Promise<void>((resolve, reject) => {
+        const refused = () => { exchangeFailureBoundary ??= 'exchange_write'; reject(new Error('installed control write failed')); };
+        try { socket.write(value, error => error ? refused() : resolve()); }
+        catch { refused(); }
+      }));
+      const results = await Promise.all([response, ...writes]); diagnosis?.at('exchange_native_after'); native.assertHeld(); return results[0];
+    } catch (error) {
+      if (exchangeFailureBoundary) diagnosis?.at(exchangeFailureBoundary);
+      throw error;
+    } finally { clearTimeout(timer); exchangeFailureBoundary = undefined; }
+  };
+  const checkCurrent = async () => {
+    if (stopped || retirementFailure) throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing');
+    native.assertHeld(); const current = await observer.observe(); stable(observed, current);
+    await peerBinding(native, current); return current;
+  };
+  const helloRequest = (): Extract<InstalledControlRequestV1, { method: 'control.hello' }> => {
+    const requestedFeatureIds = purpose === 'credential' ? ['credential.finalize'] : [...INSTALLED_CONTROL_FEATURES];
+    const request = decodeInstalledControlRequest({ protocolVersion: 1, method: 'control.hello',
+      clientBuild: purpose === 'credential' ? 'cliq-installed-credential-v1' : 'cliq-installed-client-v1',
+      controlSchemaRange: { min: 1, max: 1 }, headlessSchemaRange: { min: headlessSchemaVersion, max: headlessSchemaVersion }, requestedFeatureIds });
+    if (request.method !== 'control.hello') throw new TypeError('invalid fixed installed handshake');
+    return request;
+  };
+  let helloResult: InstalledControlResultFor<'control.hello'>;
+  const client: InstalledControlTransport = Object.freeze({
+    get hello() { return helloResult; },
+    reobserve(): Promise<void> {
+      if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
+      if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closed or busy'));
+      const pending = (async () => {
+        try {
+          // A fresh hello also crosses the application's current StateOwner and
+          // closing gates. Manager/peer observation alone cannot replace it.
+          await checkCurrent();
+          const request = helloRequest();
+          decodeInstalledControlRehello(await exchange(request), request, helloResult);
+          await checkCurrent();
+          if (stopped || closing || retirementFailure)
+            throw retirementFailure ?? failure ?? new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closing');
+        } catch (error) {
+          const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
+            : new KernelStorageError('RECOVERY_REQUIRED', 'installed control hello response is invalid');
+          fail(reason); await retire(); throw reason;
+        }
+      })();
+      running = pending; void pending.finally(() => { running = undefined; }).catch(() => {}); return pending;
+    },
+    request<M extends InstalledControlMethod>(request: Extract<InstalledControlRequestV1, { method: M }>): Promise<InstalledControlResponseFor<M>> {
+      if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
+      if (running || closing || stopped) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'installed control client is closed or busy'));
+      let candidate: InstalledControlRequestV1;
+      let diagnosis: ReturnType<typeof beginInstalledRequestDiagnostic>;
+      try {
+        candidate = decodeInstalledControlRequest(request);
+        diagnosis = beginInstalledRequestDiagnostic(candidate.method);
+        diagnosis?.at('request_validation');
+        if (candidate.method === 'control.hello' || !helloResult.enabledFeatureIds.includes(candidate.method))
+          throw new TypeError('installed control method was not enabled by this hello');
+        if (purpose === 'credential' && candidate.method !== 'credential.finalize') throw new TypeError('credential connection accepts only its original continuation');
+      } catch (cause) {
+        (diagnosis ?? beginInstalledRequestDiagnostic('unrecognized'))?.failure(cause);
+        return Promise.reject(new KernelStorageError('INVALID_REQUEST', 'invalid installed control request', { cause }));
+      }
+      const pending = (async () => {
+        try {
+          diagnosis?.at('pre_current');
+          await checkCurrent();
+          diagnosis?.at('exchange');
+          const value = await exchange(candidate, diagnosis);
+          diagnosis?.at('response_decode');
+          const response = decodeInstalledControlResponse(value, candidate);
+          diagnosis?.at('post_current');
+          await checkCurrent(); return response as InstalledControlResponseFor<M>;
+        } catch (error) {
+          diagnosis?.failure(error);
+          const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
+            : new KernelStorageError('RECOVERY_REQUIRED', 'installed control response is invalid');
+          fail(reason); await retire(); throw reason;
+        }
+      })();
+      running = pending; void pending.finally(() => { running = undefined; }).catch(() => {}); return pending;
+    },
+    close() {
+      if (this !== client) return Promise.reject(new TypeError('invalid installed control client'));
+      return closing ??= (async () => { fail(installedControlCloseError());
+        await Promise.allSettled(running ? [running] : []); await retire(); })();
+    }
+  });
+  try {
+    await checkCurrent();
+    noteInstalledClientPhase('pre_hello_current_verified');
+    const request = helloRequest();
+    noteInstalledClientPhase('hello_exchange_started');
+    const response = decodeInstalledControlResponse(await exchange(request), request) as InstalledControlResponseFor<'control.hello'>;
+    noteInstalledClientPhase('hello_received');
+    if (!response.ok) {
+      if (headlessSchemaVersion === 3) throw new InstalledControlHandshakeRefusal(response);
+      refuse('installed Supervisor refused the authenticated control handshake');
+    }
+    const hello = response.result, bundle = hello.activeRuntimeBundle;
+    if (hello.serverBuild !== 'cliq-installed-v1' || !same(hello.controlSchemaRange, { min: 1, max: 1 }) ||
+        !same(hello.headlessSchemaRange, selection.headlessSchemaRange) ||
+        (purpose === 'credential' && !same(hello.enabledFeatureIds, ['credential.finalize'])) ||
+        bundle.runtimeBundleRef !== selection.bundleDigest || bundle.bundleDigest !== selection.bundleDigest || bundle.bundleVersion !== selection.bundleVersion)
+      refuse('installed Supervisor hello is incompatible with the selected installed runtime');
+    controlWireText(hello.supervisorInstanceId); helloResult = immutableSnapshot(hello);
+    await checkCurrent(); noteInstalledClientPhase('final_current_verified'); return client;
+  } catch (error) {
+    const reason = error instanceof KernelStorageError || error instanceof ResourceRetirementError ? error
+      : new KernelStorageError('RECOVERY_REQUIRED', 'installed control hello response is invalid');
+    fail(reason); await retire(); throw reason;
+  }
+}
+
+/** The already closed authenticated refusal, suitable for a thin adapter.
+ * This is diagnostic data, never a replacement for native currentness. */
+export class InstalledControlHandshakeRefusal extends KernelStorageError {
+  readonly response: Extract<InstalledControlResponseFor<'control.hello'>, { ok: false }>;
+  constructor(value: unknown) {
+    super('RECOVERY_REQUIRED', 'installed Supervisor refused the authenticated control handshake');
+    const response = decodeInstalledControlResponse(value, { protocolVersion: 1, method: 'control.hello',
+      clientBuild: 'cliq-headless-v3', controlSchemaRange: { min: 1, max: 1 },
+      headlessSchemaRange: { min: 3, max: 3 }, requestedFeatureIds: [] });
+    if (response.ok) throw new TypeError('handshake refusal requires its closed refusal');
+    this.response = response;
+  }
+}

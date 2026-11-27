@@ -7,6 +7,11 @@ typedef struct staging_cleanup_frame {
     size_t path_length;
     struct staging_cleanup_frame *parent;
 } staging_cleanup_frame;
+typedef struct source_git_input source_git_input;
+static int close_source_git_inputs(source_staging *staging);
+static napi_value source_staging_borrow_git_input(napi_env env, napi_callback_info info);
+static napi_value source_staging_open_git_input(napi_env env, napi_callback_info info);
+static napi_value source_staging_open_absent_git_input(napi_env env, napi_callback_info info);
 struct source_staging {
     state_lock *lock;
     napi_ref lock_ref;
@@ -15,6 +20,7 @@ struct source_staging {
     char name[44];
     int cleanup_parent_fd;
     staging_cleanup_frame *cleanup;
+    source_git_input *git_inputs;
     source_staging *next;
 };
 static const napi_type_tag source_staging_tag = {0xc1a78a40c3a78ff1ULL, 0x8b534c0f2a74d9e5ULL};
@@ -34,6 +40,7 @@ static void staging_close_cleanup(source_staging *staging) {
     staging_close_fd(staging, &staging->cleanup_parent_fd);
 }
 static int close_source_staging(source_staging *staging) {
+    if (close_source_git_inputs(staging)) return EBUSY;
     staging->closed = 1;
     staging_close_cleanup(staging);
     staging_close_fd(staging, &staging->fd);
@@ -41,12 +48,14 @@ static int close_source_staging(source_staging *staging) {
     return staging->lock->source_retirement_error;
 }
 static int close_lock_source_stagings(state_lock *lock) {
-    for (source_staging *staging = lock->source_stagings; staging; staging = staging->next) close_source_staging(staging);
-    return lock->source_retirement_error;
+    int failed = 0;
+    for (source_staging *staging = lock->source_stagings; staging; staging = staging->next)
+        if (close_source_staging(staging)) failed = 1;
+    return failed || lock->source_retirement_error;
 }
 static void finalize_source_staging(napi_env env, void *data, void *hint) {
     (void)hint; source_staging *staging = data; state_lock *lock = staging->lock;
-    close_source_staging(staging);
+    if (close_source_staging(staging)) return;
     source_staging **link = &lock->source_stagings;
     while (*link && *link != staging) link = &(*link)->next;
     if (*link) *link = staging->next;
@@ -87,6 +96,14 @@ static napi_value source_staging_assert(napi_env env, napi_callback_info info) {
     if (!staging) return NULL;
     if (!staging_held(staging)) return native_error(env, "source staging identity changed or closed");
     return napi_get_undefined(env, &value) == napi_ok ? value : NULL;
+}
+/* Read-only cleanup branch selection. Each subsequent native cleanup input
+ * independently rechecks this exact identity; this observation grants none. */
+static napi_value source_staging_presence(napi_env env, napi_callback_info info) {
+    source_staging *staging = unwrap_source_staging(env, info); napi_value value;
+    if (!staging) return NULL;
+    if (!staging_held(staging)) return native_error(env, "source staging identity changed or closed");
+    return napi_create_string_utf8(env, staging->absent ? "absent" : "present", NAPI_AUTO_LENGTH, &value) == napi_ok ? value : NULL;
 }
 static napi_value source_staging_close(napi_env env, napi_callback_info info) {
     source_staging *staging = unwrap_source_staging(env, info); napi_value value;
@@ -259,13 +276,17 @@ static napi_value source_staging_open(napi_env env, napi_callback_info info, int
         !sync_directory(lock->runtime_fd)))) goto fail;
     const napi_property_descriptor methods[] = {
         {"assertHeld", NULL, source_staging_assert, NULL, NULL, NULL, napi_default, NULL},
+        {"readPresence", NULL, source_staging_presence, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, source_staging_close, NULL, NULL, NULL, napi_default, NULL},
         {"retireStep", NULL, source_staging_retire_step, NULL, NULL, NULL, napi_default, NULL},
-        {"assertRetired", NULL, source_staging_assert_retired, NULL, NULL, NULL, napi_default, NULL}
+        {"assertRetired", NULL, source_staging_assert_retired, NULL, NULL, NULL, napi_default, NULL},
+        {"borrowGitInput", NULL, source_staging_borrow_git_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openGitInput", NULL, source_staging_open_git_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openAbsentGitInput", NULL, source_staging_open_absent_git_input, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_create_reference(env, self, 1, &staging->lock_ref) != napi_ok || napi_create_object(env, &result) != napi_ok ||
         !identity_member(env, result, "identity", &staging->identity) ||
-        napi_define_properties(env, result, 4, methods) != napi_ok ||
+        napi_define_properties(env, result, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
         napi_type_tag_object(env, result, &source_staging_tag) != napi_ok ||
         napi_wrap(env, result, staging, finalize_source_staging, NULL, NULL) != napi_ok) goto fail;
     staging->next = lock->source_stagings; lock->source_stagings = staging;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import path from 'node:path';
-import { rename } from 'node:fs/promises';
+import { readdir, rename } from 'node:fs/promises';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
@@ -13,6 +13,93 @@ import { openStateStore } from './store.js';
 import { postEffectObservation } from './testing/tool-effects.js';
 
 import { batch, prepareTool, claimTool, observation } from './testing/tool-calls.js';
+
+// The projection owns one complete read cut but is never reusable authority.
+// These are real SQLite/CAS operations in the existing offline Run fixture.
+test('tool selection includes one immutable checkpoint/history cut and preparation rereads retained bytes', async () => {
+  const fixture = await createAgentFixture('tool-selection-cut', { wallTimeMs: 300_000 }, { mode: 'yolo' });
+  let displaced: { source: string; destination: string } | undefined;
+  try {
+    await batch(fixture, [{ name: 'read', input: { path: 'a.ts' } }]);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const selected = await fixture.agent.readToolInvocation();
+    assert.deepEqual(selected.checkpoint, before.latestCheckpoint);
+    assert.deepEqual(selected.journal, before.journal);
+    assert.equal(selected.checkpoint.id, selected.run.latestCheckpointId);
+    assert(Object.isFrozen(selected.checkpoint)); assert(Object.isFrozen(selected.journal));
+    assert(Object.isFrozen(selected.journal[0]));
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run, 'selection cannot reserve or claim work');
+    const source = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.run.frontierRef!);
+    displaced = { source, destination: source + '.test-held-original' };
+    await rename(displaced.source, displaced.destination);
+    await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: selected.run.revision,
+      leaseEpoch: selected.run.leaseEpoch }), { code: 'RECOVERY_REQUIRED' });
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before.run, 'a selected projection cannot bypass a later read refusal');
+    await rename(displaced.destination, displaced.source); displaced = undefined;
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    const prepared = await prepareTool(fixture);
+    assert.equal(prepared.request.callId, selected.invocation.callId);
+  } finally {
+    if (displaced) await rename(displaced.destination, displaced.source);
+    await disposeFixture(fixture);
+  }
+});
+
+// Corrupt retained data at the existing disposable SQLite/CAS seam. These
+// refusals do not construct verifier admission, a launch, or physical proof.
+for (const subjectKind of ['verifier_launch', 'delivery_plan', 'unknown'] as const)
+  test(`loading an Agent never skips an unowned ${subjectKind} policy decision`, async () => {
+    const fixture = await createAgentFixture('tool-policy-subject', undefined, { mode: 'yolo' });
+    const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      const run = fixture.store.getRun(fixture.runId);
+      const item = { schemaVersion: 1, kind: 'policy_decision', subjectKind, itemId: 'unowned-policy',
+        runId: fixture.runId, opId: 'unowned-operation', principalId: fixture.principalId,
+        decisionRef: 'a'.repeat(64), policyChannelEvidenceRef: 'a'.repeat(64), policyChannelEvidenceDigest: 'b'.repeat(64),
+        createdAt: run.updatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: 'c'.repeat(64) };
+      const payload = await fixture.store.artifacts.publishCanonical(item, 'offline-corrupt-policy-data');
+      driver.prepare('INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)')
+        .run(item.itemId, fixture.runId, 1n, item.kind, payload.ref, item.createdAt);
+      const refusal = { code: 'RECOVERY_REQUIRED', message: subjectKind === 'verifier_launch'
+        ? /verifier policy item has no owned candidate/ : /policy decision has an unsupported subject/ };
+      await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+      await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+        releaseKeys: fixture.signed!.releaseKeys }), refusal);
+      assert.deepEqual(fixture.store.getRun(fixture.runId), run);
+    } finally { driver.close(); await disposeFixture(fixture); }
+  });
+
+test('loading an Agent refuses policy rows appended after its complete recovery cut', async () => {
+  const fixture = await createAgentFixture('tool-policy-cut', undefined, { mode: 'yolo' });
+  const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const run = fixture.store.getRun(fixture.runId);
+    const item = { schemaVersion: 1, kind: 'policy_decision', subjectKind: 'verifier_launch', itemId: 'late-unowned-policy',
+      runId: fixture.runId, opId: 'unowned-operation', principalId: fixture.principalId,
+      decisionRef: 'a'.repeat(64), policyChannelEvidenceRef: 'a'.repeat(64), policyChannelEvidenceDigest: 'b'.repeat(64),
+      createdAt: run.updatedAt, decisionSource: 'direct_policy', decision: 'allow', grantRef: 'c'.repeat(64) };
+    const payload = await fixture.store.artifacts.publishCanonical(item, 'offline-corrupt-policy-data');
+    const resolve = fixture.authority.material.resolveVerifiedTools;
+    let appended = false;
+    const material = { ...fixture.authority.material, resolveVerifiedTools: (reference: Parameters<typeof resolve>[0]) => {
+      const tools = resolve(reference);
+      // Assembly validation follows the actual full recovery read. This
+      // existing resolver seam adds inert corrupt data, never a grant/launch.
+      if (!appended) {
+        driver.prepare('INSERT INTO items (item_id, session_id, run_id, item_seq, kind, payload_ref, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)')
+          .run(item.itemId, fixture.runId, 1n, item.kind, payload.ref, item.createdAt);
+        appended = true;
+      }
+      return tools;
+    } };
+    await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material,
+      releaseKeys: fixture.signed!.releaseKeys }), { code: 'REVISION_CONFLICT', message: /policy recovery cut changed/ });
+    assert.equal(appended, true);
+    assert.deepEqual(fixture.store.getRun(fixture.runId), run);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED',
+      message: /verifier policy item has no owned candidate/ });
+  } finally { driver.close(); await disposeFixture(fixture); }
+});
 
 test('canonical allow, permanent claim and ordered results continue through the real loaded Run without authority in prompts', async () => {
   const fixture = await createAgentFixture('tool-ordered', undefined, { mode: 'default' });
@@ -84,7 +171,7 @@ test('direct deny closes exactly its own call with no Journal or charge, while a
     assert.equal(beforeAsk.run.budgetConsumed.toolCalls, 0);
     assert.equal(beforeAsk.journal.filter((entry) => entry.opKind !== 'model').length, 0);
     const ask = await fixture.agent.prepareTool({ expectedRunRevision: denied.run.revision, leaseEpoch: fixture.leaseEpoch });
-    assert.equal(ask.disposition, 'approval_required');
+    assert.equal(ask.disposition, 'retirement_required');
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), beforeAsk);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 1);
     await fixture.store.close();
@@ -205,30 +292,59 @@ for (const phase of ['unknown', 'abandoned'] as const) test(`${phase} typed tool
     const unknown = await fixture.store.markInvocationUnknown({ runId: fixture.runId, opId: prepared.entry.opId, attempt: 0,
       expectedRunRevision: prepared.run.revision, evidenceRef: ambiguity.ref, evidenceDigest: ambiguity.ref });
     await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: unknown.run.revision, leaseEpoch: fixture.leaseEpoch }), /tool attempt already exists/);
-    if (phase === 'abandoned') {
-      // A low-level Journal acknowledgement is not the authenticated terminal Run closure.
-      const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
-      const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
-        attempt: 0, attestationRef: acknowledgement.ref });
-      assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
-    }
-    // Each cut has a fresh owner-bound proof, so stale inspector rejection
-    // cannot mask the unresolved Journal guard being exercised here.
+    // Prepare the existing offline changed-workspace proof while the UNKNOWN
+    // cut is still readable. It cannot repair a later Journal-only abandonment.
     const proof = await postEffectObservation(fixture, await observation(fixture, claimed, { changed: true }), prepared.checkpointId);
     const before = await fixture.store.readRecoveryClosure(fixture.runId);
-    assert.equal(before.journal.at(-1)!.phase, phase);
+    assert.equal(before.journal.at(-1)!.phase, 'unknown');
     assert.equal(before.run.status, 'running');
     assert.equal(before.run.budgetConsumed.toolCalls, 1);
     assert.equal(before.run.budgetReserved.toolCalls, 0);
     assert.equal(before.latestCheckpoint.workspaceStateRef, proof.priorWorkspaceStateRef);
-    await assert.rejects(fixture.store.sealWorkerGeneration({ launchId: fixture.launchId, expectedRunRevision: before.run.revision,
+    const sealInput = { launchId: fixture.launchId, expectedRunRevision: before.run.revision,
       expectedGenerationRowVersion: before.workspaceGenerations[0]!.rowVersion, quiesceId: 'tool-test-quiesce', checkpointId: prepared.checkpointId,
       contextManifestRef: before.latestCheckpoint.contextManifestRef, workspaceStateRef: proof.workspaceStateRef,
       snapshotEvidenceRef: proof.observation.postEffect!.snapshotEvidenceRef, snapshotEvidenceDigest: proof.snapshot.evidenceDigest,
-      retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' }), /post-effect Checkpoint together/);
+      retirementEvidenceRef: proof.observation.postEffect!.retirementEvidenceRef, checkpointReason: 'auto' as const };
+    if (phase === 'abandoned') {
+      // Deliberately incomplete retained state: this low-level ack has no
+      // typed attestation, authenticated terminal transaction or call marker.
+      const acknowledgement = await fixture.store.artifacts.publishCanonical({ acknowledgeExactRisk: true }, 'cliq-manual-abandon-attestation-v1');
+      const abandoned = await fixture.store.abandonUnknownInvocation({ runId: fixture.runId, opId: prepared.entry.opId,
+        attempt: 0, attestationRef: acknowledgement.ref });
+      assert.equal(abandoned.budgetSettlementRef, unknown.entry.budgetSettlementRef);
+      assert.deepEqual(abandoned.budgetDelta, { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 });
+      const driver = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      const rows = () => Object.fromEntries(['runs', 'worker_launches', 'workspace_generations', 'run_journal', 'artifacts',
+        'canonical_time_fence', 'items', 'checkpoints', 'sessions', 'control_requests', 'run_events']
+        .map(table => [table, driver.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()]));
+      try {
+        const unchanged = rows(), objects = (await readdir(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY))).sort();
+        // Exercise the real seal first so its existing five-second proof
+        // freshness cannot mask the unresolved claimed-call guard.
+        await assert.rejects(fixture.store.sealWorkerGeneration(sealInput), {
+          code: 'STATE_TRANSITION_INVALID', message: /post-effect Checkpoint together/ });
+        const refusal = { code: 'RECOVERY_REQUIRED', message: /manual abandonment requires.*terminal-only marker/ };
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+        await assert.rejects(fixture.agent.prepareTool({ expectedRunRevision: before.run.revision, leaseEpoch: fixture.leaseEpoch }), refusal);
+        await assert.rejects(fixture.agent.readToolInvocation(), refusal);
+        await assert.rejects(fixture.store.beginWorkerRecovery({ runId: fixture.runId, expectedRunRevision: before.run.revision }), refusal);
+        assert.deepEqual(rows(), unchanged, 'refusal cannot seal changed workspace, close the call or append recovery state');
+        assert.deepEqual((await readdir(path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY))).sort(), objects);
+        await fixture.store.close();
+        fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+        const reopened = rows();
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), refusal);
+        await assert.rejects(fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+          releaseKeys: fixture.signed!.releaseKeys }), refusal);
+        assert.deepEqual(rows(), reopened, 'reopening cannot turn the incomplete acknowledgement into terminal authority');
+      } finally { driver.close(); }
+      return;
+    }
+    await assert.rejects(fixture.store.sealWorkerGeneration(sealInput), /post-effect Checkpoint together/);
     assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
     assert.equal((await fixture.agent.readToolInvocation()).invocation.index, 0);
-    // Independently reopen unknown and abandoned cuts, not just abandonment.
+    // Independently reopen the still-valid unresolved UNKNOWN cut.
     await fixture.store.close();
     fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
     fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed!.releaseKeys });

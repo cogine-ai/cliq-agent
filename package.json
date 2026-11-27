@@ -1,9 +1,20 @@
 {
   "name": "@cogineai/cliq",
   "version": "0.15.0",
-  "description": "Tiny local coding agent harness with a provider-agnostic JSON action protocol.",
+  "description": "Local-first, provider-neutral coding agent for interactive work and reviewable repository tasks.",
   "private": false,
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk/index.d.ts",
+      "import": "./dist/sdk/index.js"
+    },
+    "./control/v1": {
+      "types": "./dist/control/v1.d.ts",
+      "import": "./dist/control/v1.js"
+    },
+    "./package.json": "./package.json"
+  },
   "license": "MIT",
   "homepage": "https://github.com/cogine-ai/cliq-agent#readme",
   "repository": {
@@ -30,7 +41,9 @@
   },
   "files": [
     "dist/**/*.js",
+    "dist/**/*.d.ts",
     "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts",
     "!dist/**/testing/**",
     "skills/**",
     "!skills/**/__pycache__/**",
@@ -48,9 +61,10 @@
     "pretest": "node scripts/kernel/build-state-owner-native.mjs",
     "prebuild": "node scripts/kernel/build-state-owner-native.mjs",
     "build": "tsc -p tsconfig.json",
+    "postbuild": "node scripts/build-sdk-types.mjs",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "node --test --test-concurrency=1 --import tsx \"src/**/*.test.ts\" \"src/**/*.test.tsx\"",
+    "test": "node --test scripts/test-router.test.mjs && node scripts/test.mjs",
     "test:agent-runtime": "node --test --test-concurrency=1 --import tsx src/kernel/artifact-plan.test.ts src/kernel/json.test.ts src/model/attempt.test.ts src/model/capabilities.test.ts src/model/pricing.test.ts src/model/provider-observation.test.ts src/model/request.test.ts src/model/run-assembly.test.ts src/model/typed-runtime-boundary.test.ts src/runtime/context-compaction.test.ts src/runtime/model-retry.test.ts src/tools/input-contract.test.ts src/policy/tool-policy.test.ts src/state/agent.test.ts src/state/model-retry.test.ts src/state/model-failure.test.ts src/state/runtime-owner.test.ts src/state/tool.test.ts src/state/tool-approval.test.ts src/state/input.test.ts src/state/stop.test.ts src/state/resource-stop.test.ts",
     "test:state": "node --test --test-concurrency=1 --import tsx \"src/kernel/**/*.test.ts\" \"src/state/**/*.test.ts\"",
     "test:state-fault": "node --test --test-concurrency=1 --import tsx src/state/state-fault.test.ts",
@@ -62,13 +76,16 @@
   },
   "dependencies": {
     "ajv": "8.20.0",
+    "diff": "9.0.0",
     "ink": "7.0.2",
     "ink-text-input": "6.0.0",
-    "react": "19.2.6"
+    "react": "19.2.6",
+    "semver": "7.6.3"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@types/react": "19.2.14",
+    "@types/semver": "7.5.8",
     "esbuild": "0.28.2",
     "ink-testing-library": "4.0.0",
     "postject": "1.0.0-alpha.6",

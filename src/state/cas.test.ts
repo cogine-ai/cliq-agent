@@ -37,6 +37,181 @@ test('publish makes immutable bytes readable by their raw SHA-256 ref', async ()
   }
 });
 
+test('optional verification retention uses the original complete read and joins before returning bounded bytes', async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-retain-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const root = path.join(home, 'objects'); await mkdir(root, { mode: 0o700 });
+  const store = new ContentAddressedStore(root), bytes = Buffer.from('original verified bytes');
+  const ref = await store.publish(bytes), open = fs.open.bind(fs);
+  let opened = 0, closed = 0;
+  t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+    const handle = await open(...args); opened++;
+    const close = handle.close.bind(handle);
+    t.mock.method(handle, 'close', async () => { await close(); closed++; }); return handle;
+  });
+  assert.deepEqual(await store.verify(ref, undefined, bytes.length), { ref, byteLength: bytes.length, bytes });
+  assert.equal(opened, 2); assert.equal(closed, opened);
+  assert.deepEqual(await store.verify(ref, undefined, bytes.length - 1), { ref, byteLength: bytes.length });
+  assert.equal(opened, 4); assert.equal(closed, opened);
+  for (const limit of [-1, NaN, Infinity, 0.5]) await assert.rejects(store.verify(ref, undefined, limit), TypeError);
+  assert.equal(opened, 4, 'invalid limits must be refused before opening any descriptor');
+  await chmod(path.join(root, ref), 0o600); await writeFile(path.join(root, ref), Buffer.alloc(bytes.length));
+  await chmod(path.join(root, ref), 0o400);
+  await assert.rejects(store.verify(ref, undefined, bytes.length), /corrupt/u);
+  assert.equal(opened, 6); assert.equal(closed, opened);
+});
+
+test('a fixed four-object publication preserves all four durable namespace boundaries and joins its real descriptors', async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-'));
+  const root = path.join(home, 'objects');
+  const sources = ['one', 'two', 'three', 'four'].map(value => Buffer.from(value)) as [Buffer, Buffer, Buffer, Buffer];
+  const open = fs.open.bind(fs);
+  const boundaries: string[][] = [];
+  let active = 0, peak = 0, fileSyncs = 0;
+  try {
+    await mkdir(root, { mode: 0o700 });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+      const handle = await open(...args);
+      active++; peak = Math.max(peak, active);
+      const close = handle.close.bind(handle), sync = handle.sync.bind(handle);
+      t.mock.method(handle, 'close', async () => { await close(); active--; });
+      t.mock.method(handle, 'sync', async () => {
+        await sync();
+        if (args[0] === root) boundaries.push((await readdir(root)).sort());
+        else fileSyncs++;
+      });
+      return handle;
+    });
+    const store = new ContentAddressedStore(root);
+    const results = await store.publishFour(sources);
+    assert.equal(active, 0, 'all original file and held-root descriptors join before returning');
+    assert.ok(peak > 2 && peak <= 5, 'one held root plus at most four actual file handles, not a whole-process FD claim');
+    assert.equal(fileSyncs, 4, 'every complete original file is actually synchronized');
+    assert.equal(boundaries.length, 4, 'the four namespace durability boundaries remain distinct');
+    assert.equal(boundaries[0]!.length, 4);
+    assert.ok(boundaries[0]!.every(name => /^\.tmp-stream-[0-9a-f]{32}$/u.test(name)), 'all immutable staging files precede the first barrier');
+    assert.equal(boundaries[1]!.length, 4);
+    assert.ok(boundaries[1]!.every(name => /^\.tmp-[0-9a-f]{64}-[0-9a-f]{32}$/u.test(name)), 'all ref-bearing renames precede the second barrier');
+    assert.equal(boundaries[2]!.length, 8, 'all four final links and their original temporaries precede the third barrier');
+    assert.deepEqual(boundaries[3], results.map(result => result.ref).sort(), 'all temporary unlinks precede the fourth barrier');
+    for (const [index, result] of results.entries()) {
+      assert.equal(result.byteLength, sources[index]!.length);
+      assert.deepEqual(await store.read(result.ref), sources[index]);
+      assert.equal((await fsStat(path.join(root, result.ref))).nlink, 1);
+    }
+  } finally { t.mock.restoreAll(); await rm(home, { recursive: true, force: true }); }
+});
+
+test('fixed four-object publication interoperates with same-root single publishers and repeated content refs', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-shared-'));
+  const root = path.join(home, 'objects');
+  try {
+    await mkdir(root, { mode: 0o700 });
+    const store = new ContentAddressedStore(root), shared = Buffer.from('shared bytes');
+    const [batch, singles] = await Promise.all([
+      store.publishFour([shared, shared, Buffer.from('third'), shared]),
+      Promise.all(Array.from({ length: 4 }, () => new ContentAddressedStore(root).publish(shared)))
+    ]);
+    assert.equal(batch[0].ref, batch[1].ref); assert.equal(batch[0].ref, batch[3].ref);
+    assert.ok(singles.every(ref => ref === batch[0].ref));
+    assert.deepEqual((await readdir(root)).sort(), [...new Set(batch.map(item => item.ref))].sort());
+    for (const item of batch) { await store.verify(item.ref); assert.equal((await fsStat(path.join(root, item.ref))).nlink, 1); }
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test('fixed four-object publication rejects missing or non-byte slots before any I/O', async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-input-'));
+  const root = path.join(home, 'objects'), open = fs.open.bind(fs);
+  let opened = 0;
+  try {
+    await mkdir(root, { mode: 0o700 });
+    t.mock.method(fs, 'open', (...args: Parameters<typeof open>) => { opened++; return open(...args); });
+    const store = new ContentAddressedStore(root), bytes = Buffer.from('valid');
+    for (const sources of [[], [bytes, bytes, bytes], [bytes, bytes, bytes, bytes, bytes],
+      new Array(4), [bytes, bytes, undefined, bytes]]) {
+      await assert.rejects(store.publishFour(sources as [Buffer, Buffer, Buffer, Buffer]), TypeError,
+        'all four actual byte sources are required before opening the protected root');
+    }
+    assert.equal(opened, 0); assert.deepEqual(await readdir(root), []);
+  } finally { t.mock.restoreAll(); await rm(home, { recursive: true, force: true }); }
+});
+
+for (const mutation of ['rename', 'link', 'unlink'] as const) {
+  test(`fixed four-object ${mutation} failure joins actual sibling mutations before syncing and cleaning the prefix`, async t => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-prefix-'));
+    const root = path.join(home, 'objects');
+    const actual = fs[mutation].bind(fs) as (...args: string[]) => Promise<void>;
+    const open = fs.open.bind(fs), failure = new Error(`actual ${mutation} reported failure after mutation`);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const pending = new Promise<void>(resolve => { entered = resolve; });
+    let started = 0, completed = 0, rootSyncs = 0, active = 0, settled = false;
+    try {
+      await mkdir(root, { mode: 0o700 });
+      t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+        const handle = await open(...args); active++;
+        const close = handle.close.bind(handle), sync = handle.sync.bind(handle);
+        t.mock.method(handle, 'close', async () => { await close(); active--; });
+        if (args[0] === root) t.mock.method(handle, 'sync', async () => { await sync(); rootSyncs++; });
+        return handle;
+      });
+      t.mock.method(fs, mutation, async (...args: string[]) => {
+        const index = started++;
+        await actual(...args); // A real namespace mutation has already happened.
+        if (index === 3) { entered(); await gate; }
+        completed++;
+        if (index === 0) throw failure;
+      });
+      const store = new ContentAddressedStore(root);
+      const publication = store.publishFour([Buffer.from('a'), Buffer.from('b'), Buffer.from('c'), Buffer.from('d')]);
+      void publication.then(() => { settled = true; }, () => { settled = true; });
+      try {
+        await pending;
+        assert.equal(settled, false);
+        assert.equal(started, 4, 'only this exact stage has started, never later cleanup before sibling join');
+        assert.equal(rootSyncs, mutation === 'rename' ? 1 : mutation === 'link' ? 2 : 3,
+          'the stage barrier cannot precede the last actual mutation return');
+        release();
+        await assert.rejects(publication, error => mutation === 'unlink'
+          ? error instanceof ResourceRetirementError && error.cause === failure : error === failure);
+        assert.ok(completed >= 4);
+        assert.equal(active, 0, 'all delivered original descriptors have really closed');
+        assert.equal(rootSyncs, mutation === 'rename' ? 3 : 4, 'failed-prefix and cleanup barriers both really run');
+        assert.ok((await readdir(root)).every(name => /^[0-9a-f]{64}$/u.test(name)), 'no owned temporary is abandoned');
+      } finally { release(); await Promise.allSettled([publication]); }
+    } finally { t.mock.restoreAll(); await rm(home, { recursive: true, force: true }); }
+  });
+}
+
+for (const failingBoundary of [1, 2, 3, 4]) {
+  test(`fixed four-object publication retains a recoverable prefix when directory barrier ${failingBoundary} reports failure`, async t => {
+    const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-four-barrier-'));
+    const root = path.join(home, 'objects');
+    const open = fs.open.bind(fs), failure = new Error('real directory synchronization reported failure');
+    const sources = [Buffer.from('a'), Buffer.from('b'), Buffer.from('c'), Buffer.from('d')] as const;
+    let syncs = 0, active = 0;
+    try {
+      await mkdir(root, { mode: 0o700 });
+      t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+        const handle = await open(...args); active++;
+        const close = handle.close.bind(handle), sync = handle.sync.bind(handle);
+        t.mock.method(handle, 'close', async () => { await close(); active--; });
+        if (args[0] === root) t.mock.method(handle, 'sync', async () => {
+          await sync(); if (++syncs === failingBoundary) throw failure;
+        });
+        return handle;
+      });
+      await assert.rejects(new ContentAddressedStore(root).publishFour(sources), error => error instanceof ResourceRetirementError);
+      assert.equal(active, 0); assert.ok(syncs >= failingBoundary);
+      assert.ok((await readdir(root)).every(name => /^[0-9a-f]{64}$/u.test(name)), 'failed batch leaves only valid orphan candidates');
+      t.mock.restoreAll();
+      const store = new ContentAddressedStore(root), recovered = await store.publishFour(sources);
+      assert.equal((await readdir(root)).length, 4);
+      for (const item of recovered) await store.verify(item.ref);
+    } finally { t.mock.restoreAll(); await rm(home, { recursive: true, force: true }); }
+  });
+}
+
 test('concurrent publication of identical bytes joins the same immutable artifact', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'cliq-cas-concurrent-'));
   const root = path.join(home, 'objects');

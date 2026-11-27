@@ -2,6 +2,7 @@
 #define CLIQ_WORKER_COMMON_H
 
 #include "worker-protocol.h"
+#include "verifier-setup.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -14,12 +15,44 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* A delegated directory's entries may change during the operation. Its held
+ * inode, owner and mode must still match before and after those changes. */
+static inline bool same_directory(const struct stat *expected, const struct stat *actual) {
+    return S_ISDIR(actual->st_mode) && expected->st_dev == actual->st_dev && expected->st_ino == actual->st_ino &&
+        expected->st_uid == actual->st_uid && expected->st_gid == actual->st_gid && expected->st_mode == actual->st_mode;
+}
+
+/* A fixed private exec-error pipe carries one native int only. A failed
+ * optional diagnostic still exits unsuccessfully; partial writes cannot be
+ * mistaken for a complete errno or stage, and EINTR never loses its tail. */
+static inline bool cliq_write_exec_diagnostic(int descriptor, int value) {
+    const unsigned char *bytes = (const unsigned char *)&value; size_t offset = 0;
+    while (offset < sizeof(value)) {
+        ssize_t written = write(descriptor, bytes + offset, sizeof(value) - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return false;
+        offset += (size_t)written;
+    }
+    return true;
+}
+
 static inline bool cliq_hex_digest(const char *value) {
     if (strnlen(value, 65) != 64) return false;
     for (size_t i = 0; i < 64; i++) {
         if (!((value[i] >= '0' && value[i] <= '9') || (value[i] >= 'a' && value[i] <= 'f'))) return false;
     }
     return true;
+}
+static inline bool cliq_admin_packet_strings_terminated(const struct cliq_worker_packet *packet) {
+    if (packet->command >= CLIQ_MCP_STDIO_RESERVE && packet->command <= CLIQ_MCP_STDIO_CLEANUP_RETAINED)
+        return packet->stdio_input_digest[64] == '\0' && packet->stdio_recipe_digest[64] == '\0' && packet->stdio_server_digest[64] == '\0' &&
+            packet->stdio_init_digest[64] == '\0' && packet->stdio_bwrap_digest[64] == '\0' &&
+            packet->stdio_checker_supervisor_id[sizeof(packet->stdio_checker_supervisor_id)-1] == '\0' &&
+            packet->stdio_checker_supervisor_token[sizeof(packet->stdio_checker_supervisor_token)-1] == '\0' && packet->stdio_original_birth_digest[64] == '\0';
+    if (packet->command < CLIQ_MCP_ADMIN_RESERVE || packet->command > CLIQ_MCP_ADMIN_CLEANUP_RETAINED) return true;
+    return packet->admin_operation_id[sizeof(packet->admin_operation_id)-1]=='\0' && packet->admin_principal_id[sizeof(packet->admin_principal_id)-1]=='\0' &&
+        packet->admin_target_ref[64]=='\0' && packet->admin_target_digest[64]=='\0' && packet->admin_core_ref[64]=='\0' && packet->admin_core_digest[64]=='\0' && packet->admin_plan_digest[64]=='\0' &&
+        packet->admin_checker_supervisor_id[sizeof(packet->admin_checker_supervisor_id)-1]=='\0' && packet->admin_checker_supervisor_token[sizeof(packet->admin_checker_supervisor_token)-1]=='\0' && packet->admin_original_birth_digest[64]=='\0';
 }
 
 /* Never bound descriptor cleanup by the current RLIMIT_NOFILE: limits can
@@ -34,9 +67,9 @@ static inline bool cliq_close_range(unsigned int first, unsigned int last) {
 
 static inline bool cliq_send(int socket, const struct cliq_worker_packet *packet,
                       const int *fds, size_t count) {
-    if (count > 5) { errno = EINVAL; return false; }
+    if (count > CLIQ_WORKER_MAX_FDS) { errno = EINVAL; return false; }
     struct iovec iov = { .iov_base = (void *)packet, .iov_len = sizeof(*packet) };
-    char ancillary[CMSG_SPACE(5 * sizeof(int))];
+    char ancillary[CMSG_SPACE(CLIQ_WORKER_MAX_FDS * sizeof(int))];
     memset(ancillary, 0, sizeof(ancillary));
     struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1 };
     if (count != 0) {
@@ -54,10 +87,15 @@ static inline bool cliq_send(int socket, const struct cliq_worker_packet *packet
 }
 
 static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *packet,
-                         int fds[5], size_t *count, int flags) {
+                         int *fds, size_t capacity, size_t *count, int flags) {
     *count = 0;
+    /* The protocol maximum is not the caller's actual destination extent.
+     * Older fixed commands intentionally hold fewer descriptors than verifier
+     * creation. Consume and retire every excess right, never overrun a caller
+     * or silently accept a packet whose rights did not fit. */
+    if (capacity > CLIQ_WORKER_MAX_FDS || (capacity != 0 && fds == NULL)) { errno = EINVAL; return false; }
     struct iovec iov = { .iov_base = packet, .iov_len = sizeof(*packet) };
-    char ancillary[CMSG_SPACE(5 * sizeof(int))];
+    char ancillary[CMSG_SPACE(CLIQ_WORKER_MAX_FDS * sizeof(int))];
     memset(ancillary, 0, sizeof(ancillary));
     struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1,
         .msg_control = ancillary, .msg_controllen = sizeof(ancillary) };
@@ -74,12 +112,13 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         size_t descriptors = (header->cmsg_len - CMSG_LEN(0)) / sizeof(int);
         int *passed = (int *)CMSG_DATA(header);
         for (size_t i = 0; i < descriptors; i++) {
-            if (*count < 5) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
+            if (*count < capacity) fds[(*count)++] = passed[i]; else { ancillary_valid = false; close(passed[i]); }
         }
     }
     bool valid = ancillary_valid && received == (ssize_t)sizeof(*packet) &&
         (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC)) == 0 &&
-        packet->magic == CLIQ_WORKER_MAGIC && packet->version == CLIQ_WORKER_VERSION &&
+        packet->magic == CLIQ_WORKER_MAGIC && packet->version == CLIQ_WORKER_VERSION && cliq_admin_packet_strings_terminated(packet) &&
+        (packet->command == CLIQ_VERIFIER_SETUP || packet->status != 0 || cliq_verifier_setup_empty(&packet->setup)) &&
         packet->nonce[sizeof(packet->nonce) - 1] == '\0' && packet->activation_nonce[sizeof(packet->activation_nonce) - 1] == '\0' &&
         packet->start_token[sizeof(packet->start_token) - 1] == '\0' && packet->init_start_token[sizeof(packet->init_start_token) - 1] == '\0' &&
         packet->init_native_start_token[sizeof(packet->init_native_start_token) - 1] == '\0' &&
@@ -91,13 +130,21 @@ static inline bool cliq_receive_flags(int socket, struct cliq_worker_packet *pac
         packet->sandbox_launch_ref[sizeof(packet->sandbox_launch_ref) - 1] == '\0' &&
         packet->sandbox_launch_digest[sizeof(packet->sandbox_launch_digest) - 1] == '\0' &&
         packet->generation_ref[sizeof(packet->generation_ref) - 1] == '\0' &&
-        packet->pid_namespace_reservation[sizeof(packet->pid_namespace_reservation) - 1] == '\0';
+        packet->pid_namespace_reservation[sizeof(packet->pid_namespace_reservation) - 1] == '\0' &&
+        packet->source_inspection_id[sizeof(packet->source_inspection_id) - 1] == '\0' &&
+        packet->source_target_ref[sizeof(packet->source_target_ref) - 1] == '\0' &&
+        packet->source_input_intent_ref[sizeof(packet->source_input_intent_ref) - 1] == '\0' &&
+        packet->source_exclude_grant_digest[sizeof(packet->source_exclude_grant_digest) - 1] == '\0' &&
+        packet->source_rule_digest[sizeof(packet->source_rule_digest) - 1] == '\0' &&
+        packet->source_snapshot_digest[sizeof(packet->source_snapshot_digest) - 1] == '\0' &&
+        packet->preparation_input_intent_ref[sizeof(packet->preparation_input_intent_ref) - 1] == '\0';
+    for (size_t i = 0; valid && i < 4; i++) if (packet->source_output_digests[i][64] != '\0') valid = false;
     if (!valid) { for (size_t i = 0; i < *count; i++) close(fds[i]); *count = 0; errno = received == 0 ? EPIPE : EPROTO; }
     return valid;
 }
 
-static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int fds[5], size_t *count) {
-    return cliq_receive_flags(socket, packet, fds, count, 0);
+static inline bool cliq_receive(int socket, struct cliq_worker_packet *packet, int *fds, size_t capacity, size_t *count) {
+    return cliq_receive_flags(socket, packet, fds, capacity, count, 0);
 }
 
 /* Resolve a host process to its PID in the innermost namespace. Start ticks

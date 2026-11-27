@@ -14,7 +14,8 @@ import { KernelStorageError } from './errors.js';
 import { readCanonicalArtifact } from './agent-context.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import { assertStateOwnerLock, type HeldStateOwnerLock } from './native-owner.js';
-import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
+import type { MigrationTailArtifacts } from './installed-runtime.js';
+import { assertSqliteConnectionOwnedBy, type SqliteConnection, type SqliteDriver } from './sqlite-driver.js';
 
 export type StateOwnerContext = {
   ownerEpoch: number;
@@ -192,6 +193,29 @@ export async function gracefullyReleaseStateOwner(
   artifacts: ArtifactCatalog,
   expected: StateOwnerContext
 ): Promise<StateOwnerRecordV1> {
+  const prepared = await prepareGracefulStateOwnerRelease(driver, artifacts, expected);
+  return driver.transaction(connection => commitGracefulStateOwnerRelease(driver, connection, expected, prepared));
+}
+
+type ActiveOwner = Extract<StateOwnerRecordV1, { state: 'active' }>;
+type TerminalOwner = Extract<StateOwnerRecordV1, { state: 'terminal' }>;
+declare const gracefulReleasePreparation: unique symbol;
+export type PreparedGracefulStateOwnerRelease = Readonly<{ [gracefulReleasePreparation]: true }>;
+const gracefulReleasePreparations = new WeakMap<PreparedGracefulStateOwnerRelease, Readonly<{
+  driver: SqliteDriver;
+  owner: StateOwnerContext;
+  active: ActiveOwner;
+  waitingDigest: string;
+  evidence: StateOwnerTransitionEvidenceV1;
+  published: PublishedArtifact;
+}>>();
+
+export async function prepareGracefulStateOwnerRelease(
+  driver: SqliteDriver,
+  artifacts: ArtifactCatalog,
+  expected: StateOwnerContext,
+  migrationTail?: MigrationTailArtifacts
+): Promise<PreparedGracefulStateOwnerRelease> {
   const active = assertActiveStateOwner(driver, expected);
   assertSourceInspectionsRetired(driver);
   const waitingCut = readWaitingRunCut(driver);
@@ -225,39 +249,57 @@ export async function gracefullyReleaseStateOwner(
     releasingProcessIdentityDigest: active.processIdentityDigest
   };
   evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
-  const published = await artifacts.publishCanonical(
+  const published = await (migrationTail ?? artifacts).publishCanonical(
     evidence,
     'cliq-state-owner-transition-evidence-v1'
   );
-  let terminal!: Extract<StateOwnerRecordV1, { state: 'terminal' }>;
-
-  driver.transaction((connection) => {
-    assertActiveStateOwner(connection, expected);
-    assertSourceInspectionsRetired(connection);
-    // No new or replaced wait can slip between retained validation and the final owner transition.
-    if (canonicalSha256(readWaitingRunCut(connection)) !== canonicalSha256(waitingCut)) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'worker inspection cut changed during graceful release');
-    }
-    const transactionObservedAt = sampleCanonicalNow();
-    const lockedFence = readTimeFence(connection);
-    if (lockedFence === undefined) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
-    }
-    const recordedAt = maxCanonicalTime(transactionObservedAt, lockedFence.lastAcceptedAt);
-    advanceTimeFence(connection, active.ownerEpoch, transactionObservedAt);
-    terminal = terminalStateOwnerRecord(active, evidence, published.ref, recordedAt);
-    insertArtifactMetadata(connection, published, recordedAt);
-    const result = connection
-      .prepare(
-        `UPDATE state_owners
-         SET record_json = ?, state = 'terminal', row_digest = ?
-         WHERE owner_epoch = ? AND state = 'active' AND row_digest = ?`
-      )
-      .run(JSON.stringify(terminal), terminal.rowDigest, BigInt(active.ownerEpoch), active.rowDigest);
-    if (result.changes !== 1n) {
-      throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner changed during graceful release');
-    }
+  if (published.ref !== canonicalSha256(evidence) || published.schemaKind !== evidence.format)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'graceful release publication differs from its exact evidence');
+  const prepared = Object.freeze({}) as PreparedGracefulStateOwnerRelease;
+  gracefulReleasePreparations.set(prepared, {
+    driver, owner: expected, active, waitingDigest: canonicalSha256(waitingCut), evidence, published
   });
+  return prepared;
+}
+
+/** The caller owns the original synchronous transaction. Rollback can root
+ * its already-published tail and terminalize the Owner in that same commit. */
+export function commitGracefulStateOwnerRelease(
+  driver: SqliteDriver,
+  connection: SqliteConnection,
+  expected: StateOwnerContext,
+  prepared: PreparedGracefulStateOwnerRelease,
+  retained: readonly PublishedArtifact[] = []
+): TerminalOwner {
+  const preparation = gracefulReleasePreparations.get(prepared);
+  if (!preparation || preparation.driver !== driver || preparation.owner !== expected || connection === driver)
+    throw new TypeError('graceful release requires its original prepared Owner and transaction');
+  assertSqliteConnectionOwnedBy(driver, connection);
+  const { active, waitingDigest, evidence, published } = preparation;
+  if (assertActiveStateOwner(connection, expected).rowDigest !== active.rowDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner changed after release preparation');
+  assertSourceInspectionsRetired(connection);
+  if (canonicalSha256(readWaitingRunCut(connection)) !== waitingDigest)
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'worker inspection cut changed during graceful release');
+  const transactionObservedAt = sampleCanonicalNow();
+  const lockedFence = readTimeFence(connection);
+  if (lockedFence === undefined) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'canonical time fence is missing');
+  }
+  const recordedAt = maxCanonicalTime(transactionObservedAt, lockedFence.lastAcceptedAt);
+  advanceTimeFence(connection, active.ownerEpoch, transactionObservedAt);
+  const terminal = terminalStateOwnerRecord(active, evidence, published.ref, recordedAt);
+  insertStateOwnerArtifacts(connection, [published, ...retained], recordedAt);
+  const result = connection
+    .prepare(
+      `UPDATE state_owners
+       SET record_json = ?, state = 'terminal', row_digest = ?
+       WHERE owner_epoch = ? AND state = 'active' AND row_digest = ?`
+    )
+    .run(JSON.stringify(terminal), terminal.rowDigest, BigInt(active.ownerEpoch), active.rowDigest);
+  if (result.changes !== 1n) {
+    throw new KernelStorageError('RECOVERY_REQUIRED', 'state owner changed during graceful release');
+  }
   return terminal;
 }
 

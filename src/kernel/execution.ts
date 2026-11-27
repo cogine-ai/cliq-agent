@@ -22,6 +22,21 @@ export type ProcessContainmentOwner =
       dispatchId: string
     }
   | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
+    }
+  | {
       kind: 'admin_probe'
       adminOperationId: string
       attempt: number
@@ -162,7 +177,7 @@ export type SandboxExecutableIdentityV1 =
       runtimeBundleRef: ArtifactRef
       runtimeBundleManifestDigest: string
       executableId: string
-      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'local_inference' | 'platform_helper'
+      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'mcp_recovery_adapter' | 'local_inference' | 'platform_helper'
       executionPath: string
       executableDigest: string
     }
@@ -209,6 +224,22 @@ export type SandboxProcessInvocationV1 =
       }
     }
   | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: {
+        stdin: 'mcp_framed'
+        stdout: 'mcp_framed'
+        stderr: 'captured'
+        extraFileDescriptors: 'none'
+      }
+    }
+  | {
       kind: 'source_inspection'
       purpose: 'source_inspection'
       recipe: 'cliq-source-git-inspection-v1'
@@ -239,6 +270,7 @@ export type SandboxProcessInvocationV1 =
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
     } & (
       | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'tool'; recipe: 'cliq-builtin-tools-v1'; privateGitProtection: 'existing_read_only'; stdio: SandboxCapturedStdioV1 }
       | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
       | {
           purpose: 'mcp_stdio'
@@ -250,7 +282,10 @@ export type SandboxProcessInvocationV1 =
             extraFileDescriptors: 'none'
           }
         }
-      | { purpose: 'dependency'; recipe: 'cliq-dependency-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | { purpose: 'dependency'; recipe: 'cliq-dependency-npm-v1'; stdio: {
+          stdin: 'closed'; stdout: 'captured'; stderr: 'captured';
+          extraFileDescriptors: 'sealed_dependency_input_and_package_metadata_only'
+        } }
       | { purpose: 'publication'; recipe: 'cliq-publication-launch-v1'; stdio: SandboxCapturedStdioV1 }
     ))
   | ({
@@ -325,6 +360,14 @@ export type SandboxMountV1 =
       purpose: 'input'
     }
   | {
+      kind: 'source_git_inspection_input'
+      inputRef: ArtifactRef
+      inputDigest: string
+      targetPath: '/scratch/input'
+      access: 'read_only'
+      purpose: 'input'
+    }
+  | {
       kind: 'run_generation'
       generationRef: ArtifactRef
       canonicalRootRelativePath: string
@@ -387,6 +430,27 @@ export type SandboxLaunchSpecV1 =
       adminTargetRef?: never
       adminTargetDigest?: never
       probePayloadCoreRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      executable: Extract<SandboxExecutableIdentityV1, { kind: 'runtime_bundle' }> & { role: 'mcp_recovery_adapter' }
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
     })
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'admin_probe' }>
@@ -555,7 +619,7 @@ export type SourceInspectionTargetV1 = {
   schemaVersion: 1
   format: 'cliq-source-inspection-target-v1'
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   originalRequestRef: ArtifactRef
@@ -572,6 +636,15 @@ export type SourceInspectionTargetV1 = {
   targetDigest: string
 }
 
+/** Fresh Git capture intent and its one-use consent. The receipt binds the
+ * admission intent, never this target, avoiding a cyclic artifact graph. */
+export type SourceInspectionTargetV2 = Omit<SourceInspectionTargetV1, 'schemaVersion' | 'format'> & {
+  schemaVersion: 2; format: 'cliq-source-inspection-target-v2';
+  inspectionGrantId: string; inspectionReceiptRef: ArtifactRef; inspectionReceiptDigest: string;
+  ignoreReadConsents: { grantId: string; receiptRef: ArtifactRef; receiptDigest: string }[];
+}
+export type SourceInspectionTarget = SourceInspectionTargetV1 | SourceInspectionTargetV2;
+
 export type SourceInspectionInputV1 = {
   schemaVersion: 1
   format: 'cliq-source-inspection-input-v1'
@@ -584,6 +657,26 @@ export type SourceInspectionInputV1 = {
   treeDigest: string
   inputDigest: string
 }
+
+/** Prepared Git input is a consent-bound descriptor/capture intent. The
+ * snapshot does not exist until this same blocked native owner captures and
+ * seals it; neither raw metadata nor fictional CAS refs belong in this row. */
+export type SourceInspectionInputV2 = {
+  schemaVersion: 2
+  format: 'cliq-source-inspection-input-v2'
+  inspectionId: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  repositoryIdentityDigest: string
+  inspectionGrantId: string
+  inspectionReceiptRef: ArtifactRef
+  inspectionReceiptDigest: string
+  recipe: 'cliq-source-git-inspection-v1'
+  snapshotPolicy: 'ephemeral_native_sealed_shards'
+  resources: SandboxResourceSpec
+  inputDigest: string
+}
+export type SourceInspectionInput = SourceInspectionInputV1 | SourceInspectionInputV2;
 
 export type SourceInspectionPlanV1 = {
   launchNonceDigest: string
@@ -623,13 +716,53 @@ export type SourceInspectionRetirementEvidenceV1 = {
   captureOwnerClosure:
     | { kind: 'local_resources_joined'; stateOwnerEpoch: number; supervisorInstanceId: string }
     | { kind: 'owning_process_dead'; stateOwnerAcquisitionEvidenceRef: ArtifactRef }
-  stagingObservation: 'exact_reserved_root_absent'
+  stagingObservation: 'exact_reserved_root_absent' | 'registered_reserved_root_absent'
   processClosure:
     | { kind: 'not_planned' }
+    | { kind: 'input_not_started'; inputRef: ArtifactRef; inputDigest: string }
+    | { kind: 'source_native_retired'; inputRef: ArtifactRef; inputDigest: string;
+        nativeBirthIdentity: { deviceId: string; fileId: string; ownerUid: number };
+        observation: SourceInspectionNativeRetirementV1;
+        output?: { inspectionOutputRef: ArtifactRef; privateGitStateRef: ArtifactRef } }
     | { kind: 'plan_quiescent'; noSpawnEvidenceRef: ArtifactRef }
     | { kind: 'all_descendants_dead'; processContainmentRef: ArtifactRef; deathEvidenceRef: ArtifactRef }
   observedAt: string
   evidenceDigest: string
+}
+
+/** Original source-domain observation. The data decoder grants no native
+ * capability; only the same genuine producer/current cleanup checker can
+ * publish it after its real scope and every actual consumer have joined. */
+export type SourceInspectionProcessIdentityV1 = Readonly<{
+  pid: number; namespaceInitPid: number; processStartToken: string; namespaceInitStartToken: string;
+  cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; remainingTrackedDescendants: number;
+  namespaceInitDeadAndReaped: number; observedAtMs: number;
+}>;
+export type SourceInspectionNativeRetirementV1 = Readonly<{
+  observedAtMs: number; inspectionId: string; stagingNonceDigest: string; targetRef: string; inputIntentRef: string;
+  reserved: 0 | 1; blocked: 0 | 1; released: 0 | 1; continued: 0 | 1;
+  origin: 'original_owner_joined' | 'original_birth_current_checker' | 'original_birth_registered_absent_checker'; lastBirthKind: 0 | 2 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12;
+  originalControllerPid: number; originalControllerStartToken: string;
+  cgroupDeviceId: string | null; cgroupId: string | null; launchNonceDigest: string | null;
+  containmentPlanRef: string | null; sandboxLaunchRef: string | null; sandboxLaunchDigest: string | null;
+  containment: SourceInspectionProcessIdentityV1 | null;
+}> & (Readonly<{ snapshotDigest?: never; byteCount?: never; entryCount?: never; shardCount?: never }> |
+  Readonly<{ snapshotDigest: string; byteCount: number; entryCount: number; shardCount: number }>);
+
+/** Same-attempt durable handoff after the original program has revoked work
+ * and joined all producers/consumers. This grants cleanup, never recapture. */
+export type SourceInspectionRetirementHandoffV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-retirement-handoff-v1'
+  originalAttemptRef: ArtifactRef
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  captureOwnerClosure: SourceInspectionRetirementEvidenceV1['captureOwnerClosure']
+  processClosure: SourceInspectionRetirementEvidenceV1['processClosure']
+  outcome: Extract<SourceInspectionAttemptV1, { phase: 'retired' }>['outcome']
+  nativeLifecycleRef?: ArtifactRef
+  observedAt: string
+  handoffDigest: string
 }
 
 export type SourceInspectionAttemptBaseV1 = {
@@ -637,7 +770,7 @@ export type SourceInspectionAttemptBaseV1 = {
   inspectionId: string
   attempt: 1
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   targetRef: ArtifactRef
@@ -652,22 +785,24 @@ export type SourceInspectionAttemptBaseV1 = {
   createdAt: string
   deadlineAt: string
   updatedAt: string
+  /** Once installed, only cleanup/cancellation and terminal retirement remain. */
+  retirementHandoffRef?: ArtifactRef
   rowDigest: string
 }
 
 export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
-  | {
+  | ({
       phase: 'capturing'
-      inputRef?: never
-      inputDigest?: never
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       plan?: never
       processContainmentRef?: never
       retirementEvidenceRef?: never
       retiredAt?: never
       outcome?: never
-    }
+    } & ({ inputRef?: never; inputDigest?: never } | { inputRef: ArtifactRef; inputDigest: string }))
   | {
       phase: 'prepared'
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       inputRef: ArtifactRef
       inputDigest: string
       plan: SourceInspectionPlanV1
@@ -678,6 +813,7 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
     }
   | {
       phase: 'active'
+      admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never
       inputRef: ArtifactRef
       inputDigest: string
       plan: SourceInspectionPlanV1
@@ -690,11 +826,20 @@ export type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
       phase: 'retired'
       retirementEvidenceRef: ArtifactRef
       retiredAt: string
-      outcome:
-        | { kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef }
-        | { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }
     } & (
+      | { outcome: { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }; admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never }
+      | { method: 'run.submit'; outcome: {
+          kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
+          captureTopologyRef?: never; captureTopologyDigest?: never
+        }; /** Original admission refusal; the captured result and retirement remain independently complete. */
+          admissionErrorResponseRef?: ArtifactRef; dependencyScriptIntentRef?: ArtifactRef }
+      | { method: 'run.apply'; admissionErrorResponseRef?: never; dependencyScriptIntentRef?: never; outcome: {
+          kind: 'captured'; sourceManifestRef: ArtifactRef; sourceManifestDigest: string; privateGitStateRef?: ArtifactRef
+          captureTopologyRef: ArtifactRef; captureTopologyDigest: string
+        } }
+    ) & (
       | { inputRef?: never; inputDigest?: never; plan?: never; processContainmentRef?: never }
+      | { inputRef: ArtifactRef; inputDigest: string; plan?: never; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef: ArtifactRef }
     ))
@@ -717,7 +862,7 @@ export type SandboxProfileV1 = {
   format: 'cliq-sandbox-profile-v1'
   backend: 'macos_vm' | 'linux_namespace'
   allowedOwners: Array<
-    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection'
+    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection' | 'reconciliation_probe'
   >
   filesystemPolicy: 'typed_launch_spec_only'
   hostFilesystemReachability: 'none'

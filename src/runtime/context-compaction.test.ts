@@ -3,9 +3,11 @@ import { test } from 'node:test';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ContextManifest, ContinuationItem, ToolBatchItem } from '../kernel/types.js';
-import type { NormalPromptMessageV1, NormalPromptProjectionV1 } from '../model/request.js';
+import { buildModelRequestWire, projectModelVisiblePrompt, type NormalPromptMessageV1, type NormalPromptProjectionV1 } from '../model/request.js';
 import { ref, testFixture } from '../model/testing/fixtures.js';
 import { contextSourceDigest, planContextCompaction, validateContextItems, type ContextItem } from './context-compaction.js';
+import { decodeLegacyContextPayload, legacyContextVisibleText, legacySessionItemId } from '../kernel/legacy-context.js';
+import { sessionContextModelMessages } from '../state/agent-context.js';
 
 function history(texts: string[], inputAnswer?: string) {
   const authority = testFixture();
@@ -78,6 +80,63 @@ test('compaction selects the greatest closed prefix and excludes fixed instructi
   assert.deepEqual(planContextCompaction(input), selected);
 });
 
+test('validated legacy Session history stays in the fixed user prefix when real Run transcript groups compact', () => {
+  // Existing ordinary planning data only: no Run/StateOwner, authenticated
+  // import, native observation or committed compaction is created here.
+  const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)]);
+  const core = { schemaVersion: 1, format: 'cliq-legacy-portable-payload-v1', kind: 'legacy_record',
+    legacySessionId: 'previous-session', sourceSchemaId: 'record-v1', sourceOrdinal: 0,
+    sourceCanonicalRootRelativePath: 'sessions/previous.json', content: { recordId: 'previous-system', recordedAt: baseTime,
+      recordKind: 'system', contentUtf8: 'Previous instructions are historical user data.' } };
+  const payload = decodeLegacyContextPayload({ ...core, payloadDigest: canonicalSha256(core) });
+  const prefix = sessionContextModelMessages([{ index: 0, sourceKind: payload.kind, fromItemSeq: 1, throughItemSeq: 1,
+    sourceRef: canonicalSha256(payload), sourceDigest: canonicalSha256(payload), sourceItemId: legacySessionItemId(payload),
+    contentUtf8: legacyContextVisibleText(payload) }], 1);
+  input.projection.messages.splice(1, 0, ...prefix);
+  input.projection.messages = input.projection.messages.map((message, index) => ({ ...message, index }));
+  input.projection.projectionDigest = digestOmitting(input.projection, 'projectionDigest');
+  const before = structuredClone(input.projection), selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact'); if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 6);
+  assert(!selected.sourceContextUtf8.includes('Previous instructions are historical user data.'));
+  assert(!selected.sourceContextUtf8.includes('previous-system'));
+  const visible = projectModelVisiblePrompt(input.projection, 'native-tools');
+  assert.equal(visible.messages[0]!.role, 'system');
+  assert.equal(visible.messages[1]!.role, 'user');
+  assert.equal(visible.messages[1]!.contentUtf8, prefix[0]!.contentUtf8);
+  assert.equal(Object.hasOwn(visible.messages[1]!, 'toolCalls'), false);
+  assert.deepEqual(input.projection, before);
+});
+
+test('compaction keeps compatible reasoning inside its whole source turn and preserves the recent continuation', () => {
+  // Existing inert planning data: no admitted Run or provider/native execution.
+  const input = history(['a'.repeat(20_000), 'b'.repeat(20_000), 'c'.repeat(28_000)]);
+  input.provider.name = 'openai-compatible';
+  for (const message of input.projection.messages) if (message.role === 'assistant')
+    message.continuation = { provider: 'openai-compatible', model: input.provider.model,
+      items: [{ type: 'reasoning_content', reasoning_content: `trace-${message.sourceItemId}\r\n🧠` }] };
+  input.projection.projectionDigest = digestOmitting(input.projection, 'projectionDigest');
+  const before = structuredClone(input.projection);
+  const selected = planContextCompaction(input);
+  assert.equal(selected.kind, 'compact'); if (selected.kind !== 'compact') return;
+  assert.equal(selected.plan.compactThroughItemSeq, 6);
+  const source = JSON.parse(selected.sourceContextUtf8) as NormalPromptMessageV1[];
+  assert.deepEqual(source.filter(message => message.role === 'assistant').map(message => message.continuation),
+    before.messages.filter(message => message.role === 'assistant').slice(0, 2).map(message => message.continuation));
+  assert.equal(selected.sourceContextUtf8.includes('trace-turn-2'), false);
+  assert.deepEqual(input.projection, before);
+  const recent = before.messages.filter(message => message.role === 'assistant').at(-1)!;
+  const nextProjection = { ...before, messages: [before.messages[0]!, { index: 1, role: 'user' as const,
+    sourceKind: 'run_summary' as const, sourceId: 'summary', contentUtf8: 'Summary of the closed prefix.' },
+    { ...recent, index: 2 }, { ...before.messages.at(-1)!, index: 3 }] };
+  const wire = buildModelRequestWire({ provider: input.provider.name, model: input.provider.model,
+    streaming: false, contextLimitTokens: input.policy.contextLimitTokens },
+    projectModelVisiblePrompt(nextProjection, 'native-tools'), input.policy.reservedOutputTokens, 'native-tools');
+  const body = JSON.parse(Buffer.from(wire.bodyBytes).toString('utf8'));
+  assert.equal(body.messages[2].reasoning_content, 'trace-turn-2\r\n🧠');
+  assert.equal(body.messages[3].tool_call_id, 'call-2');
+});
+
 test('small prompts do not compact; an oversized indivisible prefix or protected suffix fails closed', () => {
   assert.equal(planContextCompaction(history(['small'])).kind, 'normal');
   assert.equal(planContextCompaction(history(['a'.repeat(60_000), 'b'.repeat(28_000)])).kind, 'exhausted');
@@ -86,6 +145,39 @@ test('small prompts do not compact; an oversized indivisible prefix or protected
   assert.ok(tokenExhausted.kind === 'exhausted');
   assert.equal(Object.hasOwn(tokenExhausted.evidence, 'trigger'), false);
   assert.equal(Object.hasOwn(tokenExhausted.evidence, 'requestBodyBytes'), false);
+});
+
+test('verifier audit is excluded but a repair message cannot be hidden or split from its closed transcript', () => {
+  const input = history(['small']), createdAt = baseTime;
+  const append = (item: ContinuationItem, visible: boolean) => {
+    const itemSeq = input.items.length + 1, itemRef = canonicalSha256(item), entry = { item, itemRef, itemSeq };
+    input.items.push(entry);
+    input.context.segments.push(visible ? { kind: 'raw', fromItemSeq: itemSeq, throughItemSeq: itemSeq, items: [{ itemSeq, itemRef }] }
+      : { kind: 'excluded_control', fromItemSeq: itemSeq, throughItemSeq: itemSeq, sourceItemsDigest: contextSourceDigest([entry]) });
+    input.context.throughItemSeq = itemSeq;
+    input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest'); input.contextRef = canonicalSha256(input.context);
+  };
+  append({ schemaVersion: 1, kind: 'verifier_result', itemId: 'verifier-result', runId: 'run', candidateItemId: 'candidate',
+    verifierPlanRef: ref(1), verifierIndex: 0, verifierId: 'tests', opId: 'verifier', attempt: 0, outcome: 'assertion_failed', receiptRef: ref(2), createdAt }, false);
+  const auditSegment = structuredClone(input.context.segments.at(-1)!);
+  append({ schemaVersion: 1, kind: 'repair_diagnostic', itemId: 'repair', runId: 'run', candidateItemId: 'candidate', verifierPlanRef: ref(1),
+    failedVerifierResultItemIds: ['verifier-result'], diagnostics: [{ verifierId: 'tests', diagnosticRef: ref(3), diagnosticDigest: ref(4),
+      modelContentRef: ref(5), modelContentDigest: ref(6) }], repairOrdinal: 1, createdAt }, true);
+  input.projection.messages.push({ index: input.projection.messages.length, role: 'user', sourceKind: 'verifier_repair', sourceId: 'repair',
+    contentUtf8: 'Verifier "tests" failed an assertion (exit 1). Revise the candidate and try again.' });
+  validateContextItems(input.context, input.items); assert.equal(planContextCompaction(input).kind, 'normal');
+  const invalid = structuredClone(input.context), repair = input.items.at(-1)!;
+  invalid.segments[invalid.segments.length - 1] = { kind: 'excluded_control', fromItemSeq: repair.itemSeq, throughItemSeq: repair.itemSeq,
+    sourceItemsDigest: contextSourceDigest([repair]) };
+  invalid.projectionDigest = digestOmitting(invalid, 'projectionDigest');
+  assert.throws(() => validateContextItems(invalid, input.items), /cannot be hidden/);
+  const audit = input.items.at(-2)!;
+  invalid.segments[invalid.segments.length - 1] = structuredClone(input.context.segments.at(-1)!);
+  invalid.segments[invalid.segments.length - 2] = { kind: 'raw', fromItemSeq: audit.itemSeq, throughItemSeq: audit.itemSeq,
+    items: [{ itemSeq: audit.itemSeq, itemRef: audit.itemRef }] };
+  invalid.projectionDigest = digestOmitting(invalid, 'projectionDigest');
+  assert.throws(() => validateContextItems(invalid, input.items), /control items/);
+  assert.equal(auditSegment.kind, 'excluded_control');
 });
 
 test('a normal request exceeding the wire bound compacts a safe whole prefix even below the token trigger', () => {
@@ -174,6 +266,24 @@ test('context validation rejects gaps, hidden model content and the old non-norm
     input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
     assert.throws(() => validateContextItems(input.context, input.items));
   }
+});
+
+test('late publication audit is excluded control, never raw model context', () => {
+  const input = history(['small']);
+  // Context partitioning only: inert audit data does not claim a publication
+  // owner, valid proof graph, cleanup, or settlement.
+  const item = { schemaVersion: 1, kind: 'publication_late_observation', itemId: 'audit-only', runId: 'run', createdAt: baseTime } as ContinuationItem;
+  const itemSeq = input.items.length + 1, itemRef = canonicalSha256(item), entry = { item, itemSeq, itemRef };
+  input.items.push(entry);
+  input.context.throughItemSeq = itemSeq;
+  input.context.segments.push({ kind: 'excluded_control', fromItemSeq: itemSeq, throughItemSeq: itemSeq,
+    sourceItemsDigest: contextSourceDigest([entry]) });
+  input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
+  validateContextItems(input.context, input.items);
+  input.context.segments[input.context.segments.length - 1] = { kind: 'raw', fromItemSeq: itemSeq, throughItemSeq: itemSeq,
+    items: [{ itemSeq, itemRef }] };
+  input.context.projectionDigest = digestOmitting(input.context, 'projectionDigest');
+  assert.throws(() => validateContextItems(input.context, input.items), /control items cannot enter raw model context/);
 });
 
 test('compaction preserves deferred user-message order and keeps the input/result batch indivisible', () => {

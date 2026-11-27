@@ -53,19 +53,21 @@ test('replacement registration reports a concurrent authenticated Run revision c
     fs.open = (async (...args: Parameters<typeof fs.open>) => {
       const handle = await originalOpen(...args);
       if (args[0] === specPath) {
-        const read = handle.readFile.bind(handle);
-        handle.readFile = (async (...readArgs: Parameters<typeof handle.readFile>) => {
-          const bytes = await read(...readArgs);
+        const read = handle.read.bind(handle);
+        handle.read = (async (...readArgs: Parameters<typeof handle.read>) => {
+          const result = await read(...readArgs);
           if (!selected) { selected = true; entered(); await barrier; }
-          return bytes;
-        }) as typeof handle.readFile;
+          return result;
+        }) as typeof handle.read;
       }
       return handle;
     }) as typeof fs.open;
     registering = fixture.store.registerWorkspaceGeneration({ runId: fixture.runId, generationRef: artifact.ref,
       generationIdentityDigest: replacement.identityDigest });
     void registering.catch(() => {});
-    await paused;
+    await Promise.race([paused, registering.then(() => {
+      assert.fail('replacement registration must pause during the real specification read');
+    })]);
     const cancelled = await fixture.agent.cancelRun({ requestId: uuidv7(), expectedRunRevision: waiting.revision,
       ...await publishInProcessChannel(fixture.store) });
     assert.equal(cancelled.run.revision, waiting.revision + 1);

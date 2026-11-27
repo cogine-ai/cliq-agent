@@ -130,7 +130,10 @@ test('a registered materialization owner separates real birth from ready private
   assert.throws(() => Reflect.apply(borrowRunWorkspaceForExecution, undefined, [birth]), /invalid Run workspace generation/);
   assert.equal(await preparing.birth(), birth, 'birth must retain one actual tree, not allocate a replacement');
   assert.equal(typeof preparing.finish, 'function', 'only a complete materialization can become a RunWorkspace');
+  const frozenPublication = t.mock.method(artifacts, 'publishChunks');
   const generation = await preparing.finish();
+  assert.equal(frozenPublication.mock.callCount(), 0, 'a frozen Checkpoint rewalk need not stage its existing payload again');
+  frozenPublication.mock.restore();
   assert.equal(generation.generationId, observed.generationId);
   assert.equal(await preparing.finish(), generation, 'completion must not copy a second physical tree');
   assert.equal((await generation.observe()).workspaceStateRef, checkpoint.workspaceStateRef);
@@ -139,7 +142,10 @@ test('a registered materialization owner separates real birth from ready private
   t.after(() => borrowed.close()); borrowed.assertHeld();
   assert.equal(borrowed.identity.fileId, observed.directoryIdentity.fileId);
   if (process.platform === 'linux') {
+    const materializedPublication = t.mock.method(artifacts, 'publishChunks');
     const authority = await generation.publishMaterializedAuthority();
+    assert.equal(materializedPublication.mock.callCount(), 0, 'worker authority must verify the original frozen payload without staging it again');
+    materializedPublication.mock.restore();
     assert.equal(authority.generationRef, bornAuthority!.generationRef);
     const identity = await artifacts.readCanonical<WorkspaceGenerationIdentityV1>(authority.generationRef);
     assert.equal(identity.createdAt, observed.createdAt); assert.equal(identity.creationNonceDigest, generationCreationNonceDigest);

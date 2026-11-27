@@ -1,5 +1,7 @@
+import { types } from 'node:util';
 import { canonicalSha256 } from '../kernel/canonical.js';
-import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime } from '../kernel/identity.js';
+import { addCanonicalDuration, assertArtifactRef, digestOmitting, identityHash, normalizeBoundedText, parseCanonicalTime } from '../kernel/identity.js';
+import type { ReconciliationProbeCancellationClosureV1 } from '../kernel/reconciliation.js';
 import type { InvocationJournalEntry, ProcessContainmentDeathEvidenceV1, ReconciliationProbeDispatchV1, ReconciliationProbeEvidenceV1,
   ReconciliationProbeTimeoutClosureV1, ReconciliationInspectorTaskClosureV1,
   RecoveryClosureV1, RunAssemblyV1, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
@@ -8,7 +10,7 @@ import { decodeRetainedRunAssembly } from '../model/run-assembly.js';
 import { exactKeys, requireEqual } from '../policy/runtime-authority.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { KernelStorageError } from './errors.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readStateOwner } from './state-owner.js';
 import { readStateOwnerDeath } from './state-owner-death.js';
@@ -21,13 +23,92 @@ import { decodeRunSpec, decodeStateOwnerAcquisitionEvidence, decodeWorkerIdentit
 import { decodeWorkspaceGenerationState } from './invariants.js';
 import { decodeWorkerContainmentPlan, decodeWorkerProcessContainment, decodeWorkerSandboxLaunchSpec } from './execution-closure.js';
 import { MODEL_BROKER_ENTRY_ID } from './model-broker-native.js';
+import { immutableSnapshot } from '../model/immutable.js';
+
+type WorkerProbeClosure = Extract<ReconciliationProbeTimeoutClosureV1 | ReconciliationProbeCancellationClosureV1,
+  { subjectKind: 'worker_recovery' }>;
+type ClosedWorkerProbeEvidence = Extract<ReconciliationProbeEvidenceV1, { outcome: 'probe_timeout' | 'probe_cancelled' }>;
+function workerProbeFields(value: unknown): Record<string, PropertyDescriptor> {
+  if (!value || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError('worker probe requires closed plain data');
+  return Object.getOwnPropertyDescriptors(value);
+}
+function workerProbeData(fields: Record<string, PropertyDescriptor>, keys: readonly string[]): Record<string, unknown> {
+  if (Reflect.ownKeys(fields).length !== keys.length || keys.some(key => !Object.hasOwn(fields, key)) ||
+      Object.values(fields).some(field => !field.enumerable || !Object.hasOwn(field, 'value') || field.value === undefined))
+    throw new TypeError('worker probe has unknown, missing or non-data fields');
+  return Object.fromEntries(keys.map(key => [key, fields[key]!.value]));
+}
+function workerProbeText(value: unknown): string {
+  if (typeof value !== 'string' || normalizeBoundedText(value, 1, 256) !== value) throw new TypeError('invalid worker probe text');
+  return value;
+}
+
+/** Retained data validation only. Neither this decoder nor a digest-valid
+ * closure can substitute for the producer's actual same-owner task receipt. */
+export function decodeWorkerProbeClosure(value: unknown): WorkerProbeClosure {
+  const fields = workerProbeFields(value), cancellation = fields.format?.value === 'cliq-reconciliation-probe-cancellation-closure-v1';
+  const data = workerProbeData(fields, ['schemaVersion', 'format', 'runId', 'waitingSubjectRef', 'probeKind', 'probeOrdinal',
+    'probeNonceDigest', 'probeDispatchDigest', 'probeDeadlineAt', 'inspectorIdentityRef', 'inspectorIdentityDigest', 'closedAt',
+    'closureDigest', 'subjectKind', 'oldWorkerLaunchId', 'processContainmentRef', 'inspectorTaskId', 'taskClosure', ...(cancellation ? ['reason'] : [])]);
+  if (data.schemaVersion !== 1 || data.format !== (cancellation ? 'cliq-reconciliation-probe-cancellation-closure-v1' :
+      'cliq-reconciliation-probe-timeout-closure-v1') || data.subjectKind !== 'worker_recovery' || data.probeKind !== 'automatic' ||
+      !Number.isSafeInteger(data.probeOrdinal) || (data.probeOrdinal as number) < 1 || (data.probeOrdinal as number) > 8)
+    throw new TypeError('invalid worker probe closure kind or ordinal');
+  for (const key of ['runId', 'oldWorkerLaunchId', 'inspectorTaskId']) workerProbeText(data[key]);
+  for (const key of ['waitingSubjectRef', 'probeNonceDigest', 'probeDispatchDigest', 'inspectorIdentityRef',
+    'inspectorIdentityDigest', 'closureDigest', 'processContainmentRef']) assertArtifactRef(workerProbeText(data[key]));
+  const deadline = workerProbeText(data.probeDeadlineAt), ended = workerProbeText(data.closedAt);
+  parseCanonicalTime(deadline); parseCanonicalTime(ended);
+  if (!cancellation && ended < deadline || cancellation && data.reason !== 'owning_supervisor_shutdown')
+    throw new TypeError('worker probe closure has no actual deadline or owning shutdown');
+  const taskFields = workerProbeFields(data.taskClosure), kind = taskFields.closureKind?.value;
+  if (kind === 'cancelled_and_joined') {
+    const task = workerProbeData(taskFields, ['closureKind', 'inspectorTaskCancelledAndJoined']);
+    if (task.inspectorTaskCancelledAndJoined !== true) throw new TypeError('worker closure did not join its original task');
+    data.taskClosure = task;
+  } else if (!cancellation && kind === 'owner_process_dead') {
+    const task = workerProbeData(taskFields, ['closureKind', 'ownerDeathAcquisitionEvidenceRef', 'ownerDeathAcquisitionEvidenceDigest']);
+    assertArtifactRef(workerProbeText(task.ownerDeathAcquisitionEvidenceRef)); assertArtifactRef(workerProbeText(task.ownerDeathAcquisitionEvidenceDigest));
+    data.taskClosure = task;
+  } else throw new TypeError('worker shutdown requires its actual owning joined task');
+  if (data.closureDigest !== digestOmitting(data, 'closureDigest')) throw new TypeError('worker probe closure does not rehash');
+  return immutableSnapshot(data) as WorkerProbeClosure;
+}
+
+export function decodeWorkerProbeEvidence(value: unknown): ClosedWorkerProbeEvidence {
+  const fields = workerProbeFields(value), outcome = fields.outcome?.value, cancellation = outcome === 'probe_cancelled';
+  const data = workerProbeData(fields, ['schemaVersion', 'format', 'runId', 'waitingSubjectRef', 'waitingSubjectDigest', 'probeKind',
+    'probeOrdinal', 'probeNonceDigest', 'probeDispatchDigest', 'probeStartedAt', 'probeDeadlineAt', 'inspectorIdentityRef',
+    'inspectorIdentityDigest', 'observedAt', 'evidenceDigest', 'outcome', ...(cancellation
+      ? ['cancellationReason', 'cancellationClosureRef', 'cancellationClosureDigest'] : ['timeoutReason', 'timeoutClosureRef', 'timeoutClosureDigest'])]);
+  if (data.schemaVersion !== 1 || data.format !== 'cliq-reconciliation-probe-evidence-v1' ||
+      !['probe_timeout', 'probe_cancelled'].includes(outcome) || data.probeKind !== 'automatic' ||
+      !Number.isSafeInteger(data.probeOrdinal) || (data.probeOrdinal as number) < 1 || (data.probeOrdinal as number) > 8)
+    throw new TypeError('invalid closed worker probe evidence kind or ordinal');
+  workerProbeText(data.runId);
+  for (const key of ['waitingSubjectRef', 'waitingSubjectDigest', 'probeNonceDigest', 'probeDispatchDigest',
+    'inspectorIdentityRef', 'inspectorIdentityDigest', 'evidenceDigest', ...(cancellation
+      ? ['cancellationClosureRef', 'cancellationClosureDigest'] : ['timeoutClosureRef', 'timeoutClosureDigest'])]) assertArtifactRef(workerProbeText(data[key]));
+  const start = workerProbeText(data.probeStartedAt), deadline = workerProbeText(data.probeDeadlineAt), observed = workerProbeText(data.observedAt);
+  parseCanonicalTime(start); parseCanonicalTime(deadline); parseCanonicalTime(observed);
+  if (data.waitingSubjectRef !== data.waitingSubjectDigest || deadline !== addCanonicalDuration(start, 30_000) || observed < start ||
+      (cancellation ? data.cancellationReason !== 'owning_supervisor_shutdown' :
+        data.timeoutReason !== 'no_authoritative_observation_before_deadline' || observed < deadline) ||
+      data.evidenceDigest !== digestOmitting(data, 'evidenceDigest')) throw new TypeError('worker probe evidence lost its fixed bounds or digest');
+  return immutableSnapshot(data) as ClosedWorkerProbeEvidence;
+}
 
 /** Immutable witnesses of existing Journal facts, not a second invocation state machine. */
 export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]): InvocationJournalEntry[] {
   const latest = new Map<string, InvocationJournalEntry>();
   for (const entry of journal) latest.set(`${entry.opId}\0${entry.attempt}`, entry);
   return journal.filter(entry => entry.phase === 'prepared' &&
-    ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase));
+    ['prepared', 'dispatch_claimed', 'unknown'].includes(latest.get(`${entry.opId}\0${entry.attempt}`)!.phase) &&
+    !(entry.opKind === 'mcp' && entry.replayClass === 'retry' && latest.get(`${entry.opId}\0${entry.attempt}`)!.phase === 'unknown' &&
+      journal.some(next => next.opId === entry.opId && next.opKind === 'mcp' && next.replayClass === 'retry' && next.phase === 'prepared' &&
+        next.attempt === entry.attempt + 1 && next.requestRef === entry.requestRef && next.target === entry.target &&
+        next.idempotencyKey === entry.idempotencyKey && !!next.evidenceRef && !!next.evidenceDigest)));
 }
 
 /** Data eligibility only, after readRecoveryClosure has validated the complete
@@ -37,7 +118,9 @@ export function openWorkerInvocations(journal: readonly InvocationJournalEntry[]
 export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
   journal: readonly InvocationJournalEntry[]): boolean {
   const provider = assembly.provider;
-  if (provider.name !== 'openai-compatible' || provider.endpoint.kind !== 'registered' ||
+  const installed = provider.name === 'openai-compatible' && provider.endpoint.kind === 'registered' ||
+    provider.name === 'ollama' && provider.endpoint.kind === 'local_zero_cost' && provider.credentialGrantRefs.length === 0;
+  if (!installed ||
       provider.adapter.adapterId !== MODEL_BROKER_ENTRY_ID || provider.adapter.version !== '1' ||
       provider.negotiation.streaming !== false) return false;
   const open = openWorkerInvocations(journal);
@@ -49,6 +132,19 @@ export function hasOnlySettledInstalledModelUnknowns(assembly: RunAssemblyV1,
     return prepared.opKind === 'model' && prepared.replayClass === 'retry' && current.opKind === 'model' &&
       current.phase === 'unknown' && current.replayClass === 'retry' && !!current.budgetSettlementRef &&
       canonicalSha256(current.budgetDelta) === canonicalSha256(prepared.budgetDelta);
+  });
+}
+/** Eligibility only after the original MCP request/registry/ambiguity and
+ * full-once settlement were validated by the recovery closure. It supplies no
+ * effect outcome, physical death or permission to repeat the HTTP recipe. */
+export function hasOnlySettledMcpUnknowns(journal: readonly InvocationJournalEntry[]): boolean {
+  const open = openWorkerInvocations(journal);
+  return open.length === 1 && open.every(prepared => {
+    const entries = journal.filter(entry => entry.opId === prepared.opId && entry.attempt === prepared.attempt), final = entries.at(-1)!;
+    return prepared.opKind === 'mcp' && ['manual', 'retry', 'reconcile'].includes(prepared.replayClass) && entries.length === 3 &&
+      entries.every(entry => entry.opKind === 'mcp' && entry.replayClass === prepared.replayClass) && entries[1]!.phase === 'dispatch_claimed' &&
+      final.phase === 'unknown' && final.opKind === 'mcp' && !!final.budgetSettlementRef && !!final.evidenceRef && !!final.evidenceDigest &&
+      canonicalSha256(final.budgetDelta) === canonicalSha256(prepared.budgetDelta);
   });
 }
 
@@ -120,7 +216,7 @@ async function validateWorkerProbeState(artifacts: ArtifactCatalog, wait: Worker
         (state.phase === 'automatic_pending' ? state.automaticProbeCount > 7 : state.automaticProbeCount !== 8) || state.userProbeCount !== 0) {
       throw new TypeError('worker closed probe has no bounded automatic schedule');
     }
-    const wrapper = await readCanonicalArtifact<ReconciliationProbeEvidenceV1>(artifacts, state.lastProbeEvidenceRef!);
+    const wrapper = decodeWorkerProbeEvidence(await readCanonicalArtifact(artifacts, state.lastProbeEvidenceRef!));
     const prior = await readCanonicalArtifact<WorkerDeathWait>(artifacts, wrapper.waitingSubjectRef);
     requireEqual({ ...prior, probeState: state }, wait, 'worker closed probe wait');
     if (prior.probeState.phase !== 'automatic_in_flight' || prior.probeState.automaticProbeCount !== state.automaticProbeCount ||
@@ -132,11 +228,12 @@ async function validateWorkerProbeState(artifacts: ArtifactCatalog, wait: Worker
       probeOrdinal: state.automaticProbeCount, probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest,
       probeStartedAt: dispatch.probeStartedAt, probeDeadlineAt: dispatch.probeDeadlineAt,
       inspectorIdentityRef: wrapper.inspectorIdentityRef, inspectorIdentityDigest: wrapper.inspectorIdentityDigest,
-      observedAt: wrapper.observedAt, evidenceDigest: state.lastProbeEvidenceDigest, outcome: 'probe_timeout',
-      timeoutReason: 'no_authoritative_observation_before_deadline', timeoutClosureRef: wrapper.outcome === 'probe_timeout' ? wrapper.timeoutClosureRef : undefined,
-      timeoutClosureDigest: wrapper.outcome === 'probe_timeout' ? wrapper.timeoutClosureDigest : undefined }, 'worker timeout probe wrapper');
-    if (wrapper.outcome !== 'probe_timeout' || wrapper.evidenceDigest !== digestOmitting(wrapper, 'evidenceDigest') ||
-        wrapper.observedAt < dispatch.probeDeadlineAt || wrapper.observedAt > generation.updatedAt) throw new TypeError('worker timeout wrapper has no exact deadline');
+      observedAt: wrapper.observedAt, evidenceDigest: state.lastProbeEvidenceDigest, ...(wrapper.outcome === 'probe_cancelled'
+        ? { outcome: 'probe_cancelled', cancellationReason: 'owning_supervisor_shutdown', cancellationClosureRef: wrapper.cancellationClosureRef,
+          cancellationClosureDigest: wrapper.cancellationClosureDigest }
+        : { outcome: 'probe_timeout', timeoutReason: 'no_authoritative_observation_before_deadline', timeoutClosureRef: wrapper.timeoutClosureRef,
+          timeoutClosureDigest: wrapper.timeoutClosureDigest }) }, 'worker exact closed probe wrapper');
+    if (wrapper.observedAt > generation.updatedAt) throw new TypeError('worker probe closure follows its generation update');
     const inspector = await readCanonicalArtifact<SupervisorInspectorIdentityV1>(artifacts, wrapper.inspectorIdentityRef);
     const inspectingOwner = readStateOwner(driver, inspector.stateOwnerEpoch);
     if (!inspectingOwner || (inspectingOwner.state === 'terminal' && wrapper.observedAt > inspectingOwner.releasedAt)) {
@@ -145,16 +242,17 @@ async function validateWorkerProbeState(artifacts: ArtifactCatalog, wait: Worker
     const runSpec = decodeRunSpec(await readCanonicalArtifact(artifacts, specRef));
     await readSupervisorInspector(artifacts, inspectingOwner,
       decodeRetainedRunAssembly(await readCanonicalArtifact(artifacts, runSpec.assemblyRef)), wrapper);
-    const timeout = await readCanonicalArtifact<ReconciliationProbeTimeoutClosureV1>(artifacts, wrapper.timeoutClosureRef);
-    if (timeout.subjectKind !== 'worker_recovery') throw new TypeError('worker timeout closure substitutes another subject');
+    const cancellation = wrapper.outcome === 'probe_cancelled';
+    const closure = decodeWorkerProbeClosure(await readCanonicalArtifact(artifacts,
+      cancellation ? wrapper.cancellationClosureRef : wrapper.timeoutClosureRef));
     let taskClosure: ReconciliationInspectorTaskClosureV1;
-    if (timeout.taskClosure.closureKind === 'cancelled_and_joined') {
+    if (closure.taskClosure.closureKind === 'cancelled_and_joined') {
       taskClosure = { closureKind: 'cancelled_and_joined', inspectorTaskCancelledAndJoined: true };
       if (inspectingOwner.supervisorInstanceId !== dispatch.owningSupervisorInstanceId ||
           dispatch.probeStartedAt < inspectingOwner.acquiredAt) {
         throw new TypeError('only the owning live inspector may attest actual task cancellation and join');
       }
-    } else if (timeout.taskClosure.closureKind === 'owner_process_dead') {
+    } else if (closure.taskClosure.closureKind === 'owner_process_dead') {
       if (inspectingOwner.supervisorInstanceId === dispatch.owningSupervisorInstanceId) throw new TypeError('owner cannot attest its own predecessor death');
       taskClosure = await readWorkerProbeOwnerDeath(artifacts, driver, dispatch);
       const acquisition = decodeStateOwnerAcquisitionEvidence(await readCanonicalArtifact(artifacts, taskClosure.ownerDeathAcquisitionEvidenceRef));
@@ -162,15 +260,16 @@ async function validateWorkerProbeState(artifacts: ArtifactCatalog, wait: Worker
         throw new TypeError('worker timeout inspector precedes its owner death closure');
       }
     } else throw new TypeError('worker timeout task closure has no closed XOR');
-    requireEqual(timeout, { schemaVersion: 1, format: 'cliq-reconciliation-probe-timeout-closure-v1', runId: wait.runId,
+    requireEqual(closure, { schemaVersion: 1, format: cancellation ? 'cliq-reconciliation-probe-cancellation-closure-v1' :
+      'cliq-reconciliation-probe-timeout-closure-v1', runId: wait.runId,
       waitingSubjectRef: canonicalSha256(prior), probeKind: 'automatic', probeOrdinal: state.automaticProbeCount,
       probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest, probeDeadlineAt: dispatch.probeDeadlineAt,
       inspectorIdentityRef: wrapper.inspectorIdentityRef, inspectorIdentityDigest: wrapper.inspectorIdentityDigest,
-      closedAt: wrapper.observedAt, closureDigest: wrapper.timeoutClosureDigest, subjectKind: 'worker_recovery',
+      closedAt: wrapper.observedAt, closureDigest: cancellation ? wrapper.cancellationClosureDigest : wrapper.timeoutClosureDigest, subjectKind: 'worker_recovery',
       oldWorkerLaunchId: wait.subject.oldWorkerLaunchId, processContainmentRef: wait.subject.processContainmentRef,
-      inspectorTaskId: dispatch.inspectorTaskId, taskClosure }, 'worker exact task timeout closure');
-    if (timeout.closureDigest !== digestOmitting(timeout, 'closureDigest')) throw new TypeError('worker timeout closure does not rehash');
-    if (state.phase === 'automatic_pending' && state.nextProbeAt !== addCanonicalDuration(wrapper.observedAt, WORKER_PROBE_BACKOFF_MS[state.automaticProbeCount - 1]!)) {
+      inspectorTaskId: dispatch.inspectorTaskId, taskClosure, ...(cancellation ? { reason: 'owning_supervisor_shutdown' } : {}) }, 'worker exact task closure');
+    const backoffFrom = wrapper.observedAt < dispatch.probeDeadlineAt ? dispatch.probeDeadlineAt : wrapper.observedAt;
+    if (state.phase === 'automatic_pending' && state.nextProbeAt !== addCanonicalDuration(backoffFrom, WORKER_PROBE_BACKOFF_MS[state.automaticProbeCount - 1]!)) {
       throw new TypeError('worker timeout changed the bounded schedule');
     }
     await readWorkerRecoveryAnchor(artifacts, wait, generation);
@@ -394,10 +493,10 @@ export async function validateWorkerRecoveryWait(artifacts: ArtifactCatalog, cut
   const open = openWorkerInvocations(cut.journal.slice(0, generation.fencedJournalSeq));
   const refs = open.map(canonicalSha256);
   requireEqual(wait.subject?.openInvocationRefs, refs, 'worker recovery open invocation witnesses');
-  await joinResourceOperations(open.map(async entry => {
+  await artifacts.mapReads(open, async entry => {
     if (entry.timestamp > generation.updatedAt) throw new TypeError('worker recovery witness is not a prior prepared invocation');
     requireEqual(await readCanonicalArtifact(artifacts, canonicalSha256(entry)), entry, 'open invocation Journal witness');
-  }));
+  });
   const expected: WorkerDeathWait = {
     schemaVersion: 1, kind: 'reconciliation', runId: run.id, createdFromRevision: wait.createdFromRevision,
     createdAt: wait.createdAt, frontierRef: run.frontierRef,

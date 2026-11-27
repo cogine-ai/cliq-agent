@@ -21,7 +21,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#ifdef CLIQ_MODEL_BROKER_MODULE
+#if defined(CLIQ_MODEL_BROKER_MODULE) || defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) || defined(CLIQ_MCP_HTTP_BROKER_MODULE) || defined(CLIQ_MCP_STDIO_BROKER_MODULE)
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/pem.h>
@@ -45,7 +45,7 @@
 #define MANAGER_PATH "/org/freedesktop/systemd1"
 #define MANAGER_INTERFACE "org.freedesktop.systemd1.Manager"
 
-enum operation { CREATE_COMPARE, INSPECT_SECRET, DELETE_KNOWN, RELOAD_MANAGER, START_UNIT, INSPECT_UNIT };
+enum operation { CREATE_COMPARE, INSPECT_SECRET, DELETE_KNOWN, RELOAD_MANAGER, START_UNIT, INSPECT_UNIT, STOP_INSTALLED_UPGRADE };
 struct selector {
   char item_id[SELECTOR_TEXT_CAP], principal[SELECTOR_TEXT_CAP], root[65], operation[SELECTOR_TEXT_CAP], grant[SELECTOR_TEXT_CAP], target[65];
   uint64_t generation;
@@ -59,16 +59,70 @@ struct platform_observation {
   struct service service;
 };
 struct task;
+/* A raw libuv callback owns neither a Node callback scope nor its C owner.
+ * These counts are independent of model no-release mutex/fence borrows. */
+struct native_callbacks {
+  napi_env env; napi_ref resource; napi_async_context context;
+  unsigned borrows, depth; bool retiring;
+};
+struct native_callback_scope { napi_handle_scope handles; napi_callback_scope callback; };
+static void callback_fatal(const char *message) {
+  napi_fatal_error("cliq-linux-platform", NAPI_AUTO_LENGTH, message, NAPI_AUTO_LENGTH);
+}
+static bool callbacks_init(struct native_callbacks *owner, napi_env env, const char *label) {
+  owner->env = env; napi_value resource, name;
+  return napi_create_object(env, &resource) == napi_ok &&
+    napi_create_reference(env, resource, 1, &owner->resource) == napi_ok &&
+    napi_create_string_utf8(env, label, NAPI_AUTO_LENGTH, &name) == napi_ok &&
+    napi_async_init(env, resource, name, &owner->context) == napi_ok;
+}
+static void callbacks_enter(struct native_callbacks *owner, bool env_closing, struct native_callback_scope *scope) {
+  *scope = (struct native_callback_scope){0}; owner->borrows++; owner->depth++;
+  if (napi_open_handle_scope(owner->env, &scope->handles) != napi_ok) callback_fatal("callback handle scope unavailable");
+  if (!env_closing) {
+    napi_value resource;
+    if (!owner->context || !owner->resource || napi_get_reference_value(owner->env, owner->resource, &resource) != napi_ok || !resource ||
+        napi_open_callback_scope(owner->env, resource, owner->context, &scope->callback) != napi_ok) callback_fatal("callback scope unavailable");
+  }
+}
+static void callbacks_close(struct native_callbacks *owner, struct native_callback_scope *scope) {
+  /* Both closes can run Promise continuations, async hooks and GC. The caller
+   * keeps its original native borrow until context/resource retirement too. */
+  if (scope->callback && napi_close_callback_scope(owner->env, scope->callback) != napi_ok) callback_fatal("callback scope did not retire");
+  if (napi_close_handle_scope(owner->env, scope->handles) != napi_ok) callback_fatal("callback handle scope did not retire");
+  if (!owner->depth) callback_fatal("callback depth underflow");
+  owner->depth--;
+}
+static void callbacks_retire(struct native_callbacks *owner) {
+  if (owner->depth || owner->retiring || (!owner->context && !owner->resource)) return;
+  owner->retiring = true; napi_handle_scope scope;
+  if (napi_open_handle_scope(owner->env, &scope) != napi_ok) callback_fatal("callback retirement scope unavailable");
+  if (owner->context) {
+    napi_async_context context = owner->context; owner->context = NULL;
+    if (napi_async_destroy(owner->env, context) != napi_ok) callback_fatal("callback context did not retire");
+  }
+  if (owner->resource) {
+    napi_ref resource = owner->resource; owner->resource = NULL;
+    if (napi_delete_reference(owner->env, resource) != napi_ok) callback_fatal("callback resource did not retire");
+  }
+  if (napi_close_handle_scope(owner->env, scope) != napi_ok) callback_fatal("callback retirement scope did not retire");
+  owner->retiring = false;
+}
+static bool callbacks_held(const struct native_callbacks *owner) {
+  return owner->borrows || owner->depth || owner->retiring || owner->context || owner->resource;
+}
 struct inspection_owner {
   napi_env env;
   struct task *task;
   napi_ref handle, join_promise;
   napi_deferred join_deferred;
-  bool retained, finalized, joined, unsafe;
+  unsigned completion_borrows;
+  bool retained, finalized, joined, unsafe, env_closing;
 };
 struct task {
   napi_env env; napi_async_work work; napi_deferred deferred; napi_async_cleanup_hook_handle cleanup_hook;
   enum operation operation; uid_t uid; gid_t gid; char home[PATH_MAX], unit[256], job[TEXT_CAP];
+  uint32_t upgrade_pid; uint64_t upgrade_ticks; unsigned char upgrade_invocation[16];
   struct selector selector; struct platform_observation expected, observed;
   unsigned char *secret; size_t secret_size;
   struct timespec deadline; pthread_t watchdog; pthread_mutex_t mutex; pthread_cond_t condition;
@@ -82,12 +136,14 @@ struct task {
   GVariant *unit_properties, *service_properties;
   const char *error; const char *result_kind;
   struct inspection_owner *inspection;
+  struct inspection_owner *completed_inspection;
+  struct native_callbacks callbacks; bool completion_finished, release_pending;
   struct task *unretired_next;
 };
 static atomic_bool retirement_failed;
 static atomic_bool job_in_flight;
 static struct task *unretired_tasks;
-static const napi_type_tag inspection_tag = { UINT64_C(0x6dbc324eb14e4978), UINT64_C(0x84eb6af70c82d539) };
+static const napi_type_tag inspection_tag = { UINT64_C(0xd1c80f2f51c64de9), UINT64_C(0xb168d6825793a026) };
 static bool manager_shape(struct task *task);
 
 static void wipe(void *memory, size_t count) { volatile unsigned char *bytes = memory; while (count--) *bytes++ = 0; }
@@ -383,6 +439,28 @@ static GVariant *get_all(struct task *task, const char *path, const char *interf
   if (g_variant_n_children(value) > 1024) { g_variant_unref(value); fail(task, "platform_inventory_bound"); return NULL; }
   return value;
 }
+static bool manager_read_unit(struct task *task, bool allow_load) {
+  GVariant *reply = call(task, task->observed.service.unique, MANAGER_PATH, MANAGER_INTERFACE,
+    allow_load ? "LoadUnit" : "GetUnit", g_variant_new("(s)", task->unit), "(o)");
+  if (!reply) return false;
+  const char *unit; g_variant_get(reply, "(&o)", &unit); char locator[TEXT_CAP];
+  bool valid = copy_text(locator, sizeof(locator), unit); g_variant_unref(reply);
+  if (!valid) return fail(task, "platform_shape_mismatch");
+  task->unit_properties = get_all(task, locator, "org.freedesktop.systemd1.Unit");
+  task->service_properties = get_all(task, locator, "org.freedesktop.systemd1.Service");
+  return task->unit_properties && task->service_properties && manager_shape(task);
+}
+static bool manager_original_upgrade_process(struct task *task) {
+  uint32_t pid = 0; uint64_t ticks = 0;
+  GVariant *invocation = g_variant_lookup_value(task->unit_properties, "InvocationID", G_VARIANT_TYPE("ay"));
+  if (!invocation) return fail(task, "platform_shape_mismatch");
+  gsize count = 0; const unsigned char *bytes = g_variant_get_fixed_array(invocation, &count, 1);
+  bool valid = count == 16 && !memcmp(bytes, task->upgrade_invocation, 16) &&
+    g_variant_lookup(task->service_properties, "MainPID", "u", &pid) && pid == task->upgrade_pid &&
+    process_ticks(task, (pid_t)pid, task->uid, &ticks) && ticks == task->upgrade_ticks;
+  g_variant_unref(invocation);
+  return valid || fail(task, "platform_observation_changed");
+}
 static bool manager_operation(struct task *task) {
   if (!observe_owner(task, MANAGER_NAME, &task->observed.service)) return false;
   const char *destination = task->observed.service.unique;
@@ -391,23 +469,41 @@ static bool manager_operation(struct task *task) {
     if (!reply) return false;
     g_variant_unref(reply);
   } else {
-    if (task->operation == START_UNIT) {
-      GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE, "StartUnit", g_variant_new("(ss)", task->unit, "fail"), "(o)");
+    if (task->operation == STOP_INSTALLED_UPGRADE) {
+      // Administrative Stop of this installation's two fixed units only.
+      // The captured invocation and real same-user PID/start are preconditions,
+      // not an atomic StopUnit selector: systemd may restart between calls.
+      // The caller independently requires its exact original owner/death cut.
+      if (!manager_read_unit(task, false) || !manager_original_upgrade_process(task)) return false;
+      g_variant_unref(task->unit_properties); task->unit_properties = NULL;
+      g_variant_unref(task->service_properties); task->service_properties = NULL;
+    }
+    if (task->operation == START_UNIT || task->operation == STOP_INSTALLED_UPGRADE) {
+      GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE,
+        task->operation == START_UNIT ? "StartUnit" : "StopUnit", g_variant_new("(ss)", task->unit, "fail"), "(o)");
       if (!reply) return false;
       const char *job; g_variant_get(reply, "(&o)", &job); bool valid = copy_text(task->job, sizeof(task->job), job); g_variant_unref(reply);
       if (!valid) return fail(task, "platform_shape_mismatch");
     }
-    /* LoadUnit only loads an existing fixed profile into the manager. It does
-     * not start it; GetUnit alone rejects a valid inactive newly installed
-     * profile, before the client can inspect that profile safely. */
-    GVariant *reply = call(task, destination, MANAGER_PATH, MANAGER_INTERFACE,
-      task->operation == INSPECT_UNIT ? "LoadUnit" : "GetUnit", g_variant_new("(s)", task->unit), "(o)");
-    if (!reply) return false;
-    const char *unit; g_variant_get(reply, "(&o)", &unit); char locator[TEXT_CAP]; bool valid = copy_text(locator, sizeof(locator), unit); g_variant_unref(reply);
-    if (!valid) return fail(task, "platform_shape_mismatch");
-    task->unit_properties = get_all(task, locator, "org.freedesktop.systemd1.Unit");
-    task->service_properties = get_all(task, locator, "org.freedesktop.systemd1.Service");
-    if (!task->unit_properties || !task->service_properties || !manager_shape(task)) return false;
+    // A stopped unit can be garbage-collected before this read or the next
+    // poll. Load only its fixed profile again; this never starts the service.
+    // The original running PID/Invocation precheck above remains GetUnit-only.
+    if (!manager_read_unit(task, task->operation == INSPECT_UNIT || task->operation == STOP_INSTALLED_UPGRADE)) return false;
+    if (task->operation == STOP_INSTALLED_UPGRADE) {
+      for (;;) {
+        const char *active = NULL, *sub = NULL; uint32_t main_pid = UINT32_MAX, control_pid = UINT32_MAX;
+        if (!g_variant_lookup(task->unit_properties, "ActiveState", "&s", &active) ||
+            !g_variant_lookup(task->unit_properties, "SubState", "&s", &sub) ||
+            !g_variant_lookup(task->service_properties, "MainPID", "u", &main_pid) ||
+            !g_variant_lookup(task->service_properties, "ControlPID", "u", &control_pid)) return fail(task, "platform_shape_mismatch");
+        if (!strcmp(active, "inactive") && !strcmp(sub, "dead") && !main_pid && !control_pid) break;
+        if (!remaining(task)) return fail(task, "platform_timeout");
+        g_variant_unref(task->unit_properties); task->unit_properties = NULL;
+        g_variant_unref(task->service_properties); task->service_properties = NULL;
+        g_usleep(10000);
+        if (!manager_read_unit(task, true)) return false;
+      }
+    }
   }
   return observe_owner(task, MANAGER_NAME, &task->observed.service) && bus_current(task);
 }
@@ -688,11 +784,11 @@ static napi_value result_value(napi_env env, struct task *task) {
     set_string(env, result, "collectionPath", task->observed.collection);
     if (task->observed.item[0]) set_string(env, result, "itemPath", task->observed.item);
   } else {
-    set_string(env, result, "kind", task->operation == RELOAD_MANAGER ? "reload" : task->operation == START_UNIT ? "start" : "inspect");
+    set_string(env, result, "kind", task->operation == RELOAD_MANAGER ? "reload" : task->operation == START_UNIT ? "start" : task->operation == STOP_INSTALLED_UPGRADE ? "stop_installed_upgrade" : "inspect");
     set_number(env, result, "uid", task->uid); set_number(env, result, "gid", task->gid); set_string(env, result, "home", task->home);
     napi_set_named_property(env, result, "manager", service_value(env, task->observed.service));
     if (task->operation != RELOAD_MANAGER) napi_set_named_property(env, result, "unit", manager_unit_value(env, task));
-    if (task->operation == START_UNIT) set_string(env, result, "jobPath", task->job);
+    if (task->operation == START_UNIT || task->operation == STOP_INSTALLED_UPGRADE) set_string(env, result, "jobPath", task->job);
   }
   return result;
 }
@@ -705,10 +801,6 @@ static napi_value error_value(napi_env env, bool unsafe, const char *code) {
 }
 static void retire_main_handles(struct task *task) {
   bool valid = true;
-  if (task->cleanup_hook) {
-    if (napi_remove_async_cleanup_hook(task->cleanup_hook) != napi_ok) valid = false;
-    else task->cleanup_hook = NULL;
-  }
   if (task->work) {
     if (napi_delete_async_work(task->env, task->work) != napi_ok) valid = false;
     else task->work = NULL;
@@ -726,10 +818,13 @@ static void retire_main_handles(struct task *task) {
    * and callback is joined, retire that owner before a successful reply. */
   if (!task->unsafe && task->cancel) { g_object_unref(task->cancel); task->cancel = NULL; }
 }
-static void release_task(struct task *task) {
+static void release_task_storage(struct task *task) {
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
   if (task->unit_properties) { g_variant_unref(task->unit_properties); task->unit_properties = NULL; }
   if (task->service_properties) { g_variant_unref(task->service_properties); task->service_properties = NULL; }
+}
+static void release_task(struct task *task) {
+  release_task_storage(task);
   if (task->unsafe) {
     /* A possibly owning bus or watchdog must stay strongly retained until
      * process death. This is resource ownership, not a recovery ledger. */
@@ -739,14 +834,39 @@ static void release_task(struct task *task) {
   free(task);
 }
 static void release_inspection_owner(struct inspection_owner *owner) {
-  if (owner->join_promise && napi_delete_reference(owner->env, owner->join_promise) != napi_ok)
+  if (!owner->env_closing && owner->join_promise && napi_delete_reference(owner->env, owner->join_promise) != napi_ok)
     atomic_store(&retirement_failed, true);
-  if (owner->handle && napi_delete_reference(owner->env, owner->handle) != napi_ok)
+  if (!owner->env_closing && owner->handle && napi_delete_reference(owner->env, owner->handle) != napi_ok)
     atomic_store(&retirement_failed, true);
   free(owner);
 }
-static void finish_task(struct task *task) {
-  if (!task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
+static void task_retire_callbacks(struct task *task) {
+  if (!task->completion_finished || task->callbacks.depth || task->callbacks.retiring) return;
+  callbacks_retire(&task->callbacks);
+  if (task->cleanup_hook) {
+    if (napi_remove_async_cleanup_hook(task->cleanup_hook) != napi_ok) callback_fatal("platform cleanup hook did not retire");
+    task->cleanup_hook = NULL;
+  }
+}
+static void task_try_release(struct task *task) {
+  if (!task->release_pending || callbacks_held(&task->callbacks) || task->cleanup_hook) return;
+  task->release_pending = false;
+  struct inspection_owner *owner = task->completed_inspection; task->completed_inspection = NULL;
+  if (owner) {
+    if (!owner->completion_borrows) callback_fatal("inspection completion borrow underflow");
+    owner->completion_borrows--;
+    if (owner->finalized && !owner->task && !owner->completion_borrows) release_inspection_owner(owner);
+  }
+  release_task(task);
+}
+static void task_release_callback_borrow(struct task *task) {
+  task_retire_callbacks(task);
+  if (!task->callbacks.borrows) callback_fatal("platform callback borrow underflow");
+  task->callbacks.borrows--; task_try_release(task);
+}
+static void finish_task_data(struct task *task) {
+  if (task->completion_finished || !task->work_complete || (task->timer_initialized && !task->timer_closed)) return;
+  task->completion_finished = true;
   /* Neither the async worker nor the timer can still access the task. The
    * queued-cancel path never ran execute, so retire its copied input here. */
   if (task->secret) { wipe(task->secret, task->secret_size); free(task->secret); task->secret = NULL; }
@@ -758,6 +878,7 @@ static void finish_task(struct task *task) {
   retire_main_handles(task);
   const bool env_closing = task->env_closing;
   struct inspection_owner *owner = task->inspection;
+  if (owner) { owner->completion_borrows++; owner->env_closing = env_closing; }
   napi_env env = task->env;
   napi_handle_scope scope = NULL;
   if (!env_closing) {
@@ -788,8 +909,10 @@ static void finish_task(struct task *task) {
   if (owner) {
     owner->task = NULL; owner->joined = true; owner->unsafe = task->unsafe;
     task->inspection = NULL;
+    task->completed_inspection = owner;
   }
-  atomic_store(&job_in_flight, false); release_task(task);
+  release_task_storage(task);
+  atomic_store(&job_in_flight, false); task->release_pending = true;
   // release_task also retires variant/input storage. A positive cancellation
   // join is published only after every worker, watchdog, bus, FD and timer gate.
   if (owner && !env_closing && owner->join_deferred) {
@@ -802,12 +925,17 @@ static void finish_task(struct task *task) {
       napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "inspection join unavailable", NAPI_AUTO_LENGTH);
     owner->join_deferred = NULL;
   }
-  if (owner && owner->finalized) release_inspection_owner(owner);
   if (scope && napi_close_handle_scope(env, scope) != napi_ok)
     napi_fatal_error("cliq-credential-platform", NAPI_AUTO_LENGTH, "platform completion scope did not retire", NAPI_AUTO_LENGTH);
 }
+static void finish_task(struct task *task) {
+  task->callbacks.borrows++; finish_task_data(task); task_release_callback_borrow(task);
+}
 static void timer_closed(uv_handle_t *handle) {
-  struct task *task = handle->data; task->timer_closed = true; finish_task(task);
+  struct task *task = handle->data; struct native_callback_scope scope;
+  callbacks_enter(&task->callbacks, task->env_closing, &scope);
+  task->timer_closed = true; finish_task(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void close_timer(struct task *task) {
   if (task->timer_initialized && !task->timer_closing) {
@@ -816,7 +944,7 @@ static void close_timer(struct task *task) {
   }
 }
 static void cancel_task(struct task *task) {
-  g_cancellable_cancel(task->cancel);
+  if (task->cancel) g_cancellable_cancel(task->cancel);
   if (!task->work_complete && !task->cancel_requested) {
     task->cancel_requested = true;
     napi_status status = napi_cancel_async_work(task->env, task->work);
@@ -828,8 +956,10 @@ static void cancel_task(struct task *task) {
   }
 }
 static void deadline_expired(uv_timer_t *timer) {
-  struct task *task = timer->data; task->expired = true;
+  struct task *task = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&task->callbacks, task->env_closing, &scope); task->expired = true;
   cancel_task(task); close_timer(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void complete(napi_env env, napi_status status, void *data) {
   (void)env; struct task *task = data; task->work_complete = true;
@@ -840,16 +970,20 @@ static void complete(napi_env env, napi_status status, void *data) {
 }
 static void cleanup_task(napi_async_cleanup_hook_handle handle, void *data) {
   (void)handle; struct task *task = data; task->env_closing = true;
+  if (task->inspection) task->inspection->env_closing = true;
+  if (task->completed_inspection) task->completed_inspection->env_closing = true;
+  struct native_callback_scope scope; callbacks_enter(&task->callbacks, true, &scope);
   cancel_task(task); close_timer(task);
+  callbacks_close(&task->callbacks, &scope); task_release_callback_borrow(task);
 }
 static void finalize_inspection(napi_env env, void *data, void *hint) {
   (void)env; (void)hint; struct inspection_owner *owner = data; owner->finalized = true;
   if (owner->task) {
     // Strong task ownership normally prevents GC here. Environment teardown
     // can finalize first; retain this owner until the same task's complete gate.
-    owner->task->env_closing = true;
+    owner->env_closing = true; owner->task->env_closing = true;
     cancel_task(owner->task); close_timer(owner->task);
-  } else release_inspection_owner(owner);
+  } else if (!owner->completion_borrows) release_inspection_owner(owner);
 }
 static napi_value cancel_inspection(napi_env env, napi_callback_info info) {
   size_t argc = 1; napi_value args[1], receiver; bool tagged = false; struct inspection_owner *owner = NULL;
@@ -893,7 +1027,7 @@ static bool own_inspection(struct task *task, napi_value promise) {
   const napi_property_descriptor method = {"cancelAndJoin", NULL, cancel_inspection, NULL, NULL, NULL, napi_default, NULL};
   return napi_define_properties(task->env, promise, 1, &method) == napi_ok;
 }
-static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
+static napi_value submit(napi_env env, napi_callback_info info, bool manager, bool upgrade) {
   if (atomic_load(&retirement_failed)) { napi_throw(env, error_value(env, true, "resource_retirement")); return NULL; }
   if (syscall(SYS_gettid) != getpid()) { napi_throw(env, error_value(env, false, "platform_main_thread_required")); return NULL; }
   size_t argc = 2; napi_value args[2];
@@ -903,8 +1037,26 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   struct task *task = calloc(1, sizeof(*task));
   if (!task) { napi_throw(env, error_value(env, false, "platform_worker_unavailable")); return NULL; }
   task->env = env; task->runtime_fd = -1; char kind[32];
-  bool valid = current_user(&task->uid, &task->gid, task->home) && field_text(env, args[0], "kind", kind, sizeof(kind));
-  if (valid && manager) {
+  bool valid = current_user(&task->uid, &task->gid, task->home);
+  if (valid && upgrade) {
+    const char *keys[] = {"rootIdentityDigest", "role", "pid", "processStartToken", "invocationId"};
+    char root[65], role[16], invocation[33];
+    valid = fields(env, args[0], keys, 5) && field_text(env, args[0], "rootIdentityDigest", root, sizeof(root)) &&
+      strlen(root) == 64 && strspn(root, "0123456789abcdef") == 64 &&
+      field_text(env, args[0], "role", role, sizeof(role)) && (!strcmp(role, "supervisor") || !strcmp(role, "keeper")) &&
+      field_u32(env, args[0], "pid", &task->upgrade_pid) && task->upgrade_pid > 0 && task->upgrade_pid <= INT_MAX &&
+      field_ticks(env, args[0], &task->upgrade_ticks) && field_text(env, args[0], "invocationId", invocation, sizeof(invocation)) &&
+      strlen(invocation) == 32 && strspn(invocation, "0123456789abcdef") == 32;
+    bool nonzero = false;
+    if (valid) for (size_t i = 0; i < 16; i++) {
+      unsigned int byte = 0; if (sscanf(invocation + i * 2, "%2x", &byte) != 1) valid = false;
+      task->upgrade_invocation[i] = (unsigned char)byte; nonzero |= byte != 0;
+    }
+    valid = valid && nonzero;
+    if (valid) valid = snprintf(task->unit, sizeof(task->unit), "cliq-%s-%s.service", root, role) > 0;
+    task->operation = STOP_INSTALLED_UPGRADE;
+  } else if (valid && !field_text(env, args[0], "kind", kind, sizeof(kind))) valid = false;
+  if (valid && !upgrade && manager) {
     if (!strcmp(kind, "reload")) { const char *keys[] = {"kind"}; valid = fields(env, args[0], keys, 1); task->operation = RELOAD_MANAGER; }
     else if (!strcmp(kind, "start") || !strcmp(kind, "inspect")) {
       const char *keys[] = {"kind", "unit"}; valid = fields(env, args[0], keys, 2) && field_text(env, args[0], "unit", task->unit, sizeof(task->unit));
@@ -914,7 +1066,7 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
         !strcmp(task->unit + length - 8, ".service");
       task->operation = !strcmp(kind, "start") ? START_UNIT : INSPECT_UNIT;
     } else valid = false;
-  } else if (valid) {
+  } else if (valid && !upgrade) {
     napi_value selector;
     valid = member(env, args[0], "selector", &selector) && parse_selector(env, selector, &task->selector);
     if (!strcmp(kind, "create_compare")) {
@@ -936,7 +1088,11 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   }
   napi_value promise = NULL, resource;
   if (clock_gettime(CLOCK_MONOTONIC, &task->deadline)) goto failed;
-  task->deadline.tv_sec += DEADLINE_SECONDS;
+  task->deadline.tv_sec += upgrade ? 1 : DEADLINE_SECONDS;
+  if (upgrade) {
+    task->deadline.tv_nsec += 750000000;
+    if (task->deadline.tv_nsec >= 1000000000) { task->deadline.tv_sec++; task->deadline.tv_nsec -= 1000000000; }
+  }
   task->cancel = g_cancellable_new();
   if (pthread_mutex_init(&task->mutex, NULL)) goto failed;
   task->mutex_ready = true;
@@ -948,10 +1104,11 @@ static napi_value submit(napi_env env, napi_callback_info info, bool manager) {
   if (condition) goto failed;
   task->condition_ready = true;
   if (napi_create_promise(env, &task->deferred, &promise) != napi_ok ||
-      (task->operation == INSPECT_SECRET && !own_inspection(task, promise)) ||
+      ((task->operation == INSPECT_SECRET || task->operation == STOP_INSTALLED_UPGRADE) && !own_inspection(task, promise)) ||
       napi_create_string_utf8(env, "cliq-linux-credential-platform", NAPI_AUTO_LENGTH, &resource) != napi_ok ||
       napi_create_async_work(env, NULL, resource, execute, complete, task, &task->work) != napi_ok ||
-      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok) goto failed;
+      napi_add_async_cleanup_hook(env, cleanup_task, task, &task->cleanup_hook) != napi_ok ||
+      !callbacks_init(&task->callbacks, env, "cliq credential platform callbacks")) goto failed;
   uv_loop_t *loop;
   if (napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &task->deadline_timer)) goto failed;
   task->timer_initialized = true; task->deadline_timer.data = task;
@@ -971,8 +1128,9 @@ failed:
   atomic_store(&job_in_flight, false); release_task(task);
   napi_throw(env, error_value(env, unsafe, unsafe ? "resource_retirement" : "platform_worker_unavailable")); return NULL;
 }
-static napi_value secret_service(napi_env env, napi_callback_info info) { return submit(env, info, false); }
-static napi_value user_manager(napi_env env, napi_callback_info info) { return submit(env, info, true); }
+static napi_value secret_service(napi_env env, napi_callback_info info) { return submit(env, info, false, false); }
+static napi_value user_manager(napi_env env, napi_callback_info info) { return submit(env, info, true, false); }
+static napi_value stop_installed_upgrade(napi_env env, napi_callback_info info) { return submit(env, info, true, true); }
 static napi_value user(napi_env env, napi_callback_info info) {
   (void)info; uid_t uid; gid_t gid; char home[PATH_MAX];
   if (atomic_load(&retirement_failed) || syscall(SYS_gettid) != getpid() || !current_user(&uid, &gid, home)) {
@@ -980,21 +1138,30 @@ static napi_value user(napi_env env, napi_callback_info info) {
   }
   napi_value result; napi_create_object(env, &result); set_number(env, result, "uid", uid); set_number(env, result, "gid", gid); set_string(env, result, "home", home); return result;
 }
-#ifndef CLIQ_MODEL_BROKER_MODULE
+#if !defined(CLIQ_MODEL_BROKER_MODULE) && !defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE) && !defined(CLIQ_MCP_HTTP_BROKER_MODULE) && !defined(CLIQ_MCP_STDIO_BROKER_MODULE)
 static napi_value initialize(napi_env env, napi_value exports) {
   const napi_property_descriptor methods[] = {
     {"currentUser", NULL, user, NULL, NULL, NULL, napi_default, NULL},
     {"secretService", NULL, secret_service, NULL, NULL, NULL, napi_default, NULL},
     {"userManager", NULL, user_manager, NULL, NULL, NULL, napi_default, NULL},
+    {"stopInstalledUpgradeUnit", NULL, stop_installed_upgrade, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 2); return exports;
+  set_number(env, exports, "interfaceVersion", 2); set_number(env, exports, "installedUpgradeInterfaceVersion", 1); return exports;
 }
 NAPI_MODULE(cliq_linux_credential_platform, initialize)
+#elif defined(CLIQ_DEPENDENCY_REGISTRY_BROKER_MODULE)
+#include "dependency-broker.h"
+#elif defined(CLIQ_MCP_HTTP_BROKER_MODULE)
+#include "mcp-http-broker.h"
+#elif defined(CLIQ_MCP_STDIO_BROKER_MODULE)
+#include "mcp-stdio-broker.h"
 #else
 /* A distinct signed provider image. Its private handle owns the token, key,
  * copied request, connection and cancellation. No native call selects SQL
  * authority: the installed Supervisor performs both committed release gates. */
+#define CLIQ_MODEL_OWNER_LOCAL_SERVICE 1
+#include "local-inference-owner-bridge.h"
 #define BROKER_BODY_CAP 1048576
 #define BROKER_HEADER_CAP 65536
 #define BROKER_TRUST_CAP (16 * 1048576)
@@ -1023,6 +1190,7 @@ struct broker {
   bool mutex_ready, token_revoked, fence_locked, finalize_requested;
   atomic_bool fence_retained;
   unsigned active_releases, fence_borrows;
+  struct native_callbacks callbacks;
   pid_t creator_pid;
   enum broker_stage stage;
   struct broker_binding binding;
@@ -1040,9 +1208,17 @@ struct broker {
   const char *media_type;
   _Atomic(const char *) error;
   struct broker *unretired_next;
+  bool managed_local, local_health, local_version, local_connect_pending, local_peer_joined, local_peer_uncertain;
+  struct cliq_local_service_peer *local_peer;
+  napi_ref local_peer_reference;
+  GSocket *local_unretired_socket;
 };
-static const napi_type_tag broker_tag = { UINT64_C(0x59689d0f2ac42b76), UINT64_C(0xac3d70697537de41) };
-static const napi_type_tag broker_fence_tag = { UINT64_C(0x385c79f2d1954ea6), UINT64_C(0xa3e8d76b24c1095f) };
+/* struct task is embedded in broker. Its upgrade fields change the private
+ * native layout, so old-image owners/fences cannot borrow this image's methods.
+ * Public transport semantics and retained evidence formats are unchanged. */
+static const napi_type_tag broker_tag = { UINT64_C(0x67b974e0c6de44ad), UINT64_C(0x84e6e6a5351472eb) };
+static const napi_type_tag broker_fence_tag = { UINT64_C(0x15d0d05cfc294307), UINT64_C(0xa9a4f66d98e6aeb0) };
+static const napi_type_tag broker_health_tag = { UINT64_C(0x38ec45b489df481b), UINT64_C(0xbb9bc5b7db757d72) };
 struct broker_fence {
   struct broker *broker; napi_env env; napi_ref original; struct broker_binding binding; pid_t creator_pid; bool active;
 };
@@ -1050,61 +1226,32 @@ static struct broker *unretired_brokers;
 static void broker_begin_close(struct broker *broker);
 static bool broker_queue(struct broker *broker, enum broker_stage stage);
 static void broker_finish_close(struct broker *broker);
+static void broker_free(napi_env env, struct broker *broker);
+static bool broker_start_local_connection(struct broker *broker);
+static void broker_poll_local(struct broker *broker);
+static bool broker_local_cancel_join(struct broker *broker);
+static void broker_retire_callbacks(struct broker *broker) {
+  if (!broker->retired || !broker->close_finished || (broker->timer_ready && !broker->timer_closed) ||
+      broker->callbacks.depth || broker->callbacks.retiring) return;
+  callbacks_retire(&broker->callbacks);
+  if (!atomic_load(&broker->fence_retained) && !broker->fence_locked && broker->cleanup_hook) {
+    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) callback_fatal("broker cleanup hook did not retire");
+    broker->cleanup_hook = NULL;
+  }
+}
+static void broker_release_callback_borrow(struct broker *broker) {
+  broker_retire_callbacks(broker);
+  if (!broker->callbacks.borrows) callback_fatal("broker callback borrow underflow");
+  broker->callbacks.borrows--;
+  if (broker->finalize_requested) broker_free(broker->env, broker);
+}
 
 static bool broker_fail(struct broker *broker, const char *code) {
   const char *expected = NULL;
   atomic_compare_exchange_strong(&broker->error, &expected, code);
   return false;
 }
-static bool digest_hex(const unsigned char *bytes, size_t size, char result[65]) {
-  unsigned char digest[32];
-  if (!SHA256(bytes, size, digest)) { wipe(digest, sizeof(digest)); return false; }
-  for (size_t index = 0; index < 32; index++) snprintf(result + index * 2, 3, "%02x", digest[index]);
-  wipe(digest, sizeof(digest)); return true;
-}
-static bool broker_digest(napi_env env, napi_value value, const char *field, char output[65]) {
-  return field_text(env, value, field, output, 65) && strlen(output) == 64 && strspn(output, "0123456789abcdef") == 64;
-}
-static bool broker_integer(napi_env env, napi_value value, const char *field, uint64_t minimum, uint64_t *output) {
-  napi_value member_value; double number;
-  if (!member(env, value, field, &member_value) || napi_get_value_double(env, member_value, &number) != napi_ok ||
-      !isfinite(number) || number < minimum || number > 9007199254740991.0 || number != (uint64_t)number) return false;
-  *output = (uint64_t)number; return true;
-}
-static bool broker_buffer(napi_env env, napi_value value, const char *field, size_t maximum,
-  unsigned char **output, size_t *size) {
-  napi_value property; bool buffer; void *bytes;
-  if (!member(env, value, field, &property) || napi_is_buffer(env, property, &buffer) != napi_ok || !buffer ||
-      napi_get_buffer_info(env, property, &bytes, size) != napi_ok || !*size || *size > maximum) return false;
-  *output = malloc(*size);
-  if (!*output) return false;
-  memcpy(*output, bytes, *size); return true;
-}
-static bool broker_host(const char *value) {
-  size_t length = strlen(value);
-  if (!length || length > 253 || value[0] == '.' || value[length - 1] == '.' ||
-      strspn(value, "abcdefghijklmnopqrstuvwxyz0123456789.-") != length) return false;
-  const char *label = value;
-  while (*label) {
-    const char *end = strchr(label, '.'); size_t count = end ? (size_t)(end - label) : strlen(label);
-    if (!count || count > 63 || label[0] == '-' || label[count - 1] == '-') return false;
-    if (!end) break;
-    label = end + 1;
-  }
-  return true;
-}
-static bool broker_path(const char *value) {
-  if (value[0] != '/' || strchr(value, '?') || strchr(value, '#') || strchr(value, '\\') ||
-      strchr(value, '%') || strspn(value, "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-+") != strlen(value)) return false;
-  const char *cursor = value + 1;
-  while (*cursor) {
-    const char *end = strchr(cursor, '/'); size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
-    if (!length || (length == 1 && cursor[0] == '.') || (length == 2 && !memcmp(cursor, "..", 2))) return false;
-    if (!end) return true;
-    cursor = end + 1;
-  }
-  return true;
-}
+#include "http-owner-mechanism.h"
 static bool broker_binding_value(napi_env env, napi_value value, struct broker_binding *binding) {
   const char *keys[] = {"runId", "opId", "attempt", "dispatchId", "dispatchJournalSeq", "requestRef", "requestDigest",
     "targetRef", "targetDigest", "grantRef", "supervisorInstanceId", "stateOwnerEpoch", "leaseEpoch", "brokerFenceTokenDigest"};
@@ -1116,283 +1263,6 @@ static bool broker_binding_value(napi_env env, napi_value value, struct broker_b
     broker_digest(env, value, "grantRef", binding->grant_ref) && broker_digest(env, value, "brokerFenceTokenDigest", binding->token_digest) &&
     broker_integer(env, value, "attempt", 0, &binding->attempt) && broker_integer(env, value, "dispatchJournalSeq", 1, &binding->sequence) &&
     broker_integer(env, value, "stateOwnerEpoch", 1, &binding->owner_epoch) && broker_integer(env, value, "leaseEpoch", 1, &binding->lease_epoch);
-}
-static bool broker_live(struct broker *broker) {
-  return (!atomic_load(&broker->cancelled) && !atomic_load(&retirement_failed) && remaining(&broker->platform) > 0) ||
-    broker_fail(broker, "broker_cancelled_or_expired");
-}
-static bool broker_platform_retire(struct broker *broker) {
-  struct task *task = &broker->platform;
-  if (task->bus) {
-    GError *error = NULL;
-    if (!g_dbus_connection_is_closed(task->bus) && !g_dbus_connection_close_sync(task->bus, NULL, &error)) {
-      task->unsafe = true; atomic_store(&retirement_failed, true); fail(task, "resource_retirement");
-    }
-    g_clear_error(&error);
-    if (!task->unsafe) { g_object_unref(task->bus); task->bus = NULL; }
-  }
-  if (!retired_close(task, &task->runtime_fd)) task->unsafe = true;
-  if (task->unsafe) { broker->unsafe = true; return broker_fail(broker, "resource_retirement"); }
-  return true;
-}
-static bool broker_read_key(struct broker *broker) {
-  struct task *task = &broker->platform; bool found = false;
-  if (!connect_bus(task) || !observe_owner(task, SECRET_NAME, &task->observed.service) || !default_collection(task) ||
-      !search_item(task, &found) || !found || !verify_item(task) || !expected_platform(task) || !open_session(task))
-    return broker_fail(broker, "credential_redemption_refused");
-  GVariant *reply = call(task, task->observed.service.unique, task->observed.item, SECRET_INTERFACE "Item", "GetSecret",
-    g_variant_new("(o)", task->session), "((oayays))");
-  if (!reply) return broker_fail(broker, "credential_redemption_refused");
-  GVariant *parameters, *bytes; const char *session, *content_type;
-  g_variant_get(reply, "((&o@ay@ay&s))", &session, &parameters, &bytes, &content_type);
-  gsize size = 0; const unsigned char *secret = g_variant_get_fixed_array(bytes, &size, 1);
-  bool valid = !strcmp(session, task->session) && !g_variant_n_children(parameters) && size > 0 && size <= MAX_SECRET &&
-    (!strcmp(content_type, "application/octet-stream") || !strcmp(content_type, "text/plain"));
-  for (size_t index = 0; valid && index < size; index++) valid = secret[index] >= 0x21 && secret[index] <= 0x7e;
-  static const char *const protocol_literals[] = {"{", "}", "[", "]", "\"", ":", "application/json"};
-  for (size_t index = 0; valid && index < sizeof(protocol_literals) / sizeof(protocol_literals[0]); index++) {
-    const char *literal = protocol_literals[index];
-    if (memmem(literal, strlen(literal), secret, size) != NULL) valid = false;
-  }
-  if (valid) {
-    task->secret = malloc(size);
-    valid = task->secret != NULL;
-    if (valid) { memcpy(task->secret, secret, size); task->secret_size = size; }
-  }
-  /* Secret Service's immutable reply storage is never exported or persisted.
-   * Only our owned copy survives the immediate reply retirement. */
-  g_variant_unref(parameters); g_variant_unref(bytes); g_variant_unref(reply);
-  if (!valid || !verify_item(task) || !default_collection(task) || !observe_owner(task, SECRET_NAME, &task->observed.service) ||
-      !expected_platform(task) || !bus_current(task)) return broker_fail(broker, "credential_redemption_refused");
-  return broker_live(broker);
-}
-static bool broker_tls_wait(struct broker *broker, int error) {
-  if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) return broker_fail(broker, "broker_transport_interrupted");
-  if (!broker_live(broker)) return false;
-  struct pollfd descriptor = { .fd = g_socket_get_fd(broker->socket), .events = error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT };
-  int result;
-  do { result = poll(&descriptor, 1, 50); } while (result < 0 && errno == EINTR && broker_live(broker));
-  return (result >= 0 || broker_fail(broker, "broker_transport_interrupted")) && broker_live(broker);
-}
-static bool broker_load_ca(struct broker *broker) {
-  broker->tls_context = SSL_CTX_new(TLS_client_method());
-  if (!broker->tls_context || !SSL_CTX_set_min_proto_version(broker->tls_context, TLS1_3_VERSION) ||
-      !SSL_CTX_set_max_proto_version(broker->tls_context, TLS1_3_VERSION)) return broker_fail(broker, "broker_tls_refused");
-  SSL_CTX_set_verify(broker->tls_context, SSL_VERIFY_PEER, NULL);
-  SSL_CTX_set_options(broker->tls_context, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
-  BIO *input = BIO_new_mem_buf(broker->trust, (int)broker->trust_size);
-  if (!input) return broker_fail(broker, "broker_tls_refused");
-  unsigned count = 0; X509 *certificate;
-  while ((certificate = PEM_read_bio_X509(input, NULL, NULL, NULL))) {
-    bool added = X509_STORE_add_cert(SSL_CTX_get_cert_store(broker->tls_context), certificate) == 1;
-    X509_free(certificate);
-    if (!added || ++count > 4096) { BIO_free(input); ERR_clear_error(); return broker_fail(broker, "broker_tls_refused"); }
-  }
-  BIO_free(input); ERR_clear_error();
-  return count > 0 || broker_fail(broker, "broker_tls_refused");
-}
-static bool broker_pin(struct broker *broker) {
-  X509 *certificate = SSL_get1_peer_certificate(broker->tls);
-  if (!certificate) return broker_fail(broker, "broker_tls_refused");
-  X509_PUBKEY *key = X509_get_X509_PUBKEY(certificate); unsigned char *encoded = NULL;
-  int count = i2d_X509_PUBKEY(key, &encoded); unsigned char digest[32];
-  bool valid = count > 0 && encoded != NULL && SHA256(encoded, (size_t)count, digest) != NULL, matched = false;
-  for (size_t index = 0; valid && index < broker->pin_count; index++) matched |= CRYPTO_memcmp(digest, broker->pins[index], 32) == 0;
-  wipe(digest, sizeof(digest)); OPENSSL_free(encoded); X509_free(certificate);
-  return (valid && matched) || broker_fail(broker, "broker_tls_refused");
-}
-static bool broker_connect(struct broker *broker) {
-  GSocketClient *client = g_socket_client_new();
-  g_socket_client_set_enable_proxy(client, FALSE);
-  g_socket_client_set_tls(client, FALSE);
-  g_socket_client_set_timeout(client, DEADLINE_SECONDS);
-  GError *error = NULL;
-  broker->connection = g_socket_client_connect_to_host(client, broker->host, (guint16)broker->port, broker->platform.cancel, &error);
-  g_object_unref(client); g_clear_error(&error);
-  if (!broker->connection || !broker_live(broker)) return broker_fail(broker, "broker_transport_interrupted");
-  broker->socket = g_socket_connection_get_socket(broker->connection);
-  g_socket_set_blocking(broker->socket, FALSE);
-  if (!broker_load_ca(broker)) return false;
-  broker->tls = SSL_new(broker->tls_context);
-  if (!broker->tls || !SSL_set_fd(broker->tls, g_socket_get_fd(broker->socket)) ||
-      !SSL_set_tlsext_host_name(broker->tls, broker->server_name)) return broker_fail(broker, "broker_tls_refused");
-  X509_VERIFY_PARAM *parameters = SSL_get0_param(broker->tls);
-  X509_VERIFY_PARAM_set_hostflags(parameters, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-  if (g_hostname_is_ip_address(broker->server_name)) {
-    if (!X509_VERIFY_PARAM_set1_ip_asc(parameters, broker->server_name)) return broker_fail(broker, "broker_tls_refused");
-  } else if (!SSL_set1_host(broker->tls, broker->server_name)) return broker_fail(broker, "broker_tls_refused");
-  for (;;) {
-    if (!broker_live(broker)) return false;
-    int result = SSL_connect(broker->tls);
-    if (result == 1) break;
-    if (!broker_tls_wait(broker, SSL_get_error(broker->tls, result))) return false;
-  }
-  if (SSL_version(broker->tls) != TLS1_3_VERSION || SSL_get_verify_result(broker->tls) != X509_V_OK || !broker_pin(broker))
-    return broker_fail(broker, "broker_tls_refused");
-  /* Ready means native platform identities remained original after the slow
-   * handshake. Root still supplies the final fresh SQL/credential release cut. */
-  struct task *task = &broker->platform;
-  return verify_item(task) && default_collection(task) && observe_owner(task, SECRET_NAME, &task->observed.service) &&
-    expected_platform(task) && bus_current(task) && broker_live(broker);
-}
-static bool broker_write(struct broker *broker, const unsigned char *bytes, size_t size) {
-  size_t offset = 0;
-  while (offset < size) {
-    if (!broker_live(broker)) return false;
-    size_t written = 0; int result = SSL_write_ex(broker->tls, bytes + offset, size - offset, &written);
-    if (result == 1) { if (!written) return broker_fail(broker, "broker_transport_interrupted"); offset += written; }
-    else if (!broker_tls_wait(broker, SSL_get_error(broker->tls, result))) return false;
-  }
-  return true;
-}
-/* Reads are never retried as requests. A short/failed response remains an
- * ambiguous transport outcome after release, not a no-effect assertion. */
-static ssize_t broker_read(struct broker *broker, unsigned char *bytes, size_t size) {
-  for (;;) {
-    if (!broker_live(broker)) return -1;
-    size_t received = 0; int result = SSL_read_ex(broker->tls, bytes, size, &received);
-    if (result == 1) return received ? (ssize_t)received : -1;
-    int error = SSL_get_error(broker->tls, result);
-    if (error == SSL_ERROR_ZERO_RETURN) return 0;
-    if (!broker_tls_wait(broker, error)) return -1;
-  }
-}
-static bool broker_line(struct broker *broker, char *line, size_t capacity, size_t *total) {
-  size_t length = 0;
-  while (length + 1 < capacity) {
-    unsigned char byte;
-    if (broker_read(broker, &byte, 1) != 1 || ++*total > BROKER_HEADER_CAP) return broker_fail(broker, "broker_response_refused");
-    if (byte == '\r') {
-      if (broker_read(broker, &byte, 1) != 1 || ++*total > BROKER_HEADER_CAP || byte != '\n')
-        return broker_fail(broker, "broker_response_refused");
-      line[length] = '\0'; return true;
-    }
-    if (byte == '\n' || byte == 0 || (byte < 0x20 && byte != '\t') || byte > 0x7e) return broker_fail(broker, "broker_response_refused");
-    line[length++] = (char)byte;
-  }
-  return broker_fail(broker, "broker_response_refused");
-}
-static bool broker_contains(const unsigned char *bytes, size_t size, const unsigned char *needle, size_t needle_size) {
-  return needle_size && size >= needle_size && memmem(bytes, size, needle, needle_size) != NULL;
-}
-static bool broker_no_echo_plain(struct broker *broker, const unsigned char *bytes, size_t size) {
-  const unsigned char *secret = broker->platform.secret; size_t count = broker->platform.secret_size;
-  if (broker_contains(bytes, size, secret, count)) return broker_fail(broker, "broker_response_refused");
-  gchar *base64 = g_base64_encode(secret, count);
-  bool echoed = base64 && broker_contains(bytes, size, (const unsigned char *)base64, strlen(base64));
-  if (base64 && !echoed) {
-    size_t length = strlen(base64);
-    for (size_t index = 0; index < length; index++) {
-      if (base64[index] == '+') base64[index] = '-';
-      else if (base64[index] == '/') base64[index] = '_';
-    }
-    while (length && base64[length - 1] == '=') length--;
-    echoed = broker_contains(bytes, size, (const unsigned char *)base64, length);
-  }
-  if (base64) { wipe(base64, strlen(base64)); g_free(base64); }
-  unsigned char *encoded = malloc(count * 2 + 1);
-  if (!encoded) return broker_fail(broker, "broker_worker_unavailable");
-  if (!echoed) {
-    for (size_t index = 0; index < count; index++) snprintf((char *)encoded + index * 2, 3, "%02x", secret[index]);
-    echoed = broker_contains(bytes, size, encoded, count * 2);
-    for (size_t index = 0; index < count * 2; index++) if (encoded[index] >= 'a' && encoded[index] <= 'f') encoded[index] -= 'a' - 'A';
-    echoed |= broker_contains(bytes, size, encoded, count * 2);
-  }
-  if (!echoed) {
-    size_t length = 0;
-    for (size_t index = 0; index < count; index++) {
-      if (secret[index] == '"' || secret[index] == '\\') encoded[length++] = '\\';
-      encoded[length++] = secret[index];
-    }
-    echoed = broker_contains(bytes, size, encoded, length);
-  }
-  wipe(encoded, count * 2 + 1); free(encoded);
-  if (echoed) return broker_fail(broker, "broker_response_refused");
-  return true;
-}
-static int broker_hex_digit(unsigned char value) {
-  if (value >= '0' && value <= '9') return value - '0';
-  if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-  if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-  return -1;
-}
-static bool broker_unicode_hex(const unsigned char *bytes, size_t size, size_t at, unsigned *point) {
-  if (at >= size || size - at <= 4) return false;
-  *point = 0;
-  for (size_t digit = 1; digit <= 4; digit++) {
-    int value = broker_hex_digit(bytes[at + digit]);
-    if (value < 0) return false;
-    *point = *point * 16 + (unsigned)value;
-  }
-  return true;
-}
-static bool broker_no_echo_normalized(struct broker *broker, const unsigned char *bytes, size_t size) {
-  if (!broker_no_echo_plain(broker, bytes, size)) return false;
-  /* NUL separates string projections and cannot occur in the Bearer key.
-   * Normalize only valid UTF-8 segments; invalid JSON/UTF-8 still belongs to
-   * the closed production provider decoder, not this leak screen. */
-  for (size_t start = 0; start < size;) {
-    size_t end = start; while (end < size && bytes[end]) end++;
-    if (end > start && g_utf8_validate((const char *)bytes + start, (gssize)(end - start), NULL)) {
-      gchar *normalized = g_utf8_normalize((const char *)bytes + start, (gssize)(end - start), G_NORMALIZE_NFC);
-      if (!normalized) return broker_fail(broker, "broker_worker_unavailable");
-      size_t count = strlen(normalized); bool valid = broker_no_echo_plain(broker, (const unsigned char *)normalized, count);
-      wipe(normalized, count); g_free(normalized); if (!valid) return false;
-    }
-    start = end + 1;
-  }
-  return true;
-}
-static bool broker_no_echo(struct broker *broker, const unsigned char *bytes, size_t size) {
-  /* OpenAI arguments are themselves JSON strings. A single unescape pass
-   * would let a later provider/schema parse recover the key in JavaScript.
-   * Two bounded native buffers screen up to 64 string-projection layers,
-   * including Unicode/NFC, without ever rewriting the original response.
-   * This finite guard is not arbitrary malicious-transform confidentiality. */
-  unsigned char *first = malloc(size + 1), *second = malloc(size + 1);
-  if (!first || !second) { free(first); free(second); return broker_fail(broker, "broker_worker_unavailable"); }
-  const unsigned char *current = bytes; size_t current_size = size; bool valid = true;
-  for (unsigned depth = 0;; depth++) {
-    if (!broker_live(broker) || !broker_no_echo_normalized(broker, current, current_size)) { valid = false; break; }
-    unsigned char *decoded = current == first ? second : first;
-    size_t count = 0; bool escaped = false;
-    for (size_t index = 0; index < current_size; index++) {
-      if (current[index] != '"') continue;
-      while (++index < current_size && current[index] != '"') {
-        unsigned char byte = current[index];
-        if (byte == '\\') {
-          escaped = true; if (++index == current_size) break;
-          byte = current[index];
-          if (byte == 'u') {
-            unsigned point;
-            if (broker_unicode_hex(current, current_size, index, &point)) {
-              index += 4;
-              if (point >= 0xd800 && point <= 0xdbff) {
-                unsigned low;
-                if (current_size - index > 6 && current[index + 1] == '\\' && current[index + 2] == 'u' &&
-                    broker_unicode_hex(current, current_size, index + 2, &low) && low >= 0xdc00 && low <= 0xdfff) {
-                  point = 0x10000 + (point - 0xd800) * 1024 + low - 0xdc00; index += 6;
-                }
-              }
-              if (g_unichar_validate(point)) { count += (size_t)g_unichar_to_utf8(point, (char *)decoded + count); continue; }
-            }
-            byte = 0;
-          } else if (byte == 'b') byte = '\b';
-          else if (byte == 'f') byte = '\f';
-          else if (byte == 'n') byte = '\n';
-          else if (byte == 'r') byte = '\r';
-          else if (byte == 't') byte = '\t';
-          else if (byte != '"' && byte != '\\' && byte != '/') byte = 0;
-        }
-        decoded[count++] = byte;
-      }
-      decoded[count++] = 0;
-    }
-    if (!escaped) break;
-    if (depth == 64) { valid = broker_fail(broker, "broker_response_refused"); break; }
-    current = decoded; current_size = count;
-  }
-  wipe(first, size + 1); wipe(second, size + 1); free(first); free(second); return valid;
 }
 static bool broker_append_response(struct broker *broker, const unsigned char *bytes, size_t size) {
   size_t count = size;
@@ -1497,11 +1367,16 @@ static bool broker_exchange(struct broker *broker) {
   size_t capacity = strlen(broker->path) + strlen(broker->host) + broker->platform.secret_size + 512;
   unsigned char *headers = malloc(capacity);
   if (!headers) return broker_fail(broker, "broker_worker_unavailable");
-  int prefix = snprintf((char *)headers, capacity, "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\nAuthorization: Bearer ",
-    broker->path, broker->host, broker->port, broker->body_size);
-  bool valid = prefix > 0 && (size_t)prefix + broker->platform.secret_size + 4 <= capacity;
+  int prefix = broker->managed_local ?
+    snprintf((char *)headers, capacity, "%s %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\n",
+      broker->local_health && broker->local_version ? "GET" : "POST", broker->path, broker->host, broker->port, broker->body_size) :
+    snprintf((char *)headers, capacity, "POST %s HTTP/1.1\r\nHost: %s:%u\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %zu\r\nAuthorization: Bearer ",
+      broker->path, broker->host, broker->port, broker->body_size);
+  size_t suffix = broker->managed_local ? 2 : broker->platform.secret_size + 4;
+  bool valid = prefix > 0 && (size_t)prefix + suffix <= capacity;
   size_t size = valid ? (size_t)prefix : 0;
-  if (valid) { memcpy(headers + size, broker->platform.secret, broker->platform.secret_size); size += broker->platform.secret_size; memcpy(headers + size, "\r\n\r\n", 4); size += 4; }
+  if (valid && broker->managed_local) { memcpy(headers + size, "\r\n", 2); size += 2; }
+  else if (valid) { memcpy(headers + size, broker->platform.secret, broker->platform.secret_size); size += broker->platform.secret_size; memcpy(headers + size, "\r\n\r\n", 4); size += 4; }
   valid = valid && broker_write(broker, headers, size) && broker_write(broker, broker->body, broker->body_size);
   wipe(headers, capacity); free(headers);
   return valid && broker_response(broker);
@@ -1544,7 +1419,9 @@ static napi_value broker_closed_value(struct broker *broker) {
 static void broker_free(napi_env env, struct broker *broker) {
   /* A referenced handle cannot finalize before retirement. Uncertainty keeps
    * its owning C allocation until process death rather than forgetting it. */
-  if (!broker->retired || broker->unsafe) return;
+  if (!broker->finalize_requested || !broker->retired || broker->unsafe || broker->working ||
+      (broker->timer_ready && !broker->timer_closed) || callbacks_held(&broker->callbacks) || broker->cleanup_hook ||
+      broker->fence_borrows || broker->fence_locked || atomic_load(&broker->fence_retained)) return;
   if (broker->close_promise && !broker->env_closing) napi_delete_reference(env, broker->close_promise);
   if (broker->response) { wipe(broker->response, BROKER_BODY_CAP + 1); free(broker->response); }
   if (broker->mutex_ready && pthread_mutex_destroy(&broker->release_mutex)) {
@@ -1598,7 +1475,7 @@ static napi_value broker_stage_call(napi_env env, napi_callback_info info, enum 
       broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
     }
   }
-  if (broker->error || !broker_queue(broker, stage)) {
+  if (broker->error || !(broker->managed_local && stage == BROKER_CONNECT ? broker_start_local_connection(broker) : broker_queue(broker, stage))) {
     napi_reject_deferred(env, broker->phase_deferred, broker_error_value(broker)); broker->phase_deferred = NULL;
     broker_begin_close(broker);
   }
@@ -1606,10 +1483,7 @@ static napi_value broker_stage_call(napi_env env, napi_callback_info info, enum 
 }
 static napi_value broker_connect_call(napi_env env, napi_callback_info info) { return broker_stage_call(env, info, BROKER_CONNECT); }
 static napi_value broker_release_call(napi_env env, napi_callback_info info) { return broker_stage_call(env, info, BROKER_EXCHANGE); }
-static napi_value broker_close_call(napi_env env, napi_callback_info info) {
-  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
-  if (!broker) return NULL;
-  if (argc) { napi_throw_type_error(env, NULL, "Installed model broker close accepts no fields"); return NULL; }
+static napi_value broker_close_owned(napi_env env, struct broker *broker) {
   napi_value promise;
   if (broker->close_promise) { napi_get_reference_value(env, broker->close_promise, &promise); return promise; }
   if (napi_create_promise(env, &broker->close_deferred, &promise) != napi_ok ||
@@ -1620,6 +1494,22 @@ static napi_value broker_close_call(napi_env env, napi_callback_info info) {
     broker->close_deferred = NULL;
   } else broker_begin_close(broker);
   return promise;
+}
+static napi_value broker_close_call(napi_env env, napi_callback_info info) {
+  napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
+  if (!broker) return NULL;
+  if (argc) { napi_throw_type_error(env, NULL, "Installed model broker close accepts no fields"); return NULL; }
+  return broker_close_owned(env, broker);
+}
+static napi_value broker_health_close_call(napi_env env, napi_callback_info info) {
+  size_t count = 1; napi_value argument, self; bool tagged = false; struct broker *broker = NULL;
+  if (napi_get_cb_info(env, info, &count, &argument, &self, NULL) != napi_ok || count ||
+      napi_check_object_type_tag(env, self, &broker_health_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, self, (void **)&broker) != napi_ok || !broker || !broker->local_health || !broker->managed_local ||
+      broker->env != env || broker->creator_pid != getpid() || syscall(SYS_gettid) != getpid()) {
+    napi_throw_type_error(env, NULL, "Invalid original local activation-health owner"); return NULL;
+  }
+  return broker_close_owned(env, broker);
 }
 static napi_value broker_retain_fence_call(napi_env env, napi_callback_info info) {
   napi_value args[1]; size_t argc = 1; struct broker *broker = broker_receiver(env, info, &argc, args);
@@ -1777,10 +1667,23 @@ static napi_value broker_handle_value(struct broker *broker, napi_value ready) {
   if (napi_create_reference(broker->env, handle, 1, &broker->handle) != napi_ok || napi_object_freeze(broker->env, handle) != napi_ok) return NULL;
   return handle;
 }
-static void broker_timer_closed(uv_handle_t *timer) {
-  struct broker *broker = timer->data; broker->timer_closed = true; broker_finish_close(broker);
+static napi_value broker_health_value(struct broker *broker, napi_value result) {
+  napi_value handle;
+  const napi_property_descriptor methods[] = {{"close", NULL, broker_health_close_call, NULL, NULL, NULL, napi_default, NULL}};
+  if (napi_create_object(broker->env, &handle) != napi_ok || napi_type_tag_object(broker->env, handle, &broker_health_tag) != napi_ok ||
+      napi_define_properties(broker->env, handle, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok ||
+      napi_set_named_property(broker->env, handle, "result", result) != napi_ok ||
+      napi_wrap(broker->env, handle, broker, broker_finalize, NULL, NULL) != napi_ok ||
+      napi_create_reference(broker->env, handle, 1, &broker->handle) != napi_ok || napi_object_freeze(broker->env, handle) != napi_ok) return NULL;
+  return handle;
 }
-static void broker_finish_close(struct broker *broker) {
+static void broker_timer_closed(uv_handle_t *timer) {
+  struct broker *broker = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
+  broker->timer_closed = true; broker_finish_close(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
+}
+static void broker_finish_close_data(struct broker *broker) {
   if (!broker->retired || (broker->timer_ready && !broker->timer_closed)) return;
   bool retained = atomic_load(&broker->fence_retained);
   if (broker->env_closing && !broker->fence_locked) { atomic_store(&broker->fence_retained, false); retained = false; }
@@ -1788,10 +1691,6 @@ static void broker_finish_close(struct broker *broker) {
     wipe(broker->token, sizeof(broker->token));
     if (pthread_mutex_destroy(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
     else broker->mutex_ready = false;
-  }
-  if (!retained && broker->cleanup_hook) {
-    if (napi_remove_async_cleanup_hook(broker->cleanup_hook) != napi_ok) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
-    else broker->cleanup_hook = NULL;
   }
   if (broker->close_finished) {
     if (!retained && !broker->unsafe && broker->handle) {
@@ -1844,6 +1743,9 @@ static void broker_finish_close(struct broker *broker) {
     broker->handle = NULL;
   }
 }
+static void broker_finish_close(struct broker *broker) {
+  broker->callbacks.borrows++; broker_finish_close_data(broker); broker_release_callback_borrow(broker);
+}
 static void broker_close_timer(struct broker *broker) {
   if (broker->timer_ready && !broker->timer_closing) {
     broker->timer_closing = true; uv_close((uv_handle_t *)&broker->timer, broker_timer_closed);
@@ -1853,7 +1755,7 @@ static void broker_worker(napi_env env, void *data) {
   (void)env; struct broker *broker = data;
   if (broker->stage == BROKER_RETIRE) broker_retire(broker);
   else if (!broker_live(broker)) return;
-  else if (broker->stage == BROKER_PREPARE) (void)broker_read_key(broker);
+  else if (broker->stage == BROKER_PREPARE) { if (!broker->managed_local) (void)broker_read_key(broker); }
   else if (broker->stage == BROKER_CONNECT) (void)broker_connect(broker);
   else (void)broker_exchange(broker);
   if (broker->stage != BROKER_RETIRE && broker->platform.error && !broker->error) broker_fail(broker, "credential_redemption_refused");
@@ -1869,6 +1771,14 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
   broker->work = NULL;
   if (status != napi_ok) broker_fail(broker, "broker_worker_unavailable");
   if (broker->stage == BROKER_RETIRE) {
+    if (broker->local_peer && broker->unsafe) broker->local_peer_uncertain = true;
+    if (broker->local_peer && !broker->local_peer_uncertain) {
+      if (!broker->local_peer_joined || broker->local_peer->release(broker->local_peer) != 0) {
+        broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      } else if (broker->local_peer_reference && napi_delete_reference(env, broker->local_peer_reference) != napi_ok) {
+        broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      } else { broker->local_peer_reference = NULL; broker->local_peer = NULL; }
+    }
     if (pthread_mutex_lock(&broker->release_mutex)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
     else {
       broker->token_revoked = true; broker->active_releases = 0;
@@ -1877,6 +1787,11 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
     broker->retired = true; broker_close_timer(broker); broker_finish_close(broker); return;
   }
   if (!broker_live(broker) || broker->closing) broker_fail(broker, "broker_cancelled_or_expired");
+  if (!broker->error && !broker->closing && broker->stage == BROKER_PREPARE && !broker->env_closing && broker->local_health) {
+    broker->prepared = true; broker->network_started = true;
+    if (!broker_start_local_connection(broker)) { broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); }
+    return;
+  }
   if (!broker->error && !broker->closing && broker->stage == BROKER_PREPARE && !broker->env_closing && broker->ready_deferred) {
     napi_value result = NULL;
     napi_get_undefined(env, &result);
@@ -1885,6 +1800,11 @@ static void broker_complete(napi_env env, napi_status status, void *data) {
       broker->prepared = true;
       napi_resolve_deferred(env, broker->ready_deferred, result); broker->ready_deferred = NULL;
     }
+  }
+  if (!broker->error && !broker->closing && broker->stage == BROKER_CONNECT && !broker->env_closing && broker->local_health) {
+    broker->connected = true; broker->request_started = true; broker->exchanged = true;
+    if (!broker_queue(broker, BROKER_EXCHANGE)) broker_begin_close(broker);
+    return;
   }
   if (!broker->error && !broker->closing && broker->stage == BROKER_CONNECT && !broker->env_closing && broker->phase_deferred) {
     napi_value result = NULL;
@@ -1910,6 +1830,56 @@ static bool broker_queue(struct broker *broker, enum broker_stage stage) {
   }
   broker->working = true; return true;
 }
+static bool broker_start_local_connection(struct broker *broker) {
+  if (!broker->managed_local || !broker->local_peer || broker->local_connect_pending || broker->closing || broker->working ||
+      !broker->local_peer->borrowed || !broker->local_peer->assert_current(broker->local_peer) || !broker_live(broker))
+    return broker_fail(broker, "broker_transport_interrupted");
+  broker->stage = BROKER_CONNECT; broker->local_connect_pending = true;
+  if (broker->local_peer->begin_connection(broker->local_peer) == 0) return true;
+  return broker_fail(broker, "broker_transport_interrupted");
+}
+static bool broker_local_cancel_join(struct broker *broker) {
+  if (!broker->local_peer || broker->local_peer_joined || broker->local_peer_uncertain) return true;
+  if (broker->local_peer->cancel(broker->local_peer) != 0) {
+    broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement"); return true;
+  }
+  int joined = broker->local_peer->poll_joined(broker->local_peer);
+  if (joined == 0) return false;
+  broker->local_connect_pending = false;
+  if (joined == 1) { broker->local_peer_joined = true; return true; }
+  broker->unsafe = true; broker->local_peer_uncertain = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement"); return true;
+}
+static void broker_poll_local(struct broker *broker) {
+  if (broker->retired) return;
+  if (broker->closing) { broker_begin_close(broker); return; }
+  if (!broker->local_connect_pending || broker->working) return;
+  int descriptor = -1;
+  int status = broker->local_peer->poll_connection(broker->local_peer, &descriptor);
+  if (!status) return;
+  broker->local_connect_pending = false;
+  if (status != 1 || descriptor < 0 || !broker_live(broker)) {
+    if (!retired_close(&broker->platform, &descriptor)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    broker_fail(broker, broker->local_health && status == CLIQ_LOCAL_PEER_NOT_LISTENING
+      ? "local_service_not_listening" : "broker_transport_interrupted");
+    broker_begin_close(broker); return;
+  }
+  GError *error = NULL; GSocket *socket = g_socket_new_from_fd(descriptor, &error); g_clear_error(&error);
+  if (!socket) {
+    if (!retired_close(&broker->platform, &descriptor)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); return;
+  }
+  descriptor = -1; /* This exact original description is now owned by GSocket. */
+  broker->connection = g_socket_connection_factory_create_connection(socket);
+  if (!broker->connection) {
+    if (!g_socket_close(socket, &error)) { broker->unsafe = true; atomic_store(&retirement_failed, true); }
+    g_clear_error(&error);
+    if (broker->unsafe) broker->local_unretired_socket = socket;
+    else g_object_unref(socket);
+    broker_fail(broker, "broker_transport_interrupted"); broker_begin_close(broker); return;
+  }
+  broker->socket = g_socket_connection_get_socket(broker->connection); g_object_unref(socket); g_socket_set_blocking(broker->socket, FALSE);
+  if (!broker_queue(broker, BROKER_CONNECT)) broker_begin_close(broker);
+}
 static void broker_begin_close(struct broker *broker) {
   if (broker->retired) return;
   broker->closing = true; atomic_store(&broker->cancelled, true);
@@ -1922,15 +1892,23 @@ static void broker_begin_close(struct broker *broker) {
   /* No descriptor is closed concurrently with a native worker. Cancellable
    * DNS/TCP and short monotonic TLS polls wake, then the sole retire worker
    * consumes descriptors only after the preceding worker has completed. */
+  if (broker->managed_local && !broker_local_cancel_join(broker)) return;
   if (!broker->working && !broker->retired && !broker_queue(broker, BROKER_RETIRE)) {
     broker->unsafe = true; atomic_store(&retirement_failed, true); broker->retired = true;
     if (broker->platform.secret) { wipe(broker->platform.secret, broker->platform.secret_size); free(broker->platform.secret); broker->platform.secret = NULL; }
     broker_close_timer(broker); broker_finish_close(broker);
   }
 }
-static void broker_deadline(uv_timer_t *timer) { broker_begin_close(timer->data); }
+static void broker_deadline(uv_timer_t *timer) {
+  struct broker *broker = timer->data; struct native_callback_scope scope;
+  callbacks_enter(&broker->callbacks, broker->env_closing, &scope);
+  if (!broker->managed_local || remaining(&broker->platform) <= 0) broker_begin_close(broker);
+  else broker_poll_local(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
+}
 static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
   (void)handle; struct broker *broker = data; broker->env_closing = true;
+  struct native_callback_scope scope; callbacks_enter(&broker->callbacks, true, &scope);
   /* No JavaScript continuation can commit after environment teardown. Retire
    * this original mutex without inventing a no-release database fact. */
   if (broker->fence_locked) {
@@ -1938,6 +1916,7 @@ static void broker_cleanup(napi_async_cleanup_hook_handle handle, void *data) {
     else broker->fence_locked = false;
   }
   atomic_store(&broker->fence_retained, false); broker_begin_close(broker); broker_finish_close(broker);
+  callbacks_close(&broker->callbacks, &scope); broker_release_callback_borrow(broker);
 }
 static bool broker_input(napi_env env, napi_value input, struct broker *broker) {
   const char *keys[] = {"provider", "selector", "expectedObservation", "target", "trustStoreBytes", "trustStoreDigest", "requestPath", "bodyBytes", "bodyBytesDigest"};
@@ -1973,7 +1952,36 @@ static bool broker_input(napi_env env, napi_value input, struct broker *broker) 
   if (!digest_hex(broker->trust, broker->trust_size, digest) || strcmp(digest, broker->trust_digest)) return false;
   return digest_hex(broker->body, broker->body_size, digest) && !strcmp(digest, broker->body_digest);
 }
-static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
+static bool broker_local_input(napi_env env, napi_value input, struct broker *broker, unsigned purpose, napi_value *original_peer) {
+  const char *model_keys[] = {"provider", "peer", "bodyBytes", "bodyBytesDigest"};
+  const char *health_keys[] = {"provider", "peer", "requestKind"};
+  const char *show_keys[] = {"provider", "peer", "requestKind", "bodyBytes", "bodyBytesDigest"};
+  char provider[32], kind[32]; bool tagged = false; struct cliq_local_service_peer *peer = NULL;
+  if ((purpose != CLIQ_LOCAL_PEER_HEALTH && purpose != CLIQ_LOCAL_PEER_MODEL) ||
+      !field_text(env, input, "provider", provider, sizeof(provider)) || strcmp(provider, "ollama") ||
+      !member(env, input, "peer", original_peer) || napi_check_object_type_tag(env, *original_peer,
+        purpose == CLIQ_LOCAL_PEER_HEALTH ? &CLIQ_LOCAL_HEALTH_PEER_TAG : &CLIQ_LOCAL_MODEL_PEER_TAG, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, *original_peer, (void **)&peer) != napi_ok || !peer || peer->abi != CLIQ_LOCAL_OWNER_ABI || peer->purpose != purpose ||
+      peer->creator_pid != getpid() || peer->environment != env || peer->borrowed || !peer->assert_current || !peer->assert_current(peer) ||
+      !peer->begin_connection || !peer->poll_connection || !peer->cancel || !peer->poll_joined || !peer->release) return false;
+  bool health = purpose == CLIQ_LOCAL_PEER_HEALTH, version = false;
+  if (health) {
+    if (!field_text(env, input, "requestKind", kind, sizeof(kind)) || (strcmp(kind, "version") && strcmp(kind, "model_show"))) return false;
+    version = !strcmp(kind, "version");
+    if (!fields(env, input, version ? health_keys : show_keys, version ? 3 : 5)) return false;
+  } else if (!fields(env, input, model_keys, 4)) return false;
+  if (!version && (!broker_buffer(env, input, "bodyBytes", BROKER_BODY_CAP, &broker->body, &broker->body_size) ||
+      !broker_digest(env, input, "bodyBytesDigest", broker->body_digest))) return false;
+  char digest[65];
+  if (!digest_hex(broker->body, broker->body_size, digest) || (!version && strcmp(digest, broker->body_digest))) return false;
+  if (version) memcpy(broker->body_digest, digest, sizeof(broker->body_digest));
+  if (!peer->assert_current(peer) || peer->borrowed || peer->binding.port < 49152 || peer->binding.port > 65535) return false;
+  strcpy(broker->host, "127.0.0.1"); broker->port = peer->binding.port;
+  strcpy(broker->path, health ? version ? "/api/version" : "/api/show" : "/api/chat");
+  broker->managed_local = true; broker->local_health = health; broker->local_version = version; broker->local_peer = peer;
+  return true;
+}
+static napi_value broker_prepare_owned(napi_env env, napi_callback_info info, unsigned local_purpose) {
   size_t argc = 2; napi_value args[2];
   if (atomic_load(&retirement_failed) || syscall(SYS_gettid) != getpid() ||
       napi_get_cb_info(env, info, &argc, args, NULL, NULL) != napi_ok || argc != 1) {
@@ -1984,15 +1992,25 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   broker->env = env; broker->creator_pid = getpid(); broker->platform.runtime_fd = -1;
   atomic_init(&broker->cancelled, false); atomic_init(&broker->unsafe, false); atomic_init(&broker->error, NULL);
   atomic_init(&broker->fence_retained, false);
+  napi_value local_peer = NULL;
   bool valid = current_user(&broker->platform.uid, &broker->platform.gid, broker->platform.home) &&
-    broker_input(env, args[0], broker) && RAND_bytes(broker->token, sizeof(broker->token)) == 1 &&
+    (local_purpose ? broker_local_input(env, args[0], broker, local_purpose, &local_peer) : broker_input(env, args[0], broker)) && RAND_bytes(broker->token, sizeof(broker->token)) == 1 &&
     clock_gettime(CLOCK_MONOTONIC, &broker->platform.deadline) == 0;
   if (valid) {
     broker->platform.deadline.tv_sec += DEADLINE_SECONDS;
     valid = digest_hex(broker->token, sizeof(broker->token), broker->token_digest) && pthread_mutex_init(&broker->release_mutex, NULL) == 0;
     broker->mutex_ready = valid;
   }
+  if (valid && local_purpose) {
+    valid = broker->local_peer && !broker->local_peer->borrowed && broker->local_peer->assert_current(broker->local_peer) &&
+      napi_create_reference(env, local_peer, 1, &broker->local_peer_reference) == napi_ok;
+    if (valid) broker->local_peer->borrowed = true;
+  }
   if (!valid) {
+    if (broker->local_peer_reference || (broker->mutex_ready && pthread_mutex_destroy(&broker->release_mutex))) {
+      broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
+      broker->unretired_next = unretired_brokers; unretired_brokers = broker; napi_throw(env, broker_error_value(broker)); return NULL;
+    }
     if (broker->body) { wipe(broker->body, broker->body_size); free(broker->body); }
     if (broker->trust) { wipe(broker->trust, broker->trust_size); free(broker->trust); }
     wipe(broker, sizeof(*broker)); free(broker);
@@ -2000,16 +2018,19 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
   }
   broker->platform.cancel = g_cancellable_new();
   napi_value ready, handle = NULL; uv_loop_t *loop;
-  if (napi_create_promise(env, &broker->ready_deferred, &ready) == napi_ok) handle = broker_handle_value(broker, ready);
+  if (napi_create_promise(env, broker->local_health ? &broker->phase_deferred : &broker->ready_deferred, &ready) == napi_ok)
+    handle = broker->local_health ? broker_health_value(broker, ready) : broker_handle_value(broker, ready);
   if (!handle ||
       napi_add_async_cleanup_hook(env, broker_cleanup, broker, &broker->cleanup_hook) != napi_ok ||
+      !callbacks_init(&broker->callbacks, env, "cliq model broker callbacks") ||
       napi_get_uv_event_loop(env, &loop) != napi_ok || uv_timer_init(loop, &broker->timer)) {
     broker->unsafe = true; atomic_store(&retirement_failed, true); broker_fail(broker, "resource_retirement");
     broker->unretired_next = unretired_brokers; unretired_brokers = broker;
     napi_throw(env, broker_error_value(broker)); return NULL;
   }
   broker->timer_ready = true; broker->timer.data = broker; uv_update_time(loop);
-  if (uv_timer_start(&broker->timer, broker_deadline, (uint64_t)remaining(&broker->platform), 0) || !broker_queue(broker, BROKER_PREPARE)) {
+  if (uv_timer_start(&broker->timer, broker_deadline, broker->managed_local ? 0 : (uint64_t)remaining(&broker->platform), broker->managed_local ? 5 : 0) ||
+      !broker_queue(broker, BROKER_PREPARE)) {
     broker_fail(broker, "broker_worker_unavailable");
     broker_begin_close(broker);
   }
@@ -2017,13 +2038,18 @@ static napi_value broker_prepare_call(napi_env env, napi_callback_info info) {
    * await credential I/O. Even queued/executing preparation can now be closed. */
   return handle;
 }
+static napi_value broker_prepare_call(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, 0); }
+static napi_value broker_prepare_local_model(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, CLIQ_LOCAL_PEER_MODEL); }
+static napi_value broker_prepare_local_health(napi_env env, napi_callback_info info) { return broker_prepare_owned(env, info, CLIQ_LOCAL_PEER_HEALTH); }
 static napi_value initialize_broker(napi_env env, napi_value exports) {
   if (!OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL)) { napi_throw_error(env, NULL, "Installed model broker TLS initialization unavailable"); return NULL; }
   const napi_property_descriptor methods[] = {
     {"prepareModelTransport", NULL, broker_prepare_call, NULL, NULL, NULL, napi_default, NULL},
+    {"prepareLocalModelTransport", NULL, broker_prepare_local_model, NULL, NULL, NULL, napi_default, NULL},
+    {"prepareLocalHealthTransport", NULL, broker_prepare_local_health, NULL, NULL, NULL, napi_default, NULL},
   };
   if (napi_define_properties(env, exports, sizeof(methods) / sizeof(*methods), methods) != napi_ok) return NULL;
-  set_number(env, exports, "interfaceVersion", 3); return exports;
+  set_number(env, exports, "interfaceVersion", 3); set_number(env, exports, "localModelInterfaceVersion", 1); return exports;
 }
 NAPI_MODULE(cliq_linux_model_broker, initialize_broker)
 #endif

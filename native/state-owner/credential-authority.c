@@ -12,7 +12,69 @@ static napi_value credential_error(napi_env env, const char *code, const char *m
   napi_throw_error(env, code, message);
   return NULL;
 }
+static int credential_global_assert(credential_context *ctx) {
+  credential_global_guard *guard = ctx->global_guard;
+  if (guard == NULL) return -1;
+  if (guard->owned_shared != NULL)
+    return guard->migration == NULL ? kernel_global_check(guard->owned_shared, ctx->owner_env) : -1;
+  migration_credential_gate *bound = guard->migration;
+  return bound != NULL && migration_credential_check(bound, ctx->owner_env) == 0 &&
+    strcmp(bound->owner->path, ctx->root_path) == 0 &&
+    same_inode(&bound->owner->root, &ctx->identities[CREDENTIAL_ROOT]) ? 0 : -1;
+}
+static int credential_global_acquire(napi_env env, credential_context *ctx,
+                                     napi_value bound_value, int has_bound, int *busy) {
+  credential_global_guard *guard = calloc(1, sizeof(*guard));
+  if (guard == NULL) return -1;
+  ctx->global_guard = guard;
+  if (!has_bound) {
+    const char *code;
+    int status = kernel_global_acquire(env, 1, 0, &guard->owned_shared, &code);
+    if (status == 1) return credential_global_assert(ctx);
+    *busy = strcmp(code, "ERR_CLIQ_KERNEL_GLOBAL_BUSY") == 0;
+    if (strcmp(code, "ERR_CLIQ_RESOURCE_RETIREMENT") == 0) credential_poison(ctx);
+    return -1;
+  }
+  bool tagged = false;
+  migration_credential_gate *bound = NULL;
+  if (napi_check_object_type_tag(env, bound_value, &migration_credential_tag, &tagged) != napi_ok || !tagged ||
+      napi_unwrap(env, bound_value, (void **)&bound) != napi_ok ||
+      migration_credential_check(bound, env) != 0 ||
+      strcmp(bound->owner->path, ctx->root_path) != 0 ||
+      !same_inode(&bound->owner->root, &ctx->identities[CREDENTIAL_ROOT]) ||
+      bound->borrowers == UINT_MAX) return -1;
+  guard->migration = bound;
+  bound->borrowers++;
+  if (napi_create_reference(env, bound_value, 1, &guard->migration_reference) != napi_ok) {
+    bound->uncertain = 1; bound->owner->migration_retirement_error = 1;
+    credential_poison(ctx); return -1;
+  }
+  return credential_global_assert(ctx);
+}
+static int credential_global_retire(credential_context *ctx) {
+  credential_global_guard *guard = ctx->global_guard;
+  if (guard == NULL) return 0;
+  if (guard->owned_shared != NULL) {
+    kernel_global_gate *gate = guard->owned_shared;
+    if (kernel_global_check(gate, ctx->owner_env) != 0 || kernel_global_retire(gate) != 0) return -1;
+    gate->finalized = 1; kernel_global_free(gate);
+  } else if (guard->migration != NULL) {
+    if (credential_global_assert(ctx) != 0 || !guard->migration_reference || !guard->migration->borrowers) return -1;
+    napi_ref reference = guard->migration_reference;
+    guard->migration_reference = NULL;
+    if (napi_delete_reference(ctx->owner_env, reference) != napi_ok) return -1;
+    guard->migration->borrowers--;
+  }
+  /* Only this guard's owned SH description closes. EX is borrowed, and its
+   * parent StateOwner/account references stay held until the importer joins. */
+  ctx->global_guard = NULL;
+  free(guard);
+  return 0;
+}
 static int credential_visible_root(credential_context *ctx, int capture) {
+  /* Every production VFS fence passes here. An I/O-only adapter cannot stand
+   * in for this account gate or its genuine migration-owner binding. */
+  if ((ctx->prepared || ctx->global_guard != NULL) && credential_global_assert(ctx) != 0) return -1;
   int visible = credential_walk_path(ctx, ctx->root_path);
   struct stat info;
   (void)capture;
@@ -34,6 +96,10 @@ static credential_context *credential_scope_receiver(napi_env env, napi_value se
       napi_unwrap(env, self, (void **)&ctx) != napi_ok || ctx == NULL ||
       !credential_owner_context(ctx) || env != ctx->owner_env) {
     credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "invalid credential scope or owner context");
+    return NULL;
+  }
+  if (ctx->uncertain || ctx->fenced) {
+    credential_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "credential scope is uncertain or fenced; original resources retained");
     return NULL;
   }
   if (ctx->retired || atomic_load(&credential_process.active) != ctx) {
@@ -121,7 +187,7 @@ static void credential_finalize_scope(napi_env env, void *data, void *hint) {
   credential_context *ctx = data;
   /* GC is not retirement. A live/uncertain scope is permanently retained by
    * the manager; SQLite file leases can still reference this exact context. */
-  if (ctx->retired && ctx->live_files == 0 && ctx->owner_reference == NULL &&
+  if (ctx->retired && ctx->global_guard == NULL && ctx->live_files == 0 && ctx->owner_reference == NULL &&
       atomic_load(&credential_process.active) != ctx) free(ctx);
 }
 static napi_value credential_close_scope(napi_env env, napi_callback_info info) {
@@ -129,8 +195,10 @@ static napi_value credential_close_scope(napi_env env, napi_callback_info info) 
   if (ctx == NULL) return NULL;
   if (ctx->live_files != 0)
     return credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "live SQLite file leases cannot be retired");
-  if (credential_check_bindings(ctx) != 0 || credential_retire_resources(ctx) != 0)
+  if (credential_check_bindings(ctx) != 0 || credential_retire_resources(ctx) != 0 || credential_global_retire(ctx) != 0) {
+    credential_poison(ctx);
     return credential_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "credential close is uncertain or fenced; later resources retained");
+  }
   napi_ref reference = ctx->owner_reference;
   ctx->owner_reference = NULL;
   if (napi_delete_reference(env, reference) != napi_ok) {
@@ -177,8 +245,8 @@ static napi_value acquire_credential_scope(napi_env env, napi_callback_info info
     return credential_error(env, "ERR_CLIQ_CREDENTIAL_SCOPE", "credential scope allocation failed");
   }
   credential_initialize_context(ctx, env);
-  size_t count = 4, length;
-  napi_value arguments[4];
+  size_t count = 5, length;
+  napi_value arguments[5];
   double descriptor;
   bool array = false, lossless;
   uint32_t tuple_length;
@@ -186,7 +254,7 @@ static napi_value acquire_credential_scope(napi_env env, napi_callback_info info
   const char *error = "invalid original credential StateRoot identity";
   const char *error_code = "ERR_CLIQ_CREDENTIAL_SCOPE";
   int busy = 0, wrapped = 0;
-  if (napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || count != 3 ||
+  if (napi_get_cb_info(env, info, &count, arguments, NULL, NULL) != napi_ok || (count != 3 && count != 4) ||
       napi_get_value_double(env, arguments[0], &descriptor) != napi_ok ||
       !(descriptor >= 0 && descriptor <= INT_MAX) || descriptor != (int)descriptor ||
       napi_get_value_string_utf8(env, arguments[1], NULL, 0, &length) != napi_ok ||
@@ -220,11 +288,10 @@ static napi_value acquire_credential_scope(napi_env env, napi_callback_info info
     goto failed;
   }
   error = "credential global gate prerequisites refused";
-  if (credential_hold_directory(ctx, ctx->descriptors[CREDENTIAL_ROOT], "runtime", CREDENTIAL_RUNTIME) != 0 ||
-      credential_hold_file(ctx, CREDENTIAL_GLOBAL) != 0) goto failed;
-  if (credential_lock_file(ctx, CREDENTIAL_GLOBAL, LOCK_SH) != 0) {
-    busy = credential_is_busy(errno); goto failed;
-  }
+  /* Replaces the former runtime/kernel-global.lock SH guard. The old leaf is
+   * neither opened nor treated as evidence of the account-domain contract. */
+  if (credential_global_acquire(env, ctx, count == 4 ? arguments[3] : NULL, count == 4, &busy) != 0 ||
+      credential_hold_directory(ctx, ctx->descriptors[CREDENTIAL_ROOT], "runtime", CREDENTIAL_RUNTIME) != 0) goto failed;
   error = "credential authority prerequisites refused";
   int created = mkdirat(ctx->descriptors[CREDENTIAL_ROOT], "credentials", 0700) == 0;
   if (!created && errno != EEXIST) goto failed;
@@ -275,7 +342,7 @@ failed:
   /* Ordinary contention is retryable only after every owned resource has
    * been successfully consumed. An uncertain close is never retried and
    * never treated as proof that any physical lock survived. */
-  if (!ctx->uncertain && !ctx->fenced && credential_retire_resources(ctx) == 0) {
+  if (!ctx->uncertain && !ctx->fenced && credential_retire_resources(ctx) == 0 && credential_global_retire(ctx) == 0) {
     if (!wrapped) free(ctx);
   } else {
     credential_poison(ctx);

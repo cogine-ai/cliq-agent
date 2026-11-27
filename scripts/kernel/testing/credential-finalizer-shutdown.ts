@@ -17,7 +17,7 @@ import { readLedger, stageInstaller, transferPackage } from './credential-instal
 import { createCredentialSecretScanner } from './credential-secret-scan.js';
 import { scanCredentialSecretCorpus } from './credential-secret-corpus.js';
 import { buildInstalledSupervisorPackage } from './installed-supervisor-package.js';
-import { inspectInstalledOwnerHistory, installedReadClientScript } from './installed-read-control.js';
+import { inspectInstalledOwner, inspectInstalledOwnerHistory, installedReadClientScript } from './installed-read-control.js';
 import { qualifyInstalledOwnerLinks, qualifyInstalledOwnerProcess } from './installed-owner-history.js';
 
 const environment = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C', LC_ALL: 'C' };
@@ -397,8 +397,11 @@ async function campaign(filename: string): Promise<void> {
     assert.equal(command('/usr/bin/systemctl', ['--user', 'start', services.supervisorUnit]).status, 0);
     const successorBy = Date.now() + 30000;
     for (;;) {
-      const latest = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
-      if (latest.length === 2 && latest[1]!.state === 'active') break;
+      // Startup may briefly hold the schema lock. The existing read-only
+      // readiness observation treats only SQLITE_BUSY as not ready; complete
+      // owner/link verification below still uses the strict history reader.
+      const latest = inspectInstalledOwner(recipe.stateRoot);
+      if (latest?.ownerEpoch === 2 && latest.state === 'active') break;
       assert(Date.now() < successorBy, 'actual finalizer successor did not acquire'); await delay(20);
     }
     const links: Record<string, unknown> = {};

@@ -12,7 +12,7 @@ import {
   decodeStateLockIdentity,
   decodeStateRootIdentity
 } from './decoders.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { joinResourceOperations, KernelStorageError, ResourceRetirementError } from './errors.js';
 import { readLatestStateOwner, type StateOwnerContext } from './state-owner.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 import { readCanonicalArtifact } from './agent-context.js';
@@ -21,6 +21,8 @@ import { sampleCanonicalNow } from './canonical-time.js';
 import type { HeldControlListener, HeldControlPeer, NativePeerObservation } from './native-owner.js';
 import { hashHeldProcessImage } from './process-image.js';
 import { immutableSnapshot } from '../model/immutable.js';
+import { canonicalJsonBytes } from '../kernel/canonical.js';
+import { beginInstalledServerAuthentication } from './installed-diagnostics.js';
 
 export type AuthenticatedControlIdentity = Readonly<{
   principalId: string;
@@ -36,15 +38,24 @@ export type LocalControlConnection = Readonly<{
   close(): void;
 }>;
 /** Owner lifecycle only: close drains dispatches, so never await it inside one. */
-export type LocalControlListener = Readonly<{ close(): Promise<void> }>;
+export type LocalControlListener = Readonly<{ close(): Promise<void>;
+  fenceForMigration(): Promise<void>; assertFencedForMigration(): void; resumeAfterMigration(): void }>;
 type LiveChannel = { digest: string; assertCurrent(): void;
   processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 };
+type PreparedChannel = Readonly<{ identity: AuthenticatedControlIdentity;
+  processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }>;
 const liveChannels = new WeakMap<StateOwnerContext, Map<string, LiveChannel>>();
-type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel; active: boolean };
+type AuthenticatedFrame = { owner: StateOwnerContext; identity: AuthenticatedControlIdentity; channel: LiveChannel;
+  dispatch: object; active: boolean };
 const authenticatedFrames = new AsyncLocalStorage<AuthenticatedFrame>();
+declare const localInferenceFrameBrand: unique symbol;
+export type LocalInferenceAdmissionFrame = Readonly<{ [localInferenceFrameBrand]: true }>;
+const localInferenceAdmissionFrames = new WeakMap<LocalInferenceAdmissionFrame, AuthenticatedFrame>();
 
-async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation): Promise<string> {
-  return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => peer.assertObservation(observation));
+async function hashNativeImage(peer: HeldControlPeer, observation: NativePeerObservation, assertOpen: () => void): Promise<string> {
+  return hashHeldProcessImage(observation.imageFd, observation.imageByteCount, () => {
+    assertOpen(); peer.assertObservation(observation);
+  });
 }
 
 /** Owner-bound native listener. Historical JSON never populates this registry. */
@@ -54,39 +65,71 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   const channels = new Map<string, LiveChannel>();
   if (liveChannels.has(owner)) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'the owner already has a control listener');
   let closing = false;
+  let migrationFenced = false, migrationAuthenticationJoined = false;
+  let migrationFenceJoin: Promise<void> | undefined;
   let drain: Promise<void> | undefined;
   const connections = new Set<LocalControlConnection>();
-  const pending = new Set<Promise<unknown>>();
+  const pending = new Map<Promise<unknown>, object>();
+  // A connection owns at most one data-only preparation. These jobs do not
+  // consume or enlarge the independent 64-dispatch capacity below.
+  const authenticating = new Set<Promise<PreparedChannel>>();
+  let retirementFailure: ResourceRetirementError | undefined;
   let native: HeldControlListener;
   const reportError = (error: unknown) => {
     try { onError(error instanceof Error ? error : new Error('control callback failed', { cause: error })); }
     catch { /* A consumer's error reporter must not escape a native callback. */ }
   };
   const acceptPeer = (peer: HeldControlPeer) => {
-    if (closing || connections.size >= 64) { peer.close(); return; }
+    if (retirementFailure) throw retirementFailure;
+    if (migrationFenced) {
+      try { peer.close(); }
+      catch (error) {
+        retirementFailure ??= error instanceof ResourceRetirementError ? error :
+          new ResourceRetirementError('fenced unauthenticated peer did not retire', error);
+        reportError(retirementFailure);
+      }
+      return;
+    }
+    if (closing || connections.size >= 64 || authenticating.size >= 64) { peer.close(); return; }
     let socket: Socket;
     const fd = peer.takeSocketFd();
     try { socket = new Socket({ fd, readable: true, writable: true }); }
     catch (error) { closeSync(fd); peer.close(); throw error; }
     let closed = false;
     let capture: NativePeerObservation | undefined;
-    let published: Promise<AuthenticatedControlIdentity> | undefined;
+    let published: Promise<PreparedChannel> | undefined;
     let identity: AuthenticatedControlIdentity | undefined;
+    const closedError = new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is closed');
+    const assertOpen = () => {
+      if (retirementFailure) throw retirementFailure;
+      if (closing || closed) throw closedError;
+    };
     const assertCurrent = () => {
-      if (closing || closed || !capture) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is closed or unauthenticated');
+      assertOpen();
+      if (!capture) throw new KernelStorageError('ARTIFACT_MISMATCH', 'control connection is unauthenticated');
       try { peer.assertObservation(capture); }
       catch (error) { throw new KernelStorageError('ARTIFACT_MISMATCH', 'control peer native identity changed or became unavailable', { cause: error }); }
     };
     const publish = async () => {
+      assertOpen();
+      const observe = beginInstalledServerAuthentication();
       const observedAt = sampleCanonicalNow();
       capture = peer.capture();
       const processIdentity: PlatformProcessIdentityV1 = {
         schemaVersion: 1, format: 'cliq-platform-process-identity-v1', platform: process.platform === 'linux' ? 'linux' : 'macos',
         pid: capture.pid, ownerUid: capture.uid, processStartToken: capture.processStartToken,
-        executableImageDigest: await hashNativeImage(peer, capture), observedAt, identityDigest: ''
+        executableImageDigest: observe ? await observe('image_hash', () => hashNativeImage(peer, capture!, assertOpen)) : await hashNativeImage(peer, capture, assertOpen), observedAt, identityDigest: ''
       };
+      assertCurrent();
       processIdentity.identityDigest = digestOmitting(processIdentity, 'identityDigest');
-      const processArtifact = await artifacts.publishCanonical(processIdentity, processIdentity.format);
+      // References identify the complete immutable bytes, not an already
+      // published peer or any permission to activate this channel.
+      const prepare = <T extends { format: string }>(value: T) => {
+        const data = immutableSnapshot(value), bytes = canonicalJsonBytes(data);
+        return Object.freeze({ data, expected: Object.freeze({ ref: sha256Bytes(bytes),
+          byteLength: bytes.byteLength, mediaType: 'application/json', schemaKind: data.format }) });
+      };
+      const processPublication = prepare(decodePlatformProcessIdentity(processIdentity));
       const principal: LocalPrincipalIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-principal-identity-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -94,7 +137,7 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         principalId: identityHash('cliq-local-principal-v1', owner.stateRootIdentityDigest, processIdentity.platform, capture.uid), identityDigest: ''
       };
       principal.identityDigest = digestOmitting(principal, 'identityDigest');
-      const principalArtifact = await artifacts.publishCanonical(principal, principal.format);
+      const principalPublication = prepare(decodeLocalPrincipalIdentity(principal));
       const observation: LocalSocketPeerObservationV1 = {
         schemaVersion: 1, format: 'cliq-local-socket-peer-observation-v1', platform: processIdentity.platform,
         stateRootIdentityRef: owner.stateRootIdentityRef, stateRootIdentityDigest: owner.stateRootIdentityDigest,
@@ -103,43 +146,90 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         acceptedSocket: { socketType: 'SOCK_STREAM', deviceId: capture.acceptedSocket.deviceId, fileId: capture.acceptedSocket.fileId },
         credentialApi: processIdentity.platform === 'linux' ? 'linux_so_peercred' : 'macos_getpeereid_local_peerpid',
         peerUid: capture.uid, peerGid: capture.gid, peerPid: capture.pid,
-        peerProcessIdentityRef: processArtifact.ref, peerProcessIdentityDigest: processIdentity.identityDigest,
+        peerProcessIdentityRef: processPublication.expected.ref, peerProcessIdentityDigest: processIdentity.identityDigest,
         observedAt, observationDigest: ''
       };
       observation.observationDigest = digestOmitting(observation, 'observationDigest');
-      const peerArtifact = await artifacts.publishCanonical(observation, observation.format);
+      const peerPublication = prepare(decodeLocalSocketPeerObservation(observation));
       const channel: LocalControlChannelIdentityV1 = {
         schemaVersion: 1, format: 'cliq-local-control-channel-identity-v1', client: 'rpc',
-        principalIdentityRef: principalArtifact.ref, principalIdentityDigest: principal.identityDigest, principalId: principal.principalId,
-        transport: { kind: 'uds_peer', peerObservationRef: peerArtifact.ref, peerObservationDigest: observation.observationDigest },
+        principalIdentityRef: principalPublication.expected.ref, principalIdentityDigest: principal.identityDigest, principalId: principal.principalId,
+        transport: { kind: 'uds_peer', peerObservationRef: peerPublication.expected.ref, peerObservationDigest: observation.observationDigest },
         openedAt: sampleCanonicalNow(), channelNonceDigest: sha256Bytes(randomBytes(32)), channelIdentityDigest: ''
       };
       channel.channelIdentityDigest = digestOmitting(channel, 'channelIdentityDigest');
-      decodeLocalPrincipalIdentity(principal);
-      decodeLocalSocketPeerObservation(observation);
-      decodeControlChannel(channel);
-      const channelArtifact = await artifacts.publishCanonical(channel, channel.format);
+      const channelPublication = prepare(decodeControlChannel(channel));
+      const publications = Object.freeze([processPublication, principalPublication, peerPublication, channelPublication]);
       assertCurrent();
-      identity = Object.freeze({ principalId: principal.principalId, channelIdentityRef: channelArtifact.ref,
-        channelIdentityDigest: channel.channelIdentityDigest });
-      channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
-        processIdentity: immutableSnapshot(processIdentity), channel: immutableSnapshot(channel) });
-      return identity;
+      const batch = artifacts.publishCanonicalFour([
+        { value: processPublication.data, schemaKind: processPublication.expected.schemaKind },
+        { value: principalPublication.data, schemaKind: principalPublication.expected.schemaKind },
+        { value: peerPublication.data, schemaKind: peerPublication.expected.schemaKind },
+        { value: channelPublication.data, schemaKind: channelPublication.expected.schemaKind }
+      ]);
+      const published = (index: number, phase: 'process_cas' | 'principal_cas' | 'peer_cas' | 'channel_cas') => {
+        const result = () => batch.then(artifacts => artifacts[index]!);
+        return observe ? observe(phase, result) : result();
+      };
+      // Each diagnostic await covers the same fully joined fixed group, not
+      // an independent syscall. No positive result precedes all four durable
+      // stages, full file verification, and the original root's actual close.
+      const publishedArtifacts = await joinResourceOperations([
+        published(0, 'process_cas'), published(1, 'principal_cas'),
+        published(2, 'peer_cas'), published(3, 'channel_cas')
+      ]);
+      for (const [index, artifact] of publishedArtifacts.entries()) {
+        const expected = publications[index]!.expected;
+        if (artifact.ref !== expected.ref || artifact.byteLength !== expected.byteLength ||
+            artifact.mediaType !== expected.mediaType || artifact.schemaKind !== expected.schemaKind)
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'control authentication publication does not match its complete canonical bytes');
+      }
+      assertCurrent();
+      return Object.freeze({ identity: Object.freeze({ principalId: principal.principalId,
+        channelIdentityRef: channelPublication.expected.ref, channelIdentityDigest: channel.channelIdentityDigest }),
+        processIdentity: processPublication.data, channel: channelPublication.data });
+    };
+    const prepare = (): Promise<PreparedChannel> => {
+      if (published) return published;
+      if (migrationFenced) return Promise.reject(new KernelStorageError('RECOVERY_REQUIRED', 'new control authentication is fenced by migration'));
+      // Register the original producer before its first capture/read/await.
+      // Idle clients can overlap this work with their own independent checks,
+      // but no live channel or authenticated frame exists until dispatch.
+      published = Promise.resolve().then(publish).catch(error => {
+        let failure: unknown = error;
+        try { connection.close(); }
+        catch (cause) { failure = new ResourceRetirementError('control authentication resources did not retire', new AggregateError([error, cause])); }
+        if (failure instanceof ResourceRetirementError) retirementFailure ??= failure;
+        if (failure !== closedError) reportError(failure);
+        throw failure;
+      });
+      authenticating.add(published);
+      const original = published;
+      void original.finally(() => authenticating.delete(original)).catch(() => {});
+      return original;
     };
     const connection: LocalControlConnection = Object.freeze({
       socket,
       dispatch<T>(operation: (identity: AuthenticatedControlIdentity) => Promise<T>): Promise<T> {
         if (this !== connection || closing || closed || typeof operation !== 'function') return Promise.reject(new TypeError('invalid control connection dispatch'));
+        if (migrationFenced) return Promise.reject(new KernelStorageError('LEASE_FENCED', 'new control dispatch is fenced by migration'));
+        const dispatch = {};
         const running = (async () => {
           if (pending.size >= 64) throw new KernelStorageError('INVALID_REQUEST', 'control dispatch capacity is exhausted');
-          const authenticated = await (published ??= publish().catch(error => { connection.close(); throw error; }));
+          const prepared = await prepare();
           assertCurrent();
+          if (!identity) {
+            identity = prepared.identity;
+            channels.set(identity.channelIdentityRef, { digest: identity.channelIdentityDigest, assertCurrent,
+              processIdentity: prepared.processIdentity, channel: prepared.channel });
+          }
+          const authenticated = identity;
           const authority = channels.get(authenticated.channelIdentityRef)!;
-          const frame: AuthenticatedFrame = { owner, identity: authenticated, channel: authority, active: true };
+          const frame: AuthenticatedFrame = { owner, identity: authenticated, channel: authority, dispatch, active: true };
           try { return await authenticatedFrames.run(frame, () => operation(authenticated)); }
           finally { frame.active = false; }
         })();
-        pending.add(running);
+        pending.set(running, dispatch);
         void running.finally(() => pending.delete(running)).catch(() => {});
         return running;
       },
@@ -148,16 +238,23 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
         if (closed) return;
         closed = true;
         if (identity) channels.delete(identity.channelIdentityRef);
-        capture?.close();
-        peer.close();
+        const failures: unknown[] = [];
+        try { capture?.close(); } catch (error) { failures.push(error); }
+        try { peer.close(); } catch (error) { failures.push(error); }
         socket.destroy();
         connections.delete(connection);
+        if (failures.length) {
+          retirementFailure ??= new ResourceRetirementError('control connection resources did not retire', new AggregateError(failures));
+          throw retirementFailure;
+        }
       }
     });
-    socket.on('error', () => connection.close());
-    socket.once('close', () => connection.close());
+    const close = () => { try { connection.close(); } catch (error) { reportError(error); } };
+    socket.on('error', close);
+    socket.once('close', close);
     connections.add(connection);
     try { onConnection(connection); } catch (error) { connection.close(); throw error; }
+    if (!closed) prepare();
   };
   const accept = (peer: HeldControlPeer) => {
     try { acceptPeer(peer); }
@@ -169,14 +266,51 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
   native = owner.filesystem.openControlListener(accept, reportError);
   liveChannels.set(owner, channels);
   const listener: LocalControlListener = Object.freeze({
+    fenceForMigration() {
+      if (this !== listener || closing) return Promise.reject(new TypeError('invalid control migration fence'));
+      if (migrationFenceJoin) return migrationFenceJoin;
+      const original = authenticatedFrames.getStore();
+      if (!original?.active || original.owner !== owner) return Promise.reject(new TypeError('migration must own the current control frame'));
+      assertCurrentControlFrame(owner, original.identity);
+      // Fence new peers and frames, then join every previous producer except
+      // the current migration dispatch which owns this join.
+      migrationFenced = true;
+      const previous = [...pending].filter(([, dispatch]) => dispatch !== original.dispatch).map(([job]) => job);
+      migrationFenceJoin = Promise.allSettled([...authenticating, ...previous]).then(results => {
+        for (const result of results) if (result.status === 'rejected' && result.reason instanceof ResourceRetirementError)
+          retirementFailure ??= result.reason;
+        if (retirementFailure) throw retirementFailure;
+        migrationAuthenticationJoined = true;
+      });
+      return migrationFenceJoin;
+    },
+    assertFencedForMigration() {
+      if (this !== listener || closing || !migrationFenced || !migrationAuthenticationJoined)
+        throw new TypeError('control migration fence has not actually joined');
+      if (retirementFailure) throw retirementFailure;
+    },
+    resumeAfterMigration() {
+      if (this !== listener || closing || !migrationFenced || !migrationAuthenticationJoined)
+        throw new TypeError('control authentication cannot resume before its original fence joined');
+      if (retirementFailure) throw retirementFailure;
+      migrationFenced = false; migrationAuthenticationJoined = false; migrationFenceJoin = undefined;
+    },
     close() {
       if (this !== listener) return Promise.reject(new TypeError('invalid control listener'));
       if (drain) return drain;
       closing = true;
-      native.close();
-      for (const connection of connections) connection.close();
+      const failures: unknown[] = [];
+      try { native.close(); } catch (error) { failures.push(error); }
+      for (const connection of connections) {
+        try { connection.close(); } catch (error) { failures.push(error); }
+      }
       liveChannels.delete(owner);
-      drain = Promise.allSettled([...pending]).then(() => {});
+      drain = Promise.allSettled([...authenticating, ...pending.keys()]).then(results => {
+        failures.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected' &&
+          result.reason instanceof ResourceRetirementError).map(result => result.reason));
+        if (failures.length) retirementFailure ??= new ResourceRetirementError('control listener resources did not retire', new AggregateError(failures));
+        if (retirementFailure) throw retirementFailure;
+      });
       return drain;
     }
   });
@@ -186,9 +320,9 @@ export function openLocalControlListener(artifacts: ArtifactCatalog, owner: Stat
 /** Fixed synchronous friend for the final authorization cut. Historical
  * artifacts cannot enter this registry, and an earlier async closure walk
  * cannot substitute for this still-current native frame. */
-export function assertCurrentControlFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity):
+export function assertCurrentControlFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity, pin?: LocalInferenceAdmissionFrame):
   Readonly<{ processIdentity: PlatformProcessIdentityV1; channel: LocalControlChannelIdentityV1 }> {
-  const frame = authenticatedFrames.getStore();
+  const frame = pin ? localInferenceAdmissionFrames.get(pin) : authenticatedFrames.getStore();
   if (!frame?.active || frame.owner !== owner || frame.identity !== identity)
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control operation has no current native authenticated frame');
   const live = liveChannels.get(owner)?.get(identity.channelIdentityRef);
@@ -198,17 +332,34 @@ export function assertCurrentControlFrame(owner: StateOwnerContext, identity: Au
   return Object.freeze({ processIdentity: live.processIdentity, channel: live.channel });
 }
 
+/** The original frame alone can pin itself for its local activation fanout.
+ * The pin cannot keep a socket/frame live, switch its identity or run code
+ * under another participant's AsyncLocalStorage context. */
+export function pinLocalInferenceAdmissionFrame(owner: StateOwnerContext, identity: AuthenticatedControlIdentity): LocalInferenceAdmissionFrame {
+  assertCurrentControlFrame(owner, identity);
+  const frame = authenticatedFrames.getStore();
+  if (!frame || !frame.active || frame.identity !== identity || frame.owner !== owner)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'local inference admission requires its original authenticated frame');
+  const pin = Object.freeze({}) as LocalInferenceAdmissionFrame;
+  localInferenceAdmissionFrames.set(pin, frame);
+  return pin;
+}
+
 /** Rewalk a historical channel against this database's retained StateRoot, without authenticating new input. */
-export async function readHistoricalControlChannel(driver: SqliteDriver, artifacts: ArtifactCatalog,
-  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }) {
+/** Retained root data from the real SQL owner/lock. This intentionally is not
+ * a StateOwnerContext and cannot pass an active-owner or native release gate. */
+export type RetainedControlRootContext = Parameters<typeof readRetainedControlChannelClosure>[1];
+export async function readRetainedControlRoot(driver: SqliteDriver, artifacts: ArtifactCatalog): Promise<RetainedControlRootContext> {
   const owner = readLatestStateOwner(driver);
   if (!owner) throw new TypeError('control history has no retained state owner');
   const lock = decodeStateLockIdentity(await readCanonicalArtifact(artifacts, owner.stateLockIdentityRef));
   if (lock.identityDigest !== owner.stateLockIdentityDigest) throw new TypeError('control history state-owner lock mismatch');
-  return readRetainedControlChannelClosure(artifacts, {
-    stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
-    filesystem: { root: { ownerUid: lock.ownerUid } }
-  }, input);
+  return Object.freeze({ stateRootIdentityRef: lock.stateRootIdentityRef, stateRootIdentityDigest: lock.stateRootIdentityDigest,
+    filesystem: Object.freeze({ root: Object.freeze({ ownerUid: lock.ownerUid }) }) });
+}
+export async function readHistoricalControlChannel(driver: SqliteDriver, artifacts: ArtifactCatalog,
+  input: { channelIdentityRef: string; channelIdentityDigest: string; principalId: string }) {
+  return readRetainedControlChannelClosure(artifacts, await readRetainedControlRoot(driver, artifacts), input);
 }
 
 export async function validateControlChannelClosure(
@@ -218,13 +369,14 @@ export async function validateControlChannelClosure(
     channelIdentityRef: string;
     channelIdentityDigest: string;
     principalId: string;
-  }
+  },
+  pin?: LocalInferenceAdmissionFrame,
 ): Promise<{ channel: LocalControlChannelIdentityV1; metadata: PublishedArtifact[] }> {
   const closure = await readRetainedControlChannelClosure(artifacts, owner, input);
   const channel = closure.channel;
   if (channel.transport.kind === 'uds_peer') {
     const live = liveChannels.get(owner)?.get(input.channelIdentityRef);
-    const frame = authenticatedFrames.getStore();
+    const frame = pin ? localInferenceAdmissionFrames.get(pin) : authenticatedFrames.getStore();
     if (!live || live.digest !== input.channelIdentityDigest || !frame?.active || frame.owner !== owner ||
         frame.channel !== live || frame.identity.channelIdentityRef !== input.channelIdentityRef ||
         frame.identity.channelIdentityDigest !== input.channelIdentityDigest || frame.identity.principalId !== input.principalId) {
@@ -262,10 +414,10 @@ export async function readRetainedControlChannelClosure(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel identity does not match the caller');
   }
-  const principal = decodeLocalPrincipalIdentity(
-    await artifacts.readCanonical(channel.principalIdentityRef)
-  );
-  const root = decodeStateRootIdentity(await artifacts.readCanonical(owner.stateRootIdentityRef));
+  const [principal, root] = await joinResourceOperations([
+    artifacts.readCanonical(channel.principalIdentityRef).then(decodeLocalPrincipalIdentity),
+    artifacts.readCanonical(owner.stateRootIdentityRef).then(decodeStateRootIdentity)
+  ]);
   if (
     root.identityDigest !== owner.stateRootIdentityDigest ||
     root.ownerUid !== owner.filesystem.root.ownerUid ||
@@ -278,43 +430,45 @@ export async function readRetainedControlChannelClosure(
   ) {
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel principal identity is not current');
   }
-  const metadata = await joinResourceOperations([
+  // These three branches only re-read retained CAS. Principal/root validation
+  // above still precedes transport, and every issued branch joins before any
+  // result escapes; metadata failures retain their original input priority.
+  const [channelMetadata, principalMetadata, transportMetadata] = await joinResourceOperations([
     artifacts.describe(input.channelIdentityRef, 'application/json', 'cliq-local-control-channel-identity-v1'),
-    artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1')
+    artifacts.describe(channel.principalIdentityRef, 'application/json', 'cliq-local-principal-identity-v1'),
+    (async () => {
+      if (channel.transport.kind === 'in_process') {
+        const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
+        if (
+          processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
+          processIdentity.ownerUid !== owner.filesystem.root.ownerUid ||
+          processIdentity.platform !== principal.platform ||
+          processIdentity.observedAt !== channel.openedAt
+        ) {
+          throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel process identity does not match');
+        }
+        return [{ ref: channel.transport.processIdentityRef, schemaKind: 'cliq-platform-process-identity-v1' }];
+      }
+      const peer = decodeLocalSocketPeerObservation(await artifacts.readCanonical(channel.transport.peerObservationRef));
+      const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(peer.peerProcessIdentityRef));
+      if (peer.observationDigest !== channel.transport.peerObservationDigest ||
+          peer.stateRootIdentityRef !== principal.stateRootIdentityRef ||
+          peer.stateRootIdentityDigest !== principal.stateRootIdentityDigest || peer.platform !== principal.platform ||
+          peer.peerUid !== principal.effectiveUid || processIdentity.identityDigest !== peer.peerProcessIdentityDigest ||
+          processIdentity.platform !== peer.platform || processIdentity.pid !== peer.peerPid ||
+          processIdentity.ownerUid !== peer.peerUid || processIdentity.observedAt !== peer.observedAt ||
+          parseCanonicalTime(channel.openedAt) < parseCanonicalTime(peer.observedAt)) {
+        throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained control peer closure does not match');
+      }
+      return [
+        { ref: channel.transport.peerObservationRef, schemaKind: 'cliq-local-socket-peer-observation-v1' },
+        { ref: peer.peerProcessIdentityRef, schemaKind: 'cliq-platform-process-identity-v1' }
+      ];
+    })()
   ]);
-  if (channel.transport.kind === 'in_process') {
-    const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(channel.transport.processIdentityRef));
-    if (
-      processIdentity.identityDigest !== channel.transport.processIdentityDigest ||
-      processIdentity.ownerUid !== owner.filesystem.root.ownerUid ||
-      processIdentity.platform !== principal.platform ||
-      processIdentity.observedAt !== channel.openedAt
-    ) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'control channel process identity does not match');
-    }
-    metadata.push(
-      await artifacts.describe(
-        channel.transport.processIdentityRef,
-        'application/json',
-        'cliq-platform-process-identity-v1'
-      )
-    );
-  } else {
-    const peer = decodeLocalSocketPeerObservation(await artifacts.readCanonical(channel.transport.peerObservationRef));
-    const processIdentity = decodePlatformProcessIdentity(await artifacts.readCanonical(peer.peerProcessIdentityRef));
-    if (peer.observationDigest !== channel.transport.peerObservationDigest ||
-        peer.stateRootIdentityRef !== principal.stateRootIdentityRef ||
-        peer.stateRootIdentityDigest !== principal.stateRootIdentityDigest || peer.platform !== principal.platform ||
-        peer.peerUid !== principal.effectiveUid || processIdentity.identityDigest !== peer.peerProcessIdentityDigest ||
-        processIdentity.platform !== peer.platform || processIdentity.pid !== peer.peerPid ||
-        processIdentity.ownerUid !== peer.peerUid || processIdentity.observedAt !== peer.observedAt ||
-        parseCanonicalTime(channel.openedAt) < parseCanonicalTime(peer.observedAt)) {
-      throw new KernelStorageError('ARTIFACT_MISMATCH', 'retained control peer closure does not match');
-    }
-    metadata.push(
-      await artifacts.describe(channel.transport.peerObservationRef, 'application/json', 'cliq-local-socket-peer-observation-v1'),
-      await artifacts.describe(peer.peerProcessIdentityRef, 'application/json', 'cliq-platform-process-identity-v1')
-    );
-  }
+  const metadata = [channelMetadata, principalMetadata];
+  // The validated transport contributes exactly one or two original refs.
+  metadata.push(...await joinResourceOperations(transportMetadata.map(({ ref, schemaKind }) =>
+    artifacts.describe(ref, 'application/json', schemaKind))));
   return { channel, metadata };
 }

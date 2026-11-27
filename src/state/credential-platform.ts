@@ -1,3 +1,4 @@
+import { assertControlWireJson } from '../kernel/control-wire-data.js';
 import { canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 
 // These are private installed-producer models. Decoding a returned object is
@@ -55,6 +56,9 @@ export type UserManagerObservation = Readonly<{
 }>;
 export type NativeCredentialPlatformBinding = Readonly<{
   interfaceVersion: 2;
+  readonly installedUpgradeInterfaceVersion?: 1;
+  stopInstalledUpgradeUnit?(input: Readonly<{ rootIdentityDigest: string; role: 'supervisor' | 'keeper'; pid: number;
+    processStartToken: string; invocationId: string }>): NativeCredentialInspection;
   currentUser(): CredentialPlatformUser;
   secretService(input: Extract<NativeSecretServiceInput, { kind: 'inspect' }>): NativeCredentialInspection;
   secretService(input: NativeSecretServiceInput): Promise<unknown>;
@@ -213,4 +217,14 @@ export function decodeUserManagerObservation(value: unknown): UserManagerObserva
     bus: observedBus, manager,
     ...(Object.hasOwn(result, 'unit') ? { unit: unit(result.unit) } : {}),
     ...(Object.hasOwn(result, 'jobPath') ? { jobPath: objectPath(result.jobPath) } : {}) });
+}
+
+/** Fixed upgrade-stop response data only. A successful D-Bus job request is
+ * never a process-domain death or retirement proof. */
+export function decodeInstalledUpgradeStopObservation(value: unknown) {
+  assertControlWireJson(value);
+  const data = object(value, ['schemaVersion', 'kind', 'uid', 'gid', 'home', 'bus', 'manager', 'unit', 'jobPath']);
+  if (data.kind !== 'stop_installed_upgrade') throw new TypeError('invalid fixed upgrade stop observation');
+  const checked = decodeUserManagerObservation({ ...data, kind: 'start' });
+  return Object.freeze({ ...checked, kind: 'stop_installed_upgrade' as const });
 }

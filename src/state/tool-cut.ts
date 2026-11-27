@@ -1,3 +1,4 @@
+import { readChildAdmission } from './child-admission.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import type { ContinuationItem, RunFrontier, ToolBatchItem } from '../kernel/types.js';
 import type { ResolveToolInput } from '../model/attempt.js';
@@ -8,7 +9,7 @@ import { exactKeys } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact, readModelTurnMaterial } from './agent-context.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeContextManifest } from './decoders.js';
-import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
+import { KernelStorageError, stateOperation } from './errors.js';
 import { readRecoveryClosure } from './recovery-closure.js';
 import type { SqliteDriver } from './sqlite-driver.js';
 
@@ -23,9 +24,9 @@ export const readToolCut = stateOperation('RECOVERY_REQUIRED', async (
   if (frontier.kind !== 'tool' || !exactKeys(frontier, ['schemaVersion', 'kind', 'batchItemId', 'orderedCallIds', 'nextCallIndex'])) {
     throw new TypeError('tool step requires an exact tool frontier');
   }
-  const items = await joinResourceOperations(closure.items.map(async (row) => ({
+  const items = await artifacts.mapReads(closure.items, async (row) => ({
     itemSeq: row.itemSeq, itemRef: row.payloadRef, item: await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)
-  })));
+  }));
   const context = decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef));
   validateContextItems(context, items);
   if (context.throughItemSeq !== checkpoint.runItemSeq || checkpoint.runItemSeq !== items.length) throw new TypeError('tool cut is not at its ready context');
@@ -39,11 +40,46 @@ export const readToolCut = stateOperation('RECOVERY_REQUIRED', async (
   let next = 0;
   for (const { item } of items.slice(batchIndex + 1)) {
     if (item.kind === 'policy_decision') {
-      if (item.subjectKind !== 'tool_call') throw new TypeError('unexpected policy subject inside tool batch');
+      if (item.subjectKind === 'child_merge') {
+        const result = items.find(row => row.item.kind === 'child_merge_result' && row.item.policyDecisionItemRef === canonicalSha256(item))?.item;
+        const audit = result?.kind === 'child_merge_result' ? items.find(row => row.item.itemId === result.mergeBatchItemId)?.item :
+          items.find(row => row.item.kind === 'child_merge_batch' && row.item.resume.kind === 'await_tool' && row.item.resume.batchItemId === batch.itemId &&
+            row.item.resume.callIndex === next && row.item.resume.callId === batch.calls[next]?.callId)?.item;
+        if (audit?.kind !== 'child_merge_batch' || audit.resume.kind !== 'await_tool' || audit.resume.batchItemId !== batch.itemId ||
+            audit.resume.callIndex !== next || audit.resume.callId !== batch.calls[next]?.callId)
+          throw new TypeError('merge policy audit overtakes its real owning await call');
+      } else if (item.subjectKind === 'mcp_server_launch') {
+        const original = await artifacts.readCanonical<import('../kernel/mcp-server-authorization.js').McpServerPolicyChannelEvidenceV1>(item.policyChannelEvidenceRef);
+        const evidence = (await import('../kernel/mcp-server-authorization.js')).decodeMcpServerPolicyChannelEvidence(original);
+        if (evidence.runId !== run.id || evidence.opId !== item.opId || evidence.evidenceDigest !== item.policyChannelEvidenceDigest ||
+            evidence.namedAction.originatingBatchItemId !== batch.itemId || evidence.namedAction.originatingCallIndex !== next ||
+            evidence.namedAction.originatingCallId !== batch.calls[next]?.callId) throw new TypeError('MCP server policy overtakes its exact owning call');
+      } else if (item.subjectKind !== 'tool_call') throw new TypeError('unexpected policy subject inside tool batch');
+    } else if (item.kind === 'mcp_server_stopped') {
+      if (item.runId !== run.id || item.batchItemId !== batch.itemId || item.callIndex !== next || item.callId !== batch.calls[next]?.callId)
+        throw new TypeError('MCP server retirement overtakes its exact owning call');
+    } else if (item.kind === 'child_handle') {
+      const selectedCall = batch.calls[next];
+      if (selectedCall?.toolName !== 'delegate' || item.delegateBatchItemId !== batch.itemId || item.delegateCallIndex !== next ||
+          item.delegateCallId !== selectedCall.callId || item.runId !== run.id) throw new TypeError('child handle overtakes its owning delegate call');
+      const admitted = await readChildAdmission(driver, artifacts, item.childRunId);
+      if (admitted.parent.id !== run.id || canonicalSha256(admitted.handle) !== canonicalSha256(item) ||
+          admitted.receipt.childHandleItemRef !== canonicalSha256(item)) throw new TypeError('child handle has no exact original admitted source');
     } else if (item.kind === 'input_request' || item.kind === 'user_input') {
       if (item.batchItemId !== batch.itemId || item.index !== next || item.callId !== batch.calls[next]?.callId) {
         throw new TypeError('input control item differs from its result-less call');
       }
+    } else if (item.kind === 'child_merge_batch' || item.kind === 'child_merge_result') {
+      const audit = item.kind === 'child_merge_batch' ? item : items.find(row => row.item.itemId === item.mergeBatchItemId)?.item;
+      if (audit?.kind !== 'child_merge_batch' || audit.resume.kind !== 'await_tool' || audit.resume.batchItemId !== batch.itemId ||
+          audit.resume.callIndex !== next || audit.resume.callId !== batch.calls[next]?.callId)
+        throw new TypeError('merge audit overtakes its real owning await call');
+    } else if (item.kind === 'child_result') {
+      if (item.delivery.kind === 'stop_settlement' && run.stopIntentRef) continue; // Full recovery independently owns this audit-only Stop settlement.
+      if (item.delivery.kind !== 'await_tool' || batch.calls[next]?.toolName !== 'await_children' ||
+          item.delivery.awaitBatchItemId !== batch.itemId || item.delivery.awaitCallIndex !== next ||
+          item.delivery.awaitCallId !== batch.calls[next]?.callId)
+        throw new TypeError('child result overtakes its original owning await call');
     } else if (item.kind === 'tool_result' && item.batchItemId === batch.itemId && item.index === next && item.callId === batch.calls[next]?.callId) next++;
     else throw new TypeError('tool frontier has a non-contiguous result prefix');
   }

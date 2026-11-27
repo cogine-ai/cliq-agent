@@ -15,15 +15,18 @@ import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../../src/config
 import { canonicalJsonBytes, canonicalSha256 } from '../../src/kernel/canonical.js';
 import { digestOmitting, identityHash } from '../../src/kernel/identity.js';
 import type { ProcessContainment, ProcessContainmentDeathEvidenceV1, ProcessContainmentNoSpawnEvidenceV1, ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../src/kernel/execution.js';
-import type { ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
+import type { ReconciliationProbeCancellationClosureV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1 } from '../../src/kernel/reconciliation.js';
 import type { WorkerDeathWait, WorkerIdentity, WorkspaceEntryManifest, WorkspaceGenerationIdentityV1,
   WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1, WorkspaceStateManifest, PlatformProcessIdentityV1,
-  WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1 } from '../../src/kernel/types.js';
+  WorkspaceGenerationRetirementEvidenceV1, SupervisorInspectorIdentityV1, Run, WorkerLaunch, BudgetSettlementV1,
+  StateOwnerRecordV1, FinalCandidateItem, SourceManifest, WorkspaceDiffV1, RunResult,
+  WorkspaceGenerationSnapshotEvidenceV1 } from '../../src/kernel/types.js';
 import { openLinuxWorkerLauncher, type LinuxWorkerController, type LinuxWorkerLauncher } from '../../src/sandbox/linux-worker.js';
 import * as linuxWorker from '../../src/sandbox/linux-worker.js';
 import { createLinuxWorkerCampaignFixture } from '../../src/sandbox/testing/worker-campaign-fixture.js';
 import type { LocalControlConnection, LocalControlListener } from '../../src/state/control-channel.js';
-import { decodeWorkerIdentity } from '../../src/state/decoders.js';
+import { decodePlatformProcessIdentity, decodeStateOwnerAcquisitionEvidence, decodeStateOwnerTransitionEvidence,
+  decodeWorkerIdentity } from '../../src/state/decoders.js';
 import { decodeWorkerProcessContainment } from '../../src/state/execution-closure.js';
 import { loadNativeStateOwner, type HeldStateOwnerLock } from '../../src/state/native-owner.js';
 import { journalEntryFromRow, readInvocationJournal, type JournalSqlRow } from '../../src/state/repositories/journal.js';
@@ -31,9 +34,10 @@ import { readRequiredWorkerLaunch, readWorkerLaunchesForRun } from '../../src/st
 import { readRequiredWorkspaceGenerationByRef } from '../../src/state/repositories/workspace-generations.js';
 import { readRun } from '../../src/state/rows.js';
 import { openSqliteDriver, type SqliteConnection } from '../../src/state/sqlite-driver.js';
-import { readLatestStateOwner } from '../../src/state/state-owner.js';
+import { readLatestStateOwner, readStateOwner } from '../../src/state/state-owner.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from '../../src/state/store.js';
 import { uuidv7 } from '../../src/state/testing/fixtures.js';
+import { sampleCanonicalNow } from '../../src/state/canonical-time.js';
 import type { CrashChildInput, CrashChildPaused, CrashChildQueuedPostMove, CrashChildRetirementRefused, CrashChildControllerLossRefused } from './linux-worker-crash-child.js';
 
 // This command is intentionally separate from ordinary portable unit tests.
@@ -716,6 +720,321 @@ async function nativeEditSearchSemantics() {
       } else console.error('preserving uncertain native edit semantics fixture: ' + fixture.stateRoot);
       if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'native edit semantics and cleanup failures');
     }
+  }
+}
+
+async function finalTurnRetainedPublication() {
+  for (const recovery of ['resume', 'cancel', 'close', 'expired_death', 'expired_death_retry', 'changed_paths', 'changed_bytes'] as const)
+    await finalTurnPublication(recovery);
+}
+
+async function finalTurnPublication(recovery: 'resume' | 'cancel' | 'close' | 'expired_death' | 'expired_death_retry' | 'changed_paths' | 'changed_bytes') {
+  const expiresDeath = recovery === 'expired_death' || recovery === 'expired_death_retry';
+  const limited = recovery === 'changed_paths' || recovery === 'changed_bytes';
+  const fixture = await createLinuxWorkerCampaignFixture({ ...options, label: `final-turn-${recovery}`,
+    ...(limited ? { resultLimits: { maxChangedPaths: recovery === 'changed_paths' ? 0 : 1000,
+      maxChangedBytes: recovery === 'changed_bytes' ? 5 : 16 * 1024 ** 2 } } : {}) });
+  let reopened: StateStore | undefined, sample: FileHandle | undefined, root: FileHandle | undefined, file: FileHandle | undefined;
+  let prototype: { writeFile: FileHandle['writeFile'] } | undefined, originalWrite: FileHandle['writeFile'] | undefined;
+  let operationFailure: { error: unknown } | undefined, reopeningFailed = false;
+  let initialDeath: ProcessContainmentDeathEvidenceV1 | undefined, snapshot: WorkspaceGenerationSnapshotEvidenceV1 | undefined;
+  let held: Awaited<ReturnType<typeof checkpointBytes>> | undefined;
+  const candidateWrites: Buffer[] = [], finalObservationTimes: string[] = [];
+  const finalObservationBytes = new Map<string, Buffer>();
+  let injected = 0, delayedMs = 0, pendingDeathReplays = 0;
+  const storageFailure = Object.assign(new Error('campaign final-candidate temporary write ENOSPC'), { code: 'ENOSPC' });
+  const agePastFreshness = async (observedAt: string) => {
+    const started = performance.now();
+    await delay(6000);
+    while (performance.now() < started + 6000) await delay(Math.ceil(started + 6000 - performance.now()));
+    delayedMs += performance.now() - started;
+    assert.ok(Date.now() - Date.parse(observedAt) > 5_000);
+  };
+  const staleRetirement = (error: unknown) => {
+    const pending: unknown[] = [error], seen = new Set<Error>();
+    while (pending.length) {
+      const next = pending.pop(); if (!(next instanceof Error) || seen.has(next)) continue;
+      seen.add(next);
+      if (Reflect.get(next, 'code') === 'RECOVERY_REQUIRED' && /worker retirement proof is stale/u.test(next.message)) return true;
+      pending.push(next.cause); if (next instanceof AggregateError) pending.push(...next.errors);
+    }
+    return false;
+  };
+  try {
+    const startingChildren = directChildren(), hostBefore = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    const before = await checkpointBytes(fixture.store, fixture.runId), beforeLaunches = workerLaunchHistory(fixture.stateRoot, fixture.runId);
+    const sessionBefore = fixture.store.getSession(fixture.sessionId);
+    const execution = await fixture.store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
+    const edited = await bounded(execution.executeCurrentTool({ expectedRunRevision: before.closure.run.revision }));
+    const accounted = await checkpointBytes(fixture.store, fixture.runId);
+    assert.deepEqual(accounted.bytes, Buffer.from('after\n')); assert.equal(accounted.closure.run.budgetConsumed.toolCalls, 1);
+    assert.equal(accounted.closure.journal.filter(entry => entry.opKind === 'tool' && entry.phase === 'dispatch_claimed').length, 1);
+    const active = await bounded(execution.activateCurrentWorker({ expectedRunRevision: edited.revision }));
+    const live = await fixture.store.readRecoveryClosure(fixture.runId), originalLaunch = live.workerLaunches[0]!;
+    assert.equal(originalLaunch.launchId, active.activeWorkerLaunchId); assert.equal(originalLaunch.phase, 'activated');
+    assert.equal(originalLaunch.generationWriteState, 'active'); assert(originalLaunch.workerIdentityDigest && originalLaunch.processContainmentRef);
+    const originalWorker = decodeWorkerIdentity(await fixture.store.artifacts.readCanonical(originalLaunch.workerIdentityDigest));
+    assert.equal(processToken(originalWorker.pid), originalWorker.processStartToken);
+
+    // Only the existing offline model decoder/settlement fixture is used. The
+    // edit, second worker, quiescence, snapshots and final D1 are all native.
+    const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+      releaseKeys: fixture.signed.releaseKeys });
+    const prepared = await agent.prepareModel({ expectedRunRevision: active.revision, leaseEpoch: active.leaseEpoch });
+    await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: prepared.run.revision,
+      leaseEpoch: active.leaseEpoch, opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      dispatchId: identityHash('cliq-campaign-final-model-dispatch-v1', fixture.runId) });
+    const response = agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
+    response.push(Buffer.from(JSON.stringify({ id: 'campaign-final-response', object: 'response', status: 'completed', model: 'model-1',
+      output: [{ type: 'message', id: 'campaign-final-message', role: 'assistant', status: 'completed',
+        content: [{ type: 'output_text', text: 'The single private edit is ready for its declared checks.', annotations: [] }] }] })));
+    const completed = await agent.completeModel({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+      expectedRunRevision: prepared.run.revision, result: response.finish(sampleCanonicalNow(), agent.resolveToolInput) });
+    assert.equal(completed.disposition, 'candidate_required');
+    const finalCut = await checkpointBytes(fixture.store, fixture.runId);
+    assert.deepEqual(finalCut.bytes, accounted.bytes);
+    const modelRows = finalCut.closure.journal.filter(entry => entry.opKind === 'model');
+    for (const phase of ['prepared', 'dispatch_claimed', 'completed'] as const) assert.equal(
+      modelRows.filter(entry => entry.phase === phase).length,
+      accounted.closure.journal.filter(entry => entry.opKind === 'model' && entry.phase === phase).length + 1);
+    assert.deepEqual(modelRows.filter(entry => entry.opId === prepared.entry.opId).map(entry => entry.phase),
+      ['prepared', 'dispatch_claimed', 'completed']);
+    const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
+    const checkpointId = identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId);
+    const capturePreparedSeal = async () => {
+      assert(initialDeath && snapshot); assert.equal(held, undefined);
+      assert.equal(initialDeath.backend.kind, 'linux');
+      if (initialDeath.backend.kind !== 'linux') throw new Error('final turn did not retire its real Linux containment');
+      assert.equal(initialDeath.backend.cgroupPopulated, 0); assert.equal(initialDeath.backend.namespaceInitDeadAndReaped, true);
+      assert.equal(initialDeath.backend.remainingTrackedDescendants, 0);
+      assert.match(await readFile(path.join(initialDeath.backend.cgroupPath, 'cgroup.events'), 'utf8'), /(?:^|\n)populated 0\n/u);
+      held = await checkpointBytes(fixture.store, fixture.runId);
+      assert.equal(held.closure.run.status, 'running'); assert.equal(held.closure.run.activeWorkerLaunchId, originalLaunch.launchId);
+      assert.deepEqual(held.closure.journal, finalCut.closure.journal); assert.deepEqual(held.closure.items, finalCut.closure.items);
+      assert.deepEqual(held.closure.latestCheckpoint, finalCut.closure.latestCheckpoint);
+      assert.equal(held.closure.workerLaunches[0]!.generationWriteState, 'checkpointing');
+      const generation = held.closure.workspaceGenerations.find(row => row.generationRef === originalLaunch.workspaceGenerationRef)!;
+      assert.equal(generation.phase, 'checkpointing');
+      const identity = await fixture.store.artifacts.readCanonical<WorkspaceGenerationIdentityV1>(originalLaunch.workspaceGenerationRef);
+      if (identity.locator.kind !== 'linux_directory') throw new Error('final-turn witness has no Linux private directory');
+      root = await open(path.join(fixture.stateRoot, identity.locator.canonicalRootRelativePath),
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+      const physical = await root.stat({ bigint: true });
+      assert.equal(String(physical.dev), identity.locator.deviceId); assert.equal(String(physical.ino), identity.locator.directoryFileId);
+      file = await open(`/proc/self/fd/${root.fd}/a`, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      assert.equal((await file.stat()).size, Buffer.byteLength('after\n'));
+      assert.deepEqual(await witnessBytes(file, Buffer.byteLength('after\n')), Buffer.from('after\n'));
+      assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    };
+    sample = await open(path.join(fixture.workspace, 'a'), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    prototype = Object.getPrototypeOf(sample) as { writeFile: FileHandle['writeFile'] }; originalWrite = prototype.writeFile;
+    await sample.close(); sample = undefined;
+    const writeFile = originalWrite;
+    prototype.writeFile = (async function(this: FileHandle, ...args: Parameters<FileHandle['writeFile']>) {
+      await Reflect.apply(writeFile, this, args);
+      if (!Buffer.isBuffer(args[0])) return;
+      const text = args[0].toString('utf8');
+      if (!text.includes('"kind":"containment_all_descendants_dead"') &&
+          !text.includes('"format":"cliq-workspace-generation-snapshot-evidence-v1"') && !text.includes('"kind":"final_candidate"')) return;
+      const value = JSON.parse(text);
+      if (value.kind === 'containment_all_descendants_dead' && value.owner?.kind === 'worker_activation' &&
+          value.owner.workerLaunchId === originalLaunch.launchId) {
+        const death = value as ProcessContainmentDeathEvidenceV1;
+        assert.equal(death.evidenceDigest, digestOmitting(death, 'evidenceDigest'));
+        assert.equal(death.containmentRef, originalLaunch.processContainmentRef);
+        if (!initialDeath) { initialDeath = death; return; }
+        if (limited && !held) await capturePreparedSeal();
+        assert(snapshot && held, 'D1 follows the actual snapshot and either candidate publication or a durable resource StopIntent');
+        assert.deepEqual({ ...death, observedAt: initialDeath.observedAt, evidenceDigest: initialDeath.evidenceDigest }, initialDeath);
+        const observationRef = canonicalSha256(death), priorBytes = finalObservationBytes.get(observationRef);
+        if (priorBytes) {
+          // The original pending CAS bytes are not a fourth native inspection
+          // and must not acquire a replacement timestamp on publication retry.
+          assert.equal(recovery, 'expired_death_retry'); assert.equal(injected, 1); assert.equal(finalObservationTimes.length, 1);
+          assert.equal(++pendingDeathReplays, 1, 'only the one original pending D1 publication may replay');
+          assert.deepEqual(args[0], priorBytes, 'pending D1 retries the exact original canonical bytes, not a newly sampled time');
+          assert.ok(Date.now() - Date.parse(death.observedAt) > 5_000, 'the retained pending D1 is already stale on publication retry');
+          return;
+        }
+        assert.ok(Date.now() - Date.parse(death.observedAt) <= 5_000, 'the real native D1 is fresh before any storage delay');
+        if (finalObservationTimes.length) assert.ok(death.observedAt > finalObservationTimes.at(-1)!);
+        finalObservationBytes.set(observationRef, Buffer.from(args[0]));
+        finalObservationTimes.push(death.observedAt);
+        if (expiresDeath) {
+          assert.ok(finalObservationTimes.length <= 3, 'one prepared final-turn seal has at most three final inspections');
+          if (recovery === 'expired_death_retry' && finalObservationTimes.length === 1) {
+            assert.equal(injected, 0); injected++; throw storageFailure;
+          }
+          await agePastFreshness(death.observedAt);
+        }
+        return;
+      }
+      if (value.format === 'cliq-workspace-generation-snapshot-evidence-v1' && value.checkpointId === checkpointId) {
+        assert(initialDeath); snapshot = value as WorkspaceGenerationSnapshotEvidenceV1;
+        assert.equal(snapshot.quiescenceEvidenceRef, canonicalSha256(initialDeath));
+        assert.equal(snapshot.generationRef, originalLaunch.workspaceGenerationRef);
+        assert.equal(snapshot.evidenceDigest, digestOmitting(snapshot, 'evidenceDigest')); return;
+      }
+      if (value.kind !== 'final_candidate' || value.runId !== fixture.runId) return;
+      assert.equal(limited, false, 'a source-limit failure must never publish a candidate');
+      assert(initialDeath && snapshot);
+      assert.equal(value.producingItemId, producerId); assert.equal(value.producingOpId, prepared.entry.opId);
+      candidateWrites.push(Buffer.from(args[0]));
+      if (held) { assert.deepEqual(candidateWrites.at(-1), candidateWrites[0], 'retry preserves the exact original candidate bytes'); return; }
+      await capturePreparedSeal();
+      if (!expiresDeath) { injected++; throw storageFailure; }
+    }) as FileHandle['writeFile'];
+    if (limited) {
+      const sealed = await bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision }));
+      assert.equal(sealed.status, 'queued'); assert.equal(sealed.activeWorkerLaunchId, undefined);
+      assert.equal(sealed.latestCheckpointId, checkpointId); assert(sealed.stopIntentRef);
+      assert.equal(execution.hasPendingCompletion(), false); assert.equal(injected, 0); assert.equal(candidateWrites.length, 0);
+    } else if (recovery === 'expired_death') {
+      await assert.rejects(bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision }), 40_000), staleRetirement);
+    } else await assert.rejects(bounded(execution.finishCurrentFinalTurn({ expectedRunRevision: finalCut.closure.run.revision })), error => error === storageFailure);
+    assert(held && initialDeath && snapshot && file);
+    if (recovery === 'expired_death_retry') {
+      assert.equal(injected, 1); assert.equal(finalObservationTimes.length, 1); assert.equal(pendingDeathReplays, 0);
+      assert.equal(execution.hasPendingCompletion(storageFailure), true);
+      assert.deepEqual(await checkpointBytes(fixture.store, fixture.runId), held, 'failed D1 publication retains its original producer and SQL cut');
+      await agePastFreshness(finalObservationTimes[0]!);
+      await assert.rejects(bounded(execution.resumeCurrentCompletion({ expectedRunRevision: held.closure.run.revision }), 40_000), staleRetirement);
+      assert.equal(pendingDeathReplays, 1);
+    }
+    let observingStore = fixture.store;
+    if (expiresDeath) {
+      assert.equal(finalObservationTimes.length, 3); assert.equal(finalObservationBytes.size, 3);
+      assert.ok(delayedMs >= 18_000); assert.equal(candidateWrites.length, 1);
+      const fenced = await checkpointBytes(fixture.store, fixture.runId);
+      assert.equal(fenced.closure.run.status, 'waiting'); assert.equal(fenced.closure.run.waitingReason, 'reconciliation');
+      assert.equal(fenced.closure.run.activeWorkerLaunchId, undefined);
+      assert.deepEqual(fenced.closure.items, finalCut.closure.items); assert.deepEqual(fenced.closure.journal, finalCut.closure.journal);
+      assert.deepEqual(fenced.closure.latestCheckpoint, finalCut.closure.latestCheckpoint);
+      const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(fenced.closure.run.waitingOnRef!);
+      assert.equal(wait.subject.oldWorkerLaunchId, originalLaunch.launchId); assert.deepEqual(wait.subject.openInvocationRefs, []);
+      assert.equal(fenced.closure.run.resultRef, undefined);
+    } else {
+      if (!limited) {
+        assert.equal(injected, 1); assert.equal(execution.hasPendingCompletion(storageFailure), true);
+        assert.deepEqual(await checkpointBytes(fixture.store, fixture.runId), held, 'storage failure retains the original owner, cut and accounted workspace');
+      }
+      if (recovery === 'close') {
+        await bounded(fixture.store.close());
+        try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+        catch (error) { reopeningFailed = true; throw error; }
+        observingStore = reopened;
+      } else if (!limited) {
+        let stopIntentRef: string | undefined;
+        if (recovery === 'cancel') {
+          const stopped = await agent.cancelRun({ ...await publishInProcessChannel(fixture.store), requestId: uuidv7(),
+            expectedRunRevision: held.closure.run.revision });
+          stopIntentRef = stopped.run.stopIntentRef; assert(stopIntentRef); await bounded(execution.requestStop());
+        }
+        const sealed = await bounded(execution.resumeCurrentCompletion({ expectedRunRevision: fixture.store.getRun(fixture.runId).revision }));
+        assert.equal(sealed.status, 'queued'); assert.equal(sealed.activeWorkerLaunchId, undefined);
+        assert.equal(sealed.latestCheckpointId, checkpointId); assert.equal(sealed.stopIntentRef, stopIntentRef);
+      }
+      const sealed = await checkpointBytes(observingStore, fixture.runId);
+      assert.equal(sealed.closure.latestCheckpoint.id, checkpointId);
+      assert.equal(sealed.closure.latestCheckpoint.workspaceStateRef, finalCut.closure.latestCheckpoint.workspaceStateRef);
+      assert.deepEqual(sealed.closure.journal, finalCut.closure.journal); assert.deepEqual(sealed.bytes, accounted.bytes);
+      const history = workerLaunchHistory(fixture.stateRoot, fixture.runId), retired = history.find(row => row.launchId === originalLaunch.launchId)!;
+      assert.equal(history.length, beforeLaunches.length + 2, 'one real edit worker and one real final-turn worker, no replacement');
+      assert.equal(retired.phase, 'retired'); assert.equal(retired.workerIdentityDigest, originalLaunch.workerIdentityDigest);
+      assert.equal(retired.workspaceGenerationRef, originalLaunch.workspaceGenerationRef); assert(retired.retirementEvidenceRef);
+      const generation = sealed.closure.workspaceGenerations.find(row => row.generationRef === originalLaunch.workspaceGenerationRef)!;
+      assert.equal(generation.phase, 'sealed');
+      if (generation.phase !== 'sealed') throw new Error('final worker was not positively sealed');
+      assert.equal(generation.snapshotEvidenceRef, canonicalSha256(snapshot));
+      const d1 = await observingStore.artifacts.readCanonical<ProcessContainmentDeathEvidenceV1>(retired.retirementEvidenceRef);
+      assert.deepEqual({ ...d1, observedAt: initialDeath.observedAt, evidenceDigest: initialDeath.evidenceDigest }, initialDeath);
+      const c = sealed.closure.latestCheckpoint.createdAt;
+      assert.equal(retired.retiredAt, c);
+      assert.ok(initialDeath.observedAt <= snapshot.observedAt && snapshot.observedAt <= d1.observedAt && d1.observedAt <= c);
+      assert.ok(Date.parse(c) - Date.parse(d1.observedAt) <= 5000);
+      const currentAgent = await observingStore.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+        releaseKeys: fixture.signed.releaseKeys });
+      if (recovery === 'cancel' || limited) {
+        assert.deepEqual(sealed.closure.items, finalCut.closure.items); assert.equal(candidateWrites.length, limited ? 0 : 1);
+        assert.equal(sealed.closure.run.nextStep, 'agent'); assert(sealed.closure.run.stopIntentRef);
+        if (limited) {
+          const stop = await observingStore.artifacts.readCanonical<Record<string, unknown>>(sealed.closure.run.stopIntentRef);
+          assert.equal(stop.origin, 'runtime'); assert.equal(stop.runtimeSubtype, 'result_source_limit_exceeded');
+          assert.equal(stop.sourceCheckpointId, finalCut.closure.latestCheckpoint.id);
+          assert.equal(stop.workspaceStateRef, finalCut.closure.latestCheckpoint.workspaceStateRef);
+          assert.equal(stop.producingItemId, producerId); assert.equal(stop.modelOpId, prepared.entry.opId);
+          assert.equal(stop.attempt, prepared.entry.attempt); assert.equal(stop.limitKind, recovery);
+          assert.equal(stop.observed, recovery === 'changed_paths' ? 1 : 6); assert.equal(stop.limit, recovery === 'changed_paths' ? 0 : 5);
+        }
+        const terminal = await execution.finishCurrentStop({ expectedRunRevision: sealed.closure.run.revision });
+        assert.equal(terminal.status, limited ? 'failed' : 'cancelled'); assert.equal(terminal.resultRef, undefined);
+        if (limited) assert.equal(terminal.terminalReason, 'runtime_failed');
+        assert.equal(terminal.stopIntentRef, sealed.closure.run.stopIntentRef);
+      } else {
+        assert.equal(candidateWrites.length, 2); assert.equal(sealed.closure.items.length, finalCut.closure.items.length + 1);
+        const candidate = await observingStore.artifacts.readCanonical<FinalCandidateItem>(sealed.closure.items.at(-1)!.payloadRef);
+        assert.deepEqual(canonicalJsonBytes(candidate), candidateWrites[0]);
+        const source = await observingStore.artifacts.readCanonical<SourceManifest>(candidate.resultSourceRef);
+        const diff = await observingStore.artifacts.readCanonical<WorkspaceDiffV1>(candidate.diffRef);
+        assert.equal(source.role, 'result'); assert.equal(source.manifestDigest, candidate.sourceDigest);
+        assert.equal(source.entriesRef, snapshot.entriesRef); assert.equal(source.treeDigest, snapshot.treeDigest);
+        const originalEntry = { path: 'a', kind: 'file', mode: 0o644, size: fixture.original.byteLength,
+          blobRef: createHash('sha256').update(fixture.original).digest('hex') };
+        const resultEntry = { path: 'a', kind: 'file', mode: 0o644, size: Buffer.byteLength('after\n'),
+          blobRef: createHash('sha256').update('after\n').digest('hex') };
+        const resultEntries = await observingStore.artifacts.readCanonical<WorkspaceEntryManifest>(source.entriesRef);
+        assert.deepEqual(resultEntries.entries, [resultEntry]);
+        assert.deepEqual(diff.operations, [{ kind: 'modify', path: 'a', before: originalEntry, after: resultEntry }]);
+        const verified = await currentAgent.completeVerification({ expectedRunRevision: sealed.closure.run.revision });
+        const request = { expectedRunRevision: verified.run.revision }, terminal = await currentAgent.commitRunResult(request);
+        assert.equal(terminal.run.status, 'completed_unverified'); assert.equal(terminal.run.terminalReason, 'no_required_verifier');
+        const result = await observingStore.artifacts.readCanonical<RunResult>(terminal.resultRef);
+        assert.equal(result.resultSourceRef, candidate.resultSourceRef); assert.equal(result.diffRef, candidate.diffRef);
+        assert.deepEqual(await currentAgent.commitRunResult(request), terminal);
+      }
+    }
+    const after = await checkpointBytes(observingStore, fixture.runId);
+    assert.equal(workerLaunchHistory(fixture.stateRoot, fixture.runId).length, beforeLaunches.length + 2,
+      'success and exhausted freshness retain exactly the original edit/final workers, never a replacement');
+    assert.deepEqual(after.closure.journal, finalCut.closure.journal, 'persistence, close and stop cannot prepare or claim another model/tool operation');
+    assert.equal(after.closure.run.budgetConsumed.toolCalls, 1); assert.deepEqual(after.closure.run.budgetConsumed, finalCut.closure.run.budgetConsumed);
+    assert.deepEqual(after.closure.run.budgetReserved, finalCut.closure.run.budgetReserved);
+    const session = observingStore.getSession(fixture.sessionId), terminal = !expiresDeath;
+    assert.equal(session.latestItemSeq, sessionBefore.latestItemSeq + (terminal ? 1 : 0));
+    assert.equal(session.contextRevision, sessionBefore.contextRevision + (terminal ? 1 : 0));
+    await assert.rejects(access(`/proc/${originalWorker.pid}`), { code: 'ENOENT' });
+    assert.deepEqual(directChildren(), startingChildren);
+    assert.deepEqual(await readFile(path.join(fixture.workspace, 'a')), fixture.original);
+    const hostAfter = await stat(path.join(fixture.workspace, 'a'), { bigint: true });
+    for (const field of ['dev', 'ino', 'size', 'mtimeNs', 'ctimeNs'] as const) assert.equal(hostAfter[field], hostBefore[field]);
+    await file.close(); file = undefined; await root!.close(); root = undefined;
+    await observingStore.close();
+    try { reopened = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority); }
+    catch (error) { reopeningFailed = true; throw error; }
+    assert.deepEqual(await checkpointBytes(reopened, fixture.runId), after);
+    assert.deepEqual(reopened.getSession(fixture.sessionId), session);
+    await reopened.close(); reopened = undefined;
+    console.log(JSON.stringify({ scenario: 'actual-final-turn-retained-publication', recovery, runId: fixture.runId,
+      finalCheckpointId: checkpointId, originalFinalWorkerLaunchId: originalLaunch.launchId,
+      injectedWriteFailures: injected, candidateWrites: candidateWrites.length, finalObservationTimes, pendingDeathReplays, delayedMs,
+      permanentToolClaims: 1, nativePrivateEdits: 1, finalModelFixtureClaims: 1, originalHostUnchanged: true,
+      terminalSessionPublications: terminal ? 1 : 0, providerQualified: false, actualFullDiskQualified: false,
+      installedSigtermQualified: false,
+      note: 'actual native final-worker D0/snapshot/D1 and retained storage/Store.close; offline model response only, not installed entry or provider qualification' }));
+  } catch (error) { operationFailure = { error }; throw error; }
+  finally {
+    if (prototype && originalWrite) prototype.writeFile = originalWrite;
+    const failures: unknown[] = [];
+    for (const resource of [reopened, fixture.store]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    for (const resource of [sample, file, root]) {
+      try { await resource?.close(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length === 0 && !reopeningFailed) {
+      try { await fixture.dispose(); } catch (error) { failures.push(error); }
+    } else console.error(`preserving uncertain final-turn fixture: ${fixture.stateRoot}`);
+    if (failures.length) throw new AggregateError([...(operationFailure ? [operationFailure.error] : []), ...failures], 'final-turn campaign and cleanup failures');
   }
 }
 
@@ -1566,12 +1885,75 @@ function preactivationRefusalRows(connection: SqliteConnection, runId: string) {
     launches: connection.prepare('SELECT launch_id, run_id, phase, row_json, retired_at FROM worker_launches WHERE run_id=? ORDER BY launch_id').all<CampaignLaunchRow>(runId),
     generations: connection.prepare('SELECT generation_id, run_id, phase, row_version, row_json FROM workspace_generations WHERE run_id=? ORDER BY generation_id').all<CampaignGenerationRow>(runId),
     journal: connection.prepare('SELECT run_id, seq, op_id, op_kind, attempt, phase, entry_json FROM run_journal WHERE run_id=? ORDER BY seq').all<CampaignJournalRow>(runId),
-    // The fixture's offline prefix may already contain these kinds. Compare
-    // exact registered rows, never mislabel its metadata as native evidence.
-    proofs: connection.prepare(`SELECT ref, media_type, schema_kind, byte_length, created_at FROM artifacts WHERE schema_kind IN (
-      'cliq-worker-identity-v1', 'cliq-process-containment-v1', 'cliq-process-containment-death-evidence-v1',
-      'cliq-process-containment-no-spawn-evidence-v1', 'cliq-workspace-generation-quarantine-evidence-v1') ORDER BY ref`).all<CampaignArtifactRow>()
+    // First-declaration labels are not an exhaustive index of typed uses.
+    artifacts: connection.prepare('SELECT ref, media_type, schema_kind, byte_length, created_at FROM artifacts ORDER BY ref')
+      .all<CampaignArtifactRow>()
   };
+}
+
+function assertRefusalArtifactChanges(stateRoot: string, before: readonly CampaignArtifactRow[], after: readonly CampaignArtifactRow[],
+  prior: Extract<StateOwnerRecordV1, { state: 'active' }>, terminal: StateOwnerRecordV1 | undefined,
+  successor: Extract<StateOwnerRecordV1, { state: 'active' }>) {
+  assert.ok(terminal?.state === 'terminal');
+  assert.equal(successor.ownerEpoch, prior.ownerEpoch + 1);
+  const { releasedAt: _releasedAt, terminalReason, transitionEvidenceRef, transitionEvidenceDigest,
+    rowDigest: _terminalDigest, state: _terminalState, rowVersion: _terminalVersion, ...terminalIdentity } = terminal;
+  const { rowDigest: _priorDigest, state: _priorState, rowVersion: _priorVersion, ...priorIdentity } = prior;
+  assert.deepEqual(terminalIdentity, priorIdentity, 'takeover cannot rewrite the original owner identity');
+  assert.equal(terminalReason, 'superseded_after_owner_death');
+  for (const field of ['runtimeBundleRef', 'runtimeBundleManifestDigest', 'supervisorEntryId', 'supervisorEntryVersion',
+    'supervisorExecutableDigest', 'stateLockIdentityRef', 'stateLockIdentityDigest'] as const) {
+    assert.equal(successor[field], prior[field]);
+  }
+  const processIdentity = decodePlatformProcessIdentity(frozenArtifact(stateRoot, successor.processIdentityRef));
+  assert.equal(processIdentity.platform, 'linux');
+  assert.equal(processIdentity.ownerUid, process.geteuid!());
+  assert.equal(processIdentity.identityDigest, successor.processIdentityDigest);
+  assert.equal(processIdentity.executableImageDigest, successor.supervisorExecutableDigest);
+  assert.equal(processIdentity.observedAt, successor.acquiredAt);
+  assert.equal(successor.supervisorInstanceId, identityHash('cliq-supervisor-instance-v1', processIdentity.identityDigest,
+    successor.acquiredAt, String(successor.ownerEpoch)));
+  const acquisition = decodeStateOwnerAcquisitionEvidence(frozenArtifact(stateRoot, successor.acquisitionEvidenceRef));
+  assert.deepEqual(acquisition, {
+    schemaVersion: 1, format: 'cliq-state-owner-acquisition-evidence-v1', kind: 'takeover_after_owner_death',
+    ownerEpoch: successor.ownerEpoch, supervisorInstanceId: successor.supervisorInstanceId,
+    runtimeBundleRef: successor.runtimeBundleRef, runtimeBundleManifestDigest: successor.runtimeBundleManifestDigest,
+    processIdentityRef: successor.processIdentityRef, processIdentityDigest: successor.processIdentityDigest,
+    stateLockIdentityRef: successor.stateLockIdentityRef, stateLockIdentityDigest: successor.stateLockIdentityDigest,
+    instanceNonceDigest: successor.instanceNonceDigest, acquiredAt: successor.acquiredAt, evidenceDigest: successor.acquisitionEvidenceDigest,
+    priorOwnerEpoch: prior.ownerEpoch, priorTerminalRowDigest: terminal.rowDigest,
+    priorTransitionEvidenceRef: transitionEvidenceRef, priorTransitionEvidenceDigest: transitionEvidenceDigest,
+    priorTerminalReason: 'superseded_after_owner_death'
+  });
+  const transition = decodeStateOwnerTransitionEvidence(frozenArtifact(stateRoot, transitionEvidenceRef));
+  assert.deepEqual(transition, {
+    schemaVersion: 1, format: 'cliq-state-owner-transition-evidence-v1', kind: 'superseded_after_owner_death',
+    priorOwnerEpoch: prior.ownerEpoch, priorSupervisorInstanceId: prior.supervisorInstanceId,
+    priorProcessIdentityRef: prior.processIdentityRef, priorProcessIdentityDigest: prior.processIdentityDigest,
+    stateLockIdentityRef: prior.stateLockIdentityRef, stateLockIdentityDigest: prior.stateLockIdentityDigest,
+    observedAt: successor.acquiredAt, evidenceDigest: transitionEvidenceDigest,
+    priorProcessObservation: 'absent_or_start_token_mismatch', successorOwnerEpoch: successor.ownerEpoch,
+    successorSupervisorInstanceId: successor.supervisorInstanceId, successorRuntimeBundleRef: successor.runtimeBundleRef,
+    successorRuntimeBundleManifestDigest: successor.runtimeBundleManifestDigest,
+    successorProcessIdentityRef: successor.processIdentityRef, successorProcessIdentityDigest: successor.processIdentityDigest,
+    successorInstanceNonceDigest: successor.instanceNonceDigest
+  });
+  const original = new Map(before.map(row => [row.ref, row]));
+  assert.deepEqual(after.filter(row => original.has(row.ref)), before,
+    'refusal cannot remove or change any original artifact descriptor, label or timestamp');
+  const ownerObjects = new Map([
+    [successor.processIdentityRef, BigInt(canonicalJsonBytes(processIdentity).byteLength)],
+    [successor.acquisitionEvidenceRef, BigInt(canonicalJsonBytes(acquisition).byteLength)],
+    [transitionEvidenceRef, BigInt(canonicalJsonBytes(transition).byteLength)]
+  ]);
+  for (const [ref, byteLength] of ownerObjects) {
+    const row = after.find(row => row.ref === ref);
+    assert.ok(row, 'the independently verified successor closure must be registered');
+    assert.equal(row.byte_length, byteLength, 'successor descriptor length must equal its complete verified canonical bytes');
+  }
+  assert.deepEqual(after.filter(row => !original.has(row.ref)).map(row => row.ref),
+    [...ownerObjects.keys()].filter(ref => !original.has(ref)).sort(),
+    'refusal may register only its exact successor owner closure, never positive native/quarantine proof');
 }
 
 async function releaseForkTracer(tracer: LinuxForkTracer) {
@@ -2019,11 +2401,16 @@ async function supervisorCrashPreactivation(boundary: NonNullable<CrashChildInpu
         assert.deepEqual(readInvocationJournal(connection, fixture.runId), before.closure.journal);
         assert.deepEqual(readRequiredWorkerLaunch(connection, held.launch.launchId), held.launch);
         assert.deepEqual(readRequiredWorkspaceGenerationByRef(connection, held.generation.generationRef), held.generation);
-        assert.deepEqual(preactivationRefusalRows(connection, fixture.runId), held.refusalRows,
-          'invalid birth refusal cannot change any Run events, Journal, launch/generation rows or register positive native/quarantine proof');
+        const { artifacts: currentArtifacts, ...currentRows } = preactivationRefusalRows(connection, fixture.runId);
+        const { artifacts: originalArtifacts, ...originalRows } = held.refusalRows!;
+        assert.deepEqual(currentRows, originalRows,
+          'invalid birth refusal cannot change any Run events, Journal or launch/generation rows');
         const owner = readLatestStateOwner(connection)!;
-        assert.equal(owner.state, 'active'); assert.ok(owner.ownerEpoch > held.owner.ownerEpoch);
-        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId); return owner;
+        assert.ok(owner.state === 'active' && held.owner.state === 'active');
+        assert.notEqual(owner.supervisorInstanceId, held.owner.supervisorInstanceId);
+        assertRefusalArtifactChanges(fixture.stateRoot, originalArtifacts, currentArtifacts, held.owner,
+          readStateOwner(connection, held.owner.ownerEpoch), owner);
+        return owner;
       });
       const helperIdentity = frozenArtifact<PlatformProcessIdentityV1>(fixture.stateRoot, refusingOwner.processIdentityRef);
       assert.equal(helperIdentity.platform, 'linux'); assert.equal(helperIdentity.pid, helper.pid);
@@ -2685,6 +3072,7 @@ function frozenArtifact<T>(stateRoot: string, ref: string): T {
     assert.ok(before.isFile() && before.size <= 1024n * 1024n && before.nlink === 1n);
     assert.equal(before.mode & 0o7777n, 0o400n);
     const bytes = fs.readFileSync(fd);
+    assert.equal(createHash('sha256').update(bytes).digest('hex'), ref);
     const value: T = JSON.parse(bytes.toString('utf8'));
     assert.equal(canonicalSha256(value), ref); assert.deepEqual(canonicalJsonBytes(value), bytes);
     const after = fs.fstatSync(fd, { bigint: true });
@@ -2763,8 +3151,12 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
   }) as typeof fs.readSync;
   syncBuiltinESMExports();
   try {
-    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })),
-      /actual invocation or parent process identity was revoked/u);
+    // The lease recheck or the native release check can observe the same
+    // original process loss first. Both must refuse before the tool runs.
+    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })), {
+      code: 'RECOVERY_REQUIRED',
+      message: /^(?:native worker process or executable identity drifted|actual invocation or parent process identity was revoked)$/u
+    });
     assert.ok(fault, 'actual parent loss must be injected before the release; absent coverage is a failed campaign');
     const failed = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(failed.run.status, 'waiting'); assert.equal(failed.run.waitingReason, 'reconciliation');
@@ -2933,14 +3325,17 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
   const controllerImage = fixture.signed.bundle.entries.find(entry => entry.entryId === 'linux_worker_controller')!;
   assert.ok(controllerImage.executable && controllerImage.role === 'platform_helper');
   const recovery = execution.recoverWorker({ expectedRunRevision: failed.revision });
+  let recoverySettled = false;
+  void recovery.then(() => { recoverySettled = true; }, () => { recoverySettled = true; });
   const rejected = assert.rejects(recovery);
   void rejected.catch(() => {}); // Also awaited after the real close below.
-  let stopped: { pid: number; token: string; wait: WorkerDeathWait } | undefined;
+  let observed: { pid: number; token: string; wait: WorkerDeathWait } | undefined;
   const discoveryDeadline = performance.now() + 5000;
   // This fault target is a new direct child of this otherwise sequential
   // fixture, pinned to the installed signed controller bytes and token. It is
-  // only an OS test selection, never production authority or a receipt seam.
-  while (!stopped && performance.now() < discoveryDeadline) {
+  // only a read-only observation, never production authority or a receipt
+  // seam. Do not stop, trace or otherwise hold this genuine inspector open.
+  while (!observed && performance.now() < discoveryDeadline) {
     const run = fixture.store.getRun(fixture.runId);
     const wait = frozenArtifact<WorkerDeathWait>(fixture.stateRoot, run.waitingOnRef!);
     const children = [...directChildren()].filter(pid => !baseline.has(pid));
@@ -2960,50 +3355,59 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
           assert.equal(after.mtimeNs, before.mtimeNs); assert.equal(after.ctimeNs, before.ctimeNs);
           assert.equal(processToken(pid), token);
           assert.ok(directChildren().has(pid), 'controller remains an actual direct child');
-          process.kill(pid, 'SIGSTOP');
-          stopped = { pid, token, wait };
+          const current = fixture.store.getRun(fixture.runId);
+          assert.equal(current.waitingOnRef, run.waitingOnRef, 'the original inspection must still own its exact in-flight nonce');
+          assert.equal(recoverySettled, false, 'a completed operation cannot stand in for an actual in-flight inspector');
+          observed = { pid, token, wait };
         }
       } finally { fs.closeSync(fd); }
     }
-    if (!stopped) await delay(1);
+    if (!observed) await delay(1);
   }
-  assert.ok(stopped, 'actual in-flight controller must be pinned and stopped; missing coverage fails the campaign');
-  const stopDeadline = performance.now() + 1000;
-  for (;;) {
-    const line = fs.readFileSync(`/proc/${stopped.pid}/stat`, 'utf8');
-    const state = line.slice(line.lastIndexOf(')') + 2).split(' ')[0];
-    assert.equal(processToken(stopped.pid), stopped.token);
-    if (state === 'T') break;
-    assert.ok(performance.now() < stopDeadline, 'SIGSTOP must be an actual kernel-observed state');
-    await delay(1);
-  }
-  assert.equal(stopped.wait.probeState.phase, 'automatic_in_flight');
-  if (stopped.wait.probeState.phase !== 'automatic_in_flight') throw new Error('fault did not freeze its inspection dispatch');
-  const dispatch = stopped.wait.probeState.dispatch;
+  assert.ok(observed, 'actual unpaused in-flight controller must be pinned; missing coverage fails the campaign');
+  assert.equal(observed.wait.probeState.phase, 'automatic_in_flight');
+  if (observed.wait.probeState.phase !== 'automatic_in_flight') throw new Error('observation did not select its original inspection dispatch');
+  const dispatch = observed.wait.probeState.dispatch;
   if (dispatch.subjectKind !== 'worker_recovery') throw new Error('fault did not select the worker inspector');
-  const oldWorker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, stopped.wait.subject.oldWorkerIdentity));
+  const oldWorker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, observed.wait.subject.oldWorkerIdentity));
   assert.equal(dispatch.owningSupervisorInstanceId, oldWorker.supervisorInstanceId, 'this is the original live-owner inspection');
+  assert.equal(processToken(observed.pid), observed.token);
+  assert.ok(directChildren().has(observed.pid));
+  assert.equal(recoverySettled, false);
+  assert.ok(sampleCanonicalNow() < dispatch.probeDeadlineAt, 'shutdown must begin before the original deadline');
   const closingAt = performance.now();
-  await bounded(fixture.store.close(), 45_000);
+  const closing = fixture.store.close();
+  // The bound is an assertion, not a replacement for the actual resource join.
+  // A failed bound still awaits the original close before propagating failure.
+  try { await bounded(closing, 2000); }
+  finally { await closing; }
+  const closeElapsedMs = performance.now() - closingAt;
+  assert.ok(closeElapsedMs <= 2000, 'the original Store close must genuinely complete within two seconds');
   await rejected;
-  await assert.rejects(access(`/proc/${stopped.pid}`), { code: 'ENOENT' });
+  await assert.rejects(access(`/proc/${observed.pid}`), { code: 'ENOENT' });
+  assert.deepEqual(directChildren(), baseline, 'the original close joins every actual inspector child');
   const store = await openStateStore(fixture.stateRoot, fixture.runtimeAuthority);
   try {
     const cut = await store.readRecoveryClosure(fixture.runId);
     const wait = await store.artifacts.readCanonical<WorkerDeathWait>(cut.run.waitingOnRef!);
     assert.equal(wait.probeState.phase, 'automatic_pending'); assert.equal(wait.probeState.automaticProbeCount, 1);
     if (wait.probeState.phase !== 'automatic_pending' || wait.probeState.automaticProbeCount !== 1) {
-      throw new Error('same-owner cancellation did not close one exact deadline/nonce');
+      throw new Error('same-owner cancellation did not close one exact original nonce');
     }
     const wrapper = await store.artifacts.readCanonical<ReconciliationProbeEvidenceV1>(wait.probeState.lastProbeEvidenceRef);
-    assert.equal(wrapper.outcome, 'probe_timeout');
-    if (wrapper.outcome !== 'probe_timeout') throw new Error('cancelled inspection installed a late subject proof');
-    const closure = await store.artifacts.readCanonical<ReconciliationProbeTimeoutClosureV1>(wrapper.timeoutClosureRef);
-    if (closure.subjectKind !== 'worker_recovery') throw new Error('timeout belongs to another subject');
+    assert.equal(wrapper.outcome, 'probe_cancelled');
+    if (wrapper.outcome !== 'probe_cancelled') throw new Error('cancelled inspection installed a timeout or late subject proof');
+    assert.equal(wrapper.cancellationReason, 'owning_supervisor_shutdown');
+    const closure = await store.artifacts.readCanonical<ReconciliationProbeCancellationClosureV1>(wrapper.cancellationClosureRef);
+    if (closure.subjectKind !== 'worker_recovery') throw new Error('cancellation belongs to another subject');
+    assert.equal(closure.reason, 'owning_supervisor_shutdown');
     assert.equal(closure.taskClosure.closureKind, 'cancelled_and_joined');
-    assert.equal(closure.waitingSubjectRef, canonicalSha256(stopped.wait));
+    assert.equal(closure.waitingSubjectRef, canonicalSha256(observed.wait));
     assert.equal(closure.probeNonceDigest, dispatch.probeNonceDigest); assert.equal(closure.probeDispatchDigest, dispatch.dispatchDigest);
-    assert.equal(closure.inspectorTaskId, dispatch.inspectorTaskId); assert.ok(closure.closedAt >= dispatch.probeDeadlineAt);
+    assert.equal(closure.inspectorTaskId, dispatch.inspectorTaskId);
+    assert.ok(closure.closedAt < dispatch.probeDeadlineAt, 'a real shutdown closure must not wait for or pretend to expire the original deadline');
+    assert.equal(wait.probeState.nextProbeAt, new Date(Date.parse(dispatch.probeDeadlineAt) + 1000).toISOString(),
+      'cancellation preserves the original deadline and first backoff rather than making an early retry eligible');
     assert.equal(cut.run.latestCheckpointId, failed.latestCheckpointId); assert.equal(cut.run.budgetReserved.toolCalls, 0);
     assert.equal(cut.journal.filter(entry => entry.opKind === 'tool').length, 0);
     const generation = cut.workspaceGenerations.find(row => row.generationRef === wait.subject.workspaceGenerationRef)!;
@@ -3013,10 +3417,10 @@ async function closeActualInspection(fixture: Awaited<ReturnType<typeof createLi
     assert.equal(store.getRun(fixture.runId).revision, revision); assert.equal(store.getRun(fixture.runId).waitingOnRef, waitingOnRef);
     await delay(Math.max(0, Date.parse(wait.probeState.nextProbeAt) - Date.now()));
     const replacement = await store.loadRunExecution({ runId: fixture.runId, material: fixture.authority.material });
-    console.log(JSON.stringify({ scenario: 'actual-inspection-cancelled-and-joined', pid: stopped.pid, processStartToken: stopped.token,
-      probeNonceDigest: dispatch.probeNonceDigest, timeoutClosureRef: wrapper.timeoutClosureRef,
-      closeElapsedMs: performance.now() - closingAt, nextProbeAt: wait.probeState.nextProbeAt,
-      note: 'real SIGSTOP, public Store.close abort plus native join, actual wall-clock persisted deadline; no late proof' }));
+    console.log(JSON.stringify({ scenario: 'actual-inspection-cancelled-and-joined', pid: observed.pid, processStartToken: observed.token,
+      probeNonceDigest: dispatch.probeNonceDigest, cancellationClosureRef: wrapper.cancellationClosureRef,
+      closeElapsedMs, nextProbeAt: wait.probeState.nextProbeAt,
+      note: 'unpaused actual controller, public Store.close abort plus native join within two seconds and genuine pre-deadline cancellation; not installed Supervisor SIGTERM qualification' }));
     return { store, execution: replacement };
   } catch (error) { await store.close(); throw error; }
 }
@@ -3030,18 +3434,17 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
   const policyPath = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY, before.runSpec.policyRef);
   const sample = await open(policyPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const policyIdentity = await sample.stat({ bigint: true });
-  const filePrototype = Object.getPrototypeOf(sample) as { readFile: FileHandle['readFile'] };
-  const originalReadFile = filePrototype.readFile;
+  const filePrototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'read'>;
+  const originalRead = filePrototype.read;
   await sample.close();
   let fault: { workerPid: number; processStartToken: string; generationRef: string; scope: string;
     originalPath: string; originalDevice: bigint; originalInode: bigint } | undefined;
-  // FileHandle.readFile is the actual CAS OS boundary (CAS is asynchronous;
-  // mocking fs.readSync would not exercise this path). Return real OS bytes
-  // everywhere except the single explicitly injected I/O failure after an
-  // exact frozen worker is SIGKILLed, before any tool attempt exists.
-  filePrototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
-    const bytes: unknown = await Reflect.apply(originalReadFile, this, args);
-    if (!fault && Buffer.isBuffer(bytes)) {
+  // FileHandle.read is the actual bounded CAS OS boundary. Complete that
+  // original read without changing its bytes/EOF, then inject the single I/O
+  // failure after an exact frozen worker is SIGKILLed, before any tool attempt.
+  filePrototype.read = (async function(this: FileHandle, ...args: unknown[]) {
+    const result: Awaited<ReturnType<FileHandle['read']>> = await Reflect.apply(originalRead, this, args);
+    if (!fault && result.bytesRead > 0) {
       const held = fs.fstatSync(this.fd, { bigint: true });
       if (held.dev === policyIdentity.dev && held.ino === policyIdentity.ino) {
         const launch = metadata.readSnapshot(connection => {
@@ -3053,6 +3456,14 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
           return readRequiredWorkerLaunch(connection, row.active_worker_launch_id);
         });
         if (launch?.phase === 'activated') {
+          // Independently verify all real bytes from this same original held
+          // inode; a bounded first chunk is not the complete policy artifact.
+          const bytes = Buffer.alloc(Number(policyIdentity.size));
+          for (let offset = 0; offset < bytes.length;) {
+            const count = fs.readSync(this.fd, bytes, offset, bytes.length - offset, offset);
+            assert.ok(count > 0); offset += count;
+          }
+          assert.equal(createHash('sha256').update(bytes).digest('hex'), before.runSpec.policyRef);
           assert.equal(canonicalSha256(JSON.parse(bytes.toString('utf8'))), before.runSpec.policyRef);
           const worker = decodeWorkerIdentity(frozenArtifact<WorkerIdentity>(fixture.stateRoot, launch.workerIdentityDigest!));
           const containment = decodeWorkerProcessContainment(frozenArtifact(fixture.stateRoot, launch.processContainmentRef!));
@@ -3072,13 +3483,13 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
         }
       }
     }
-    return bytes;
-  }) as FileHandle['readFile'];
+    return result;
+  }) as FileHandle['read'];
   try {
     await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })));
     assert.ok(fault, 'activated-before-prepare loss must occur; missing fault coverage fails the campaign');
     // Remove the OS instrumentation before native inspection/recovery.
-    filePrototype.readFile = originalReadFile;
+    filePrototype.read = originalRead;
     const failed = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(failed.run.status, 'waiting'); assert.equal(failed.run.waitingReason, 'reconciliation');
     const wait = await fixture.store.artifacts.readCanonical<WorkerDeathWait>(failed.run.waitingOnRef!);
@@ -3123,7 +3534,7 @@ async function noOpenInvocationRecovery(cancelInspection = false) {
       restoredCheckpointId: before.latestCheckpoint.id, nativeEffectsAfterRecovery: 1,
       note: 'actual native whole-hierarchy death plus descriptor archive; CAS EIO explicitly injected at OS boundary' }));
   } finally {
-    filePrototype.readFile = originalReadFile; metadata.close();
+    filePrototype.read = originalRead; metadata.close();
     if (store !== fixture.store) await store.close();
     try { await fixture.dispose(); }
     catch (error) { console.error('no-open recovery StateStore.close failed:', error); throw error; }
@@ -3511,7 +3922,8 @@ for (const [scenario, run] of [
   ['timeout-retirement-failure', () => retirementFailureKeepsOwner('timeout_closure')],
   ['worker-recovery-first-inflight-cancel', () => parentLossBeforeRelease(true, true, true)],
   ['edit-search-semantics', nativeEditSearchSemantics],
-  ['received-tool-death-publication-failure', receivedToolSurvivesDeathPublicationFailure]
+  ['received-tool-death-publication-failure', receivedToolSurvivesDeathPublicationFailure],
+  ['final-turn-retained-publication', finalTurnRetainedPublication]
 ] as const) {
   console.log(JSON.stringify({ scenario, phase: 'start' }));
   try { await run(); }

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, realpath, rename, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../config.js';
 import { digestOmitting } from '../kernel/identity.js';
 import { testFixture } from '../model/testing/fixtures.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
@@ -17,6 +17,74 @@ import { signedToolBundle } from './testing/tool-authority.js';
 import { createInstalledRuntime, type HeldInstalledRuntime } from './installed-runtime.js';
 import { writeInstalledControlPackage } from './testing/installed-control-fixture.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
+import { kernelSchemaBirthRecipe } from './schema.js';
+
+// A real signed ordinary Store and native owner on the current host. This
+// tests retained manifest reading, not a Linux installation or execution.
+for (const schemaVersion of [1, 2] as const) test(`a signed manifest${schemaVersion} reopens and rewalks both actual owner epochs`, async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-owner-manifest-version-')));
+  await chmod(root, 0o700);
+  let store: StateStore | undefined;
+  try {
+    const signed = await signedToolBundle(testFixture().assembly, [], schemaVersion);
+    store = await openStateStore(root, signed);
+    assert.equal(store.ownerEpoch, 1);
+    assert.equal(ownerAt(root).runtimeBundleRef, canonicalSha256(signed.bundle));
+    await store.close(); store = undefined;
+    store = await openStateStore(root, signed);
+    assert.equal(store.ownerEpoch, 2);
+    const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+    try {
+      const history = await readRetainedStateOwnerHistory(driver, store.artifacts, 2);
+      assert.deepEqual(history.entries.map(entry => entry.owner.ownerEpoch), [1, 2]);
+      for (const entry of history.entries) {
+        assert.equal(entry.owner.runtimeBundleRef, canonicalSha256(signed.bundle));
+        assert.equal(entry.owner.runtimeBundleManifestDigest, signed.bundle.manifestDigest);
+      }
+      driver.transaction(connection => history.assertUnchanged(connection));
+      await store.close(); store = undefined;
+      assert.throws(() => driver.transaction(connection => history.assertUnchanged(connection)), /history changed before commit/u);
+    } finally { driver.close(); }
+  } finally { await store?.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('retained manifest2 reading rejects missing, substituted and cross-version custody fields before using the birth', async () => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-owner-manifest-closure-')));
+  await chmod(root, 0o700);
+  let store: StateStore | undefined;
+  try {
+    const signed = await signedToolBundle(testFixture().assembly, [], 2);
+    store = await openStateStore(root, signed);
+    const original = ownerAt(root);
+    const acquisition = await store.artifacts.readCanonical<StateOwnerAcquisitionEvidenceV1>(original.acquisitionEvidenceRef);
+    const { installedLayout: _layout, ...missing } = signed.bundle as typeof signed.bundle & { installedLayout: string };
+    const malformed = [missing, { ...signed.bundle, installedLayout: 'another-layout' },
+      { ...signed.bundle, installedLayout: null }, { ...signed.bundle, extraCustody: true },
+      { ...signed.bundle, schemaVersion: 1 }, { ...signed.bundle, schemaVersion: 3 }];
+    const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+    try {
+      for (const value of malformed) {
+        const { signature, manifestDigest: _digest, ...core } = value;
+        const replacement = { ...core, manifestDigest: canonicalSha256(core), signature };
+        const manifest = await store.artifacts.publishCanonical(replacement, 'cliq-test-rejection-input');
+        const changedAcquisition = { ...acquisition, runtimeBundleRef: manifest.ref,
+          runtimeBundleManifestDigest: replacement.manifestDigest, evidenceDigest: '' };
+        changedAcquisition.evidenceDigest = digestOmitting(changedAcquisition, 'evidenceDigest');
+        const acquired = await store.artifacts.publishCanonical(changedAcquisition, acquisition.format);
+        const changedOwner = { ...original, runtimeBundleRef: manifest.ref, runtimeBundleManifestDigest: replacement.manifestDigest,
+          acquisitionEvidenceRef: acquired.ref, acquisitionEvidenceDigest: changedAcquisition.evidenceDigest, rowDigest: '' };
+        changedOwner.rowDigest = digestOmitting(changedOwner, 'rowDigest');
+        try {
+          replaceRow(driver, changedOwner); // Rejection-only data; never an input to acquire or execute anything.
+          await assert.rejects(readRetainedStateOwnerHistory(driver, store.artifacts, 1),
+            { code: 'RECOVERY_REQUIRED', message: 'retained StateOwner runtime manifest is invalid' });
+        } finally { replaceRow(driver, original); }
+      }
+      const genuine = await readRetainedStateOwnerHistory(driver, store.artifacts, 1);
+      driver.transaction(connection => genuine.assertUnchanged(connection));
+    } finally { driver.close(); }
+  } finally { await store?.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 test('reopening rewalks the original process graph beyond the immediate predecessor', async () => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-owner-history-')));
@@ -324,6 +392,65 @@ test('a rehashed grandparent takeover cannot substitute its original successor i
     }
   } finally { await store?.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+for (const runtimeKind of ['schema-only', 'signed'] as const)
+  test(`retained ${runtimeKind} genesis rejects a self-rehashed known older birth from a real Store`, async () => {
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'cliq-owner-birth-source-')));
+    await chmod(root, 0o700);
+    let store: StateStore | undefined;
+    try {
+      const authority = runtimeKind === 'signed' ? await signedToolBundle(testFixture().assembly, []) : undefined;
+      store = await openStateStore(root, authority);
+      const original = ownerAt(root);
+      const acquisition = await store.artifacts.readCanonical<StateOwnerAcquisitionEvidenceV1>(original.acquisitionEvidenceRef);
+      assert(acquisition.kind === 'genesis');
+      const generation = await store.artifacts.readCanonical<KernelGenerationIdentityV1>(acquisition.kernelGenerationIdentityRef);
+      assert.equal(generation.origin, 'fresh_empty');
+      const prior = kernelSchemaBirthRecipe(6);
+      assert.equal(generation.stateSchemaVersion, KERNEL_STATE_SCHEMA_VERSION);
+      assert(prior.userVersion < generation.stateSchemaVersion);
+      const originalSchema = await store.artifacts.readCanonical<{ userVersion: number; schemaDigest: string; manifestDigest: string }>(
+        generation.pristineSchemaManifestRef);
+      const schema = { ...originalSchema, userVersion: prior.userVersion, schemaDigest: prior.schemaDigest, manifestDigest: '' };
+      schema.manifestDigest = digestOmitting(schema, 'manifestDigest');
+      const schemaArtifact = await store.artifacts.publishCanonical(schema, 'cliq-kernel-schema-manifest-v1');
+      const originalDatabase = await store.artifacts.readCanonical<{ userVersion: number; contentDigest: string }>(generation.databaseImageRef);
+      const database = { ...originalDatabase, userVersion: prior.userVersion, contentDigest: prior.emptyDatabaseContentDigest };
+      const databaseArtifact = await store.artifacts.publishCanonical(database, 'cliq-kernel-empty-database-v1');
+      const changedGeneration = { ...generation, stateSchemaVersion: prior.userVersion,
+        pristineSchemaManifestRef: schemaArtifact.ref, pristineSchemaManifestDigest: schema.manifestDigest,
+        pristineSchemaDigest: prior.schemaDigest, databaseImageRef: databaseArtifact.ref,
+        databaseImageDigest: databaseArtifact.ref, databaseIdentityDigest: databaseArtifact.ref,
+        databaseContentDigest: prior.emptyDatabaseContentDigest, generationDigest: '' };
+      changedGeneration.generationDigest = digestOmitting(changedGeneration, 'generationDigest');
+      const birth = await store.artifacts.publishCanonical(changedGeneration, generation.format);
+      const changedAcquisition = { ...acquisition, kernelGenerationIdentityRef: birth.ref,
+        kernelGenerationIdentityDigest: changedGeneration.generationDigest, evidenceDigest: '' };
+      changedAcquisition.evidenceDigest = digestOmitting(changedAcquisition, 'evidenceDigest');
+      const acquired = await store.artifacts.publishCanonical(changedAcquisition, acquisition.format);
+      const changedOwner = { ...original, acquisitionEvidenceRef: acquired.ref,
+        acquisitionEvidenceDigest: changedAcquisition.evidenceDigest, rowDigest: '' };
+      changedOwner.rowDigest = digestOmitting(changedOwner, 'rowDigest');
+      const driver = openSqliteDriver(path.join(root, KERNEL_DATABASE_FILENAME));
+      try {
+        const genuine = await readRetainedStateOwnerHistory(driver, store.artifacts, 1);
+        driver.transaction(connection => genuine.assertUnchanged(connection));
+        try {
+          // Only the disposable refusal input changes; the original runtime,
+          // genuine native owner and current database schema remain untouched.
+          replaceRow(driver, changedOwner);
+          await assert.rejects(readRetainedStateOwnerHistory(driver, store.artifacts, 1), error =>
+            error instanceof Error && Reflect.get(error, 'code') === 'RECOVERY_REQUIRED' &&
+            (runtimeKind === 'schema-only' ? /original runtime schema/u : /original schema authority/u).test(error.message));
+        } finally {
+          replaceRow(driver, original);
+          const restored = await readRetainedStateOwnerHistory(driver, store.artifacts, 1);
+          assert.equal(restored.entries[0]!.owner.rowDigest, original.rowDigest);
+          driver.transaction(connection => restored.assertUnchanged(connection));
+        }
+      } finally { driver.close(); }
+    } finally { await store?.close(); await rm(root, { recursive: true, force: true }); }
+  });
 
 for (const fault of ['generation_digest', 'unsupported_origin', 'unsupported_schema', 'foreign_root', 'extra_field'] as const)
   test(`retained genesis rejects a self-rehashed ${fault} graph from a real birth`, async () => {

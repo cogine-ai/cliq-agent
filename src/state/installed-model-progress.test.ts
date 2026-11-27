@@ -15,11 +15,12 @@ test('a settled no-claim preparation failure wakes maintenance only when the ori
   assert.equal(selectInstalledModelProgress({ ...failed, hasDispatchClaim: true }), 'retain');
 });
 
-test('a completed unusable observation must stop while a successful candidate remains retained', () => {
+test('a settled final observation hands off to candidate completion without preparing another model request', () => {
   const completed: InstalledModelProgress = { phase: 'completed', disposition: 'stop_required',
     hasDispatchClaim: true, hasSettlement: true, retry: 'completed' };
   assert.equal(selectInstalledModelProgress(completed), 'stop');
-  assert.equal(selectInstalledModelProgress({ ...completed, disposition: 'candidate_required' }), 'retain');
+  assert.equal(selectInstalledModelProgress({ ...completed, disposition: 'candidate_required' }), 'candidate');
+  assert.equal(selectInstalledModelProgress({ ...completed, disposition: 'candidate_required', hasSettlement: false }), 'retain');
   assert.equal(selectInstalledModelProgress({ ...completed, disposition: undefined }), 'retain');
 });
 

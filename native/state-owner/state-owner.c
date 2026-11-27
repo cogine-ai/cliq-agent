@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -18,6 +20,7 @@
 #include <libproc.h>
 #elif defined(__linux__)
 #include <linux/magic.h>
+#include <sys/syscall.h>
 #include <sys/vfs.h>
 #endif
 
@@ -57,6 +60,12 @@ typedef struct control_listener control_listener;
 typedef struct generation_tree generation_tree;
 typedef struct source_staging source_staging;
 typedef struct worker_reservation worker_reservation;
+typedef struct preparation_git_input preparation_git_input;
+typedef struct publication_operation publication_operation;
+typedef struct publication_git_reader publication_git_reader;
+typedef struct admin_mcp_input admin_mcp_input;
+typedef struct run_mcp_stdio_input run_mcp_stdio_input;
+typedef struct recovery_mcp_stdio_input recovery_mcp_stdio_input;
 
 typedef struct {
     int root_fd, runtime_fd, lock_fd;
@@ -66,12 +75,32 @@ typedef struct {
     generation_tree *trees;
     source_staging *source_stagings;
     worker_reservation *worker_reservations;
+    publication_operation *publication_operations;
+    publication_git_reader *publication_git_readers;
+    admin_mcp_input *admin_mcp_inputs;
+    int admin_mcp_retirement_error;
+    run_mcp_stdio_input *run_mcp_stdio_inputs;
+    int run_mcp_stdio_retirement_error;
+    recovery_mcp_stdio_input *recovery_mcp_stdio_inputs;
+    int recovery_mcp_stdio_retirement_error;
     int source_retirement_error, worker_reservation_error, generation_retirement_error;
     int process_observation_retirement_error;
+    int publication_retirement_error;
+    /* Physical Owner borrower count, retaining its original field/layout.
+     * Migration friends separately prove their actual global EX gate; local
+     * input friends borrow only this Owner and gain no EX/credential rights.
+     * Neither this count nor the account gate alone selects another Root. */
+    napi_env owner_env;
+    pid_t owner_pid;
+    uid_t owner_uid;
+    gid_t owner_gid;
+    pthread_t owner_thread;
+    unsigned int migration_bindings;
+    int migration_retirement_error;
     int finalized;
 } state_lock;
 
-static const napi_type_tag lock_tag = {0x3d641bc705864cfbULL, 0xab53499f3ee988c4ULL};
+static const napi_type_tag lock_tag = {0x8241692a33014713ULL, 0xb47e01d236db9c54ULL};
 
 static napi_value assert_prior_process_dead(napi_env env, napi_callback_info info);
 static napi_value observe_prior_process_death(napi_env env, napi_callback_info info);
@@ -85,17 +114,49 @@ static napi_value open_generation_tree(napi_env env, napi_callback_info info);
 static int close_lock_source_stagings(state_lock *lock);
 static napi_value create_source_staging(napi_env env, napi_callback_info info);
 static napi_value open_source_staging(napi_env env, napi_callback_info info);
+static napi_value decode_source_git_lifecycle(napi_env env, napi_callback_info info);
 static int close_lock_worker_reservations(state_lock *lock);
+static int close_tree_preparation_inputs(generation_tree *tree);
+static int tree_preparation_inputs_retired(generation_tree *tree);
+static int close_reservation_preparation_inputs(worker_reservation *reservation);
+static napi_value worker_reservation_preparation_input(napi_env env, napi_callback_info info);
+static napi_value worker_reservation_retained_preparation_input(napi_env env, napi_callback_info info);
 static napi_value create_worker_reservation(napi_env env, napi_callback_info info);
 static napi_value open_worker_reservation(napi_env env, napi_callback_info info);
+static int close_lock_publication_operations(state_lock *lock);
+static int close_lock_publication_git_readers(state_lock *lock);
+static napi_value open_publication_git_index(napi_env env, napi_callback_info info);
+static napi_value open_publication_operation(napi_env env, napi_callback_info info);
+static napi_value open_publication_namespace_observer(napi_env env, napi_callback_info info);
+static int close_lock_admin_mcp_inputs(state_lock *lock);
+static napi_value create_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value open_absent_admin_mcp_input(napi_env env,napi_callback_info info);
+static napi_value decode_admin_mcp_lifecycle(napi_env env,napi_callback_info info);
+static int close_lock_run_mcp_stdio_inputs(state_lock *lock);
+static int close_lock_recovery_mcp_stdio_inputs(state_lock *lock);
+static napi_value create_recovery_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_recovery_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value create_run_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_run_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value create_admin_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_admin_mcp_stdio_input(napi_env env,napi_callback_info info);
+static napi_value create_local_inference_input(napi_env env,napi_callback_info info);
+static napi_value open_retained_local_inference_input(napi_env env,napi_callback_info info);
 
 /* Reopening a path is only a locator check. Authority stays on these held
  * descriptors, and flock is released solely by closing the lock descriptor. */
 static void close_lock(state_lock *lock) {
+    if (lock->migration_bindings || lock->migration_retirement_error) return;
+    if (close_lock_run_mcp_stdio_inputs(lock)) return;
+    if (close_lock_recovery_mcp_stdio_inputs(lock)) return;
+    if (close_lock_admin_mcp_inputs(lock)) return;
+    if (close_lock_publication_git_readers(lock)) return;
     close_lock_listeners(lock);
     close_lock_trees(lock);
     close_lock_source_stagings(lock);
     close_lock_worker_reservations(lock);
+    close_lock_publication_operations(lock);
     if (lock->lock_fd >= 0) close(lock->lock_fd);
     if (lock->runtime_fd >= 0) close(lock->runtime_fd);
     if (lock->root_fd >= 0) close(lock->root_fd);
@@ -103,7 +164,7 @@ static void close_lock(state_lock *lock) {
 }
 
 static void free_lock_if_done(state_lock *lock) {
-    if (!lock->finalized || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations) return;
+    if (!lock->finalized || lock->migration_bindings || lock->migration_retirement_error || lock->trees || lock->listeners || lock->source_stagings || lock->worker_reservations || lock->publication_operations || lock->publication_git_readers || lock->admin_mcp_inputs || lock->run_mcp_stdio_inputs || lock->recovery_mcp_stdio_inputs) return;
     free(lock->path);
     free(lock);
 }
@@ -113,7 +174,7 @@ static void finalize_lock(napi_env env, void *data, void *hint) {
     state_lock *lock = data;
     /* Fatal observation uncertainty cannot turn GC into a successful release.
      * Retain this exact allocation and its OS lock until actual process death. */
-    if (lock->process_observation_retirement_error) return;
+    if (lock->migration_bindings || lock->migration_retirement_error || lock->process_observation_retirement_error || lock->publication_retirement_error || lock->admin_mcp_retirement_error || lock->run_mcp_stdio_retirement_error || lock->recovery_mcp_stdio_retirement_error) return;
     close_lock(lock);
     lock->finalized = 1;
     free_lock_if_done(lock);
@@ -198,9 +259,21 @@ static state_lock *unwrap_lock(napi_env env, napi_callback_info info) {
 static napi_value assert_held(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (lock->migration_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "StateOwner resource binding is uncertain; StateOwner remains held"); return NULL;
+    }
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
     if (lock->generation_retirement_error) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
+    }
+    if (lock->publication_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "publication descriptors did not retire; StateOwner remains held"); return NULL;
+    }
+    if (lock->recovery_mcp_stdio_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "Recovery MCP stdio custody did not retire; StateOwner remains held"); return NULL;
+    }
+    if (lock->run_mcp_stdio_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "Run MCP stdio custody did not retire; StateOwner remains held"); return NULL;
     }
     if (!lock_is_held(lock)) return native_error(env, "StateOwner root/runtime/lock descriptor identity changed or closed");
     napi_value result;
@@ -211,15 +284,26 @@ static napi_value assert_held(napi_env env, napi_callback_info info) {
 static napi_value release_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = unwrap_lock(env, info);
     if (!lock) return NULL;
+    if (lock->migration_bindings || lock->migration_retirement_error) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "StateOwner resource bindings remain; StateOwner stays held"); return NULL;
+    }
     if (lock->process_observation_retirement_error) return prior_process_observation_retirement_error(env, lock);
+    if (close_lock_run_mcp_stdio_inputs(lock)) { napi_throw_error(env,"ERR_CLIQ_RESOURCE_RETIREMENT","Run MCP stdio resources did not retire; StateOwner remains held"); return NULL; }
+    if (close_lock_recovery_mcp_stdio_inputs(lock)) { napi_throw_error(env,"ERR_CLIQ_RESOURCE_RETIREMENT","Recovery MCP stdio resources did not retire; StateOwner remains held"); return NULL; }
+    if (close_lock_admin_mcp_inputs(lock)) { napi_throw_error(env,"ERR_CLIQ_RESOURCE_RETIREMENT","Admin MCP resources did not retire; StateOwner remains held"); return NULL; }
     int source_failed = close_lock_source_stagings(lock);
     int reservation_failed = close_lock_worker_reservations(lock);
+    int publication_failed = close_lock_publication_operations(lock);
+    if (close_lock_publication_git_readers(lock)) publication_failed = 1;
     close_lock_trees(lock);
     if (source_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "source staging descriptors did not retire; StateOwner remains held"); return NULL;
     }
     if (reservation_failed) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "worker reservation descriptors did not retire; StateOwner remains held"); return NULL;
+    }
+    if (publication_failed) {
+        napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "publication descriptors did not retire; StateOwner remains held"); return NULL;
     }
     if (lock->generation_retirement_error) {
         napi_throw_error(env, "ERR_CLIQ_RESOURCE_RETIREMENT", "generation descriptors did not retire; StateOwner remains held"); return NULL;
@@ -261,6 +345,11 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
     state_lock *lock = calloc(1, sizeof(*lock));
     if (!lock) return native_error(env, "StateOwner lock allocation failed");
     lock->root_fd = lock->runtime_fd = lock->lock_fd = -1;
+    lock->owner_env = env;
+    lock->owner_pid = getpid();
+    lock->owner_uid = geteuid();
+    lock->owner_gid = getegid();
+    lock->owner_thread = pthread_self();
     lock->path = malloc(length + 1);
     const char *error = "cannot open StateOwner root without following symlinks";
     if (!lock->path || napi_get_value_string_utf8(env, argv[0], lock->path, length + 1, &length) != napi_ok ||
@@ -301,6 +390,20 @@ static napi_value acquire_lock(napi_env env, napi_callback_info info) {
         {"openSourceInspectionStaging", NULL, open_source_staging, NULL, NULL, NULL, napi_default, NULL},
         {"createWorkerReservation", NULL, create_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkerReservation", NULL, open_worker_reservation, NULL, NULL, NULL, napi_default, NULL},
+        {"createAdminMcpInput", NULL, create_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedAdminMcpInput", NULL, open_retained_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openAbsentAdminMcpInput", NULL, open_absent_admin_mcp_input, NULL, NULL, NULL, napi_default, NULL},
+        {"createRunMcpStdioInput", NULL, create_run_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedRunMcpStdioInput", NULL, open_retained_run_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"createRecoveryMcpStdioInput", NULL, create_recovery_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"createLocalInferenceInput", NULL, create_local_inference_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedLocalInferenceInput", NULL, open_retained_local_inference_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedRecoveryMcpStdioInput", NULL, open_retained_recovery_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"createAdminMcpStdioInput", NULL, create_admin_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openRetainedAdminMcpStdioInput", NULL, open_retained_admin_mcp_stdio_input, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationOperation", NULL, open_publication_operation, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationNamespaceObserver", NULL, open_publication_namespace_observer, NULL, NULL, NULL, napi_default, NULL},
+        {"openPublicationGitIndex", NULL, open_publication_git_index, NULL, NULL, NULL, napi_default, NULL},
         {"close", NULL, release_lock, NULL, NULL, NULL, napi_default, NULL}
     };
     error = "StateOwner lock handle creation failed";
@@ -537,13 +640,37 @@ static int observe_process(pid_t pid, char token[128]) {
 
 #include "control-socket.c"
 #include "control-client.c"
+#include "client-stdio.c"
+#include "client-data-lock.h"
 #include "installed-exec.c"
 #include "installed-anchor.c"
 #include "generation-tree.c"
 #include "source-staging.c"
 #include "worker-reservation.c"
+#include "preparation-git-input.c"
 #include "source-root.c"
+#include "source-git-input.c"
+#include "source-git-lifecycle.c"
+#include "admin-mcp-input.c"
+#include "run-mcp-stdio-input.c"
+#include "recovery-mcp-stdio-input.c"
+#include "local-inference-input.c"
+#include "mcp-stdio-lifecycle-data.c"
+#include "mcp-admin-original-retirement-data.c"
+#include "publication.c"
+#include "publication-git-index.c"
+#include "kernel-global-gate.c"
 #include "credential-authority.c"
+#include "model-archive-current-check.h"
+#include "kernel-archive-runtime-witness.h"
+#include "migration-candidate-borrow.h"
+#include "migration-fs.c"
+#include "migration-entry.c"
+#include "migration-startup.c"
+#include "prepared-import-candidate.c"
+#include "local-model-store-archive.h"
+#include "kernel-archive.c"
+#include "local-model-store.c"
 
 static napi_value process_start_token(napi_env env, napi_callback_info info) {
     (void)info;
@@ -625,12 +752,39 @@ static napi_value initialize(napi_env env, napi_value exports) {
     const napi_property_descriptor methods[] = {
         {"acquireLock", NULL, acquire_lock, NULL, NULL, NULL, napi_default, NULL},
         {"acquireCredentialScope", NULL, acquire_credential_scope, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireLocalModelStore", NULL, acquire_local_model_store, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectExistingLocalModelStore", NULL, inspect_existing_local_model_store, NULL, NULL, NULL, napi_default, NULL},
+        {"deriveLocalModelStoreGate", NULL, derive_local_model_store_gate, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectKernelGlobalGate", NULL, inspect_kernel_global_gate, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireKernelGlobalShared", NULL, acquire_kernel_global_shared, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireKernelGlobalExclusive", NULL, acquire_kernel_global_exclusive, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectLegacyEntry", NULL, inspect_legacy_entry, NULL, NULL, NULL, napi_default, NULL},
+        {"verifyLegacyMigratedAuth", NULL, verify_legacy_migrated_auth, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectKernelMigrationEntry", NULL, inspect_kernel_migration_entry, NULL, NULL, NULL, napi_default, NULL},
+        {"inspectKernelMigrationBeforeOwner", NULL, inspect_kernel_migration_before_owner, NULL, NULL, NULL, napi_default, NULL},
+        {"bindMigrationCredentialGate", NULL, bind_migration_credential_gate, NULL, NULL, NULL, napi_default, NULL},
+        {"acquireMigrationFilesystem", NULL, acquire_migration_filesystem, NULL, NULL, NULL, napi_default, NULL},
+        {"openCurrentMigrationInspector", NULL, open_current_migration_inspector, NULL, NULL, NULL, napi_default, NULL},
+        {"createCurrentRollbackPublisher", NULL, create_current_rollback_publisher, NULL, NULL, NULL, napi_default, NULL},
+        {"openPreparedImportCandidate", NULL, open_prepared_import_candidate, NULL, NULL, NULL, napi_default, NULL},
+        {"createKernelArchive", NULL, create_kernel_archive, NULL, NULL, NULL, napi_default, NULL},
         {"processStartToken", NULL, process_start_token, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeSourceGitLifecycle", NULL, decode_source_git_lifecycle, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeAdminMcpLifecycle", NULL, decode_admin_mcp_lifecycle, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeMcpStdioLifecycle", NULL, decode_mcp_stdio_lifecycle, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeMcpStdioCleanup", NULL, decode_mcp_stdio_cleanup, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeMcpStdioRecoveryLifecycle", NULL, decode_mcp_stdio_recovery_lifecycle, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeMcpStdioRecoveryCleanup", NULL, decode_mcp_stdio_recovery_cleanup, NULL, NULL, NULL, napi_default, NULL},
+        {"decodeMcpAdminOriginalRetirement", NULL, decode_mcp_admin_original_retirement, NULL, NULL, NULL, napi_default, NULL},
         {"captureCurrentProcess", NULL, capture_current_process, NULL, NULL, NULL, napi_default, NULL},
+        {"duplicateClientStdout", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)1},
+        {"duplicateClientStderr", NULL, duplicate_client_stdio, NULL, NULL, NULL, napi_default, (void *)2},
+        {"tryLockClientDataDirectory", NULL, try_lock_client_data_directory, NULL, NULL, NULL, napi_default, NULL},
         {"connectInstalledControl", NULL, connect_installed_control, NULL, NULL, NULL, napi_default, NULL},
         {"executeInstalledImage", NULL, execute_installed_image, NULL, NULL, NULL, napi_default, NULL},
         {"initializeInstalledKeeper", NULL, initialize_installed_keeper, NULL, NULL, NULL, napi_default, NULL},
         {"acquireInstalledAnchor", NULL, acquire_installed_anchor, NULL, NULL, NULL, napi_default, NULL},
+        {"checkInstalledUpgradeKeeper", NULL, check_installed_upgrade_keeper, NULL, NULL, NULL, napi_default, NULL},
         {"openWorkspaceRoot", NULL, open_workspace_root, NULL, NULL, NULL, napi_default, NULL}
     };
     if (napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods) != napi_ok) return NULL;

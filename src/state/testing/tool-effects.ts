@@ -28,7 +28,7 @@ export async function fixtureInspector(fixture: Awaited<ReturnType<typeof create
 }
 
 /** Retained offline proof fixtures; no process is launched, killed or treated as platform-qualified. */
-export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof createAgentFixture>>, checkpointId: string, changedWorkspace = false) {
+export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof createAgentFixture>>, checkpointId: string, changedWorkspace: boolean | string = false) {
   const { store, runId } = fixture;
   const closure = await store.readRecoveryClosure(runId);
   const launch = closure.workerLaunches.find((launch) => launch.launchId === closure.run.activeWorkerLaunchId);
@@ -41,7 +41,7 @@ export async function quiescedToolCheckpoint(fixture: Awaited<ReturnType<typeof 
   const workspace = await store.artifacts.readCanonical<WorkspaceStateManifest>(closure.latestCheckpoint.workspaceStateRef);
   let entries = await store.artifacts.readCanonical<WorkspaceEntryManifest>(workspace.entriesRef);
   if (changedWorkspace) {
-    const bytes = Buffer.from('post-effect file contents');
+    const bytes = Buffer.from(typeof changedWorkspace === 'string' ? changedWorkspace : 'post-effect file contents');
     const blob = await store.artifacts.publishBytes(bytes, 'application/octet-stream', 'cliq-workspace-file-v1');
     entries = { schemaVersion: 1, format: 'cliq-workspace-entries-v1',
       entries: [{ kind: 'file', path: 'a', mode: 0o644, size: bytes.byteLength, blobRef: blob.ref }], entryCount: 1, byteCount: bytes.byteLength, treeDigest: '' };
@@ -80,4 +80,13 @@ export async function postEffectObservation(fixture: Awaited<ReturnType<typeof c
   observation.observationDigest = digestOmitting(observation, 'observationDigest');
   const complete = await fixture.store.artifacts.publishCanonical(observation, observation.format);
   return { ...proof, observationRef: complete.ref, observation };
+}
+
+/** Exercises the same original retirement producer with the existing inert
+ * native-evidence fixture. This is SQL/CAS regression, not physical proof. */
+export async function retireFixtureToolSelection(fixture: Awaited<ReturnType<typeof createAgentFixture>>,
+  selection: Extract<Awaited<ReturnType<typeof fixture.agent.prepareTool>>, { disposition: 'retirement_required' }>) {
+  const proof = await quiescedToolCheckpoint(fixture, selection.checkpointId);
+  return fixture.agent.retireToolSelection({ expectedRunRevision: selection.run.revision,
+    checkpointId: selection.checkpointId, checkpoint: proof.checkpoint });
 }

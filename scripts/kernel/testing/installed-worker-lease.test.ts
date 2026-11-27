@@ -8,10 +8,335 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../../../src/kernel/control-submit.js';
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
+import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src/kernel/execution.js';
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
-  inspectInstalledWorkerRetirement } from './installed-worker-lease.js';
+  inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
+import { inspectInstalledMcpWorkerRetirementHistory, inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement,
+  inspectInstalledVerifierClaim, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
+import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
+import { publicationArenaId } from '../../../src/kernel/publication.js';
+import { addCanonicalDuration, identityHash } from '../../../src/kernel/identity.js';
+
+test('publication crash diagnostics never accept an absent claim or manufacture a birth from a pathname', async t => {
+  const value = await workerFixture(t);
+  update(value.filename, database => database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT);
+    CREATE TABLE items(run_id TEXT,item_id TEXT,item_seq INTEGER,payload_ref TEXT,kind TEXT,created_at TEXT);`));
+  const before = await readFile(value.filename), names = await readdir(value.cas);
+  assert.equal(inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId), undefined);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+});
+
+// Serialized SQL and canonical launch/plan data only. No process, native
+// scope, cancellation, containment death or recovery authority is created.
+async function verifierClaimFixture(t: TestContext) {
+  const value = await fixture(t), hash = 'a'.repeat(64), time = value.launch.createdAt;
+  const cas = path.join(value.stateRoot, KERNEL_CAS_DIRECTORY); await mkdir(cas, { mode: 0o700 });
+  const put = async (object: unknown) => {
+    const ref = canonicalSha256(object);
+    await writeFile(path.join(cas, ref), canonicalJsonBytes(object), { mode: 0o400, flag: 'wx' }); return ref;
+  };
+  const owner = { kind: 'run_invocation' as const, runId: value.expected.runId, intendedLeaseEpoch: value.expected.leaseEpoch,
+    workerLaunchId: value.expected.launchId, opId: 'inert-verifier', attempt: 0, dispatchId: 'inert-verifier-dispatch' };
+  const plan: ProcessContainmentPlanV1 = { schemaVersion: 1, format: 'cliq-process-containment-plan-v1', owner,
+    filesystemBinding: { kind: 'run-generation', generationRef: hash }, parentContainmentRef: hash,
+    launchNonceDigest: hash, backend: { kind: 'linux', cgroupPath: '/fixture/verifier', cgroupNameReservationDigest: hash,
+      pidNamespaceReservationId: 'inert-verifier-namespace', subreaperStartToken: 'inert-subreaper' }, createdAt: time, planDigest: '' };
+  plan.planDigest = digestOmitting(plan, 'planDigest');
+  const runtime = { runtimeBundleRef: hash, runtimeBundleManifestDigest: hash, sandboxBackend: 'linux_namespace' as const,
+    toolchain: { kind: 'guest_toolchain' as const, guestToolchainManifestRef: hash, guestToolchainManifestDigest: hash,
+      guestImageRef: hash, guestImageDigest: hash }, launcher: { executableId: 'inert-launcher', executableDigest: hash }, runtimeDigest: '' };
+  runtime.runtimeDigest = digestOmitting(runtime, 'runtimeDigest');
+  const environment = { schemaVersion: 1 as const, format: 'cliq-sanitized-sandbox-environment-v1' as const,
+    controlledPath: ['/usr/bin'], locale: { lang: 'C.UTF-8', lcAll: 'C.UTF-8' }, home: '/home/cliq', tmpdir: '/tmp', variables: [],
+    inheritedHostEnvironment: false as const, secretMaterial: 'none' as const, brokerAccessAtSpawn: 'none' as const,
+    networkMode: 'none' as const, environmentDigest: '' };
+  environment.environmentDigest = digestOmitting(environment, 'environmentDigest');
+  const launch: Extract<SandboxLaunchSpecV1, { owner: { kind: 'run_invocation' } }> = {
+    schemaVersion: 1, format: 'cliq-sandbox-launch-v1', owner, purpose: 'verifier', runtime, environment,
+    executable: { kind: 'guest_toolchain', guestToolchainManifestRef: hash, guestToolchainManifestDigest: hash, toolId: 'node',
+      role: 'verifier', executionPath: '/usr/bin/node', executableDigest: hash },
+    processInvocation: { kind: 'run_request', purpose: 'verifier', recipe: 'cliq-verifier-command-v1', requestRef: hash,
+      requestDigest: hash, targetRef: hash, targetDigest: hash, argvCwdSource: 'trusted_recipe_decode_of_request_and_target',
+      stdio: { stdin: 'closed', stdout: 'captured', stderr: 'captured', extraFileDescriptors: 'authenticated_operation_channel_only' } },
+    filesystem: { kind: 'run_generation', generationRef: hash, access: 'read_only', sourceProjectionRef: hash, independentGit: true },
+    mounts: [], mountsDigest: canonicalSha256([]), sandboxProfileRef: hash, sandboxProfileDigest: hash,
+    resources: { ...DEFAULT_SANDBOX_RESOURCES }, resourcesDigest: canonicalSha256(DEFAULT_SANDBOX_RESOURCES),
+    containmentPlanRef: await put(plan), containmentPlanDigest: plan.planDigest, operationGrantRef: hash, requestRef: hash,
+    requestDigest: hash, targetRef: hash, targetDigest: hash, parentWorkerContainmentRef: hash, createdAt: time, launchSpecDigest: '' };
+  launch.launchSpecDigest = digestOmitting(launch, 'launchSpecDigest');
+  const claim = { runId: value.expected.runId, seq: 8, opId: owner.opId, opKind: 'verifier', attempt: 0, phase: 'dispatch_claimed',
+    leaseEpoch: owner.intendedLeaseEpoch, requestRef: hash, target: hash, grantRef: hash, replayClass: 'retry',
+    budgetDelta: { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }, timestamp: time,
+    dispatchId: owner.dispatchId, supervisorInstanceId: value.expected.supervisorInstanceId, stateOwnerEpoch: 1,
+    sandboxLaunchSpecRef: await put(launch) };
+  update(value.filename, database => database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT)`));
+  const saveClaim = (selected = claim) => update(value.filename, database => {
+    database.prepare('DELETE FROM run_journal').run();
+    database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)')
+      .run(selected.runId, selected.seq, selected.opId, selected.opKind, selected.attempt, selected.phase, JSON.stringify(selected));
+  });
+  return { ...value, cas, plan, launch, claim, put, saveClaim,
+    inspect: () => inspectInstalledVerifierClaim(value.stateRoot, value.expected.uid, value.expected.runId) };
+}
+
+test('in-flight verifier diagnostics retain one immutable SQL/CAS recipe without claiming process or retirement evidence', async t => {
+  const value = await verifierClaimFixture(t);
+  assert.equal(value.inspect(), undefined, 'no claim is an observation to keep waiting, not no-spawn evidence');
+  value.saveClaim();
+  const databaseBefore = await readFile(value.filename), namesBefore = await readdir(value.cas), observed = value.inspect()!;
+  assert.deepEqual(observed.claim, value.claim); assert.deepEqual(observed.launch, value.launch); assert.deepEqual(observed.plan, value.plan);
+  assert.equal(observed.diagnosticOnly, true); assert.match(observed.sqlCutDigest, /^[a-f0-9]{64}$/u);
+  assert(Object.isFrozen(observed) && Object.isFrozen(observed.claim) && Object.isFrozen(observed.launch.owner) && Object.isFrozen(observed.plan.backend));
+  for (const field of ['qualified', 'pid', 'retiredAt', 'deathEvidenceRef', 'cancel', 'stop']) assert.equal(Object.hasOwn(observed, field), false);
+  assert.deepEqual(await readFile(value.filename), databaseBefore); assert.deepEqual(await readdir(value.cas), namesBefore);
+  update(value.filename, database => database.prepare('UPDATE runs SET revision=revision+1').run());
+  assert.deepEqual(value.inspect(), observed, 'unrelated mutable Run revision is outside this locating diagnostic');
+  assert.throws(() => inspectInstalledVerifierClaim(value.stateRoot, value.expected.uid, 'missing'),
+    { message: 'installed verifier claim inspection refused' });
+});
+
+test('verifier locating diagnostics refuse changed launch bindings, malformed canonical data and excess rows', async t => {
+  const value = await verifierClaimFixture(t); value.saveClaim();
+  for (const member of ['requestRef', 'target', 'grantRef', 'dispatchId'] as const) {
+    value.saveClaim({ ...value.claim, [member]: member === 'dispatchId' ? 'foreign-dispatch' : 'b'.repeat(64) });
+    assert.throws(value.inspect); value.saveClaim();
+  }
+  update(value.filename, database => database.prepare('UPDATE runs SET active_worker_launch_id=?').run('foreign-launch'));
+  assert.throws(value.inspect);
+  update(value.filename, database => database.prepare('UPDATE runs SET active_worker_launch_id=?,lease_epoch=lease_epoch+1').run(value.expected.launchId));
+  assert.throws(value.inspect);
+  update(value.filename, database => database.prepare('UPDATE runs SET lease_epoch=?').run(value.expected.leaseEpoch));
+  const malformed = { ...value.launch, unretained: 'not part of the closed launch' };
+  malformed.launchSpecDigest = digestOmitting(malformed, 'launchSpecDigest');
+  value.saveClaim({ ...value.claim, sandboxLaunchSpecRef: await value.put(malformed) }); assert.throws(value.inspect);
+  const wrongPlan = structuredClone(value.plan); wrongPlan.owner = { ...value.launch.owner, workerLaunchId: 'foreign-launch' };
+  wrongPlan.planDigest = digestOmitting(wrongPlan, 'planDigest');
+  const wrongLaunch = { ...value.launch, containmentPlanRef: await value.put(wrongPlan), containmentPlanDigest: wrongPlan.planDigest };
+  wrongLaunch.launchSpecDigest = digestOmitting(wrongLaunch, 'launchSpecDigest');
+  value.saveClaim({ ...value.claim, sandboxLaunchSpecRef: await value.put(wrongLaunch) }); assert.throws(value.inspect);
+  value.saveClaim();
+  update(value.filename, database => database.prepare('UPDATE run_journal SET entry_json=?').run('x'.repeat(65537)));
+  assert.throws(value.inspect); value.saveClaim();
+  update(value.filename, database => {
+    const insert = database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)');
+    for (let index = 0; index < 3; index++) insert.run(value.claim.runId, index + 9, value.claim.opId, 'verifier', 0, 'dispatch_claimed', JSON.stringify({ ...value.claim, seq: index + 9 }));
+  });
+  assert.throws(value.inspect, 'the fixed one-verifier campaign bound is not a production Run limit');
+});
+
+test('publication crash diagnostics bind actual canonical birth and retain an already-committed receipt as a missed cut', async t => {
+  const value = await workerFixture(t), hash = 'a'.repeat(64), time = new Date().toISOString();
+  const budget = { modelTokens: 0, costMicros: 0, toolCalls: 1, repairAttempts: 0 };
+  const birth = { schemaVersion: 1, format: 'cliq-publication-arena-birth-v1', deliveryRunId: value.expected.runId,
+    deliveryPlanRef: hash, workspaceIdentityRef: hash, workspaceIdentityDigest: hash, stateRootIdentityRef: hash, stateRootIdentityDigest: hash,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, sequence: 'forward', operationIndex: 0, operationId: 'O'.repeat(43),
+    opId: 'actual-original-op', attempt: 0, dispatchId: 'actual-dispatch',
+    arenaId: publicationArenaId(value.expected.runId, 'O'.repeat(43), 'actual-original-op', 0, 'actual-dispatch'),
+    arenaIdentity: { deviceId: '1', fileId: '20', ownerUid: value.expected.uid, mode: 0o700 },
+    parentIdentity: { deviceId: '1', fileId: '21', ownerUid: value.expected.uid, mode: 0o700 }, observedAt: time, birthDigest: '' };
+  birth.birthDigest = digestOmitting(birth, 'birthDigest'); const bytes = canonicalJsonBytes(birth), birthRef = sha256Bytes(bytes);
+  await writeFile(path.join(value.cas, birthRef), bytes, { mode: 0o400, flag: 'wx' });
+  const prepared = { runId: value.expected.runId, seq: 1, opId: birth.opId, opKind: 'publish', attempt: 0, phase: 'prepared',
+    leaseEpoch: 1, requestRef: hash, target: hash, grantRef: hash, replayClass: 'reconcile', budgetDelta: budget, timestamp: time };
+  const claim = { ...prepared, seq: 2, phase: 'dispatch_claimed', budgetDelta: { ...budget, toolCalls: 0 },
+    evidenceRef: birthRef, evidenceDigest: birth.birthDigest, dispatchId: birth.dispatchId, stateOwnerEpoch: 1, supervisorInstanceId: value.expected.supervisorInstanceId };
+  const insert = (database: DatabaseSync, row: typeof prepared) => database.prepare('INSERT INTO run_journal VALUES(?,?,?,?,?,?,?)')
+    .run(row.runId, row.seq, row.opId, row.opKind, row.attempt, row.phase, JSON.stringify(row));
+  update(value.filename, database => {
+    database.exec(`CREATE TABLE run_journal(run_id TEXT,seq INTEGER,op_id TEXT,op_kind TEXT,attempt INTEGER,phase TEXT,entry_json TEXT);
+      CREATE TABLE items(run_id TEXT,item_id TEXT,item_seq INTEGER,payload_ref TEXT,kind TEXT,created_at TEXT);`);
+    insert(database, prepared); insert(database, claim);
+  });
+  const before = await readFile(value.filename), observed = inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId)!;
+  assert.equal(observed.originalReceiptCommitted, false); assert.deepEqual(observed.birth, birth); assert.equal(observed.claim.dispatchId, birth.dispatchId);
+  assert.deepEqual(await readFile(value.filename), before); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  update(value.filename, database => insert(database, { ...claim, seq: 3, phase: 'completed', budgetDelta: budget,
+    budgetSettlementRef: hash, receiptRef: birthRef } as typeof prepared));
+  assert.equal(inspectInstalledPublicationClaim(value.stateRoot, value.expected.uid, value.expected.runId)!.originalReceiptCommitted, true);
+});
+
+test('a normal sealed worker is not the genuinely retired recovery branch', async t => {
+  const value = await workerFixture(t); await retireFixture(value);
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, value.expected.uid, {
+    runId: value.expected.runId, supervisorInstanceId: value.expected.supervisorInstanceId, leaseEpoch: 1,
+    inspectorIdentityRef: 'a'.repeat(64), inspectorIdentityDigest: 'a'.repeat(64),
+    resources: { kind: 'genuinely_retired_from_verified_checkpoint', workerLaunchId: value.expected.launchId,
+      generationRef: value.generation.generationRef, sourceCheckpointId: value.generation.sourceCheckpointId,
+      quarantineEvidenceRef: 'a'.repeat(64), retirementEvidenceRef: 'a'.repeat(64) },
+  }), { message: 'installed recovered worker retirement inspection refused' });
+});
+
+async function recoveredFixture(t: TestContext) {
+  const value = await workerFixture(t), hash = 'a'.repeat(64);
+  const time = (n: number) => new Date(Date.parse(value.launch.activatedAt!) + n).toISOString();
+  const published = new Set<string>();
+  const put = async (object: unknown) => {
+    const ref = canonicalSha256(object); if (published.has(ref)) return ref;
+    await publishFixture(value, object); published.add(ref); return ref;
+  };
+  const seal = <T extends Record<string, unknown>>(object: T) => ({ ...object, evidenceDigest: digestOmitting(object, 'evidenceDigest') });
+  const subject = { kind: 'worker_death', oldWorkerLaunchId: value.launch.launchId, oldLeaseEpoch: 1,
+    oldWorkerIdentity: value.launch.workerIdentityDigest, processContainmentRef: value.launch.processContainmentRef,
+    workspaceGenerationRef: value.generation.generationRef, openInvocationRefs: [] };
+  const pending = { schemaVersion: 1, kind: 'reconciliation', runId: value.expected.runId, createdFromRevision: 4,
+    createdAt: time(100), frontierRef: hash, subject,
+    probeState: { phase: 'automatic_pending', automaticProbeCount: 0, userProbeCount: 0, nextProbeAt: time(100) } };
+  const pendingRef = await put(pending);
+  const anchor = { ...value.generation, rowVersion: 4, phase: 'fenced_reconciling', updatedAt: time(100),
+    waitingSubjectRef: pendingRef, waitingSubjectDigest: pendingRef, fencedJournalSeq: 2, fencedFromPhase: 'active' };
+  const anchorRef = await put(anchor), nonce = canonicalSha256('inert worker probe');
+  const dispatch: Record<string, any> = { schemaVersion: 1, format: 'cliq-reconciliation-probe-dispatch-v1', runId: value.expected.runId,
+    reconciliationSubjectDigest: canonicalSha256(subject), probeKind: 'automatic', probeOrdinal: 1, probeNonceDigest: nonce,
+    probeStartedAt: time(200), probeDeadlineAt: addCanonicalDuration(time(200), 30000), owningSupervisorInstanceId: 'inert-successor',
+    subjectKind: 'worker_recovery', inspectorTaskId: identityHash(value.expected.runId, canonicalSha256(subject), 'automatic', 1, nonce),
+    inspectionTargetDigest: anchorRef };
+  dispatch.dispatchDigest = digestOmitting(dispatch, 'dispatchDigest');
+  const wait = { ...pending, probeState: { phase: 'automatic_in_flight', automaticProbeCount: 1, userProbeCount: 0, dispatch } }, waitRef = await put(wait);
+  const death = seal({ schemaVersion: 1, kind: 'containment_all_descendants_dead', containmentRef: value.launch.processContainmentRef,
+    planRef: value.launch.containmentPlanRef, sandboxLaunchSpecRef: value.launch.sandboxLaunchSpecRef, sandboxLaunchSpecDigest: hash,
+    owner: value.containment.owner, launchNonceDigest: value.launch.spawnNonceDigest, inspectorSupervisorInstanceId: 'inert-successor',
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, backend: { ...value.containment.backend,
+      cgroupPopulated: 0, namespaceInitDeadAndReaped: true, remainingTrackedDescendants: 0 }, observedAt: time(300) });
+  const recovery = seal({ schemaVersion: 1, format: 'cliq-worker-recovery-evidence-v1', runId: value.expected.runId,
+    waitingSubjectRef: waitRef, oldWorkerLaunchId: value.launch.launchId, oldLeaseEpoch: 1, oldWorkerIdentityDigest: value.launch.workerIdentityDigest,
+    processContainmentRef: value.launch.processContainmentRef, containmentDeathEvidenceRef: await put(death), containmentDeathEvidenceDigest: death.evidenceDigest,
+    workspaceGenerationRef: value.generation.generationRef, generationTreeDigest: value.generation.lastVerifiedTreeDigest,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: time(400), generationDisposition: 'quarantined' });
+  const quarantine = seal({ schemaVersion: 1, format: 'cliq-workspace-generation-quarantine-evidence-v1', runId: value.expected.runId,
+    generationRef: value.generation.generationRef, generationIdentityDigest: value.generation.generationIdentityDigest, sourceRowVersion: 5,
+    observedState: { kind: 'complete_tree', treeDigest: value.generation.lastVerifiedTreeDigest }, inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
+    quarantineCanonicalRootRelativePath: `quarantine/workspace-generations/${identityHash(value.generation.generationId, '5')}`,
+    quarantineDeviceId: '1', quarantineFileId: '2', originalLocatorAbsent: true, renameNoReplace: true, directoryFsyncComplete: true,
+    observedAt: time(500), reason: 'worker_recovery', fromPhase: 'fenced_reconciling', workerRecoveryEvidenceRef: await put(recovery),
+    workerRecoveryEvidenceDigest: recovery.evidenceDigest });
+  const quarantineRef = await put(quarantine), wrapper = seal({ schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1',
+    runId: value.expected.runId, waitingSubjectRef: waitRef, waitingSubjectDigest: waitRef, probeKind: 'automatic', probeOrdinal: 1,
+    probeNonceDigest: nonce, probeDispatchDigest: dispatch.dispatchDigest, probeStartedAt: dispatch.probeStartedAt, probeDeadlineAt: dispatch.probeDeadlineAt,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: recovery.observedAt, outcome: 'subject_observation',
+    subjectEvidenceKind: 'worker_recovery', subjectEvidenceRef: await put(recovery), subjectEvidenceDigest: recovery.evidenceDigest });
+  const retired = seal({ schemaVersion: 1, format: 'cliq-workspace-generation-retirement-evidence-v1', runId: value.expected.runId,
+    generationRef: value.generation.generationRef, generationIdentityDigest: value.generation.generationIdentityDigest,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash, observedAt: time(700), fromPhase: 'quarantined',
+    quarantineEvidenceRef: quarantineRef, quarantineEvidenceDigest: quarantine.evidenceDigest, sourceQuarantinedRowVersion: 6,
+    activeRunPointerCount: 0, nonretiredWorkerLaunchCount: 0, liveContainmentCount: 0, activeMountCount: 0, releasableBrokerClaimCount: 0 });
+  const retiredRef = await put(retired);
+  const { snapshotEvidenceRef: _snapshot, snapshotEvidenceDigest: _digest, activeWorkerLaunchId: _active, leaseEpoch: _lease, ...base } = value.generation;
+  const generation = { ...base, phase: 'retired', rowVersion: 7, updatedAt: time(800), retirementEvidenceRef: retiredRef, retirementEvidenceDigest: retired.evidenceDigest };
+  const launch = { ...value.launch, phase: 'retired', generationWriteState: 'fenced_reconciling', retiredAt: time(600), retirementEvidenceRef: await put(wrapper) };
+  update(value.filename, database => {
+    database.prepare('UPDATE runs SET active_worker_launch_id=NULL,status=?').run('succeeded');
+    database.prepare('UPDATE worker_launches SET phase=?,row_json=?,retired_at=?').run('retired', JSON.stringify(launch), launch.retiredAt);
+    database.prepare('UPDATE workspace_generations SET phase=?,row_version=?,row_json=?').run('retired', generation.rowVersion, JSON.stringify(generation));
+  });
+  const expected = { runId: value.expected.runId, supervisorInstanceId: value.expected.supervisorInstanceId, leaseEpoch: 1,
+    inspectorIdentityRef: hash, inspectorIdentityDigest: hash,
+    resources: { kind: 'genuinely_retired_from_verified_checkpoint' as const, workerLaunchId: value.expected.launchId,
+      generationRef: generation.generationRef, sourceCheckpointId: generation.sourceCheckpointId,
+      quarantineEvidenceRef: quarantineRef, retirementEvidenceRef: retiredRef } };
+  return { ...value, expected, retired, retiredRef, put };
+}
+
+test('actual readonly SQL recovery diagnostics require the complete original quarantine, death and retirement graph', async t => {
+  const value = await recoveredFixture(t), before = await readFile(value.filename), names = await readdir(value.cas);
+  const observed = inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected);
+  const mcp = inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, process.getuid!(),
+    { runId: value.expected.runId, launchId: value.expected.resources.workerLaunchId });
+  assert.equal(mcp.generationPhase, 'retired'); assert.equal(mcp.retirementEvidenceRef, observed.retirementEvidenceRef);
+  assert.equal(mcp.launchIdentityDigest, observed.launchIdentityDigest);
+  assert.equal(observed.generationPhase, 'retired'); assert.equal(observed.generationWriteState, 'fenced_reconciling');
+  assert.equal(observed.retirementEvidenceRef, value.expected.resources.retirementEvidenceRef);
+  assert.equal(observed.pid, 12345); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), {
+    ...value.expected, inspectorIdentityDigest: 'b'.repeat(64) }));
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), {
+    ...value.expected, resources: { ...value.expected.resources, sourceCheckpointId: 'another-checkpoint' } }));
+});
+
+test('the verifier-parent wrapper reuses the complete strict SQL/CAS recovery graph without inventing a publication or child receipt', async t => {
+  // Serialized test-owned rows and CAS data only. This does not mint native
+  // death/retirement, StateOwner, an admitted Run or a genuine positive fixture.
+  const value = await recoveredFixture(t), prior = inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected);
+  const read = async (ref: string) => JSON.parse(await readFile(path.join(value.cas, ref), 'utf8'));
+  const quarantine = await read(value.expected.resources.quarantineEvidenceRef), recovery = await read(quarantine.workerRecoveryEvidenceRef);
+  const evidence: VerifierParentDomainDispatchClosureV1 = { schemaVersion: 1, format: 'cliq-invocation-dispatch-closure-evidence-v1',
+    runId: value.expected.runId, opId: 'inert-verifier', attempt: 0, dispatchId: 'inert-dispatch', unknownJournalSeq: 3,
+    closure: { kind: 'verifier_parent_domain_dead', claimJournalSeq: 2, claimingSupervisorInstanceId: value.expected.supervisorInstanceId,
+      claimingStateOwnerEpoch: 1, requestRef: 'a'.repeat(64), targetRef: 'b'.repeat(64), grantRef: 'c'.repeat(64), sandboxLaunchSpecRef: 'd'.repeat(64),
+      workerLaunchId: value.expected.resources.workerLaunchId, leaseEpoch: 1, generationRef: value.expected.resources.generationRef,
+      parentContainmentRef: value.launch.processContainmentRef!, parentDeathEvidenceRef: recovery.containmentDeathEvidenceRef,
+      parentDeathEvidenceDigest: recovery.containmentDeathEvidenceDigest, quarantineEvidenceRef: value.expected.resources.quarantineEvidenceRef,
+      quarantineEvidenceDigest: quarantine.evidenceDigest, retirementEvidenceRef: value.retiredRef, retirementEvidenceDigest: value.retired.evidenceDigest,
+      controllerLifetime: 'original_subreaper_absent_and_inspector_joined' }, observedAt: value.retired.observedAt, evidenceDigest: '' };
+  evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
+  const { resources: _resources, ...expected } = value.expected;
+  const inspect = (selected = evidence) => inspectInstalledVerifierParentRetirement(value.stateRoot, process.getuid!(), { ...expected, evidence: selected });
+  assert.throws(() => inspect(), 'a merely succeeded recovery row is not the cancelled UNKNOWN branch');
+  update(value.filename, database => database.prepare('UPDATE runs SET status=?,cancel_requested=1,stop_intent_ref=?').run('cancelled', 'f'.repeat(64)));
+  const before = await readFile(value.filename), names = await readdir(value.cas), observed = inspect();
+  assert.equal(observed.pid, prior.pid); assert.equal(observed.processStartToken, prior.processStartToken);
+  assert.equal(observed.graph.generation.sourceCheckpointId, value.expected.resources.sourceCheckpointId);
+  assert.equal(observed.graph.death.evidenceDigest, evidence.closure.parentDeathEvidenceDigest);
+  assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  for (const member of ['workerLaunchId', 'generationRef', 'parentContainmentRef', 'parentDeathEvidenceRef', 'parentDeathEvidenceDigest',
+    'quarantineEvidenceRef', 'quarantineEvidenceDigest', 'retirementEvidenceRef', 'retirementEvidenceDigest'] as const) {
+    const changed = structuredClone(evidence); changed.closure[member] = 'e'.repeat(64); changed.evidenceDigest = digestOmitting(changed, 'evidenceDigest');
+    assert.throws(() => inspect(changed), member);
+  }
+  const changed = structuredClone(evidence); changed.observedAt = addCanonicalDuration(changed.observedAt, 1);
+  changed.evidenceDigest = digestOmitting(changed, 'evidenceDigest'); assert.throws(() => inspect(changed));
+  assert.throws(() => inspectInstalledVerifierParentRetirement(value.stateRoot, process.getuid!(), { ...expected, evidence, extra: true } as never));
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+
+  // The genuine stopped-recovery producer prepares retirement at P, then
+  // atomically commits the launch, generation and terminal Run at C >= P.
+  // These are inert retained rows; no native retirement is manufactured here.
+  update(value.filename, database => database.exec('ALTER TABLE runs ADD COLUMN updated_at TEXT'));
+  const commitAt = addCanonicalDuration(value.retired.observedAt, 100);
+  const commit = (launchAt: string, generationAt: string, runAt: string) => update(value.filename, database => {
+    const launch = JSON.parse(database.prepare('SELECT row_json FROM worker_launches').get()!.row_json as string);
+    const generation = JSON.parse(database.prepare('SELECT row_json FROM workspace_generations').get()!.row_json as string);
+    database.prepare('UPDATE worker_launches SET retired_at=?,row_json=?').run(launchAt, JSON.stringify({ ...launch, retiredAt: launchAt }));
+    database.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify({ ...generation, updatedAt: generationAt }));
+    database.prepare('UPDATE runs SET updated_at=?').run(runAt);
+  });
+  commit(commitAt, commitAt, commitAt);
+  const atomicBefore = await readFile(value.filename), atomic = inspect();
+  assert.equal(atomic.retiredAt, commitAt); assert.equal(atomic.graph.retired.observedAt, value.retired.observedAt);
+  assert.deepEqual(await readFile(value.filename), atomicBefore); assert.deepEqual(await readdir(value.cas), names);
+  update(value.filename, database => database.exec('UPDATE runs SET lease_epoch=2'));
+  assert.throws(() => inspect(), 'the atomic terminal Run must retain the original worker epoch');
+  update(value.filename, database => database.exec('UPDATE runs SET lease_epoch=1'));
+  assert.throws(() => inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected),
+    'the ordinary retirement branch cannot borrow an atomic verifier closure');
+  const later = addCanonicalDuration(commitAt, 1);
+  for (const times of [[commitAt, later, commitAt], [later, commitAt, commitAt], [commitAt, commitAt, later]]) {
+    commit(times[0]!, times[1]!, times[2]!); assert.throws(() => inspect(), 'all three committed rows must share the original cut');
+  }
+  const lastFresh = addCanonicalDuration(value.retired.observedAt, 5000);
+  commit(lastFresh, lastFresh, lastFresh); assert.equal(inspect().retiredAt, lastFresh);
+  const stale = addCanonicalDuration(lastFresh, 1);
+  commit(stale, stale, stale); assert.throws(() => inspect(), 'retirement remains bounded by the original five-second freshness');
+
+  const wait = await read(recovery.waitingSubjectRef), deadline = wait.probeState.dispatch.probeDeadlineAt;
+  const nearDeadline = { ...value.retired, observedAt: new Date(Date.parse(deadline) - 100).toISOString() };
+  nearDeadline.evidenceDigest = digestOmitting(nearDeadline, 'evidenceDigest');
+  const nearRef = await value.put(nearDeadline), lateEvidence = { ...evidence, observedAt: nearDeadline.observedAt,
+    closure: { ...evidence.closure, retirementEvidenceRef: nearRef, retirementEvidenceDigest: nearDeadline.evidenceDigest } };
+  lateEvidence.evidenceDigest = digestOmitting(lateEvidence, 'evidenceDigest');
+  update(value.filename, database => {
+    const generation = JSON.parse(database.prepare('SELECT row_json FROM workspace_generations').get()!.row_json as string);
+    database.prepare('UPDATE workspace_generations SET row_json=?').run(JSON.stringify({ ...generation,
+      retirementEvidenceRef: nearRef, retirementEvidenceDigest: nearDeadline.evidenceDigest }));
+  });
+  const within = new Date(Date.parse(deadline) - 1).toISOString();
+  commit(within, within, within); assert.equal(inspect(lateEvidence).retiredAt, within);
+  commit(deadline, deadline, deadline);
+  assert.throws(() => inspect(lateEvidence), 'the atomic commit cannot outlive its original thirty-second probe');
+});
 
 async function fixture(t: TestContext) {
   const stateRoot = await mkdtemp(path.join(os.tmpdir(), 'cliq-installed-worker-lease-'));
@@ -63,6 +388,37 @@ function update(filename: string, operation: (database: DatabaseSync) => void) {
   try { operation(database); } finally { database.close(); }
 }
 
+test('bounded readonly launch enumeration distinguishes an existing empty Run from missing and preserves original bytes', async t => {
+  const value = await fixture(t); await mkdir(path.join(value.stateRoot, KERNEL_CAS_DIRECTORY), { mode: 0o700 });
+  const databaseBefore = await readFile(value.filename), namesBefore = await readdir(value.stateRoot);
+  const observed = inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId);
+  assert.deepEqual(observed.launchIds, [value.expected.launchId]); assert.equal(observed.diagnosticOnly, true);
+  assert.equal(Object.hasOwn(observed, 'qualified'), false); assert(Object.isFrozen(observed) && Object.isFrozen(observed.launchIds));
+  assert.deepEqual(await readFile(value.filename), databaseBefore); assert.deepEqual(await readdir(value.stateRoot), namesBefore);
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, 'missing'),
+    { message: 'installed worker launch enumeration refused' });
+  update(value.filename, db => db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId));
+  assert.deepEqual(inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId).launchIds, []);
+});
+
+test('readonly launch enumeration has an exact bound, scopes the original Run and refuses malformed IDs', async t => {
+  const value = await fixture(t); await mkdir(path.join(value.stateRoot, KERNEL_CAS_DIRECTORY), { mode: 0o700 });
+  const add = (runId: string, id: string) => update(value.filename, db => db.prepare('INSERT INTO worker_launches VALUES(?,?,?,?,?)')
+    .run(id, runId, 'data-only', '{}', null));
+  add('unrelated-run', 'must-not-escape');
+  for (let index = 1; index < 16; index++) add(value.expected.runId, `data-launch-${String(index).padStart(2, '0')}`);
+  const observed = inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId);
+  assert.equal(observed.launchIds.length, 16); assert(!observed.launchIds.includes('must-not-escape'));
+  add(value.expected.runId, 'seventeenth');
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+  update(value.filename, db => { db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId); });
+  add(value.expected.runId, '');
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+  update(value.filename, db => { db.prepare('DELETE FROM worker_launches WHERE run_id=?').run(value.expected.runId); });
+  add(value.expected.runId, 'x'.repeat(129));
+  assert.throws(() => inspectInstalledWorkerLaunchIds(value.stateRoot, value.expected.uid, value.expected.runId));
+});
+
 // Pure serialized data for the diagnostic seam, never a native birth/death proof.
 async function workerFixture(t: TestContext) {
   const value = await fixture(t), hash = 'a'.repeat(64);
@@ -96,6 +452,34 @@ async function workerFixture(t: TestContext) {
   });
   return { ...value, cas, containment, worker, workerFilename, generation };
 }
+
+test('a superseded public revision is refused distinctly and only a fresh exact cut observes the same worker', async t => {
+  const value = await workerFixture(t);
+  update(value.filename, database => database.prepare('UPDATE runs SET revision=?').run(value.expected.runRevision + 1));
+  const before = await readFile(value.filename), names = await readdir(value.cas);
+  assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+    assert(error instanceof Error);
+    assert.equal(error.name, 'InstalledWorkerIdentityObservationSupersededError');
+    assert.equal(error.message, 'installed worker identity inspection refused');
+    assert.equal(error.cause, undefined); return true;
+  });
+  const fresh = inspectInstalledWorkerIdentity(value.stateRoot, { ...value.expected, runRevision: value.expected.runRevision + 1 });
+  assert.equal(fresh.launchId, value.expected.launchId); assert.equal(fresh.pid, value.worker.pid);
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+});
+
+for (const fault of ['future_cut', 'corrupt_worker', 'other_owner', 'cancelled'] as const)
+  test(`a newer revision never hides ${fault} as a retryable identity observation`, async t => {
+    const value = await workerFixture(t);
+    update(value.filename, database => database.prepare('UPDATE runs SET revision=?').run(value.expected.runRevision + (fault === 'future_cut' ? -1 : 1)));
+    if (fault === 'corrupt_worker') { await chmod(value.workerFilename, 0o600); await writeFile(value.workerFilename, '{}'); await chmod(value.workerFilename, 0o400); }
+    if (fault === 'other_owner') value.expected.supervisorInstanceId = 'different-owner';
+    if (fault === 'cancelled') update(value.filename, database => database.exec('UPDATE runs SET cancel_requested=1'));
+    assert.throws(() => inspectInstalledWorkerIdentity(value.stateRoot, value.expected), error => {
+      assert(error instanceof Error); assert.equal(error.name, 'Error');
+      assert.equal(error.message, 'installed worker identity inspection refused'); return true;
+    });
+  });
 
 test('active identity diagnostic fixes the original worker PID/start and generation without creating authority', async t => {
   const value = await workerFixture(t);
@@ -171,6 +555,45 @@ test('retirement diagnostic follows the captured original worker after the Run p
   const { observedAt: _firstTime, ...first } = observed;
   const { observedAt: _secondTime, ...second } = inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original);
   assert.deepEqual(second, first, 'the original seal is independent of the later Run pointer and status');
+});
+
+test('retirement history reads a real retained seal without inventing an earlier live observation', async t => {
+  const value = await workerFixture(t), expected = { runId: value.expected.runId, launchId: value.expected.launchId };
+  assert.throws(() => inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected));
+  assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected),
+    { message: 'installed worker retirement history inspection refused' });
+  const retired = await retireFixture(value), before = await readFile(value.filename), names = await readdir(value.cas);
+  const bytes = await Promise.all(names.map(name => readFile(path.join(value.cas, name))));
+  const observed = inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected);
+  const mcp = inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected);
+  assert.equal(mcp.generationPhase, 'sealed'); assert.equal(mcp.launchIdentityDigest, observed.launchIdentityDigest);
+  assert.equal(observed.diagnosticOnly, true); assert.equal(observed.launchId, value.expected.launchId);
+  assert.equal(observed.phase, 'retired'); assert.equal(observed.generationWriteState, 'sealed'); assert.equal(observed.generationPhase, 'sealed');
+  assert.equal(observed.retirementEvidenceRef, retired.retiredLaunch.retirementEvidenceRef);
+  assert.equal(observed.snapshotEvidenceRef, retired.sealedGeneration.snapshotEvidenceRef);
+  assert.equal(observed.snapshotEvidenceDigest, retired.sealedGeneration.snapshotEvidenceDigest);
+  assert.equal(observed.deathObservedAt, retired.death.observedAt); assert(observed.observedAt >= observed.retiredAt);
+  assert(Object.isFrozen(observed)); assert.equal(Object.hasOwn(observed, 'qualified'), false);
+  assert.equal(Object.hasOwn(observed, 'nativeObservation'), false);
+  const retirement = { launchId: value.expected.launchId, supervisorInstanceId: value.expected.supervisorInstanceId,
+    leaseEpoch: 1, workspaceGenerationRef: value.generation.generationRef,
+    snapshotEvidenceRef: retired.sealedGeneration.snapshotEvidenceRef,
+    snapshotEvidenceDigest: retired.sealedGeneration.snapshotEvidenceDigest, retiredAt: retired.retiredLaunch.retiredAt! };
+  assert.equal(inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+    { ...expected, retirement }).snapshotEvidenceRef, retirement.snapshotEvidenceRef);
+  for (const changed of [{ ...retirement, launchId: 'other-launch' }, { ...retirement, supervisorInstanceId: 'other-supervisor' },
+    { ...retirement, leaseEpoch: 2 }, { ...retirement, workspaceGenerationRef: 'c'.repeat(64) },
+    { ...retirement, snapshotEvidenceRef: 'd'.repeat(64) }, { ...retirement, snapshotEvidenceDigest: 'e'.repeat(64) },
+    { ...retirement, retiredAt: '2026-01-01T00:00:00.000Z' }, { ...retirement, nativeObservation: true }])
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+      { ...expected, retirement: changed }), { message: 'installed worker retirement history inspection refused' });
+  assert.deepEqual(await readFile(value.filename), before); assert.deepEqual(await readdir(value.cas), names);
+  assert.deepEqual(await Promise.all(names.map(name => readFile(path.join(value.cas, name)))), bytes);
+  for (const changed of [{ ...expected, runId: 'other' }, { ...expected, launchId: 'successor-launch' },
+    { ...expected, nativeObservation: true }]) {
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, changed),
+      { message: 'installed worker retirement history inspection refused' });
+  }
 });
 
 const workerCasChanges: Array<[string, (value: Awaited<ReturnType<typeof workerFixture>>) => Promise<void>]> = [
@@ -297,6 +720,17 @@ for (const [label, change] of retirementChanges) {
     const retired = await retireFixture(value); await change(value, retired);
     assert.throws(() => inspectInstalledWorkerRetirement(value.stateRoot, value.expected.uid, original), error => {
       assert(error instanceof Error); assert.equal(error.message, 'installed worker retirement inspection refused');
+      assert.equal(error.cause, undefined); return true;
+    });
+  });
+  // These two checks need the genuinely captured earlier identity, so remain
+  // mandatory on the original API above, not falsely promised by a history read.
+  if (label === 'changed original generation source' || label === 'replaced database inode') continue;
+  test(`retirement history inspection refuses ${label}`, async t => {
+    const value = await workerFixture(t), retired = await retireFixture(value); await change(value, retired);
+    assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid,
+      { runId: value.expected.runId, launchId: value.expected.launchId }), error => {
+      assert(error instanceof Error); assert.equal(error.message, 'installed worker retirement history inspection refused');
       assert.equal(error.cause, undefined); return true;
     });
   });

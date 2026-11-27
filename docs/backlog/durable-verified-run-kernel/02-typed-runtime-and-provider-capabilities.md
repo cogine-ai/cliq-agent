@@ -42,6 +42,18 @@ This spec imports those schemas rather than maintaining a second copy.
 WP01 owns state transitions and reachability; WP02 may not narrow their
 evidence, final-candidate, quiescence, recovery or settlement requirements.
 
+The ordinary-tools integration uses the RFC's closed execution union. The
+original executable edit remains `builtin`; `read|ls|find|grep|bash` use the
+signed non-executable `builtin_tools` script plus the exact signed guest Node
+identity (`builtin_script`). `request_input` instead binds the actual signed
+Supervisor image (`supervisor_control`), with no operation request, grant,
+Journal dispatch, process or synthetic death receipt. Whole-batch input
+normalization and ordered native results remain shared with the same
+ToolContractManifest/ToolBatch, not a second tool loop. Frozen manifest,
+script, schema and guest member bytes are fully verified on their original
+read cut. Text-only operation and existing typed model capability rules do
+not change. Local data regressions are not installed Linux qualification.
+
 ### User outcome
 
 Cliq executes tools from negotiated provider-native calls, never from
@@ -166,6 +178,27 @@ OpenAI uses Responses; Anthropic uses Messages; OpenRouter, OpenAI-compatible
 and Zhipu use their explicit Chat Completions mappings; Ollama uses Chat.
 OpenAI reasoning items and Anthropic thinking/signature/redacted blocks survive
 observation, durable turns and the next request, bound to provider/model.
+
+The OpenAI-compatible Chat adapter also retains an explicitly present
+`reasoning_content` as exactly one closed continuation item
+`{type:'reasoning_content', reasoning_content:string|null}`. Empty and null are
+distinct from absence; text is not normalized. SSE string fragments concatenate
+in wire order; null does not erase earlier string fragments. Only a complete
+turn retains this item. Every surviving historical assistant turn replays the
+field, including turns without tool calls. The existing provider/model binding,
+strict JSON depth/entry limits and 1 MiB request/response bounds still apply;
+opaque continuation grants no tool, credential or settlement authority.
+Compaction retains the complete selected source messages and preserves recent
+turns with their continuation; it does not mutate retained turns.
+
+This mapping follows the [DeepSeek thinking-mode guide](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)
+and [Chat API contract](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/).
+As checked on 2026-10-25, the [published model table](https://api-docs.deepseek.com/zh-cn/quick_start/pricing/)
+maps `deepseek-flash` to DeepSeek-V4.1-Flash-1017. This is external adapter-design
+context, not verified capability, pricing authority or a replacement model id.
+Offline JSON/SSE, retained-CAS and planning regressions make no live-provider,
+billing, installed-runtime or Linux qualification claim; no billable request is
+made and the existing spend ceiling is unchanged.
 
 The canonical endpoint and credential rules remain unchanged. Only exact
 Kernel-managed Ollama service/model/no-egress provenance permits credential-free

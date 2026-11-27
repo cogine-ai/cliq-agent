@@ -1,6 +1,6 @@
 import { canonicalJsonBytes, canonicalSha256, normalizeCanonicalText } from '../kernel/canonical.js';
 import { planArtifactBytes, planCanonicalArtifact, type PlannedArtifact } from '../kernel/artifact-plan.js';
-import { assertArtifactRef, digestOmitting, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
+import { assertArtifactRef, digestOmitting, identityHash, parseCanonicalTime, sha256Bytes } from '../kernel/identity.js';
 import { assertBoundedJsonValue } from '../kernel/json.js';
 import type { ArtifactRef, ProviderName } from '../kernel/types.js';
 import type {
@@ -91,11 +91,18 @@ export type ToolInputResolution =
     };
 
 export type ResolveToolInput = (input: {
+  /** Present for durable model normalization and reproduced historical reads.
+   * These identities precede all resolved argument bytes. */
+  runId?: string;
+  batchItemId?: string;
   callId: string;
   index: number;
   toolName: string;
   observedInput: ObservedToolCallInputV1;
 }) => ToolInputResolution;
+export function modelToolBatchItemId(runId: string, modelOpId: string, modelAttempt: number): string {
+  return identityHash('cliq-tool-batch-item-v1', identityHash('cliq-model-turn-item-v1', runId, modelOpId, String(modelAttempt)));
+}
 
 type CompileModelObservationInputBase = {
   runId: string;
@@ -604,7 +611,8 @@ export function compileModelObservation(input: CompileModelObservationInput): Co
       return unusableFromComplete(input, 'malformed_transport_payload');
     }
     const callId = callIds[index]!;
-    const resolution = input.resolveToolInput({ callId, index, toolName, observedInput: observedInput.value });
+    const resolution = input.resolveToolInput({ runId: input.runId, batchItemId: modelToolBatchItemId(input.runId, input.opId, input.attempt),
+      callId, index, toolName, observedInput: observedInput.value });
     const toolInput = createToolInput(callId, index, toolName, observedInput, resolution);
     for (const dependency of toolInput.dependencies) appendArtifact(artifacts, artifactRefs, dependency);
     appendArtifact(artifacts, artifactRefs, toolInput.artifact);

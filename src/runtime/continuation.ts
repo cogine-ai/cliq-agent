@@ -7,7 +7,7 @@ import type {
   ToolResultPayloadV1, RunFrontier, ContinuationItem
 } from '../kernel/types.js';
 import type { AgentModelTurn, ModelTextV1, ModelUnusableResponseV1, ObservedToolCallInputV1, ToolCallInputV1 } from '../protocol/agent-ir.js';
-import { MODEL_RESPONSE_LIMIT_BYTES, modelResponseDigest, verifyModelText, type ResolveToolInput } from '../model/attempt.js';
+import { MODEL_RESPONSE_LIMIT_BYTES, modelResponseDigest, modelToolBatchItemId, verifyModelText, type ResolveToolInput } from '../model/attempt.js';
 import type { ModelRequestV1 } from '../model/request.js';
 
 export type ModelTurnMaterial = {
@@ -120,7 +120,8 @@ export function validateModelTurn(
         observed.observedInputDigest !== value.observedInputDigest) {
       throw new TypeError('tool input closure does not rehash or match its call');
     }
-    const resolved = resolveToolInput({ callId: call.callId, index, toolName: call.toolName, observedInput: observed });
+    const resolved = resolveToolInput({ runId: request.runId, batchItemId: modelToolBatchItemId(request.runId, request.opId, request.attempt),
+      callId: call.callId, index, toolName: call.toolName, observedInput: observed });
     const base = { schemaVersion: 1, format: 'cliq-tool-call-input-v1', callId: call.callId, index,
       toolName: call.toolName, observedInputRef: value.observedInputRef, observedInputDigest: value.observedInputDigest };
     const expected = resolved.kind === 'resolved'
@@ -186,7 +187,7 @@ export function planModelContinuation(input: {
     items, artifacts: [], disposition: turn.stopReason === 'end' ? 'candidate_required' : 'stop_required'
   };
   const batch: ToolBatchItem = { schemaVersion: 1, kind: 'assistant_tool_batch', runId: request.runId,
-    itemId: identityHash('cliq-tool-batch-item-v1', modelItem.itemId), modelOpId: request.opId,
+    itemId: modelToolBatchItemId(request.runId, request.opId, request.attempt), modelOpId: request.opId,
     modelAttempt: request.attempt, modelTurnRef: turnRef, textRef: turn.textRef, calls: turn.toolCalls, createdAt };
   items.push(batch);
   const invalidCallIds = inputs.filter(({ value }) => value.disposition !== 'resolved').map(({ value }) => value.callId)

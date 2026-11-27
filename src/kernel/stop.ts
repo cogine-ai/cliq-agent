@@ -1,6 +1,20 @@
 import type { ArtifactRef, BudgetUsage, RunStatus, RunTerminalReason } from './types.js';
 
-type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string };
+type StopIdentity = { schemaVersion: 1; runId: string; createdAt: string; supersedesStopIntentRef?: ArtifactRef; registeredCheckpointId?: string; registeredRunRevision?: number; registeredJournalSeq?: number };
+
+/** Independently reproduced from the original final-model Checkpoint and frozen projection. */
+export type ResultSourceLimitCause = {
+  sourceCheckpointId: string; workspaceStateRef: ArtifactRef; producingItemId: string; modelOpId: string; attempt: number;
+  limitKind: 'changed_paths' | 'changed_bytes'; observed: number; limit: number;
+};
+
+/** Deterministic immutable Delivery output, never a model turn or physical failure. */
+export type DeliveryMergeLimitCause = {
+  sourceCheckpointId: string; workspaceStateRef: ArtifactRef; sourceRunResultRef: ArtifactRef;
+  sourceBaseRef: ArtifactRef; sourceDesiredRef: ArtifactRef; capturedWorkspaceRef: ArtifactRef;
+  sourceProjectionRef: ArtifactRef; sandboxProfileRef: ArtifactRef; mergeAlgorithm: 'cliq-diff3-v1';
+  limitKind: 'changed_paths' | 'changed_bytes' | 'generation_bytes' | 'single_file_bytes' | 'merged_entries'; observed: number; limit: number;
+};
 
 /** The token trigger retains its original closed shape. Byte exhaustion is a
  * separate, reproducible pre-dispatch fact, never an arbitrary caught error. */
@@ -21,6 +35,17 @@ export type ModelResponseFailureEvidenceV1 = {
   failureKind: 'model_unusable_response'; unusableResponseRef: ArtifactRef; unusableResponseDigest: string;
 };
 
+/** A native-screened matching MCP event with unusable full-prefix custody.
+ * Its original completed observation stays fully charged and cannot resume. */
+export type McpKnownResultUnusableEvidenceV1 = Omit<ModelResponseFailureEvidenceV1,
+  'failureKind' | 'unusableResponseRef' | 'unusableResponseDigest'> & {
+  failureKind: 'mcp_known_result_unusable';
+  toolObservationRef: ArtifactRef;
+  toolObservationDigest: string;
+  captureRef: ArtifactRef;
+  captureDigest: string;
+};
+
 /** Pre-I/O refusal, never a model response, dispatch permission or a retry hint. */
 export type CredentialRedemptionFailureEvidenceV1 = {
   schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string;
@@ -36,7 +61,24 @@ export type CredentialRedemptionFailureEvidenceV1 = {
 );
 
 /** Implemented closed branches; other RFC runtime failures still need their owners. */
-export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | CredentialRedemptionFailureEvidenceV1;
+export type DependencyAcquisitionFailureEvidenceV1 = {
+  schemaVersion: 1; format: 'cliq-runtime-failure-evidence-v1'; runId: string; frontierRef: ArtifactRef; frontierDigest: string;
+  failingOpId: string; inspectorIdentityRef: ArtifactRef; inspectorIdentityDigest: string; observedAt: string; evidenceDigest: string;
+  failureKind: 'dependency_acquisition_failed'; dependencyPlanRef: ArtifactRef; dependencyFailureItemRef: ArtifactRef; failedJournalSeq: number;
+};
+export type DependencyAmbiguityFailureEvidenceV1 = Omit<DependencyAcquisitionFailureEvidenceV1, 'failureKind' | 'dependencyFailureItemRef' | 'failedJournalSeq'> & {
+  failureKind: 'dependency_result_unavailable'; ambiguityRef: ArtifactRef; unknownJournalSeq: number;
+};
+export type RetryUnknownExhaustionEvidenceV1 = Omit<ModelResponseFailureEvidenceV1,
+  'failureKind' | 'unusableResponseRef' | 'unusableResponseDigest'> & {
+  failureKind: 'retry_unknown_exhausted'; retryUnknownResultRef: ArtifactRef; retryUnknownResultDigest: string;
+};
+export type McpCallResourceExhaustionEvidenceV1 = Omit<RetryUnknownExhaustionEvidenceV1, 'failureKind'> & {
+  failureKind: 'mcp_call_resource_exhausted'; resource: 'server_launch_capacity'; used: number; limit: number;
+};
+export type RuntimeFailureEvidenceV1 = ModelResponseFailureEvidenceV1 | McpKnownResultUnusableEvidenceV1 |
+  CredentialRedemptionFailureEvidenceV1 | DependencyAcquisitionFailureEvidenceV1 | DependencyAmbiguityFailureEvidenceV1 |
+  RetryUnknownExhaustionEvidenceV1 | McpCallResourceExhaustionEvidenceV1;
 
 /** RFC stop authority. Individual reducers accept only the branches whose evidence they can prove. */
 export type StopIntent = StopIdentity & (
@@ -57,6 +99,8 @@ export type StopIntent = StopIdentity & (
   | ({ origin: 'runtime'; targetStatus: 'failed'; reason: 'runtime_failed' } & (
       | { runtimeSubtype: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number }
       | ({ runtimeSubtype: 'context_window_exhausted' } & ContextWindowExhaustionCause)
+      | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
+      | ({ runtimeSubtype: 'delivery_merge_limit_exceeded' } & DeliveryMergeLimitCause)
       | { runtimeSubtype: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
       | { runtimeSubtype: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string }
       | { runtimeSubtype: 'local_inference_unavailable'; activationCycleId: string; serviceId: string; frontierRef: ArtifactRef; failureDetailRef: ArtifactRef }
@@ -71,6 +115,8 @@ export type TerminalReasonDetail =
   | { kind: 'budget_exhausted' | 'cancelled'; stopIntentRef: ArtifactRef }
   | { kind: 'context_compaction_failed'; compactionPlanRef: ArtifactRef; modelOpId: string; attempt: number; evidenceRef: ArtifactRef }
   | ({ kind: 'context_window_exhausted'; evidenceRef: ArtifactRef } & ContextWindowExhaustionCause)
+  | ({ kind: 'result_source_limit_exceeded'; evidenceRef: ArtifactRef } & ResultSourceLimitCause)
+  | ({ kind: 'delivery_merge_limit_exceeded'; evidenceRef: ArtifactRef } & DeliveryMergeLimitCause)
   | { kind: 'dependency_source_integrity'; dependencyPlanRef: ArtifactRef; failingOpId: string; integrityEvidenceRef: ArtifactRef; integrityEvidenceDigest: string }
   | { kind: 'delivery_merge_conflict'; deliveryMergeConflictItemRef: ArtifactRef; conflictRef: ArtifactRef }
   | { kind: 'delivery_publication_failed'; deliveryPlanRef: ArtifactRef; sequence: 'forward' | 'abort'; operationId: string; evidenceRef: ArtifactRef }
@@ -85,7 +131,8 @@ export type TerminalDetail = {
   deliveryTerminalProjectionEvidenceRef?: ArtifactRef;
   abandonedRetryInvocations: Array<{ opId: string; attempt: number; unknownJournalSeq: number;
     budgetSettlementRef: ArtifactRef; dispatchFenceOrDeathEvidenceRef: ArtifactRef }>;
-  abandonedManualInvocation?: { opId: string; attempt: number; abandonedJournalSeq: number; attestationRef: ArtifactRef; toolAbandonedItemRef?: ArtifactRef };
+  abandonedManualInvocation?: { opId: string; attempt: number; abandonedJournalSeq: number; attestationRef: ArtifactRef;
+    dispatchFenceOrDeathEvidenceRef: ArtifactRef; toolAbandonedItemRef: ArtifactRef };
   createdAt: string;
 };
 

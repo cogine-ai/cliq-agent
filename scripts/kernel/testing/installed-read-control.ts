@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { KERNEL_DATABASE_FILENAME, KERNEL_STATE_SCHEMA_VERSION } from '../../../src/config.js';
 import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
 import { digestOmitting, parseCanonicalTime } from '../../../src/kernel/identity.js';
@@ -15,12 +16,22 @@ const ownerKeys = ['schemaVersion', 'ownerEpoch', 'supervisorInstanceId', 'runti
   'instanceNonceDigest', 'acquiredAt', 'rowDigest', 'state', 'rowVersion'];
 const terminalKeys = ['releasedAt', 'terminalReason', 'transitionEvidenceRef', 'transitionEvidenceDigest'];
 
-export function inspectInstalledOwnerHistory(stateRoot: string) {
+export type InstalledOwnerHistoryReadStage = 'open' | 'snapshot' | 'schema' | 'rows' | 'records' | 'fence' | 'commit';
+
+export function inspectInstalledOwnerHistory(stateRoot: string, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
+  const note = (stage: InstalledOwnerHistoryReadStage) => {
+    try { observer?.(stage); } catch { /* Observation cannot decide or replace the original read. */ }
+  };
+  note('open');
   const database = new DatabaseSync(path.join(stateRoot, KERNEL_DATABASE_FILENAME), { readOnly: true, allowExtension: false });
   try {
+    note('snapshot');
     database.exec('BEGIN');
+    note('schema');
     assert.equal(database.prepare('PRAGMA user_version').get()?.user_version, KERNEL_STATE_SCHEMA_VERSION);
+    note('rows');
     const rows = database.prepare('SELECT owner_epoch, supervisor_instance_id, record_json, state, row_digest FROM state_owners ORDER BY owner_epoch').all();
+    note('records');
     const owners = rows.map((row, index) => {
       assert.equal(typeof row.record_json, 'string');
       const owner = parseJsonStrict(row.record_json as string) as StateOwnerRecordV1;
@@ -39,6 +50,7 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
       }
       return owner;
     });
+    note('fence');
     const fences = database.prepare('SELECT * FROM canonical_time_fence').all();
     assert.equal(fences.length, owners.length ? 1 : 0);
     let fence: CanonicalTimeFenceV1 | undefined;
@@ -52,22 +64,61 @@ export function inspectInstalledOwnerHistory(stateRoot: string) {
       assert(['healthy', 'clock_regressed'].includes(fence.state)); assert.equal(fence.updatedAt, fence.lastAcceptedAt);
       if (fence.state === 'healthy') assert.equal(fence.observedWallClockAt, fence.lastAcceptedAt);
     }
+    note('commit');
     database.exec('COMMIT');
     return { owners, fence };
   } finally { database.close(); }
+}
+
+/** Re-observe the complete SQL cut after an asynchronous retained-evidence walk.
+ * Owner lineage must remain byte-for-byte current, but its time fence may have
+ * advanced through ordinary transactions by that same owner. This read-only
+ * qualification check creates no ownership or execution authority. */
+export function assertInstalledOwnerHistoryCurrent(stateRoot: string, expected: ReturnType<typeof inspectInstalledOwnerHistory>): void {
+  const current = inspectInstalledOwnerHistory(stateRoot);
+  assert.deepEqual(current.owners, expected.owners);
+  if (expected.fence === undefined) {
+    assert.equal(current.fence, undefined);
+    return;
+  }
+  assert(current.fence);
+  assert.equal(current.fence.stateOwnerEpoch, expected.fence.stateOwnerEpoch);
+  assert(parseCanonicalTime(current.fence.lastAcceptedAt) >= parseCanonicalTime(expected.fence.lastAcceptedAt),
+    'the same owner canonical accepted time must not regress');
+  assert(parseCanonicalTime(current.fence.updatedAt) >= parseCanonicalTime(expected.fence.updatedAt),
+    'the same owner canonical fence update must not regress');
+}
+
+export function observeInstalledOwnerHistory(stateRoot: string, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
+  try { return inspectInstalledOwnerHistory(stateRoot, observer); }
+  catch (error) {
+    const sqlite = error as Error & { code?: unknown; errcode?: unknown };
+    if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number' &&
+        Number.isSafeInteger(sqlite.errcode) && sqlite.errcode >= 0 && sqlite.errcode % 256 === 5) return undefined;
+    throw error;
+  }
+}
+
+/** Only the caller's original absolute readiness budget permits waiting.
+ * Every attempt closes its actual read transaction before yielding. */
+export async function waitForInstalledOwnerHistory(stateRoot: string, by: number, observer?: (stage: InstalledOwnerHistoryReadStage) => void) {
+  assert(Number.isSafeInteger(by) && by >= 0);
+  for (;;) {
+    assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
+    const history = observeInstalledOwnerHistory(stateRoot, observer);
+    if (history !== undefined) {
+      assert(Date.now() < by, 'installed owner history exceeded the original readiness budget');
+      return history;
+    }
+    await delay(20);
+  }
 }
 
 /** One readiness observation, not a successful owner/death/recovery proof.
  * A live startup writer may briefly hold the rollback-journal schema lock;
  * the caller's existing deadline/poll loop owns waiting, never this reader. */
 export function inspectInstalledOwner(stateRoot: string): StateOwnerRecordV1 | undefined {
-  try { return inspectInstalledOwnerHistory(stateRoot).owners.at(-1); }
-  catch (error) {
-    const sqlite = error as Error & { code?: unknown; errcode?: unknown };
-    if (error instanceof Error && sqlite.code === 'ERR_SQLITE_ERROR' && typeof sqlite.errcode === 'number'
-      && (sqlite.errcode & 0xff) === 5) return undefined;
-    throw error;
-  }
+  return observeInstalledOwnerHistory(stateRoot)?.owners.at(-1);
 }
 
 export function assertInstalledReadExchanges(stdout: string, owner: StateOwnerRecordV1, bundle: RuntimeBundleManifest): void {

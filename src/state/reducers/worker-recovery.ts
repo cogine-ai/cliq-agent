@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { canonicalSha256 } from '../../kernel/canonical.js';
 import { addCanonicalDuration, digestOmitting, identityHash, sha256Bytes } from '../../kernel/identity.js';
-import type { ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1, Run, SupervisorInspectorIdentityV1,
-  WorkerDeathWait, WorkerRecoveryEvidenceV1, WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
+import type { ReconciliationProbeCancellationClosureV1 } from '../../kernel/reconciliation.js';
+import type { BoundWorkerLaunch, ProcessContainmentDeathEvidenceV1, ReconciliationProbeEvidenceV1, ReconciliationProbeTimeoutClosureV1,
+  RecoveryClosureV1, Run, SupervisorInspectorIdentityV1, WorkerDeathWait, WorkerRecoveryEvidenceV1,
+  WorkspaceGenerationQuarantineEvidenceV1, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
 import { decodeRetainedRunAssembly } from '../../model/run-assembly.js';
 import { exactKeys } from '../../policy/runtime-authority.js';
@@ -11,7 +13,7 @@ import { observeRetainedRunWorkspace, readRetainedWorkspaceObservation } from '.
 import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
-import { readRetainedWorkerLaunchClosure } from '../execution-closure.js';
+import { assertWorkerLaunchClosure, readRetainedWorkerLaunchClosure, type WorkerLaunchClosure } from '../execution-closure.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { nextJournalSequence, readInvocationJournal } from '../repositories/journal.js';
 import { readRequiredWorkerLaunch, readWorkerLaunchesForRun, updateWorkerLaunch } from '../repositories/worker-launches.js';
@@ -19,22 +21,25 @@ import { readRequiredWorkspaceGenerationByRef, readWorkspaceGenerationsForRun, u
 import { readRun } from '../rows.js';
 import type { SqliteConnection, SqliteDriver } from '../sqlite-driver.js';
 import { assertActiveStateOwner, type StateOwnerContext } from '../state-owner.js';
-import { hasOnlySettledInstalledModelUnknowns, openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
+import { hasOnlySettledInstalledModelUnknowns, hasOnlySettledMcpUnknowns, openWorkerInvocations, readWorkerProbeOwnerDeath, readWorkerRecoveryAnchor, WORKER_PROBE_BACKOFF_MS } from '../worker-recovery.js';
 import { assertWorkerRecoveryTaskReceipt, type WorkerRecoveryTaskReceipt } from '../worker-recovery-task.js';
 import { assertInstalledBrokerQuiescence, type InstalledBrokerQuiescence } from '../store.js';
 import { appendRunStateEvent, requireHealthyFence } from './invocation.js';
 import { prepareWorkerRecoveryTerminalPlan, type WorkerRecoveryTerminalPlan } from '../worker-recovery-terminal.js';
+import { readReconciliationProbeCapacity } from '../reconciliation-capacity.js';
 import { hasOnlySettledPrivateToolUnknowns } from '../private-tool-rollback.js';
+import { hasOnlySettledVerifierUnknowns } from '../verifier-unknown-retirement.js';
 
 export type BeginWorkerRecoveryInput = { runId: string; expectedRunRevision: number };
 
 export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  joinedTask?: WorkerRecoveryTaskReceipt
+  joinedTask?: WorkerRecoveryTaskReceipt, closureKind: 'deadline' | 'shutdown' = 'deadline'
 ): Promise<Run> => {
   input = immutableSnapshot(input);
   if (!exactKeys(input, ['runId', 'expectedRunRevision']) || typeof input.runId !== 'string' || !input.runId ||
-      !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
+      !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1 ||
+      !['deadline', 'shutdown'].includes(closureKind)) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker timeout requires a Run id and expected revision only');
   }
   const inspectingOwner = assertActiveStateOwner(driver, owner);
@@ -50,12 +55,14 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   }
   const dispatch = wait.probeState.dispatch;
   const closedAt = sampleCanonicalNow();
-  if (closedAt < dispatch.probeDeadlineAt) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
+  if (closureKind === 'deadline' && closedAt < dispatch.probeDeadlineAt)
+    throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection deadline has not elapsed');
   let taskClosure;
   if (dispatch.owningSupervisorInstanceId === inspectingOwner.supervisorInstanceId) {
     assertWorkerRecoveryTaskReceipt(joinedTask, { run, wait, owner }, closedAt);
     taskClosure = { closureKind: 'cancelled_and_joined' as const, inspectorTaskCancelledAndJoined: true as const };
   } else {
+    if (closureKind === 'shutdown') throw new KernelStorageError('RECOVERY_REQUIRED', 'shutdown cannot adopt another owner worker inspection');
     if (joinedTask !== undefined) throw new KernelStorageError('RECOVERY_REQUIRED', 'successor cannot substitute a task receipt for observed owner death');
     taskClosure = await readWorkerProbeOwnerDeath(artifacts, driver, dispatch);
   }
@@ -70,26 +77,33 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   inspector.identityDigest = digestOmitting(inspector, 'identityDigest');
   const inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
   const inspectorPair = { inspectorIdentityRef: inspectorArtifact.ref, inspectorIdentityDigest: inspector.identityDigest };
-  const timeout: ReconciliationProbeTimeoutClosureV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-timeout-closure-v1',
-    runId: run.id, waitingSubjectRef: run.waitingOnRef, probeKind: 'automatic', probeOrdinal: dispatch.probeOrdinal,
+  const common = { schemaVersion: 1 as const, runId: run.id, waitingSubjectRef: run.waitingOnRef, probeKind: 'automatic' as const, probeOrdinal: dispatch.probeOrdinal,
     probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest, probeDeadlineAt: dispatch.probeDeadlineAt,
-    ...inspectorPair, closedAt, closureDigest: '', subjectKind: 'worker_recovery', oldWorkerLaunchId: wait.subject.oldWorkerLaunchId,
-    processContainmentRef: wait.subject.processContainmentRef, inspectorTaskId: dispatch.inspectorTaskId, taskClosure };
-  timeout.closureDigest = digestOmitting(timeout, 'closureDigest');
-  const timeoutArtifact = await artifacts.publishCanonical(timeout, timeout.format);
+    ...inspectorPair, closedAt, closureDigest: '', subjectKind: 'worker_recovery' as const, oldWorkerLaunchId: wait.subject.oldWorkerLaunchId,
+    processContainmentRef: wait.subject.processContainmentRef, inspectorTaskId: dispatch.inspectorTaskId };
+  const closure: Extract<ReconciliationProbeCancellationClosureV1 | ReconciliationProbeTimeoutClosureV1, { subjectKind: 'worker_recovery' }> =
+    closureKind === 'shutdown' ? { ...common, format: 'cliq-reconciliation-probe-cancellation-closure-v1', reason: 'owning_supervisor_shutdown',
+      taskClosure: taskClosure as Extract<typeof taskClosure, { closureKind: 'cancelled_and_joined' }> }
+      : { ...common, format: 'cliq-reconciliation-probe-timeout-closure-v1', taskClosure };
+  closure.closureDigest = digestOmitting(closure, 'closureDigest');
+  const closureArtifact = await artifacts.publishCanonical(closure, closure.format);
   const wrapper: ReconciliationProbeEvidenceV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1', runId: run.id,
     waitingSubjectRef: run.waitingOnRef, waitingSubjectDigest: run.waitingOnRef, probeKind: 'automatic', probeOrdinal: dispatch.probeOrdinal,
     probeNonceDigest: dispatch.probeNonceDigest, probeDispatchDigest: dispatch.dispatchDigest, probeStartedAt: dispatch.probeStartedAt,
-    probeDeadlineAt: dispatch.probeDeadlineAt, ...inspectorPair, observedAt: closedAt, evidenceDigest: '', outcome: 'probe_timeout',
-    timeoutReason: 'no_authoritative_observation_before_deadline', timeoutClosureRef: timeoutArtifact.ref, timeoutClosureDigest: timeout.closureDigest };
+    probeDeadlineAt: dispatch.probeDeadlineAt, ...inspectorPair, observedAt: closedAt, evidenceDigest: '', ...(closureKind === 'shutdown'
+      ? { outcome: 'probe_cancelled' as const, cancellationReason: 'owning_supervisor_shutdown' as const,
+        cancellationClosureRef: closureArtifact.ref, cancellationClosureDigest: closure.closureDigest }
+      : { outcome: 'probe_timeout' as const, timeoutReason: 'no_authoritative_observation_before_deadline' as const,
+        timeoutClosureRef: closureArtifact.ref, timeoutClosureDigest: closure.closureDigest }) };
   wrapper.evidenceDigest = digestOmitting(wrapper, 'evidenceDigest');
   const wrapperArtifact = await artifacts.publishCanonical(wrapper, wrapper.format);
   const evidence = { lastProbeEvidenceRef: wrapperArtifact.ref, lastProbeEvidenceDigest: wrapper.evidenceDigest };
   const count = wait.probeState.automaticProbeCount;
+  const backoffFrom = closedAt < dispatch.probeDeadlineAt ? dispatch.probeDeadlineAt : closedAt;
   const nextWait: WorkerDeathWait = { ...wait, probeState: count === 8
     ? { phase: 'automatic_exhausted', automaticProbeCount: 8, userProbeCount: 0, ...evidence }
     : { phase: 'automatic_pending', automaticProbeCount: count, userProbeCount: 0,
-      nextProbeAt: addCanonicalDuration(closedAt, WORKER_PROBE_BACKOFF_MS[count - 1]!), ...evidence } };
+      nextProbeAt: addCanonicalDuration(backoffFrom, WORKER_PROBE_BACKOFF_MS[count - 1]!), ...evidence } };
   const nextWaitArtifact = await artifacts.publishCanonical(nextWait, 'cliq-waiting-subject-v1');
   const launch = cut.workerLaunches[0]!;
   const generation = cut.workspaceGenerations.find(value => value.generationRef === wait.subject.workspaceGenerationRef)!;
@@ -107,7 +121,7 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
     outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
     if (now < closedAt) throw new KernelStorageError('RECOVERY_REQUIRED', 'worker timeout commit precedes its task closure');
-    for (const artifact of [inspectorArtifact, timeoutArtifact, wrapperArtifact, nextWaitArtifact]) insertArtifactMetadata(connection, artifact, now);
+    for (const artifact of [inspectorArtifact, closureArtifact, wrapperArtifact, nextWaitArtifact]) insertArtifactMetadata(connection, artifact, now);
     updateWorkspaceGeneration(connection, generation, { ...generation, rowVersion: generation.rowVersion + 1,
       updatedAt: now, waitingSubjectRef: nextWaitArtifact.ref, waitingSubjectDigest: nextWaitArtifact.ref });
     connection.prepare('UPDATE runs SET waiting_on_ref=?, revision=revision+1, updated_at=? WHERE id=?')
@@ -121,21 +135,22 @@ export const closeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
 
 export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
   driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: BeginWorkerRecoveryInput,
-  onCommitted?: (run: Run, wait: WorkerDeathWait) => void
+  onCommitted?: (run: Run, wait: WorkerDeathWait) => void, readSignal?: AbortSignal
 ): Promise<Run> => {
+  const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts; reads.assertReadActive();
   input = immutableSnapshot(input);
   if (!exactKeys(input, ['runId', 'expectedRunRevision']) || typeof input.runId !== 'string' || !input.runId ||
       !Number.isSafeInteger(input.expectedRunRevision) || input.expectedRunRevision < 1) {
     throw new KernelStorageError('INVALID_REQUEST', 'worker inspection requires a Run id and expected revision only');
   }
   assertActiveStateOwner(driver, owner);
-  const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  const cut = await readRecoveryClosure(driver, reads, input.runId);
   const { run } = cut;
   if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection Run revision changed');
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection requires the installed worker wait');
   }
-  const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
+  const wait = await reads.readCanonical<WorkerDeathWait>(run.waitingOnRef);
   if (wait.subject.kind !== 'worker_death' || wait.probeState.phase !== 'automatic_pending') {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker inspection cannot replace an in-flight dispatch');
   }
@@ -149,7 +164,7 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   const probeNonceDigest = sha256Bytes(randomBytes(32));
   const anchorArtifact = wait.probeState.automaticProbeCount === 0
     ? await artifacts.publishCanonical(generation, 'cliq-workspace-generation-state-v1') : undefined;
-  const inspectionTargetDigest = anchorArtifact?.ref ?? canonicalSha256((await readWorkerRecoveryAnchor(artifacts, wait, generation)).anchor);
+  const inspectionTargetDigest = anchorArtifact?.ref ?? canonicalSha256((await readWorkerRecoveryAnchor(reads, wait, generation)).anchor);
   const dispatch = { schemaVersion: 1 as const, format: 'cliq-reconciliation-probe-dispatch-v1' as const, runId: run.id,
     reconciliationSubjectDigest, probeKind: 'automatic' as const, probeOrdinal, probeNonceDigest, probeStartedAt,
     probeDeadlineAt: addCanonicalDuration(probeStartedAt, 30_000), owningSupervisorInstanceId: owner.supervisorInstanceId,
@@ -162,8 +177,10 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
   const metadata = [...(anchorArtifact ? [anchorArtifact] : []), ...await joinResourceOperations([artifacts.publishCanonical(dispatch, dispatch.format),
     artifacts.publishCanonical(nextWait, 'cliq-waiting-subject-v1')])];
   const waitingOnRef = canonicalSha256(nextWait);
+  const capacity = await readReconciliationProbeCapacity(driver, reads);
   let outcome: TimeFenceAdvance | undefined, updated!: Run;
   driver.transaction(connection => {
+    reads.assertReadActive();
     assertActiveStateOwner(connection, owner);
     if (canonicalSha256(readRun(connection, run.id)) !== canonicalSha256(run) ||
         canonicalSha256(readRequiredWorkerLaunch(connection, launch.launchId)) !== canonicalSha256(launch) ||
@@ -171,6 +188,7 @@ export const beginWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', asyn
         nextJournalSequence(connection, run.id) !== cut.journal.length + 1) {
       throw new KernelStorageError('REVISION_CONFLICT', 'worker inspection cut changed before dispatch publication');
     }
+    capacity.assertAvailable(connection);
     const now = sampleCanonicalNow();
     outcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (outcome !== 'healthy') return;
@@ -199,8 +217,66 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
   }
   assertActiveStateOwner(driver, owner);
   const cut = await readRecoveryClosure(driver, artifacts, input.runId);
+  return commitWorkerRecoveryFence(driver, artifacts, owner, input.expectedRunRevision, cut);
+});
+
+/** Current pointer-bound state for an already held original activation.
+ * This read grants no release or result-commit authority. Native retirement
+ * uses its original receiver; completion still verifies the full history. */
+export function readOwnedWorkerRetirementCut(
+  driver: SqliteDriver, owner: StateOwnerContext,
+  original: Readonly<{ run: Run; launch: BoundWorkerLaunch }>, closure: WorkerLaunchClosure
+) {
+  assertWorkerLaunchClosure(closure);
+  const active = assertActiveStateOwner(driver, owner);
+  return driver.readSnapshot(connection => {
+    const run = readRun(connection, original.run.id);
+    const workerLaunches = readWorkerLaunchesForRun(connection, run.id, true);
+    const launch = workerLaunches[0];
+    if (workerLaunches.length !== 1 || launch?.phase !== 'activated' || run.status !== 'running' || !run.frontierRef ||
+        run.activeWorkerLaunchId !== original.launch.launchId || run.specRef !== original.run.specRef ||
+        run.createdAt !== original.run.createdAt || run.deadlineAt !== original.run.deadlineAt ||
+        run.leaseEpoch !== original.run.leaseEpoch || launch.launchId !== original.launch.launchId ||
+        launch.supervisorInstanceId !== active.supervisorInstanceId || launch.leaseEpoch !== run.leaseEpoch ||
+        !launch.workerIdentityDigest || !launch.processContainmentRef ||
+        launch.workerIdentityDigest !== original.launch.workerIdentityDigest || launch.processContainmentRef !== original.launch.processContainmentRef ||
+        launch.sandboxLaunchSpecRef !== closure.sandboxLaunchSpecRef || launch.containmentPlanRef !== closure.containmentPlanRef ||
+        launch.workspaceGenerationRef !== closure.workspaceGenerationRef || launch.spawnNonceDigest !== original.launch.spawnNonceDigest ||
+        launch.activationNonceDigest !== original.launch.activationNonceDigest || closure.spec.owner.workerLaunchId !== launch.launchId ||
+        closure.spec.owner.runId !== run.id || closure.spec.owner.intendedLeaseEpoch !== run.leaseEpoch ||
+        canonicalSha256(closure.runSpec) !== run.specRef)
+      throw new KernelStorageError('LEASE_FENCED', 'worker retirement requires its original owned activation');
+    const generation = readRequiredWorkspaceGenerationByRef(connection, launch.workspaceGenerationRef);
+    if ((generation.phase !== 'active' && generation.phase !== 'revoking' && generation.phase !== 'checkpointing') ||
+        generation.runId !== run.id || generation.activeWorkerLaunchId !== launch.launchId || generation.leaseEpoch !== launch.leaseEpoch ||
+        generation.phase !== launch.generationWriteState || generation.quiesceId !== launch.quiesceId ||
+        generation.generationIdentityDigest !== closure.generation.identityDigest || generation.generationId !== closure.generation.generationId ||
+        generation.sourceCheckpointId !== closure.generation.sourceCheckpointId ||
+        generation.sourceWorkspaceStateRef !== closure.generation.sourceWorkspaceStateRef ||
+        generation.sourceWorkspaceStateDigest !== closure.generation.sourceWorkspaceStateDigest)
+      throw new KernelStorageError('LEASE_FENCED', 'worker retirement requires its original pointer-bound generation');
+    return { run, workerLaunches, workspaceGenerations: [generation], journal: readInvocationJournal(connection, run.id),
+      refs: [run.frontierRef, launch.workerIdentityDigest, launch.processContainmentRef, launch.sandboxLaunchSpecRef,
+        launch.containmentPlanRef, launch.workspaceGenerationRef] };
+  });
+}
+
+/** The closing execution still owns the verified activation. Install the
+ * same unresolved fence without reopening unrelated history inside Stop2.
+ * The successor must complete that history walk before observing or resuming. */
+export const fenceOwnedWorkerOnShutdown = stateOperation('RECOVERY_REQUIRED', async (
+  driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  original: Readonly<{ run: Run; launch: BoundWorkerLaunch }>, closure: WorkerLaunchClosure
+): Promise<Run> => {
+  const cut = readOwnedWorkerRetirementCut(driver, owner, original, closure);
+  await artifacts.mapReads(cut.refs, ref => artifacts.verifyBytes(ref));
+  return commitWorkerRecoveryFence(driver, artifacts, owner, cut.run.revision, cut);
+});
+
+async function commitWorkerRecoveryFence(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext,
+  expectedRunRevision: number, cut: Pick<RecoveryClosureV1, 'run' | 'workerLaunches' | 'workspaceGenerations' | 'journal'>): Promise<Run> {
   const { run } = cut;
-  if (run.revision !== input.expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery Run revision changed');
+  if (run.revision !== expectedRunRevision) throw new KernelStorageError('REVISION_CONFLICT', 'worker recovery Run revision changed');
   const launch = cut.workerLaunches.find(launch => launch.launchId === run.activeWorkerLaunchId);
   const generation = cut.workspaceGenerations.find(generation => generation.generationRef === launch?.workspaceGenerationRef);
   if (run.status !== 'running' || !run.frontierRef || !launch || !generation || cut.workerLaunches.length !== 1 ||
@@ -252,7 +328,7 @@ export const beginWorkerRecovery = stateOperation('RECOVERY_REQUIRED', async (
   });
   requireHealthyFence(outcome);
   return immutableSnapshot(updated);
-});
+}
 
 /** Internal owning reducer. A control client cannot supply proof, a path or a tree observation. */
 export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', async (
@@ -275,7 +351,8 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   if (run.status !== 'waiting' || run.waitingReason !== 'reconciliation' || !run.waitingOnRef) {
     throw new KernelStorageError('STATE_TRANSITION_INVALID', 'worker recovery completion has no installed inspection');
   }
-  const wait = await artifacts.readCanonical<WorkerDeathWait>(run.waitingOnRef);
+  const workerWaitingSubjectRef = run.waitingOnRef;
+  const wait = await artifacts.readCanonical<WorkerDeathWait>(workerWaitingSubjectRef);
   signal?.throwIfAborted();
   if (wait.subject.kind !== 'worker_death' || wait.probeState.phase !== 'automatic_in_flight' ||
       wait.probeState.dispatch.owningSupervisorInstanceId !== owner.supervisorInstanceId) {
@@ -286,7 +363,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     assertActiveStateOwner(connection, owner);
     const current = readRun(connection, run.id);
     const unchanged = canonicalSha256(current) === canonicalSha256(run);
-    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, ...data }: Run) => data;
+    const stable = ({ revision: _revision, updatedAt: _time, stopIntentRef: _intent, cancelRequested: _cancel, parentCancellationRef: _parentCancellation, ...data }: Run) => data;
     if ((!unchanged && (!stoppedOwner || !brokerQuiescence || !current.stopIntentRef || current.revision <= run.revision ||
         current.updatedAt < run.updatedAt || run.cancelRequested && !current.cancelRequested ||
         canonicalSha256(stable(current)) !== canonicalSha256(stable(run)))) ||
@@ -299,8 +376,29 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     run = current; cut = { ...cut, run };
     return true;
   }
-  const open = openWorkerInvocations(cut.journal);
+  let open = openWorkerInvocations(cut.journal);
+  if (cut.runSpec.operation === 'delivery' && open.length === 1 && open[0]!.opKind === 'publish') {
+    const history = cut.journal.filter(row => row.opId === open[0]!.opId && row.attempt === open[0]!.attempt);
+    if (history.length === 2 && history[1]!.phase === 'dispatch_claimed') {
+      const publication = await import('../publication-invocation.js');
+      const initial = await publication.prepareOwnedPublicationInitialAmbiguity(driver, artifacts, owner,
+        { runId: run.id, expectedRunRevision: run.revision }, death, signal);
+      const { preparePublicationInitialAmbiguitySettlement } = await import('../publication-settlement.js');
+      const settlement = await preparePublicationInitialAmbiguitySettlement(driver, artifacts, owner, initial);
+      await settlement.settle({ expectedRunRevision: run.revision });
+      // The new CP is a true excluded-control continuation of the same W_M,
+      // not the old generation fence or a replacement worker/path wait.
+      const current = await readRecoveryClosure(driver, artifacts, run.id);
+      if (current.run.status !== 'waiting' || current.run.waitingOnRef !== run.waitingOnRef ||
+          current.latestCheckpoint.workspaceStateRef !== cut.latestCheckpoint.workspaceStateRef ||
+          canonicalSha256(current.workerLaunches) !== canonicalSha256(cut.workerLaunches) ||
+          canonicalSha256(current.workspaceGenerations) !== canonicalSha256(cut.workspaceGenerations))
+        throw new KernelStorageError('RECOVERY_REQUIRED', 'initial publication ambiguity changed the original worker-death fence');
+      cut = current; run = current.run; open = openWorkerInvocations(cut.journal);
+    }
+  }
   const assembly = open.length ? decodeRetainedRunAssembly(await artifacts.readCanonical(cut.runSpec.assemblyRef)) : undefined;
+  let publicationUnknown: Awaited<ReturnType<typeof import('../publication-worker-retirement.js')['readUnresolvedPublicationWorkerCut']>> | undefined;
   // The closure, wait and assembly reads may yield to a real StopIntent. Decide
   // only after checking the current exact subject and immutable resource cut.
   refreshStopCut(driver);
@@ -311,7 +409,14 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     const privateRollback = !!run.stopIntentRef && hasOnlySettledPrivateToolUnknowns(cut.journal);
     const undispatched = !!run.stopIntentRef && open.every(prepared => cut.journal.filter(entry =>
       entry.opId === prepared.opId && entry.attempt === prepared.attempt).length === 1);
-    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) && !privateRollback && !undispatched) || !brokerQuiescence) {
+    const publication = cut.runSpec.operation === 'delivery' && open.some(entry => entry.opKind === 'publish')
+      ? await (await import('../publication-worker-retirement.js')).readUnresolvedPublicationWorkerCut(driver, artifacts, cut) : undefined;
+    publicationUnknown = publication;
+    if ((!hasOnlySettledInstalledModelUnknowns(assembly!, cut.journal) &&
+        !hasOnlySettledMcpUnknowns(cut.journal) &&
+        !(run.stopIntentRef && hasOnlySettledVerifierUnknowns(cut.journal)) &&
+        !(run.stopIntentRef && (await import('../dependency-unknown-retirement.js')).hasOnlySettledDependencyUnknowns(cut.journal)) &&
+        !privateRollback && !undispatched && !publication) || !brokerQuiescence) {
       throw new KernelStorageError('RECOVERY_REQUIRED', 'open worker invocations require their typed settlement or explicit manual-risk wait before quarantine');
     }
     assertInstalledBrokerQuiescence(brokerQuiescence, driver, owner, run.id);
@@ -335,7 +440,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     throw new KernelStorageError('ARTIFACT_MISMATCH', 'native worker death does not observe this persisted inspection');
   }
   const workspaceRetirement = await observeRetainedRunWorkspace({ filesystem: owner.filesystem, artifacts,
-    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal });
+    identity: closure.generation, sourceRowVersion: intent.sourceRowVersion, signal, gitResources: closure.spec.resources });
   const observation = readRetainedWorkspaceObservation(workspaceRetirement);
   signal?.throwIfAborted();
   if (observation.generationRef !== generation.generationRef || observation.generationIdentityDigest !== generation.generationIdentityDigest ||
@@ -352,6 +457,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   function requireCurrentCut(connection: SqliteConnection) {
     signal?.throwIfAborted();
     assertActiveStateOwner(connection, owner);
+    publicationUnknown?.assertSourceCut(connection);
     if (open.length !== 0) {
       assertInstalledBrokerQuiescence(brokerQuiescence!, driver, owner, run.id);
       // A readonly replacement registration need not change Run revision or
@@ -397,7 +503,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const deathArtifact = await artifacts.publishCanonical(deathEvidence, 'cliq-process-containment-death-evidence-v1');
   signal?.throwIfAborted();
   const recovery: WorkerRecoveryEvidenceV1 = { schemaVersion: 1, format: 'cliq-worker-recovery-evidence-v1', runId: run.id,
-    waitingSubjectRef: run.waitingOnRef, oldWorkerLaunchId: launch.launchId, oldLeaseEpoch: launch.leaseEpoch!,
+    waitingSubjectRef: workerWaitingSubjectRef, oldWorkerLaunchId: launch.launchId, oldLeaseEpoch: launch.leaseEpoch!,
     oldWorkerIdentityDigest: launch.workerIdentityDigest!, processContainmentRef: launch.processContainmentRef!,
     containmentDeathEvidenceRef: deathArtifact.ref, containmentDeathEvidenceDigest: deathEvidence.evidenceDigest,
     workspaceGenerationRef: generation.generationRef, generationTreeDigest: generation.lastVerifiedTreeDigest, ...inspectorPair,
@@ -419,7 +525,7 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
   const quarantineArtifact = await artifacts.publishCanonical(quarantine, quarantine.format);
   signal?.throwIfAborted();
   const wrapper: ReconciliationProbeEvidenceV1 = { schemaVersion: 1, format: 'cliq-reconciliation-probe-evidence-v1', runId: run.id,
-    waitingSubjectRef: run.waitingOnRef, waitingSubjectDigest: run.waitingOnRef, probeKind: 'automatic',
+    waitingSubjectRef: workerWaitingSubjectRef, waitingSubjectDigest: workerWaitingSubjectRef, probeKind: 'automatic',
     probeOrdinal: wait.probeState.automaticProbeCount, probeNonceDigest: wait.probeState.dispatch.probeNonceDigest,
     probeDispatchDigest: wait.probeState.dispatch.dispatchDigest, probeStartedAt: wait.probeState.dispatch.probeStartedAt,
     probeDeadlineAt: wait.probeState.dispatch.probeDeadlineAt, ...inspectorPair, observedAt, evidenceDigest: '',
@@ -437,6 +543,11 @@ export const completeWorkerRecoveryProbe = stateOperation('RECOVERY_REQUIRED', a
     const plan = await prepareWorkerRecoveryTerminalPlan(driver, artifacts, owner, { cut, wait, launch, generation,
       quarantine, quarantineArtifact, wrapperArtifact, metadata, nativeRetirement, workspaceRetirement,
       brokerQuiescence: brokerQuiescence! });
+    if (cut.runSpec.operation === 'delivery' && cut.journal.some(entry => entry.opKind === 'publish' && entry.phase === 'dispatch_claimed')) {
+      const { commitStoppedPublicationWorkerRetirement, commitUnresolvedPublicationWorkerRetirement } = await import('../publication-worker-retirement.js');
+      return publicationUnknown ? commitUnresolvedPublicationWorkerRetirement(driver, artifacts, owner, plan, run.id, signal)
+        : commitStoppedPublicationWorkerRetirement(driver, artifacts, owner, plan, run.id, signal);
+    }
     return stoppedOwner!.finish(plan);
   }
   let outcome: TimeFenceAdvance | undefined, updated!: Run;

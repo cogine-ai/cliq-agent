@@ -1,10 +1,29 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, mkdtemp, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
 import { loadNativeStateOwner, type HeldWorkspaceRoot } from './native-owner.js';
 import { captureLiveWorkspaceIdentity } from './workspace-identity.js';
+
+test('new Session workspace identity opens only descriptors before any Git inspection authority exists', async t => {
+  const root = await mkdtemp(path.join(process.cwd(), '.cliq-source-descriptors-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = path.join(root, 'workspace'), target = path.join(root, 'external-config');
+  await mkdir(workspace); await mkdir(path.join(workspace, '.git'));
+  await writeFile(target, 'raw configuration sentinel must never be an identity input\n');
+  await symlink(target, path.join(workspace, '.git/config'));
+  const captured = await captureLiveWorkspaceIdentity({ workspacePath: workspace, ownerPrincipalId: 'descriptor-only-test' });
+  assert.equal(captured.repository!.schemaVersion, 2);
+  assert.equal(captured.repository!.format, 'cliq-repository-identity-v2');
+  assert.equal(Object.hasOwn(captured.repository!, 'objectFormat'), false);
+  const directory = await lstat(path.join(workspace, '.git'), { bigint: true });
+  assert.deepEqual(captured.repository!.gitDirectoryIdentity,
+    { deviceId: String(directory.dev), fileId: String(directory.ino), ownerUid: Number(directory.uid) });
+  assert.equal(await readFile(target, 'utf8'), 'raw configuration sentinel must never be an identity input\n');
+  const native = await loadNativeStateOwner(), held = native.openWorkspaceRoot(workspace);
+  try { assert.throws(() => held.readGitConfigChunk(), /owning authorized source inspection/); held.assertHeld(); }
+  finally { held.close(); }
+});
 
 test('source identity retains every no-follow ancestor and rejects a symlink back to the same root', async t => {
   const container = await mkdtemp(path.join(process.cwd(), '.cliq-source-identity-'));
@@ -33,51 +52,50 @@ test('source identity retains every no-follow ancestor and rejects a symlink bac
   await rm(container);
   await rename(saved, container);
   held.assertHeld();
-  assert.equal(held.readGitConfigChunk()!.toString(), '[core]\n\trepositoryformatversion = 0\n');
-  assert.equal(held.readGitConfigChunk(), null);
+  assert.throws(() => held.readGitConfigChunk(), /owning authorized source inspection/);
   held.close();
   assert.throws(() => held.assertHeld(), /changed or closed/);
 });
 
-test('source repository identity does not interpret an alias value as its object format', async t => {
+test('descriptor-only identity does not interpret an alias as configuration or object identity', async t => {
   const root = await mkdtemp(path.join(process.cwd(), '.cliq-source-format-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, '.git'));
   await writeFile(path.join(root, '.git/config'), '[core]\nrepositoryformatversion = 0\n[alias]\nobjectFormat = sha256\n');
   const captured = await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' });
-  assert.equal(captured.repository!.objectFormat, 'sha1');
+  assert.equal(captured.repository!.schemaVersion, 2);
+  assert.equal(Object.hasOwn(captured.repository!, 'objectFormat'), false);
 });
 
-test('source repository identity reads quoted Git object-format literals with comments', async t => {
+test('descriptor-only identity does not read even a valid quoted object-format declaration', async t => {
   const root = await mkdtemp(path.join(process.cwd(), '.cliq-source-format-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, '.git'));
   const config = path.join(root, '.git/config');
   await writeFile(config, '[core]\nrepositoryformatversion = 1\n[extensions]\nobjectFormat = "sha256" # frozen hash algorithm\n');
-  // Ambient Git is an independent fixture oracle, never production authority.
-  assert.equal(execFileSync('git', ['config', '--file', config, '--no-includes', '--get', 'extensions.objectformat'],
-    { encoding: 'utf8' }).trim(), 'sha256');
-  assert.equal((await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' })).repository!.objectFormat, 'sha256');
+  const captured = await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' });
+  assert.equal(Object.hasOwn(captured.repository!, 'objectFormat'), false);
 });
 
-test('source repository identity does not treat a continued alias body as configuration sections', async t => {
+test('continued configuration values cannot become pre-authorization identity facts', async t => {
   const root = await mkdtemp(path.join(process.cwd(), '.cliq-source-format-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, '.git'));
   const config = path.join(root, '.git/config');
   await writeFile(config, '[core]\nrepositoryformatversion = 0\n[alias]\nbody = literal \\\n[extensions]\\\nobjectFormat = sha256\n');
-  assert.equal(execFileSync('git', ['config', '--file', config, '--no-includes', '--get', 'alias.body'],
-    { encoding: 'utf8' }).trim(), 'literal [extensions]objectFormat = sha256');
-  assert.equal((await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' })).repository!.objectFormat, 'sha1');
+  const captured = await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' });
+  assert.equal(Object.hasOwn(captured.repository!, 'objectFormat'), false);
 });
 
-test('source repository identity ignores object-format keys in an extensions subsection', async t => {
+test('configuration bytes may change without inventing a new descriptor identity or authorizing their read', async t => {
   const root = await mkdtemp(path.join(process.cwd(), '.cliq-source-format-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, '.git'));
   const config = path.join(root, '.git/config');
   await writeFile(config, '[extensions "plugin"]\nobjectFormat = sha256\n');
-  assert.equal(execFileSync('git', ['config', '--file', config, '--no-includes', '--get', 'extensions.plugin.objectformat'],
-    { encoding: 'utf8' }).trim(), 'sha256');
-  assert.equal((await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' })).repository!.objectFormat, 'sha1');
+  const first = await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' });
+  await writeFile(config, 'unparseable raw metadata is not a Session identity input\n');
+  const second = await captureLiveWorkspaceIdentity({ workspacePath: root, ownerPrincipalId: 'source-test' });
+  assert.deepEqual(second, first);
+  assert.equal(Object.hasOwn(second.repository!, 'objectFormat'), false);
 });

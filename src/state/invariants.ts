@@ -15,8 +15,9 @@ import type {
   WorkspaceGenerationStateV1
 } from '../kernel/types.js';
 import { KernelStorageError } from './errors.js';
+import { types } from 'node:util';
 
-const BUDGET_FIELDS = ['modelTokens', 'costMicros', 'toolCalls', 'repairAttempts'] as const;
+import { assertControlWireJson, BUDGET_FIELDS, decodeWireBudget, decodeWireJournal } from '../kernel/control-wire-data.js';
 const ZERO_BUDGET: BudgetUsage = {
   modelTokens: 0,
   costMicros: 0,
@@ -114,15 +115,8 @@ function requireEvidencePair(value: Record<string, unknown>, refKey: string, dig
 }
 
 export function decodeBudgetUsage(value: unknown, label = 'BudgetUsage'): BudgetUsage {
-  const record = requireRecord(value, label);
-  rejectUnknownKeys(record, BUDGET_FIELDS, label);
-  for (const field of BUDGET_FIELDS) requireSafeInteger(record[field], `${label}.${field}`);
-  return {
-    modelTokens: record.modelTokens as number,
-    costMicros: record.costMicros as number,
-    toolCalls: record.toolCalls as number,
-    repairAttempts: record.repairAttempts as number
-  };
+  try { return decodeWireBudget(value, label); }
+  catch (error) { if (error instanceof TypeError) invalid(error.message); throw error; }
 }
 
 export function isZeroBudget(value: BudgetUsage): boolean {
@@ -163,133 +157,30 @@ export function assertBudgetWithin(
   }
 }
 
-const JOURNAL_BASE_KEYS = [
-  'seq',
-  'runId',
-  'opId',
-  'opKind',
-  'attempt',
-  'leaseEpoch',
-  'phase',
-  'target',
-  'requestRef',
-  'replayClass',
-  'idempotencyKey',
-  'grantRef',
-  'budgetDelta',
-  'timestamp'
-] as const;
-const JOURNAL_CLAIM_KEYS = [
-  'sandboxLaunchSpecRef',
-  'dispatchId',
-  'supervisorInstanceId',
-  'stateOwnerEpoch',
-  'brokerFenceTokenDigest'
-] as const;
-const JOURNAL_TERMINAL_KEYS = [
-  'resultRef',
-  'receiptRef',
-  'errorRef',
-  'evidenceRef',
-  'evidenceDigest',
-  'attestationRef',
-  'budgetSettlementRef'
-] as const;
-
-function decodeJournalBase(record: Record<string, unknown>): void {
-  requireSafeInteger(record.seq, 'Journal.seq', 1);
-  requireString(record.runId, 'Journal.runId');
-  requireString(record.opId, 'Journal.opId');
-  if (!['model', 'tool', 'mcp-server', 'mcp', 'verifier', 'publish'].includes(String(record.opKind))) {
-    invalid('Journal.opKind is not closed');
-  }
-  requireSafeInteger(record.attempt, 'Journal.attempt');
-  requireSafeInteger(record.leaseEpoch, 'Journal.leaseEpoch', 1);
-  requireString(record.target, 'Journal.target');
-  requireArtifactRef(record.requestRef, 'Journal.requestRef');
-  if (!['retry', 'workspace-rollback-retry', 'reconcile', 'manual'].includes(String(record.replayClass))) {
-    invalid('Journal.replayClass is not closed');
-  }
-  if (has(record, 'idempotencyKey')) requireString(record.idempotencyKey, 'Journal.idempotencyKey');
-  if (has(record, 'grantRef')) requireArtifactRef(record.grantRef, 'Journal.grantRef');
-  decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta');
-  requireCanonicalTime(record.timestamp, 'Journal.timestamp');
-  requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal');
-}
-
-function requireClaimIdentity(record: Record<string, unknown>): void {
-  requireString(record.dispatchId, 'Journal.dispatchId');
-  requireString(record.supervisorInstanceId, 'Journal.supervisorInstanceId');
-  requireSafeInteger(record.stateOwnerEpoch, 'Journal.stateOwnerEpoch', 1);
-  if (has(record, 'sandboxLaunchSpecRef')) {
-    requireArtifactRef(record.sandboxLaunchSpecRef, 'Journal.sandboxLaunchSpecRef');
-  }
-  if (has(record, 'brokerFenceTokenDigest')) {
-    requireDigest(record.brokerFenceTokenDigest, 'Journal.brokerFenceTokenDigest');
-  }
-}
-
 export function decodeInvocationJournalEntry(value: unknown): InvocationJournalEntry {
-  const record = requireRecord(value, 'Journal');
-  decodeJournalBase(record);
-  const phase = record.phase;
-  if (!['prepared', 'dispatch_claimed', 'completed', 'failed', 'unknown', 'abandoned'].includes(String(phase))) {
-    invalid('Journal.phase is not closed');
+  try {
+    // Retained storage historically accepts safe bigint counters. Normalize
+    // only those closed numeric positions for the common data validator;
+    // public JSON/wire callers still reject bigint before this seam.
+    const copy = (input: unknown, integers: readonly string[]): unknown => {
+      if (!input || typeof input !== 'object' || Array.isArray(input) || types.isProxy(input) ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(input))) return input;
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      if (Reflect.ownKeys(descriptors).some(key => typeof key !== 'string') ||
+          Object.values(descriptors).some(field => !field.enumerable || !Object.hasOwn(field, 'value')))
+        throw new TypeError('Journal retained data must contain only own data fields');
+      return Object.fromEntries(Object.entries(descriptors).map(([key, field]) => [key,
+        typeof field.value === 'bigint' && integers.includes(key) ? requiredSafeInteger(field.value, `Journal.${key}`) : field.value]));
+    };
+    const normalized = copy(value, ['seq', 'attempt', 'leaseEpoch', 'stateOwnerEpoch']);
+    if (normalized && typeof normalized === 'object' && !Array.isArray(normalized) && !types.isProxy(normalized) &&
+        [Object.prototype, null].includes(Object.getPrototypeOf(normalized))) {
+      const fields = normalized as Record<string, unknown>;
+      if (Object.hasOwn(fields, 'budgetDelta')) fields.budgetDelta = copy(fields.budgetDelta, BUDGET_FIELDS);
+    }
+    decodeWireJournal(normalized); return value as InvocationJournalEntry;
   }
-
-  if (phase === 'prepared') {
-    rejectUnknownKeys(record, JOURNAL_BASE_KEYS, 'Journal(prepared)');
-    requireAbsent(record, [...JOURNAL_CLAIM_KEYS, ...JOURNAL_TERMINAL_KEYS], 'Journal(prepared)');
-  } else if (phase === 'dispatch_claimed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS], 'Journal(dispatch_claimed)');
-    requireClaimIdentity(record);
-    if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-      invalid('dispatch_claimed must have zero budgetDelta');
-    }
-    requireAbsent(record, JOURNAL_TERMINAL_KEYS, 'Journal(dispatch_claimed)');
-  } else if (phase === 'completed') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'resultRef', 'receiptRef', 'budgetSettlementRef'], 'Journal(completed)');
-    requireClaimIdentity(record);
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-    if (!has(record, 'resultRef') && !has(record, 'receiptRef')) invalid('completed requires a result or receipt');
-    if (has(record, 'resultRef')) requireArtifactRef(record.resultRef, 'Journal.resultRef');
-    if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
-  } else if (phase === 'unknown') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'evidenceRef', 'evidenceDigest', 'budgetSettlementRef'], 'Journal(unknown)');
-    requireClaimIdentity(record);
-    requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(unknown)');
-    if (!has(record, 'evidenceRef')) invalid('unknown requires ambiguity evidence');
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-  } else if (phase === 'abandoned') {
-    rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'attestationRef', 'budgetSettlementRef'], 'Journal(abandoned)');
-    requireClaimIdentity(record);
-    requireArtifactRef(record.attestationRef, 'Journal.attestationRef');
-    requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-    if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-      invalid('abandoned must have zero additional budgetDelta');
-    }
-  } else {
-    const claimed = has(record, 'dispatchId') || has(record, 'supervisorInstanceId') || has(record, 'stateOwnerEpoch');
-    if (claimed) {
-      rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, ...JOURNAL_CLAIM_KEYS, 'errorRef', 'receiptRef', 'evidenceRef', 'evidenceDigest', 'budgetSettlementRef'], 'Journal(failed post-claim)');
-      requireClaimIdentity(record);
-      requireArtifactRef(record.errorRef, 'Journal.errorRef');
-      requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-      if (has(record, 'evidenceRef')) requireEvidencePair(record, 'evidenceRef', 'evidenceDigest', 'Journal(failed post-claim)');
-      if (!has(record, 'evidenceRef') && record.opKind !== 'verifier') {
-        invalid('post-claim failed requires no-release evidence');
-      }
-      if (has(record, 'receiptRef')) requireArtifactRef(record.receiptRef, 'Journal.receiptRef');
-    } else {
-      rejectUnknownKeys(record, [...JOURNAL_BASE_KEYS, 'errorRef', 'budgetSettlementRef'], 'Journal(failed pre-dispatch)');
-      requireArtifactRef(record.errorRef, 'Journal.errorRef');
-      requireArtifactRef(record.budgetSettlementRef, 'Journal.budgetSettlementRef');
-      if (!isZeroBudget(decodeBudgetUsage(record.budgetDelta, 'Journal.budgetDelta'))) {
-        invalid('pre-dispatch failed must consume zero budget');
-      }
-    }
-  }
-  return record as InvocationJournalEntry;
+  catch (error) { if (error instanceof TypeError) invalid(error.message); throw error; }
 }
 
 const WORKER_BASE_KEYS = [
@@ -331,9 +222,10 @@ function decodeWorkerPreparation(record: Record<string, unknown>): WorkerPrepara
   }
   if (has(preparation, 'controller')) {
     const controller = requireRecord(preparation.controller, 'WorkerLaunch.preparation.controller');
-    rejectUnknownKeys(controller, ['birthIdentityRef', 'birthIdentityDigest'], 'WorkerLaunch.preparation.controller');
+    rejectUnknownKeys(controller, ['birthIdentityRef', 'birthIdentityDigest', 'privateGitInputRef'], 'WorkerLaunch.preparation.controller');
     requireArtifactRef(controller.birthIdentityRef, 'WorkerLaunch.preparation.controller.birthIdentityRef');
     requireDigest(controller.birthIdentityDigest, 'WorkerLaunch.preparation.controller.birthIdentityDigest');
+    if (has(controller, 'privateGitInputRef')) requireArtifactRef(controller.privateGitInputRef, 'WorkerLaunch.preparation.controller.privateGitInputRef');
   }
   if (has(preparation, 'reservation')) {
     const reservation = requireRecord(preparation.reservation, 'WorkerLaunch.preparation.reservation');
@@ -583,6 +475,8 @@ function decodeChildTerminal(value: unknown, expectedMode: 'read_only' | 'mutati
 }
 
 export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
+  try { assertControlWireJson(value); }
+  catch { invalid('ChildAllocation must be closed JSON data'); }
   const record = requireRecord(value, 'ChildAllocation');
   requireLiteral(record.schemaVersion, 1, 'ChildAllocation.schemaVersion');
   requireString(record.parentRunId, 'ChildAllocation.parentRunId');
@@ -596,11 +490,12 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
   requireArtifactRef(record.delegateOperationGrantRef, 'ChildAllocation.delegateOperationGrantRef');
   requireArtifactRef(record.capabilityGrantRef, 'ChildAllocation.capabilityGrantRef');
   if (record.mode !== 'read_only' && record.mode !== 'mutating') invalid('ChildAllocation.mode is invalid');
-  decodeBudgetUsage(record.grantedAdditiveCeilings, 'ChildAllocation.grantedAdditiveCeilings');
+  const granted = decodeBudgetUsage(record.grantedAdditiveCeilings, 'ChildAllocation.grantedAdditiveCeilings');
   requireSafeInteger(record.grantedChildDepth, 'ChildAllocation.grantedChildDepth');
   requireSafeInteger(record.grantedChildConcurrency, 'ChildAllocation.grantedChildConcurrency', 1);
   requireCanonicalTime(record.childDeadlineAt, 'ChildAllocation.childDeadlineAt');
   requireCanonicalTime(record.createdAt, 'ChildAllocation.createdAt');
+  if ((record.childDeadlineAt as string) <= (record.createdAt as string)) invalid('ChildAllocation deadline must follow its original creation');
 
   if (record.state === 'reserved') {
     rejectUnknownKeys(record, CHILD_BASE_KEYS, 'ChildAllocation(reserved)');
@@ -611,7 +506,6 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
       'ChildAllocation(child_terminal)'
     );
     decodeChildTerminal(record.terminal, record.mode);
-    decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
     requireCanonicalTime(record.terminalAt, 'ChildAllocation.terminalAt');
   } else if (record.state === 'settled') {
     rejectUnknownKeys(
@@ -629,14 +523,45 @@ export function decodeChildAllocation(value: unknown): ChildAllocationV1 {
       'ChildAllocation(settled)'
     );
     decodeChildTerminal(record.terminal, record.mode);
-    decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
     requireCanonicalTime(record.terminalAt, 'ChildAllocation.terminalAt');
     requireString(record.childResultItemId, 'ChildAllocation.childResultItemId');
     requireSafeInteger(record.parentSettlementRevision, 'ChildAllocation.parentSettlementRevision', 1);
-    decodeBudgetUsage(record.releasedUnusedBudget, 'ChildAllocation.releasedUnusedBudget');
     requireCanonicalTime(record.settledAt, 'ChildAllocation.settledAt');
   } else {
     invalid('ChildAllocation.state is invalid');
   }
+  if (record.state === 'child_terminal' || record.state === 'settled') {
+    const usage = decodeBudgetUsage(record.inclusiveBudgetUsage, 'ChildAllocation.inclusiveBudgetUsage');
+    if (BUDGET_FIELDS.some(field => usage[field] > granted[field])) invalid('ChildAllocation inclusive usage exceeds its original granted ceiling');
+    if ((record.terminalAt as string) < (record.createdAt as string)) invalid('ChildAllocation terminal time precedes its original creation');
+    if (record.state === 'settled') {
+      const unused = decodeBudgetUsage(record.releasedUnusedBudget, 'ChildAllocation.releasedUnusedBudget');
+      if (BUDGET_FIELDS.some(field => unused[field] !== granted[field] - usage[field])) invalid('ChildAllocation unused budget differs from its exact original grant minus usage');
+      if ((record.settledAt as string) < (record.terminalAt as string)) invalid('ChildAllocation settlement precedes its original terminal outcome');
+    }
+  }
   return record as ChildAllocationV1;
+}
+
+/** Budget data only. Incoming reservations belong to the parent, and inclusive
+ * settled child use already contains its descendants; neither is added twice. */
+export function childAllocationBudgetFacts(runId: string, allocations: readonly ChildAllocationV1[]): {
+  reserved: BudgetUsage; consumed: BudgetUsage; nonterminalDirectChildren: number;
+} {
+  let reserved = { ...ZERO_BUDGET }, consumed = { ...ZERO_BUDGET }, nonterminalDirectChildren = 0;
+  const children = new Set<string>();
+  let incoming = false;
+  for (const value of allocations) {
+    const row = decodeChildAllocation(value);
+    if (row.parentRunId !== runId) {
+      if (row.childRunId !== runId || incoming) invalid('child budget cut has a foreign or duplicate incoming allocation');
+      incoming = true; continue;
+    }
+    if (children.has(row.childRunId)) invalid('child budget cut duplicates an outgoing allocation');
+    children.add(row.childRunId);
+    if (row.state === 'settled') consumed = addBudget(consumed, row.inclusiveBudgetUsage, 'inclusive child consumed budget');
+    else reserved = addBudget(reserved, row.grantedAdditiveCeilings, 'conservative child reserved budget');
+    if (row.state === 'reserved') nonterminalDirectChildren++;
+  }
+  return { reserved, consumed, nonterminalDirectChildren };
 }

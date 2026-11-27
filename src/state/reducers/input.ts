@@ -13,7 +13,7 @@ import { insertArtifactMetadata, type ArtifactCatalog } from '../artifacts.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from '../canonical-time.js';
 import { readRetainedControlChannelClosure, validateControlChannelClosure } from '../control-channel.js';
 import { prepareContinuationCommit } from '../continuation-commit.js';
-import { joinResourceOperations, KernelStorageError, stateOperation } from '../errors.js';
+import { KernelStorageError, stateOperation } from '../errors.js';
 import { validateUserInputRecovery } from '../input-recovery.js';
 import { readRecoveryClosure } from '../recovery-closure.js';
 import { nextJournalSequence } from '../repositories/journal.js';
@@ -30,11 +30,13 @@ type Response = Extract<ControlApplicationResponseV1, { ok: true }> & { result: 
 export async function loadInputContinuation(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, authority: {
   run: Run; spec: RunSpec; assembly: RunAssemblyV1; principalId: string; resolveToolInput: ResolveToolInput;
   contracts: readonly ToolInputAuthority[];
-  assertAuthority: () => Promise<void>;
-}, reobserve?: NativeWorkerRetirement) {
+  assertAuthority: (readSignal?: AbortSignal) => Promise<void>;
+}, reobserve?: NativeWorkerRetirement, openingSignal?: AbortSignal) {
+  const openingReads = openingSignal ? artifacts.withReadSignal(openingSignal) : artifacts;
+  openingReads.assertReadActive();
   const { run: admitted, spec, assembly, principalId, resolveToolInput } = authority;
   const runId = admitted.id;
-  const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'builtin');
+  const contract = authority.contracts.find((entry) => entry.name === 'request_input' && entry.access === 'control' && entry.execution.kind === 'supervisor_control');
   const assertInputCall = (selected: ToolCut) => {
     if (!contract || selected.call.toolName !== contract.name || selected.call.inputSchemaRef !== contract.inputSchemaRef ||
         selected.call.inputSchemaDigest !== contract.inputSchemaDigest) throw new TypeError('current call is not the frozen builtin request_input');
@@ -45,28 +47,27 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
     if (revision !== undefined && selected.run.revision !== revision) throw new KernelStorageError('REVISION_CONFLICT', 'input Run revision changed');
     return selected;
   };
-  const recover = async () => {
+  const recover = async (reads = artifacts) => {
     // The public closure also works after the tool batch has advanced to an agent frontier.
-    const closure = await readRecoveryClosure(driver, artifacts, runId);
-    const items = new Map(await joinResourceOperations(closure.items.map(async (row) => [row.itemId,
-      await readCanonicalArtifact<ContinuationItem>(artifacts, row.payloadRef)] as const)));
+    const closure = await readRecoveryClosure(driver, reads, runId);
+    const items = new Map(await reads.mapReads(closure.items, async (row) => [row.itemId,
+      await readCanonicalArtifact<ContinuationItem>(reads, row.payloadRef)] as const));
     const checkpoints = driver.prepare('SELECT id FROM checkpoints WHERE run_id = ? ORDER BY based_on_run_revision, created_at, id')
       .all<{ id: string }>(runId).map(({ id }) => readCheckpoint(driver, id));
-    return validateUserInputRecovery({ artifacts, run: closure.run, spec, items, journal: closure.journal, checkpoints });
+    return validateUserInputRecovery({ artifacts: reads, run: closure.run, spec, items, journal: closure.journal, checkpoints });
   };
-  async function verifyReply(itemRef: string, recovered?: Awaited<ReturnType<typeof recover>>) {
-    recovered ??= await recover();
+  async function verifyReply(itemRef: string, recovered?: Awaited<ReturnType<typeof recover>>, reads = artifacts) {
+    recovered ??= await recover(reads);
     const value = recovered.find(({ reply }) => reply?.itemRef === itemRef);
     if (!value?.reply) throw new TypeError('input response has no committed input owner');
     const { reply, proof } = value;
     const command = reply.command;
     if (command.principalId !== principalId) throw new TypeError('input reply principal does not own this Run');
-    const row = driver.prepare("SELECT request_digest, channel_identity_ref, channel_identity_digest, response_ref, committed_at FROM control_requests WHERE principal_id = ? AND method = 'run.input' AND request_id = ?")
-      .get<{ request_digest: string; channel_identity_ref: string; channel_identity_digest: string; response_ref: string; committed_at: string }>(principalId, command.requestId);
-    if (!row || row.request_digest !== reply.payload.requestDigest || row.channel_identity_ref !== command.channelIdentityRef ||
-        row.channel_identity_digest !== command.channelIdentityDigest || row.committed_at !== reply.item.createdAt) throw new TypeError('input reply has no exact authenticated control-row owner');
-    await readRetainedControlChannelClosure(artifacts, owner, command);
-    const response = await readCanonicalArtifact<Response>(artifacts, row.response_ref);
+    const row = readControlRequest(driver, principalId, 'run.input', command.requestId);
+    if (!row || row.requestDigest !== reply.payload.requestDigest || row.channelIdentityRef !== command.channelIdentityRef ||
+        row.channelIdentityDigest !== command.channelIdentityDigest || row.committedAt !== reply.item.createdAt) throw new TypeError('input reply has no exact authenticated control-row owner');
+    await readRetainedControlChannelClosure(reads, owner, command);
+    const response = await readCanonicalArtifact<Response>(reads, row.responseRef);
     const snapshot = response.result.snapshot;
     if (response.protocolVersion !== 1 || response.ok !== true || response.result.method !== 'run.input' || response.result.inputItemRef !== itemRef ||
         snapshot.schemaVersion !== 1 || snapshot.operation !== 'agent' || snapshot.latestRunItemSeq !== reply.checkpoint.runItemSeq ||
@@ -74,9 +75,9 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         snapshot.run.latestCheckpointId !== reply.checkpointId || snapshot.run.updatedAt !== reply.item.createdAt ||
         snapshot.run.revision !== command.expectedRunRevision + 1 || snapshot.run.status !== 'queued' || snapshot.run.waitingOnRef !== undefined ||
         snapshot.run.activeWorkerLaunchId !== undefined) throw new TypeError('input response substitutes its committed snapshot');
-    const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'tool' }>>(artifacts, proof.wait.frontierRef);
+    const frontier = await readCanonicalArtifact<Extract<RunFrontier, { kind: 'tool' }>>(reads, proof.wait.frontierRef);
     if (snapshot.run.frontierRef !== canonicalSha256(nextFrontier(frontier, reply.item, snapshot.latestRunItemSeq))) throw new TypeError('input response substitutes its continuation');
-    return response;
+    return { response, command, requestDigest: reply.payload.requestDigest, control: row };
   }
   function nextFrontier(frontier: Extract<RunFrontier, { kind: 'tool' }>, item: UserInputItem, itemSeq: number): RunFrontier {
     return frontier.nextCallIndex + 1 < frontier.orderedCallIds.length ? { ...frontier, nextCallIndex: frontier.nextCallIndex + 1 }
@@ -96,12 +97,13 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
     return run;
   }
   if (driver.prepare("SELECT 1 FROM items WHERE run_id = ? AND kind = 'input_request' LIMIT 1").get(runId) || admitted.waitingReason === 'input') {
-    await authority.assertAuthority();
-    const recovered = await recover();
-    for (const { reply } of recovered) if (reply) await verifyReply(reply.itemRef, recovered);
+    await authority.assertAuthority(openingSignal);
+    const recovered = await recover(openingReads);
+    for (const { reply } of recovered) if (reply) await verifyReply(reply.itemRef, recovered, openingReads);
   }
   return {
     async plan(selected: ToolCut) {
+      await authority.assertAuthority();
       assertInputCall(selected);
       const proof = planInputWait(selected.run, selected.batch.itemId, selected.call, sampleCanonicalNow());
       for (const artifact of proof.artifacts) await artifacts.publishBytes(artifact.bytes, artifact.mediaType, artifact.schemaKind);
@@ -159,14 +161,19 @@ export async function loadInputContinuation(driver: SqliteDriver, artifacts: Art
         if (!row) return undefined;
         if (row.requestDigest !== digest) throw new KernelStorageError('REQUEST_ID_CONFLICT', 'run.input requestId was reused with different bytes');
         const response = await readCanonicalArtifact<Response>(artifacts, row.responseRef);
-        requireEqual(response, await verifyReply(response.result.inputItemRef), 'replayed input response');
+        const verified = await verifyReply(response.result.inputItemRef);
+        if (verified.command.principalId !== principalId || verified.command.requestId !== input.requestId ||
+            verified.requestDigest !== digest || canonicalSha256(verified.control) !== canonicalSha256(row)) {
+          throw new KernelStorageError('RECOVERY_REQUIRED', 'input replay substitutes its original authenticated control request');
+        }
+        requireEqual(response, verified.response, 'replayed input response');
         return immutableSnapshot({ replayed: true, run: response.result.snapshot.run, response });
       };
       const existing = await replay();
       if (existing) return existing;
       const selected = await cut(input.expectedRunRevision);
       if (selected.run.status !== 'waiting' || selected.run.waitingReason !== 'input' || selected.run.waitingOnRef !== input.waitingOnRef ||
-          selected.run.activeWorkerLaunchId) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'run.input requires its exact worker-free input wait');
+          selected.run.activeWorkerLaunchId) throw new KernelStorageError('INVALID_REQUEST', 'run.input requires its exact worker-free input wait');
       const wait = await readCanonicalArtifact<InputWait>(artifacts, input.waitingOnRef);
       const proof = planInputWait({ ...selected.run, revision: wait.createdFromRevision }, selected.batch.itemId, selected.call, wait.createdAt);
       requireEqual(wait, proof.wait, 'current input wait');

@@ -1,3 +1,4 @@
+import { assertChildAncestryRelease } from '../child-ancestry.js';
 import { assertArtifactRef, addCanonicalDuration, parseCanonicalTime } from '../../kernel/identity.js';
 import type { BoundWorkerLaunch, Checkpoint, Run, RunEvent, WorkerIdentity, WorkspaceGenerationStateV1 } from '../../kernel/types.js';
 import { immutableSnapshot } from '../../model/immutable.js';
@@ -141,6 +142,7 @@ export async function reserveWorkerLaunch(
     fenceOutcome = advanceTimeFence(connection, owner.ownerEpoch, now);
     if (fenceOutcome !== 'healthy') return;
     const run = readRun(connection, input.runId);
+    assertChildAncestryRelease(connection, run.id, now);
     assertRunCanActivate(run, now, input.expectedRunRevision);
     const retained = readWorkerLaunchesForRun(connection, input.runId, true);
     const preparation = retained.length === 1 && retained[0]!.phase === 'preparing' ? retained[0] : undefined;
@@ -315,6 +317,7 @@ function activateWorkerLeaseAtCurrentCut(driver: SqliteDriver, owner: StateOwner
       throw new KernelStorageError('LEASE_FENCED', 'worker launch is not preactivated by the current owner');
     }
     const run = readRun(connection, currentLaunch.runId);
+    assertChildAncestryRelease(connection, run.id, now);
     assertRunCanActivate(run, now, input.expectedRunRevision);
     const leaseExpiresAt = input.leaseDurationMs === undefined
       ? new Date(Math.min(parseCanonicalTime(now) + MAX_LEASE_EXTENSION_MS, parseCanonicalTime(run.deadlineAt))).toISOString()
@@ -412,6 +415,7 @@ export function renewWorkerLease(
       throw new KernelStorageError('LEASE_FENCED', 'worker heartbeat identity or version is stale');
     }
     const run = readRun(connection, input.runId);
+    assertChildAncestryRelease(connection, run.id, now);
     if (
       run.status !== 'running' ||
       run.activeWorkerLaunchId !== current.launchId ||

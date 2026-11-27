@@ -1,0 +1,409 @@
+// One public consumer journey. Its owner supplies the real signed installation,
+// authenticated client, scoped credential and actual process/resource joins.
+// No setup, secret handling, host execution or native authority lives here.
+import { setTimeout as delay } from 'node:timers/promises';
+import { canonicalJsonBytes } from '../../../src/kernel/canonical.js';
+import { decodeBuiltinToolCapture } from '../../../src/state/builtin-tool-capture.js';
+import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
+import { parseJsonStrict } from '../../../src/kernel/json.js';
+import type { BudgetUsage, RunSpec } from '../../../src/kernel/types.js';
+import type { RunModelRequest } from '../../../src/kernel/control-submit.js';
+import { decodeInstalledControlRequest, decodeInstalledControlResponse,
+  type InstalledControlFeature, type InstalledControlRequestV1, type InstalledControlResponseFor } from '../../../src/control/v1.js';
+import { clientMutation } from '../../../src/client/commands.js';
+import { presentControlArtifacts, type ClientDetail } from '../../../src/client/details.js';
+import { decodeRunSpec, decodeSourceManifest, decodeWorkspaceEntries, decodeBudgetSettlement } from '../../../src/state/decoders.js';
+import { decodeRetainedRunAssembly } from '../../../src/model/run-assembly.js';
+import { decodeRunResult, decodeWorkspaceDiff, decodeVerificationClosure, decodeInheritedVerificationProvenance } from '../../../src/state/result-artifacts.js';
+import { decodeVerificationReceipt, decodeVerifierCommand, decodeVerifierEnvironment } from '../../../src/state/verifier-artifacts.js';
+import { decodeDeliveryTerminalProjectionEvidence } from '../../../src/kernel/publication.js';
+import { decodeHeadlessControlRecord } from '../../../src/control/v1.js';
+import { terminalText } from '../../../src/client/view.js';
+import type { InstalledVerifierOutcome } from './installed-verifier-result.js';
+
+export const PROVIDER_JOURNEY_FILES = Object.freeze({
+  'math.mjs': 'export function add(a, b) {\n  return a - b;\n}\n',
+  'check.test.mjs': "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { add } from './math.mjs';\n\ntest('add handles positive, negative and zero operands', () => {\n  assert.equal(add(3, 2), 5);\n  assert.equal(add(-3, 2), -1);\n  assert.equal(add(0, 7), 7);\n});\n"
+});
+const CHECK_ARGS = ['--test', '--test-concurrency=1', 'check.test.mjs'];
+const ZERO: BudgetUsage = { modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 };
+const ARTIFACT_BYTES = 64 * 1024 * 1024, REQUEST_MS = 30_000, TERMINAL_MS = 90_000;
+type Result<M extends InstalledControlFeature> = Extract<InstalledControlResponseFor<M>, { ok: true }>['result'];
+type Cut = Result<'run.get'>;
+export type ProviderJourneyStage = 'setup' | 'model_setup' | 'workspace' | 'session' | 'authorization' | 'admission' | 'execution' | 'result' |
+  'review' | 'reconnect' | 'application' | 'publication' | 'accounting';
+export type ProviderJourneyProgress = Readonly<{
+  stage: ProviderJourneyStage; elapsedMs: number; readElapsedMs: number; status: Cut['snapshot']['run']['status'];
+  nextStep: Cut['snapshot']['run']['nextStep']; revision: number; journalSeq: number; itemSeq: number;
+  operations: ReadonlyArray<Readonly<{ seq: number; kind: Cut['journal'][number]['opKind'];
+    phase: Cut['journal'][number]['phase']; hasError: boolean }>>;
+}>;
+export class InstalledProviderJourneyError extends Error {
+  readonly code = 'INSTALLED_PROVIDER_JOURNEY_REFUSED';
+  constructor(readonly stage: ProviderJourneyStage, readonly progress: readonly ProviderJourneyProgress[] = []) { super(`installed provider journey refused at ${stage}`); this.name = 'InstalledProviderJourneyError'; }
+}
+/** Read-only diagnostic from the original public Journal and complete retained
+ * objects. It emits no content, path, model text or execution/recovery proof. */
+export function providerToolDiagnostic(row: Cut['journal'][number], observation: Record<string, unknown>, capture?: unknown) {
+  check(row.opKind === 'tool' && row.phase === 'completed' && row.resultRef === sha256Bytes(canonicalJsonBytes(observation)));
+  check(observation.format === 'cliq-tool-observation-v1' && observation.schemaVersion === 1 &&
+    observation.observationDigest === digestOmitting(observation, 'observationDigest'));
+  for (const key of ['runId', 'opId', 'attempt', 'requestRef', 'dispatchId'] as const) check(observation[key] === row[key]);
+  check(observation.targetRef === row.target && observation.grantRef === row.grantRef);
+  check(observation.outcome === 'executed' || observation.outcome === 'error');
+  if (observation.outcome === 'error') check(['TOOL_EXECUTION_FAILED', 'TOOL_PROTOCOL_ERROR', 'TOOL_RESOURCE_EXHAUSTED'].includes(observation.code as string));
+  const base = { seq: row.seq, outcome: observation.outcome, ...(observation.outcome === 'error' ? { code: observation.code } : {}) };
+  if (observation.captureRef === undefined) { check(capture === undefined); return base; }
+  const parsed = decodeBuiltinToolCapture(capture);
+  check(sha256Bytes(canonicalJsonBytes(parsed)) === observation.captureRef && parsed.captureDigest === observation.captureDigest);
+  for (const key of ['runId', 'opId', 'attempt', 'requestRef', 'dispatchId'] as const) check(parsed[key] === row[key]);
+  check(parsed.targetRef === row.target && parsed.grantRef === row.grantRef);
+  return { ...base, tool: parsed.tool, terminationReason: parsed.terminationReason, durationMs: parsed.durationMs,
+    ...(parsed.terminationReason === 'exit' ? { exitCode: parsed.exitCode } : {}),
+    ...(parsed.terminationReason === 'spawn_error' ? { nativeErrorCode: parsed.nativeErrorCode } : {}) };
+}
+export type InstalledProviderJourneyInput = Readonly<{
+  workspacePath: string; model: RunModelRequest & { provider: 'openai-compatible' }; budgets: RunSpec['budgets'];
+  guestToolchainManifestId: string; endpointIdentityDigest: string;
+}>;
+export type InstalledProviderJourneyContext = Readonly<{
+  send(request: InstalledControlRequestV1, timeoutMs: number): Promise<unknown>;
+  artifact(ref: string, options: { maxBytes: number; signal?: AbortSignal }): Promise<Buffer>;
+  reconnect(): Promise<void>;
+  /** Owner's joined no-follow/full-byte observation of only its tiny fixture.
+   * This is read-only test composition, never a native proof or execution grant. */
+  observeWorkspace(): Promise<Readonly<{ paths: readonly string[]; math: Buffer; test: Buffer }>>;
+  /** Owner verifies the complete original candidate/repair/receipt/retirement
+   * graph and independently observes every recorded process lifetime absent. */
+  verifySource(cut: Cut, session: Result<'session.get'>, finalMath: Buffer): Promise<InstalledVerifierOutcome>;
+  review?(detail: ClientDetail): void | Promise<void>;
+  mark?(phase: ProviderJourneyStage): void;
+}>;
+const check = (condition: unknown): void => { if (!condition) throw new Error('public provider workflow invariant failed'); };
+export type InstalledDailyProviderJourneyInput = Readonly<Omit<InstalledProviderJourneyInput, 'model' | 'guestToolchainManifestId'> & {
+  model: Readonly<{ provider: 'openai-compatible'; model: string }>; modelAlias: string;
+  providerKind: 'owned_https' | 'real_provider';
+}>;
+export type InstalledDailyProviderJourneyContext = InstalledProviderJourneyContext & Readonly<{
+  /** The fixture owns this actual same-user signed SEA child and credential
+   * stdin. No secret, native proof or execution authority crosses here. */
+  command(argv: readonly string[], timeoutMs: number): Promise<Readonly<{ stdout: Buffer }>>;
+}>;
+type Journey = { kind: 'control'; input: InstalledProviderJourneyInput; context: InstalledProviderJourneyContext } |
+  { kind: 'daily'; input: InstalledDailyProviderJourneyInput; context: InstalledDailyProviderJourneyContext };
+const same = (a: unknown, b: unknown) => check(canonicalJsonBytes(a).equals(canonicalJsonBytes(b)));
+
+/** Collect a stable public projection through its original bounded pages.
+ * A live cut is diagnostic data, never terminal or recovery proof. */
+export async function readInstalledStableCut(runId: string,
+  read: (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => Promise<Cut>): Promise<Cut> {
+  const first = await read({ protocolVersion: 1, method: 'run.get', runId, itemLimit: 100, journalLimit: 100, checkpointLimit: 100 });
+  const items = [...first.items], journal = [...first.journal], checkpoints = [...first.checkpoints];
+  let page = first, pages = 1;
+  while (page.nextItemSeq < first.highWaterItemSeq || page.nextJournalSeq < first.highWaterJournalSeq || page.nextCheckpointCursor !== first.highWaterCheckpointCursor) {
+    check(++pages <= 1000 && items.length + journal.length + checkpoints.length <= 10_000);
+    const next = await read({ protocolVersion: 1, method: 'run.get', runId, afterItemSeq: page.nextItemSeq, afterJournalSeq: page.nextJournalSeq,
+      // A full item/Journal frame may not have reached checkpoints yet.
+      // Only an actually issued next cursor advances that stream.
+      ...(page.nextCheckpointCursor === undefined ? {} : { checkpointCursor: page.nextCheckpointCursor }),
+      itemLimit: 100, journalLimit: 100, checkpointLimit: 100 });
+    same(next.snapshot, first.snapshot); same([next.highWaterItemSeq, next.highWaterJournalSeq, next.highWaterCheckpointCursor ?? null],
+      [first.highWaterItemSeq, first.highWaterJournalSeq, first.highWaterCheckpointCursor ?? null]);
+    check(next.nextItemSeq > page.nextItemSeq || next.nextJournalSeq > page.nextJournalSeq ||
+      next.nextCheckpointCursor !== page.nextCheckpointCursor);
+    items.push(...next.items); journal.push(...next.journal); checkpoints.push(...next.checkpoints); page = next;
+  }
+  check(items.length + journal.length + checkpoints.length <= 10_000);
+  check(items.length === first.highWaterItemSeq && journal.length === first.highWaterJournalSeq);
+  items.forEach((row, index) => check(row.itemSeq === index + 1)); journal.forEach((row, index) => check(row.seq === index + 1));
+  check(new Set(items.map(item => item.itemId)).size === items.length && new Set(checkpoints.map(item => item.id)).size === checkpoints.length);
+  check(checkpoints.some(row => row.id === first.snapshot.run.latestCheckpointId));
+  const { nextCheckpointCursor: _firstNext, ...captured } = first;
+  return { ...captured, items, journal, checkpoints, nextItemSeq: page.nextItemSeq, nextJournalSeq: page.nextJournalSeq,
+    ...(page.nextCheckpointCursor === undefined ? {} : { nextCheckpointCursor: page.nextCheckpointCursor }) };
+}
+
+/** Success/accounting still requires the original terminal-only contract. */
+export async function readInstalledTerminalCut(runId: string,
+  read: (request: Extract<InstalledControlRequestV1, { method: 'run.get' }>) => Promise<Cut>): Promise<Cut> {
+  return readInstalledStableCut(runId, async request => {
+    const cut = await read(request);
+    check(['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status));
+    return cut;
+  });
+}
+
+/** Run only after the owner has installed and registered the actual package,
+ * endpoint, safe credential and Workspace Trust. A test protocol implementation
+ * can exercise these decisions, but can never turn this report into provider,
+ * containment, billing, installation or complete I1/I2 qualification. */
+export async function runInstalledProviderJourney(input: InstalledProviderJourneyInput, context: InstalledProviderJourneyContext) {
+  return runProviderJourney({ kind: 'control', input, context });
+}
+/** The owner first runs normal setup and model enrollment, retaining their
+ * actual process/pipe joins. This completes its three remaining normal commands
+ * and shared read-only evidence checks, never provider/billing qualification. */
+export async function runInstalledDailyProviderJourney(input: InstalledDailyProviderJourneyInput, context: InstalledDailyProviderJourneyContext) {
+  return runProviderJourney({ kind: 'daily', input, context });
+}
+async function runProviderJourney(journey: Journey) {
+  const { input, context } = journey;
+  let stage: ProviderJourneyStage = 'workspace';
+  // Fixed scalars from already-decoded public responses only. Keep the original
+  // requests, deadlines and failure; this cannot grant or retry any operation.
+  const progress: ProviderJourneyProgress[] = [];
+  const started = performance.now();
+  const mark = (next: ProviderJourneyStage) => { stage = next; context.mark?.(next); };
+  try {
+    if (journey.kind === 'daily') check(['owned_https', 'real_provider'].includes(journey.input.providerKind));
+    async function send<M extends InstalledControlFeature>(request: unknown, method: M): Promise<Result<M>> {
+      const selected = decodeInstalledControlRequest(request); check(selected.method === method);
+      const response = decodeInstalledControlResponse(await context.send(selected, REQUEST_MS), selected);
+      check(response.ok);
+      return (response as Extract<typeof response, { ok: true }>).result as Result<M>;
+    }
+    async function bytes(ref: string) {
+      const data = await context.artifact(ref, { maxBytes: ARTIFACT_BYTES });
+      check(Buffer.isBuffer(data) && data.length <= ARTIFACT_BYTES && sha256Bytes(data) === ref); return data;
+    }
+    async function object(ref: string) {
+      const data = await bytes(ref), value: unknown = parseJsonStrict(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data));
+      check(canonicalJsonBytes(value).equals(data)); return value;
+    }
+    const observe = async (expectedMath: Buffer) => {
+      const observation = await context.observeWorkspace();
+      same([...observation.paths].sort(), ['check.test.mjs', 'math.mjs']);
+      check(observation.math.equals(expectedMath) && observation.test.equals(Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs'])));
+    };
+    async function daily(argv: readonly string[], timeoutMs = REQUEST_MS): Promise<Buffer> {
+      if (journey.kind !== 'daily') throw new Error('daily command scope required');
+      const output = await journey.context.command(argv, timeoutMs);
+      check(Buffer.isBuffer(output.stdout) && output.stdout.length <= 2 * 1024 * 1024); return output.stdout;
+    }
+    function admittedOutput<M extends 'run.submit' | 'run.apply'>(bytes: Buffer, method: M): Result<M> {
+      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+      check(text.endsWith('\n'));
+      const records = text.slice(0, -1).split('\n').map(line => {
+        const value = parseJsonStrict(line); check(canonicalJsonBytes(value).equals(Buffer.from(line))); return decodeHeadlessControlRecord(value);
+      });
+      const matches = records.filter(record => record.type === 'response' && record.response.ok && record.response.result.method === method);
+      check(matches.length === 1);
+      const selected = matches[0]!;
+      if (selected.type !== 'response' || !selected.response.ok) throw new Error('daily admission response required');
+      return selected.response.result as Result<M>;
+    }
+    const originalMath = Buffer.from(PROVIDER_JOURNEY_FILES['math.mjs']);
+    await observe(originalMath);
+    let sourceRunId: string, submit: InstalledControlRequestV1 | undefined, admitted: Result<'run.submit'>;
+    if (journey.kind === 'daily') {
+      mark('admission');
+      const { modelTokens, costMicros, ...otherBudgets } = input.budgets;
+      const usd = `${Math.floor(costMicros / 1_000_000)}.${String(costMicros % 1_000_000).padStart(6, '0')}`;
+      admitted = admittedOutput(await daily(['run',
+        'Fix the add function in math.mjs so the existing check.test.mjs tests pass. Inspect the files and edit only math.mjs. Preserve check.test.mjs byte-for-byte. Do not add files, dependencies or network calls. Finish with a concise explanation of the fix.',
+        '--workspace', input.workspacePath, '--model', journey.input.modelAlias, '--check-node', 'check.test.mjs', '--policy', 'yolo',
+        '--budget-usd', usd, '--budget-tokens', String(modelTokens), '--trust-workspace', '--detach', '--json',
+        '--options', canonicalJsonBytes({ budgets: otherBudgets, maxChangedPaths: 1, maxChangedBytes: 65_536 }).toString('utf8')]), 'run.submit');
+      sourceRunId = admitted.snapshot.run.id; check(admitted.snapshot.operation === 'agent');
+    } else {
+    const input = journey.input;
+    mark('session');
+    const created = await send(clientMutation({ method: 'session.create', workspacePath: input.workspacePath }, true), 'session.create');
+    const session = created.snapshot.session;
+    mark('authorization');
+    const authorized = await send(clientMutation({ method: 'authorization.create', decision: { kind: 'execution_identity_read', purpose: 'verifier',
+      target: { kind: 'guest_toolchain', guestToolchainManifestId: input.guestToolchainManifestId, toolId: 'node' } } }), 'authorization.create');
+    check(authorized.grant.state === 'active' && authorized.grant.purpose === 'verifier' &&
+      authorized.grant.targetKind === 'execution_identity_read' && authorized.grant.useCount === 0);
+    mark('admission');
+    submit = clientMutation({ method: 'run.submit', sessionId: session.id, expectedContextRevision: session.contextRevision,
+      workspacePath: input.workspacePath,
+      objective: 'Fix the add function in math.mjs so the existing check.test.mjs tests pass. Inspect the files and edit only math.mjs. Preserve check.test.mjs byte-for-byte. Do not add files, dependencies or network calls. Finish with a concise explanation of the fix.',
+      model: input.model, policyMode: 'yolo', budgets: input.budgets, maxChangedPaths: 1, maxChangedBytes: 65_536,
+      verifiers: [{ id: 'node-tests', version: '1', required: true, executable: { kind: 'toolchain', toolId: 'node' },
+        argv: CHECK_ARGS.map(value => ({ kind: 'non_secret_literal', value })), cwd: '.', env: {}, writableEphemeralPaths: [],
+        identityReadGrantId: authorized.grant.grantId, timeoutMs: 10_000, retries: 0, outputLimitBytes: 65_536 }],
+      dependency: { mode: 'none' }, sourceIncludes: [], sourceExcludes: [], registeredMcpServerIds: [], skillIds: [], allowUnverified: false }, true);
+    admitted = await send(submit, 'run.submit'); sourceRunId = admitted.snapshot.run.id;
+    check(admitted.snapshot.operation === 'agent' && admitted.snapshot.run.sessionId === session.id);
+    }
+
+    async function terminal(runId: string): Promise<Cut> {
+      const by = Date.now() + TERMINAL_MS;
+      let afterJournalSeq = 0;
+      for (;;) {
+        check(Date.now() < by);
+        const reading = performance.now();
+        const cut = await send({ protocolVersion: 1, method: 'run.get', runId, afterJournalSeq, itemLimit: 1, journalLimit: 32, checkpointLimit: 1 }, 'run.get');
+        const observed = performance.now();
+        progress.push({ stage, elapsedMs: Math.round(observed - started), readElapsedMs: Math.round(observed - reading),
+          status: cut.snapshot.run.status, nextStep: cut.snapshot.run.nextStep, revision: cut.snapshot.run.revision,
+          journalSeq: cut.highWaterJournalSeq, itemSeq: cut.highWaterItemSeq,
+          operations: cut.journal.map(row => ({ seq: row.seq, kind: row.opKind, phase: row.phase, hasError: row.errorRef !== undefined })) });
+        afterJournalSeq = cut.nextJournalSeq;
+        if (progress.length > 128) progress.shift();
+        check(Date.now() < by);
+        if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(cut.snapshot.run.status)) return cut;
+        // A wait is visible refusal to finish this particular autonomous case.
+        // Never approve, probe, replace an admission or guess UNKNOWN here.
+        check(cut.snapshot.run.status !== 'waiting');
+        // A full authenticated observation can cost more than its old 250ms
+        // pause. Give the actual task room to run instead of saturating the
+        // same runner with image checks. No deadline or response check changes.
+        await delay(Math.min(5000, Math.max(250, 2 * (observed - reading))));
+      }
+    }
+    const fullCut = (runId: string) => readInstalledTerminalCut(runId, request => send(request, 'run.get'));
+    async function accounting(cut: Cut, verifiedRepairs = 0) {
+      same(cut.snapshot.run.budgetReserved, ZERO);
+      const consumed = { ...ZERO, repairAttempts: verifiedRepairs }, settlements = new Map<string, string>();
+      for (const row of cut.journal) {
+        if (row.budgetSettlementRef === undefined) continue;
+        const key = `${row.opId}\0${row.attempt}`, previous = settlements.get(key);
+        if (previous !== undefined) { check(previous === row.budgetSettlementRef); continue; }
+        const settlement = decodeBudgetSettlement(await object(row.budgetSettlementRef));
+        check(settlement.runId === cut.snapshot.run.id && settlement.opId === row.opId && settlement.attempt === row.attempt);
+        const prepared = cut.journal[settlement.preparedJournalSeq - 1], terminal = cut.journal[settlement.terminalJournalSeq - 1];
+        check(prepared?.phase === 'prepared' && prepared.opId === row.opId && prepared.attempt === row.attempt &&
+          terminal?.phase === settlement.terminalPhase && terminal.opId === row.opId && terminal.attempt === row.attempt &&
+          terminal.budgetSettlementRef === row.budgetSettlementRef);
+        same(terminal.budgetDelta, settlement.consumed);
+        settlements.set(key, row.budgetSettlementRef);
+        for (const dimension of Object.keys(ZERO) as (keyof BudgetUsage)[]) {
+          consumed[dimension] += settlement.consumed[dimension]; check(Number.isSafeInteger(consumed[dimension]));
+        }
+      }
+      same(consumed, cut.snapshot.run.budgetConsumed); return consumed;
+    }
+    mark('execution'); await terminal(sourceRunId); const source = await fullCut(sourceRunId);
+    check(source.snapshot.operation === 'agent' && source.snapshot.run.status === 'succeeded' && source.snapshot.run.terminalReason === 'verified');
+    await observe(originalMath); // Private execution must leave the host untouched.
+    mark('result');
+    const spec = decodeRunSpec(await object(source.snapshot.run.specRef)), assembly = decodeRetainedRunAssembly(await object(spec.assemblyRef));
+    same(spec.budgets, input.budgets);
+    check(assembly.provider.name === input.model.provider && assembly.provider.model === input.model.model &&
+      assembly.provider.endpoint.kind === 'registered' && assembly.provider.endpoint.endpointIdentityDigest === input.endpointIdentityDigest);
+    const reply = await send({ protocolVersion: 1, method: 'run.result', runId: sourceRunId }, 'run.result');
+    check(reply.result.ref === source.snapshot.run.resultRef);
+    const result = decodeRunResult(await object(reply.result.ref)), closure = decodeVerificationClosure(await object(result.verificationClosureRef));
+    check(result.runId === sourceRunId && result.baseSourceRef === spec.baseWorkspaceManifestRef && result.verificationClosureRef === reply.verificationClosureRef &&
+      closure.runId === sourceRunId && closure.resultSourceRef === result.resultSourceRef && closure.verification.kind === 'local' && closure.verification.outcome === 'verified');
+    if (closure.verification.kind !== 'local') throw new Error('local source check required');
+    check(closure.verification.entries.length === 1);
+    const entry = closure.verification.entries[0]!;
+    check(entry.required && entry.verifierId === 'node-tests' && entry.disposition.kind === 'passed');
+    if (entry.disposition.kind !== 'passed') throw new Error('passing required check required');
+    const passed = entry.disposition, receiptRef = passed.receiptRef, receipt = decodeVerificationReceipt(await object(receiptRef));
+    same(result.verificationReceiptRefs, [receiptRef]);
+    check(receipt.runId === sourceRunId && receipt.verifierId === 'node-tests' && receipt.resultSourceRef === result.resultSourceRef &&
+      receipt.outcome === 'passed' && receipt.exitCode === 0 && receipt.terminationReason === 'exit' && !receipt.stdoutTruncated && !receipt.stderrTruncated);
+    const command = decodeVerifierCommand(await object(receipt.commandRef)), environment = decodeVerifierEnvironment(await object(receipt.environmentRef));
+    check(command.executable.kind === 'guest_toolchain' && command.executable.toolId === 'node' && command.cwd === '.');
+    same(command.argv, CHECK_ARGS.map(value => ({ kind: 'non_secret_literal', value })));
+    check(environment.commandRef === receipt.commandRef && environment.commandDigest === command.commandDigest &&
+      environment.sourceAccess === 'read_only' && environment.networkAccess === 'denied');
+    same(environment.variables, []); same(environment.writableEphemeralPaths, []);
+    const resultSource = decodeSourceManifest(await object(result.resultSourceRef)), entries = decodeWorkspaceEntries(await object(resultSource.entriesRef));
+    check(resultSource.treeDigest === entries.treeDigest && receipt.sourceDigestBefore === resultSource.manifestDigest && receipt.sourceDigestAfter === resultSource.manifestDigest);
+    same(entries.entries.map(row => row.path), ['check.test.mjs', 'math.mjs']);
+    const testFile = entries.entries[0]!, mathFile = entries.entries[1]!;
+    check(testFile.kind === 'file' && mathFile.kind === 'file');
+    if (testFile.kind !== 'file' || mathFile.kind !== 'file') throw new Error('fixed file result required');
+    check(testFile.mode === 0o644 && mathFile.mode === 0o644 && testFile.blobRef === sha256Bytes(Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs'])));
+    const fixedMath = await bytes(mathFile.blobRef); check(fixedMath.length === mathFile.size && !fixedMath.equals(originalMath));
+    check((await bytes(testFile.blobRef)).equals(Buffer.from(PROVIDER_JOURNEY_FILES['check.test.mjs'])));
+    const diff = decodeWorkspaceDiff(await object(result.diffRef));
+    check(diff.baseSourceRef === result.baseSourceRef && diff.resultSourceRef === result.resultSourceRef && diff.operations.length === 1);
+    const change = diff.operations[0]!;
+    check(change.kind === 'modify' && change.path === 'math.mjs');
+    if (change.kind !== 'modify') throw new Error('fixed modification required');
+    check(change.before.kind === 'file' && change.before.blobRef === sha256Bytes(originalMath)); same(change.after, mathFile);
+    const verifierCompletion = source.journal.find(row => row.opKind === 'verifier' && row.opId === passed.opId &&
+      row.attempt === passed.attempt && row.phase === 'completed' && row.receiptRef === receiptRef);
+    check(verifierCompletion && verifierCompletion.seq === passed.completedJournalSeq);
+    check(source.journal.some(row => row.opKind === 'model' && row.phase === 'completed') && source.journal.some(row => row.opKind === 'tool' && row.phase === 'completed'));
+    const session = await send({ protocolVersion: 1, method: 'session.get', sessionId: source.snapshot.run.sessionId, limit: 100 }, 'session.get');
+    check(session.nextItemSeq === session.highWaterItemSeq);
+    const sourceVerification = await context.verifySource(source, session, fixedMath);
+    check(sourceVerification.runId === sourceRunId && sourceVerification.sessionId === source.snapshot.run.sessionId &&
+      sourceVerification.status === 'succeeded' && sourceVerification.terminalReason === 'verified' &&
+      sourceVerification.resultRef === reply.result.ref && sourceVerification.verificationClosureRef === result.verificationClosureRef &&
+      Number.isSafeInteger(sourceVerification.repairCount) && sourceVerification.repairCount >= 0 &&
+      sourceVerification.repairCount <= input.budgets.repairAttempts && sourceVerification.candidateCount === sourceVerification.repairCount + 1 &&
+      sourceVerification.checkedFileCount === 2 && sourceVerification.retirementIdentities.length === sourceVerification.verifierAttemptCount);
+    const ownedDaily = journey.kind === 'daily' && journey.input.providerKind === 'owned_https';
+    if (ownedDaily) {
+      check(sourceVerification.caseKind === 'required_repair' &&
+        sourceVerification.candidateCount === 2 && sourceVerification.verifierAttemptCount === 2 && sourceVerification.repairCount === 1 &&
+        sourceVerification.checkedFileCount === 2 && source.snapshot.run.repairCount === 1);
+    } else check(sourceVerification.caseKind === 'required_provider');
+    mark('accounting'); const sourceConsumed = await accounting(source, sourceVerification.repairCount);
+    check((ownedDaily ? sourceConsumed.costMicros === 0 : sourceConsumed.costMicros > 0) && sourceConsumed.modelTokens > 0);
+    for (const dimension of Object.keys(ZERO) as (keyof BudgetUsage)[]) check(sourceConsumed[dimension] <= input.budgets[dimension]);
+    mark('review');
+    const review: ClientDetail[] = [];
+    await presentControlArtifacts({ artifact: context.artifact }, { protocolVersion: 1, method: 'run.result', runId: sourceRunId },
+      { protocolVersion: 1, ok: true, result: reply }, async detail => { review.push(detail); await context.review?.(detail); });
+    check(review.length === 1 && review[0]!.artifactRef === reply.result.ref);
+    if (journey.kind === 'daily') {
+      const output = await daily(['result', sourceRunId, '--wait']);
+      check(output.includes(Buffer.from(`${terminalText(review[0]!.label)} · ${reply.result.ref}\n${terminalText(review[0]!.text)}\n`)));
+    }
+    mark('reconnect'); await context.reconnect();
+    if (journey.kind === 'control') same(await send(submit, 'run.submit'), admitted);
+    same(await fullCut(sourceRunId), source);
+    await observe(originalMath);
+    mark('application');
+    let apply: InstalledControlRequestV1 | undefined, applied: Result<'run.apply'>;
+    if (journey.kind === 'daily') {
+      applied = admittedOutput(await daily(['apply', sourceRunId, '--result', reply.result.ref, '--json', '--options',
+        canonicalJsonBytes({ budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } }).toString('utf8')], TERMINAL_MS), 'run.apply');
+    } else {
+    apply = clientMutation({ method: 'run.apply', sourceRunId, expectedRunResultRef: reply.result.ref,
+      budgets: { wallTimeMs: input.budgets.wallTimeMs, toolCalls: input.budgets.toolCalls } }, true);
+    applied = await send(apply, 'run.apply');
+    }
+    const deliveryRunId = applied.snapshot.run.id;
+    check(applied.snapshot.operation === 'delivery' && deliveryRunId !== sourceRunId);
+    mark('publication'); await terminal(deliveryRunId); const delivery = await fullCut(deliveryRunId);
+    check(delivery.snapshot.operation === 'delivery' && delivery.snapshot.run.status === 'succeeded' && delivery.snapshot.run.terminalReason === 'verified');
+    const published = await send({ protocolVersion: 1, method: 'run.result', runId: deliveryRunId }, 'run.result');
+    check(published.result.ref === delivery.snapshot.run.resultRef);
+    const deliveredResult = decodeRunResult(await object(published.result.ref));
+    check(deliveredResult.runId === deliveryRunId && deliveredResult.resultSourceRef === result.resultSourceRef &&
+      deliveredResult.verificationClosureRef === published.verificationClosureRef && deliveredResult.deliveryTerminalProjectionEvidenceRef);
+    const deliveredClosure = decodeVerificationClosure(await object(deliveredResult.verificationClosureRef));
+    check(deliveredClosure.runId === deliveryRunId && deliveredClosure.resultSourceRef === result.resultSourceRef);
+    if (deliveredClosure.verification.kind === 'inherited_verified') {
+      check(deliveredClosure.verification.sourceRunId === sourceRunId && deliveredClosure.verification.sourceRunResultRef === reply.result.ref &&
+        deliveredClosure.verification.sourceVerificationClosureRef === result.verificationClosureRef &&
+        deliveredClosure.verification.inheritedProvenanceRef === deliveredResult.verificationProvenanceRef);
+      const provenance = decodeInheritedVerificationProvenance(await object(deliveredClosure.verification.inheritedProvenanceRef));
+      check(provenance.deliveryRunId === deliveryRunId && provenance.sourceRunId === sourceRunId && provenance.sourceRunResultRef === reply.result.ref &&
+        provenance.sourceVerificationClosureRef === result.verificationClosureRef && provenance.resultSourceRef === result.resultSourceRef);
+      same(provenance.verificationReceiptRefs, result.verificationReceiptRefs);
+    } else check(deliveredClosure.verification.outcome === 'verified' && deliveredClosure.verification.entries.some(row => row.verifierId === 'node-tests' && row.required));
+    const projection = decodeDeliveryTerminalProjectionEvidence(await object(deliveredResult.deliveryTerminalProjectionEvidenceRef!));
+    check(projection.deliveryRunId === deliveryRunId && projection.observedSourceRef === result.resultSourceRef && projection.selectedBranch === 'forward_finalize');
+    await observe(fixedMath);
+    mark('accounting'); const deliveryConsumed = await accounting(delivery);
+    check(deliveryConsumed.costMicros === 0 && deliveryConsumed.modelTokens === 0);
+    mark('reconnect'); await context.reconnect();
+    if (journey.kind === 'control') same(await send(apply, 'run.apply'), applied);
+    same(await fullCut(deliveryRunId), delivery); same(await fullCut(sourceRunId), source); await observe(fixedMath);
+    return { protocolWorkflowComplete: true as const, actualProviderQualified: false as const, actualProviderBillingQualified: false as const,
+      officialReleaseQualified: false as const, completeI1Qualified: false as const, completeI2Qualified: false as const,
+      sourceRunId, deliveryRunId, resultRef: reply.result.ref, deliveredResultRef: published.result.ref,
+      verificationClosureRef: result.verificationClosureRef, receiptRef, diffRef: result.diffRef,
+      sourceConsumed, deliveryConsumed, sourceJournalEntries: source.journal.length, deliveryJournalEntries: delivery.journal.length,
+      completedModelCalls: source.journal.filter(row => row.opKind === 'model' && row.phase === 'completed').length,
+      hostFileDigest: mathFile.blobRef, preservedTestDigest: testFile.blobRef, reviewedArtifactRef: review[0]!.artifactRef,
+      ...(journey.kind === 'daily' ? { normalCliWorkflowComplete: true as const, reviewApplyWorkflowCommandCount: 3 as const,
+        controlledHttpsProvider: ownedDaily, sourceVerification,
+        ...(journey.input.providerKind === 'real_provider' ? { actualProviderRepairObserved: sourceVerification.repairCount > 0 } : {}) } : {}) };
+  } catch {
+    // Provider/tool bytes and arbitrary assertions must never become a retained
+    // diagnostic, cause chain or console message in the credential-owning owner.
+    throw new InstalledProviderJourneyError(stage, progress);
+  }
+}

@@ -6,6 +6,339 @@
 **Implementation Status (2026-09-26, main `0f2fa146`):** Hidden M0/M1/M2 foundations, native StateOwner crash takeover, worker-loss fencing/quarantine primitives, and substantial WP02 typed continuation have landed. Supervisor/broker/verification/package integration and migration/rollback remain incomplete; the default CLI/TUI still uses the legacy runtime. See the [six-package design review](../kernel/2026-09-26-design-review.md) for current evidence and remaining boundaries. Kernel Cut has not passed.
 **Audience:** Core maintainers, implementers, reviewers, and integration authors
 
+## Approved preview delivery amendment — 2026-11-16
+
+The deliverable is one installed Linux workflow for one active Git repository
+task. Submit from the normal CLI with one real model and one approved check.
+The model works in the existing private workspace, uses the actual check's
+failure to repair the candidate, and produces an inspectable result. Close
+the client before completion, reconnect to the same Run, review the verified
+diff, and explicitly apply that exact result. Reuse the installed Supervisor,
+Run, worker, broker, verifier and Delivery paths.
+
+Use the real DeepSeek compatibility issue from PR #532. Start at `v0.15.0`
+(`9cce652c2a91d8484344e4794ae56576a915cc67`) with the PR's actual focused
+regression file from `961658fcf80116b6ef13e39cf39d901276a48c3c` and its locked
+project dependencies. An explicitly registered public npm mirror can serve the
+original lock URLs' packages. Require TLS 1.3, the selected mirror's pinned
+identity, no redirects, and the unchanged lock integrity for each archive.
+The focused Node/tsx check must fail on the original
+implementation and pass on the model's candidate. Supply the issue, check
+command and exact original source/test as repository-data context, including
+their byte hashes. Keep the reference implementation withheld. The original
+check still runs before any model edit, and actual edits use the private tools.
+A controlled provider can
+rehearse the installed transport and check lifecycle. The acceptance result
+requires a real model and the same project's real check.
+
+Give the model useful failure evidence through the existing authorized
+private tools where possible. If those are insufficient, expose only a bounded
+data projection of the exact failed check, with no credentials or new tool
+authority. The fixed `.test.ts` check uses locked npm dependencies and the
+pinned esbuild from the signed guest image. The model receives at most eight
+reported line numbers for the approved test file. The workspace stays read-only
+and non-executable. An infrastructure failure stays distinct from an assertion failure.
+
+The Bash recipe additionally provides measured GNU `cat`, `find`, `grep`,
+`head`, `ls`, `sed`, `sort`, `tail`, `uniq`, `wc` and `xargs` at their fixed
+`/usr/bin/` paths. The publisher signs each executable's actual digest and
+complete dependency graph in the same guest image. Native extraction maps
+only the declared fixed roots, verifies and seals each file, and the trusted
+init hashes and binds its actual named copy before enabling execution.
+The Bash description lists only the executables in that signed manifest.
+The existing 32-file/32-pin/256-MiB limits remain; an oversized closure refuses.
+Node-only verifiers and read-only tools do not gain these executable roots.
+Workspace/tmp no-exec, network isolation, read-only Git metadata, tool grants,
+READY5 and Stop2 remain unchanged. A requested unchanged baseline is a valid
+provisional candidate, not a claim that checks passed or the task completed.
+Only the existing verifier receipt bound to the final immutable candidate can
+establish verified success. Workspace Trust still precedes config loading.
+Explicit tool permission, OS containment, credential and spend limits, current
+owner/release checks, genuine retirement and refusal to resend unknown effects
+remain required. Applying must refuse conflicting drift before writing.
+
+A root repair candidate can reuse already installed dependencies from the same
+Run when install scripts were disabled, the exact package plan and execution
+inputs match, and the current candidate's original native seal proves that the
+complete managed tree is unchanged. Record the original acquired-ready item in
+the new candidate's readiness Checkpoint and revalidate both seals on recovery.
+The verifier still runs again against the new candidate. If a draining
+execution fails and still owns an activated worker, use the same checked
+shutdown fence as for an idle owned worker, then join the real resources.
+An already received process result stays in custody through settlement.
+Independent candidate file reads may use the existing four-reader group, with
+every issued read joined and deterministic metadata order retained. A claimed
+verifier's final read-only release validation has a separately cancellable
+lifetime. Stop cancels and joins those reads, then fences the original claim.
+The actual execution and received-result lifetime remains owned by its original
+producer, and the synchronous native release still follows the complete gate.
+A builtin tool release has the same separately cancellable read lifetime as a
+verifier release. Ordinary close or a committed Stop cancels and joins those
+reads while preserving the original claim signal and any actual result producer.
+Cancellation grants no release, settlement, refund or replay authority. Every
+original owner/grant/lease/history check and the synchronous native release
+boundary still apply.
+
+The explicit `run.apply` client waits at most five minutes for its original
+admission response, including complete verified-source history and live source
+capture. The preview command fixture allows five minutes and thirty seconds
+for that command's authentication, response and actual pipe joins. This is a
+bounded extension of the former thirty-second apply-response wait under the
+approved task-limit extension. Qualify five-second authenticated readiness,
+two-second service stop and thirty-second native HTTP independently. Original
+authorization expiry and fresh final-transaction checks continue to decide
+whether the application can be admitted.
+
+For an affected test-private scanner change, reuse the completed free task
+and original Stop2 evidence only when the production runtime source, fixed execution-recipe source
+and original project/check bytes are byte-identical. Run the changed scanner's real Linux
+filesystem regressions separately. The final real-model journey still requires
+the complete corpus scan and every original task, deadline and join assertion
+before PR delivery. Record failed free reports as unqualified.
+
+An actual native statement failure may automatically roll back its original
+SQLite transaction. The same connection's native transaction-state observation
+before COMMIT can establish that rollback and close the original statement
+scope. Preserve its original error. A failed COMMIT or unproven rollback keeps
+the connection unusable. This supplies no invocation replay or refund authority.
+
+One complete recovery projection may reuse its own fully verified small-object
+byte copies for existence verification, exact-size discard verification and JSON decoding. The first read
+opens and verifies the real CAS object and joins its
+handles. Repeated uses receive independent copies and retain their full digest,
+canonical encoding and typed-decoder checks. The captured content reference
+identifies those immutable bytes. A separate projection, including a nested
+projection, starts with fresh reads. SQL snapshots, StateOwner, grants, current
+lease and native release checks keep their existing boundaries. Explicit raw,
+bounded and stream reads retain their original physical verification. An
+existence-verification miss retains bytes only when the actual held size fits
+the remaining cache budget. Larger objects keep complete discard verification.
+Failed verification, cancellation or descriptor retirement supplies no copy.
+Exact-size discard uses rehash the complete owned bytes and check their exact
+length. On a small miss, exhaust the original exact-size stream and join both
+handles before retaining a copy. Explicit byte streams still perform their
+independent physical reads. Large discard inputs keep their existing joined
+reader. The temporary data cache holds at most 64 MiB, 8192 objects and 16 MiB
+per object. The former 1 MiB per-object eligibility excluded the actual locked
+compiler and dependency files (about 2–10 MiB). The total owned-byte budget and
+entry ceiling retain their values; inputs above 16 MiB keep the original complete
+discard/stream path. Artifact acceptance, raw/bounded/explicit-stream readers,
+per-use hashes and later-projection fresh physical reads retain their checks. The earlier 16 MiB capacity was smaller than the unfixed project's
+distinct eligible source and dependency bytes. This increases temporary reuse
+capacity. Artifact acceptance, workspace quotas and execution limits retain
+their existing values. Cache capacity
+selects the original complete read path for additional objects. These limits
+govern temporary reuse and preserve the supported artifact sizes. Callback exit
+clears the byte copies and closes their lifetime, including failure/cancellation.
+
+One complete control-list query may own that same bounded byte-cache lifetime.
+Repeated rows still independently decode their original RunSpec and retain the
+complete ordered source, row digests and final exact SQL equality checks.
+The next query starts with fresh physical reads. Source/cut capacity, signal
+checks, scratch retirement and the original Stop2 boundary retain their values;
+cached bytes never become current StateOwner, grant or execution authority.
+
+Within one fresh recovery traversal, workspace, sealed tool result and
+dependency projections may share a complete verification of the same CAS
+instance, artifact reference and exact byte count. The first read uses its
+original joined discard or streaming reader. Each use checks its own typed
+manifest, provenance, requested length and row bindings. Each workspace state
+can share its checked descriptor fields with the generation rows that name it.
+The candidate/verification history owns the complete dependency acquisition
+audit once per cut and rejects orphaned dependency entries even if there are
+no candidates. The tool history still validates each ordinary tool and MCP
+request, claim and result.
+
+Retained signed toolchain, npm data and script members may share those exact
+byte verification records. Signature, command, physical process and permission
+checks stay with each owning operation. Verification records share the
+existing 8192-entry ceiling. Capacity overflow uses the original complete read
+path, and a failed original read cannot supply a successful result. A later or
+nested traversal starts fresh. Raw, bounded and byte-consuming streams retain
+their independent physical reads. Native activation and release retain their
+own checks. The traversal clears its records on exit, including on failure
+and cancellation.
+
+Discard-only historical file checks may use those same complete small byte
+copies. A miss preserves the consumer's original streaming cadence, complete
+hash, exact length, metadata/root checks and descriptor joins. Explicit readers
+that consume bytes and large historical streams keep their existing paths.
+
+An execution that still holds its original physical worker may begin private
+Checkpoint retirement using the same fresh pointer-bound SQL cut as its
+shutdown fence. Recheck the active StateOwner, original branded launch closure,
+Run identity/epoch, worker identity/nonces, containment and generation/source
+binding. Quiescence and snapshot observation use the original native receiver.
+Every file sync, complete snapshot read, native death observation and original
+result-completion transaction remains required. The completion reader still
+validates the full retained history before committing the result. This avoids
+an additional full-history traversal solely to select the current owned rows.
+
+The full-project PR #532 experiment supplies an explicit ninety-minute wall
+budget to each admitted Run under the approved task-limit extension. Its
+hosted job is bounded to 195 minutes, covering the agent Run, application
+admission, Delivery Run and cleanup. The acceptance still requires the original
+failed assertion, model repair, passing recheck, reviewed result and exact
+application. Timed polling uses 7.5-second intervals, retaining the original
+720-poll upper bound and 1024-frame authenticated channel lifetime. Delivery
+reauthenticates through the existing path. Record observed durations
+independently of these task budgets.
+
+The whole-project rehearsal selects the fixed `pr532_full_project_v1` owned
+4GiB test-volume profile, which records its actual hard capacity and
+`nativeGenerationQuotaVerified: false`. Other installed Run-volume campaigns use their
+original1GiB profile. The original source/check, per-file/source limits, native
+recipes, READY5, Stop2 and HTTP30 govern qualification. Preserve the failed
+original-size reports separately from the new profile's physical evidence.
+
+The real DeepSeek experiment selects the documented 1M context. Explicit
+finite token and USD cost budgets must fit the owner's approved CNY 200 total,
+including prior unresolved reservations. Record each trial's ceilings and
+reconciliation in the delivery plan. Full-request pricing ceilings and the
+native 1 MiB request bound still apply.
+The PR #532 recipe's signed catalog admits at most8192 output tokens, including
+its Run-compaction summary. Every original normal/compaction wire request
+serializes that admitted cap as `max_tokens`. Its price table therefore selects
+an8192-output ceiling, with the full1048576 input and independent cache-read
+ceilings. Assembly, reservation and reproduced wire-body checks reject an
+output cap above the signed bound before release. At the selected peak prices,
+each released or UNKNOWN request consumes its complete330696-USD-micro
+reservation. Current-run usage supplies no budget refund. The experiment's
+USD1.66 Run ceiling permits at most5 such full charges. The delivery plan
+accounts for its full lifetime within the approved cumulative CNY200 total.
+The task presents the original source/check as repository data, then gives the
+model its affordable full-call count and coherent-edit/check guidance. These
+are advisory prompt facts. The original kernel budget and verifier decisions
+continue to enforce the Run.
+The objective asks for an immediate first model turn with plain text and no
+tools or edits, then uses the genuine baseline failure for exploration/repair.
+Failure reports retain the original decoded Stop subtype and current budget
+counters. Optional batches of at most eight committed items keep only declared
+tool names, outcomes and fixed failure codes, bound to the exact retained result.
+Retain the latest observed batch before a later query refusal. Query diagnosis
+keeps the decoded method/code and the original fixed error classification with
+its observed current driver phase. An early bounded marker can survive abnormal
+exit, with the original process/invocation independently bound by its reader.
+Raw arguments, source contents and model text remain withheld.
+Missing historical diagnostics remain unknown. DeepSeek publishes
+its current context and pricing in its [official model table](https://api-docs.deepseek.com/quick_start/pricing/).
+
+When original publication preparation rejects, preserve its fixed phase and
+error classification before starting failure retirement. The trusted test image
+may emit one bounded diagnostic tuple before exit. The reader must bind the
+original process and invocation independently. This tuple supplies no completion,
+resource join, successful stop or recovery authority. Keep the original stop
+deadline and exit-summary checks.
+
+The final secret corpus uses one cumulative scanner with a 512-MiB limit
+and sixty-second corpus deadline. Small-state campaigns retain their
+4096-stream, 1024-entry-per-directory and 2048-file capacity. The complete
+PR #532 project campaign uses the fixed `whole_project_v2` diagnostic profile
+with 8192 cumulative streams, 16384 entries per directory and 16384 files. This
+explicitly expands diagnostic work capacity for the larger real project; the
+selected capacity is retained in the report. Its CAS partition has one continuous
+byte projection containing each sorted name and that exact file's full bytes,
+retaining overlap across objects. This preserves every within-file match and
+also refuses matches across object boundaries. The installed MCP campaigns
+accumulate multiple Runs and their retained objects in one StateRoot. They
+reuse this profile's bounded inventory and continuous CAS projection with
+their original 4096-stream ceiling. Separate raw databases, evidence
+files and process output retain independent streams. All bytes remain in one scan,
+with the same detection, ownership, identity, stability and join checks. A copied
+SQLite database has one continuous logical byte stream for every schema name,
+schema SQL and TEXT/BLOB value, in the real query order. Retain overlap across
+cells, including empty cells, and refuse cross-cell secret matches too. Raw
+files and separate databases keep independent streams. This replaces the
+former per-cell stream allocation. Preserve the independent 8192-row,
+65536-cell and 128-MiB logical guards, full raw-file/CAS/client-data coverage,
+identity/stability checks and all resource joins. Do not skip, deduplicate,
+truncate or reset any scanned bytes or counters. Scanner exhaustion continues
+to refuse qualification and suppress the unqualified report body.
+
+Retain the original checks and their outcomes for the existing qualification
+campaigns. The broad maximum-image, scale, cross-platform, migration, MCP and
+unrelated crash-cut matrices do not gate this one-task preview. Measure latency
+and interruptions on the actual task. A fixed campaign observation window or
+the number of file revalidations is not a preview product requirement. The
+original runtime safety deadlines still apply. Consolidate verification only
+where the same identity, freshness and failure behavior is demonstrated.
+
+A fixed readonly installed-service observation performs complete byte
+revalidation at entry to and exit from the same held-runtime borrow. Its native
+current-user and fixed-unit inspections still check the original held selection
+on every call, and profile descriptors are reread, checked and joined before
+returning. These observations consolidate the former additional intermediate
+full-image read. Setup and mutating manager capabilities retain the complete
+pre-operation read. Record the actual count in readiness diagnostics instead of
+assuming the former sixteen reads remain on this connection path.
+
+An original activated agent worker or publication holder records its actual
+same-owner renewals for complete history reads. The agent scope requires the
+genuine execution, held native resources, active generation and unexpired lease.
+An original agent worker may also retain its guarded heartbeat while the pure
+tool-selection read is pending. Execution preparation starts after that read
+and its cancellation checkpoint complete. Native activation, revocation,
+Checkpoint, received-result custody and execution preparation retain their
+existing renewal rules. Every renewal still requires the same held physical
+worker, productive Run, active generation, original StateOwner and unexpired
+current lease. The Run deadline and final release checks stay current.
+Read comparisons may recognize only the exact recorded rows, with unchanged
+non-lease fields and current SQL equal to the latest recorded row. This
+comparison includes the nested locked-dependency candidate reader. Recovery
+snapshots retain their actual rows. Revoking/checkpointing leaves this renewal
+equivalence. A failed producer ends its productive renewal scope before the
+recovery reader captures the exact row for its reducing fence. A retryable
+original completion keeps its own scope and custody. Final release still
+requires the current unexpired lease, original
+grant, owner and Stop checks. Shutdown cancels and joins failure-recovery reads
+before installing the checked original-holder fence and joining real resources.
+
+Verify once through the installed entry and reuse targeted cancellation,
+restart/unknown-effect and drift-refusal coverage. Fix only blockers on this
+path. Run the repository build and full tests before pushing, then open one
+complete preview PR after the real-model workflow passes. This amendment
+takes precedence over the prior preview scope below. It leaves default cutover
+and its broader release claims pending.
+
+## Approved delivery amendment — 2026-11-13
+
+The first release is an explicit Linux qualification preview of one repository
+task: admit a bounded task, use the selected real DeepSeek provider to modify a
+private workspace, execute required checks and bounded repair, inspect the exact
+result and receipts, and explicitly apply it. Client detach/reconnect, cancellation
+and Supervisor restart belong to this same delivery. Unsupported or ambiguous
+recovery remains visible waiting; it is never guessed into success.
+
+This amendment supersedes requirements that all six work packages, all clients,
+all execution platforms and the full maintenance/scale matrix must precede any
+preview release. It does not supersede their requirements for default Kernel Cut.
+The preview supports one active task. Existing implementation is reused; a full
+engine replacement is not a prerequisite. Managed local inference, all MCP
+profiles, macOS execution, automatic legacy migration/rollback/GC and thousand-Run
+qualification are deferred from this release, with their original gaps retained.
+
+Workspace Trust, tool permission and actual OS containment remain independent.
+Credential protection, claim/settlement ownership, UNKNOWN non-replay, immutable
+result identity, actual verifier receipts, explicit application and physical
+resource retirement are required for every supported preview path. Existing
+timing and integrity checks remain binding. A feature cannot become supported
+merely because its qualification was deferred.
+
+Completion requires the same source and installation to perform the real-model
+task through review and application, with its necessary lifecycle regressions.
+Development uses affected checks; build and the full local test suite remain
+required before pushing. A ten-task competitor comparison and unrelated fault
+matrices are not prerequisites for implementing this delivery. The complete
+release gates below still govern default cutover and broader capability claims.
+
+The owner additionally authorized real-provider validation on a free GitHub-hosted
+Linux runner using a temporary encrypted Actions secret. Only an explicit manual
+dispatch at its reviewed commit may receive that secret; the test wrapper removes
+the transport environment value before children and uses the original private
+stdin enrollment into Secret Service. Ordinary CI remains uncredentialed. This
+changes the experiment's hosting boundary, not credential authority, billing,
+Trust, containment, time bounds or the meaning of qualification evidence.
+
 > **Product promise:** **Delegate. Detach. Return to verified work.**
 > **中文：**交出任务，离开终端，回来拿到经过验证的结果。
 
@@ -60,6 +393,16 @@ Client attachment is not Run state. Closing the CLI or TUI cannot cancel, pause,
 3. the initial ready Checkpoint;
 4. the queued Run row;
 5. Supervisor ownership of the admission.
+
+The original stored admission response acknowledges those durable facts. The
+Supervisor registers any nonproductive continuation reconstruction before the
+Run becomes visible and retains its complete read/join independently of the
+client. Its existing driver queue must join that exact load and recheck current
+Run/owner/deadline gates before material, native or productive work; completion
+of reconstruction is not an additional acknowledgement prerequisite. Failed
+loads retain the existing failure/retirement fences, and shutdown still cancels
+and joins them before releasing StateOwner. No acknowledgement authorizes a
+retry, changes an execution result or makes client detachment a cancellation.
 
 Process death, Supervisor restart, and machine reboot must either resume the same Run from a consistent state or leave it in an explicit waiting/recovery state. Cliq must never silently lose it.
 
@@ -214,7 +557,181 @@ The StateRoot isolation boundary excludes a malicious or uncooperative unsandbox
 
 Linux obtains the atomic `(pid,uid,gid)` tuple only from `getsockopt(SOL_SOCKET,SO_PEERCRED)`; macOS obtains uid/gid from `getpeereid` and pid from `getsockopt(SOL_LOCAL,LOCAL_PEERPID)`. The Supervisor captures exact `PlatformProcessIdentityV1` for that native pid and its independently observed client executable image, then repeats the credential calls before publication; both samples must be identical, process pid/owner uid must equal the peer tuple, process observation must not predate the accepted connection, and any unavailable API, exited/reused pid, process start/image drift, uid mismatch, listener replacement, non-socket, or descriptor drift rejects/closes the connection. A caller-supplied pid, descriptor, path or hash is never consulted. This named-entry/transport distinction is the [accepted control-peer clarification](2026-10-06-control-peer-identity.md); it changes no artifact shape or public method.
 
-Each accepted transport then publishes `LocalControlChannelIdentityV1`; its digest omits itself and its principal pair rehashes. The in-process branch rehashes the current signed process identity. The UDS branch rehashes the peer observation, requires its StateRoot/platform/peer uid to equal the principal identity, and remains bound to that exact still-open accepted descriptor until the request frame is authenticated. Retained artifacts establish historical provenance only; a fresh UDS request additionally requires an opaque native live connection under the current StateOwner. Historical reads do not require the old peer to remain alive. Transport authentication and injected identity precede every StateStore call, including admission replay, whose internal replay-before-closure-traversal ordering remains unchanged. `openedAt` is canonical and not earlier than the observation; `channelNonceDigest` hashes 32 fresh Supervisor-generated bytes. Every persisted authority-bearing request, grant, consent, approval, abandonment, MCP risk, migration, and rollback carries the injected `channelIdentityRef/channelIdentityDigest` pair plus matching `principalId`; the ref closed-decodes this exact artifact and the semantic digest is recomputed. `control_requests` retains the pair for the channel that first committed the mutation. Same-request replay follows that retained control response even from a later authenticated channel without rewriting provenance; a new authority-bearing decision uses the new channel rather than copying a caller string.
+Each accepted transport publishes the complete closure of `PlatformProcessIdentityV1`, `LocalPrincipalIdentityV1`, `LocalSocketPeerObservationV1` and `LocalControlChannelIdentityV1` before enabling its channel. Canonical full-byte CAS refs may be computed from the closed-decoded artifacts before publication so that these four original publication operations can run concurrently, bounded to four per authentication; their completion order is unrestricted. A precomputed ref is not persistence or authorization proof, and a full-byte CAS ref is not an artifact's self-omitting semantic digest. Each actual publication must retain its complete byte/hash/metadata verification, durability and resource-close checks; its returned ref, byte length, media type and schema kind must match the exact expected artifact. Every issued operation must settle and be joined, including siblings of a failure or connection close. Only after the complete verified closure and a final native-current check may the Supervisor register the channel or dispatch a state operation. Failure, descriptor drift or closure forbids activation; partial CAS objects remain data, not authority. This changes publication order only, not artifact shapes, resource ownership, authentication bounds or durability requirements.
+
+The accepted connection may start its single owned authentication-data producer
+before the first application frame, after the original native accept and
+connection-consumer checks. This overlaps the client's independent installed
+image checks; it does not skip, combine, cache or move any of those checks.
+Preparation owns the original peer observation and the same four-object
+publication, but registers no live channel, authenticated frame or StateStore
+operation. The first dispatch joins that original producer, rechecks the still
+current native peer and only then registers its channel. Later frames reuse
+that same closure with the original fresh native-frame checks. The 64 accepted
+connections and 64 in-flight dispatches remain separate bounds; preparation
+adds at most one producer per accepted connection and four publications per
+producer. At most 64 preparation producers may be in flight, including closed
+connections until their original producers join, so reconnect churn cannot
+expand the bound. Shutdown closes the accepted peers before joining every original
+preparation and dispatch. Preparation failure closes only that connection,
+contains error-reporter exceptions and preserves any retirement uncertainty;
+it never starts another producer on that connection. All four CAS durability
+stages, complete byte checks, native identity checks, sixteen client
+revalidations, one-MiB installed-image discard scratch and existing deadlines
+remain unchanged.
+
+`LocalControlChannelIdentityV1`'s digest omits itself and its principal pair rehashes. The in-process branch rehashes the current signed process identity. The UDS branch rehashes the peer observation, requires its StateRoot/platform/peer uid to equal the principal identity, and remains bound to that exact still-open accepted descriptor until the request frame is authenticated. Retained artifacts establish historical provenance only; a fresh UDS request additionally requires an opaque native live connection under the current StateOwner. Historical reads do not require the old peer to remain alive. Transport authentication and injected identity precede every StateStore call, including admission replay, whose internal replay-before-closure-traversal ordering remains unchanged. `observedAt` and `openedAt` are actual canonical samples, with `openedAt` not earlier than the observation; neither timestamp attests that publication or activation already completed. `channelNonceDigest` hashes 32 fresh Supervisor-generated bytes. Every persisted authority-bearing request, grant, consent, approval, abandonment, MCP risk, migration, and rollback carries the injected `channelIdentityRef/channelIdentityDigest` pair plus matching `principalId`; the ref closed-decodes this exact artifact and the semantic digest is recomputed. `control_requests` retains the pair for the channel that first committed the mutation. Same-request replay follows that retained control response even from a later authenticated channel without rewriting provenance; a new authority-bearing decision uses the new channel rather than copying a caller string.
+
+The four-object authentication publication may use one fixed CAS phase batch,
+not an unbounded batch or an all-or-nothing database transaction. Its four
+durability boundaries remain, in order: complete streamed temporary files,
+digest-named recovery temporaries, final no-replace links, and retirement of
+the owned temporaries. Each boundary joins every actual mutation in that
+phase before fsync of the same held, identity-checked CAS directory covers the
+phase. Each file still receives its own data fsync, immutable-mode checks and
+complete independent final hash/length/metadata verification. Neither a later
+directory fsync nor a sibling's successful result substitutes for an earlier
+boundary. Single-object publication and the fixed batch share the same phase
+and recovery rules, including bounded linked-temporary recovery and concurrent
+independent publishers. A partially applied failing syscall is not proof that
+nothing happened: cleanup must retain exact inode ownership, durably retire
+known temporaries and join every issued operation and descriptor. Unknown
+ownership or failed cleanup/join refuses activation, with retirement failure
+taking precedence. Valid immutable final objects may remain as data-only
+orphans after failure; the batch neither deletes them for atomicity nor
+registers a partial channel. No authentication or shutdown deadline changes.
+
+Installed admission with exactly one verifier may reuse that same fixed-four
+CAS phase batch for its command, environment, verifier specification and Run
+assembly, in that order. Their canonical references are composition data,
+not evidence of completed publication. The sandbox profile is fully published
+first, either individually or in the exact model-material quartet below.
+Its complete independent read and all original toolchain, identity,
+authorization and resource checks retain their original relative order and
+must finish before the batch; the policy is still published afterward.
+Zero or multiple verifiers retain their ordinary publication path, without
+dummy objects. Historical reconstruction remains read-only. Every issued
+member must fully settle, verify its actual descriptor and join before an
+admission handle can escape. A partial, cancelled or failed group is not
+admission or execution authority.
+All original final runtime, authenticated-frame, channel and StateOwner checks
+remain required. Like the authentication batch, cancellation or failure may
+leave additional valid data-only CAS orphans relative to the former serial
+order; this is not serial-order equivalence or an atomic publication. The four
+durability boundaries, per-file sync and full readback, recovery rules and
+retirement-failure precedence above are unchanged. This does not extend the
+thirty-second request or any authentication, shutdown or qualification limit.
+
+The same four-stage CAS mechanism may also publish only these fixed admission
+data closures: `[original control request, source sandbox profile, source
+inspection target]`, `[retirement inspector identity, source retirement
+evidence]`, `[original source attempt, retirement inspector identity, source
+retirement handoff]`, and, iff there is exactly one model credential binding,
+`[registered endpoint, credential binding, model capability evidence, installed
+sandbox profile]`. The fourth member is the closed fixed recipe over the
+already-normalized resource request, not a permission or execution decision.
+The original endpoint/binding/catalog checks precede that quartet; all four
+files are durable, independently rehashed and joined before `materialFor`,
+complete RunAssembly validation and tool-runtime authority verification.
+The later complete profile read, fresh verifier resolution, policy publication
+and final runtime/channel/owner checks retain their relative order. Zero or
+multiple bindings keep their original ordinary publication and later sandbox
+publication, without padding.
+Initial ordinary non-Git capture may publish the exact `[entries manifest,
+frozen ignore rules, source projection, source manifest]` quartet. Raw source
+streams remain earlier independent durable publications. The internal manifest
+publisher receives an immutable copy, and all original capture resources remain
+held through the group's full durability/readback/join, the original signal-bound
+full entries reread and complete native metadata recheck. No structural callback
+result or precomputed ref is a capture/Run authority. Same-scan delivery retains
+its earlier entries manifest and exact `[frozen ignore rules, source projection,
+source manifest, delivery topology]` quartet. Git and frozen-result paths retain
+their existing ordering. The handoff triple plans the original attempt ref from
+its complete in-memory bytes, samples a fresh real observation time and joins
+all three artifacts before the original sole transaction rechecks actual staging,
+owner, unchanged attempt, healthy time fence and the unchanged five-second
+freshness bound. It grants no cleanup before registration and never substitutes
+CAS presence for the physical joined lifecycle. A failed group can leave inert
+orphans; every issued mutation, cleanup, reader and close must join before refusal.
+Instruction capture retains every independent raw-file publication, canonical
+text, original source entry and final manifest. Its at-most-64 texts / aggregate
+one-MiB input bound is unchanged. Prefix texts may publish in groups of at most
+four; the final pair/triple/quartet contains zero/one/two remaining texts,
+instruction source and instruction manifest. All hashes plan exact existing
+bytes; no padding or synthetic object is added. Each group retains the four
+CAS namespace barriers, every file sync, full reread and actual close/join.
+The original held capture is rechecked after each group and before return.
+No graph escapes early, no source/Run authority or time fence moves, and no
+request, stop or secret-scan bound changes. A failed group may leave inert
+orphans and never a partial accepted capture.
+The fresh final-admission single-verifier path retains its original
+`[command, environment, verifier specification]` triple outside installed
+admission. Installed admission may instead publish exactly `[command,
+environment, verifier specification, original authorization consumption
+receipt]` after its complete fresh resolver and exact expected-spec check.
+The receipt binds the original grant, already determined Run id and admission
+intent, and installed preparation time; its publication consumes no authority.
+The sole final admission transaction still rereads the exact active grant and
+checks its original creation/expiry interval against actual fresh commit time,
+alongside the original owner, Session and authenticated-frame checks, before
+consuming it. Ordinary admission does not move its canonical-time sample, and
+zero/multiple verifiers keep their original path. All original bytes are
+published and completely verified again even when their refs already exist.
+Earlier assembly data is not reusable authorization; historical reconstruction
+never publishes these groups. Each quartet preserves the same four durability
+stages, every file sync and complete readback, exact slot descriptors, durable
+failure cleanup, all-issued join and retirement-failure precedence. This allows
+additional valid data-only orphans, not serial-order equivalence, an atomic
+namespace transaction, a dummy fourth member or a wider acceptance deadline.
+The fixed builtin-script result producer may use the same four-stage mechanism
+for exactly `[original Supervisor inspector identity, original invocation
+containment, whole-invocation death evidence, BuiltinToolCaptureV1]`. Before
+planning that quartet, it durably publishes and completely joins both original
+raw stdout/stderr byte artifacts. Every member is derived from the one genuine
+captured native result and original claim; precomputed full-byte refs only
+compose this immutable data graph. No intermediate grant, clock, SQL mutation,
+or execution point exists between the four members. The complete quartet's
+actual bytes, refs, lengths, media types and schema kinds must verify and all
+issued operations must join before the capture receipt is returned or any
+settlement proceeds. Partial failure retains the original result/fence and
+UNKNOWN handling, never another dispatch. All four durability boundaries,
+per-file sync, full re-read, identity checks, durable partial cleanup and
+retirement-failure precedence above remain unchanged; this is not atomic
+publication or evidence that the two-second Linux stop limit has passed.
+Installed final Run admission may also publish these two fixed four-member
+data groups: `[original public request core, Run objective, admitted context,
+initial workspace state]`, then `[Run specification, initial context manifest,
+initial frontier, original control response]`. Any required direct-unverified
+consent remains its own complete publication between the groups. Pure typed
+values may use precomputed full-byte refs to compose dependent values; these
+are not publication receipts. Both groups must complete all physical writes,
+full-byte and exact slot metadata checks and descriptor joins before the sole
+final admission transaction can consume a grant, create the Run/Checkpoint or
+expose the response. Cancellation stops the next group and waits for any
+issued group to join; corruption and retirement failure retain precedence.
+The original final read/currentness/owner/frame checks are unchanged. Other
+admission paths retain their individual publisher; neither historical replay
+nor an earlier assembly substitutes for any fresh final check.
+These are exact two/three/declared-four-member tuples, not a general queued batch or a
+deferred-durability API. Precomputed canonical refs compose data only. Every
+member retains its own file sync and complete final byte/hash/length/metadata
+verification, and one promise joins the entire group and all descriptors
+before any member's result escapes. The original four namespace boundaries,
+partial-mutation cleanup, independent/repeated-ref publishers and retirement
+failure precedence above remain required. A multi-member failure cannot mint
+single-publication ENOSPC retry provenance.
+
+No group crosses a source reservation or retirement transaction, live capture,
+staging retirement, complete entries readback, held-root/currentness check or
+final runtime/channel/StateOwner acceptance point. In particular, source
+projection and workspace-instruction publications retain their existing
+individual currentness observations. Every original complete material and
+guest-image read and runtime revalidation remains required. Other credential
+counts keep the original publisher (or earlier recipe refusal), without dummy
+members. Sandbox, verifier, policy and final authority checks keep their
+original relative order. Like the fixed-four batches, cancellation or failure
+may leave additional valid data-only CAS orphans but cannot admit partial
+state or execute work; clocks, limits and deadlines are unchanged.
 
 ## 4. Semantic Ownership
 
@@ -349,9 +866,16 @@ type SessionCompactionItem = {
   createdAt: string
 }
 
+type LegacySessionContextKind =
+  | 'legacy_record'
+  | 'legacy_compaction'
+  | 'legacy_plan'
+  | 'legacy_handoff'
+  | 'legacy_bookmark'
+
 type SessionHandoffEntryV1 = {
   index: number
-  sourceKind: 'run_terminal' | 'summary'
+  sourceKind: 'run_terminal' | 'summary' | LegacySessionContextKind
   fromItemSeq: number
   throughItemSeq: number
   sourceRef: ArtifactRef
@@ -383,11 +907,17 @@ Legacy import attempts the same descriptor-held construction. If the recorded ro
 
 The logical Session stream is immutable and contiguous by sequence; a physical child Session may inherit its prefix rather than copy rows. Only context projection/revision/name/timestamps are mutable; fork lineage and workspace identity never change. `contextProjectionRef` resolves to the exact versioned shape above and must match Session id/revision/latest sequence. Segments are ordered, nonoverlapping, and cover every sequence `1..throughItemSeq`: a raw segment contains exactly one source-Session identity/payload tuple for every sequence in its range; a summary binds the source range digest and immutable `SessionCompactionItem`/summary; an excluded-control segment binds non-model-visible history without projecting it. Retained ids exist in the covered source range and are projected after the summary in stable item-sequence order. Every item id/kind/payload ref is checked against either this Session's row or the exact immutable ancestor lineage reachable through `parentSessionId/forkedThroughItemSeq`; an inherited entry's sequence may not exceed any lineage fork cursor. `sourceItemsDigest` is over ordered logical `{itemSeq,kind,payloadRef}` tuples, deliberately independent of physical owner/item id, so a forked view preserves it. `projectionDigest` is SHA-256 over the RFC 8785/JCS object with that member omitted.
 
-Kernel Cut deliberately rejects ambiguous projection surgery. `session.compact` requires `fromItemSeq` and `throughItemSeq` to equal whole current segment boundaries, requires every selected segment to be `raw`, and requires retained ids to be unique logical source items inside that exact range; any summary, `excluded_control`, straddling, nested, or recompaction range returns `INVALID_REQUEST`. The public `summaryMarkdown` is normalized to NFC, rejects NUL/unpaired surrogates, and publishes exact `ModelTextV1` with UTF-8 bytes in `1..262144`; `summaryRef` names it and `summaryDigest` equals its `textDigest` in both the item and projection segment. It publishes summary/item/new-projection artifacts first and atomically appends one child-owned `SessionCompactionItem` at `latestItemSeq+1`, replaces the projection, increments `contextRevision`, and updates `latestItemSeq`. The new compaction item itself is always represented by an exact one-item `excluded_control` segment whose source digest binds its `{itemSeq,kind,payloadRef}` tuple; it is never model-visible or ambiguously raw. `session.fork throughItemSeq` must be zero or the `throughItemSeq` of a current segment; a cursor inside a summary/raw/control segment is rejected rather than re-expanded. One idempotent transaction creates the child with `parentSessionId`, `forkedThroughItemSeq`, `contextRevision=1`, and `latestItemSeq=throughItemSeq`, plus a new projection whose prefix entries keep exact source Session/item ids; it clones no item rows. The child's first local append uses `throughItemSeq+1`. Subsequent lookup validates the immutable ancestor chain, and a parent later append/compaction cannot enter the frozen child prefix. Legacy item kinds are retained for inspect/export only and must occur exclusively in `excluded_control` segments; they are never decoded as model context. A later RFC may add deterministic re-expansion/recompaction. Session contains no status, lease, wait, budget, worker, Journal, workspace generation, or Run frontier field.
+A fork ending at a summary may exclude the later compaction control item from its logical stream. That summary still resolves its exact `compactionItemId` through the original committed immutable item index and immutable Session lineage/workspace association. This metadata is justification only: it cannot enter the child's raw/model stream or extend its cursor. Verification reads the full original `previousProjectionRef`, exact source range and source Session/item tuples, summary and retained ids; equal payload bytes from an unrelated Session cannot substitute. An admitted Run reads its original frozen projection and this original immutable graph plus committed immutable index. It never substitutes today's Session projection, revision or permission. Empty/raw-only admitted projections continue to require only their retained CAS graph.
 
-`session.handoff.create` is one exact read projection. An omitted `throughItemSeq` means the captured projection's `throughItemSeq`; an explicit cursor must be zero or the end of a current segment and no greater than that cut. The server reads Session, lineage rows, and projection in one SQLite snapshot and rejects a revision mismatch. It walks the exact prefix: each raw `run_terminal` emits one entry with its payload ref, `sourceDigest=SHA-256(JCS(SessionRunTerminalItem))`, and the section 4.2 model-visible JCS string; each summary emits one entry with the compaction item ref, its `summaryDigest`, and decoded `ModelTextV1.utf8`; every `excluded_control` range is copied to `excludedRanges`; legacy kinds are control-only. Entries and excluded ranges are contiguous in their respective stored encounter order, indices start at zero, refs/digests rehash, and no current mutable path, checkpoint, principal, credential, grant, receipt body, or hidden Run transcript enters the handoff. `contextProjectionDigest` and workspace identity equal the captured Session; `handoffDigest = SHA-256(JCS(handoff with handoffDigest omitted))`.
+Session first-response replay independently audits the original retained channel and current owner/frame/lifetime. Fork responses bind the original admission intent/control link, deterministic child id, immutable lineage/workspace/creation fields, revision one and complete frozen prefix. Compaction responses bind the exact original request, deterministic immutable compaction row, normalized summary/retained range, previous projection and deterministically reconstructed replacement projection. A different valid same-method response is not interchangeable. Later compaction also cannot make a terminal Run's history unreadable: the atomic terminal item and original exact one-item raw segment remain provable through the full immutable compaction graph even when current model visibility is a summary.
+
+Kernel Cut deliberately rejects ambiguous projection surgery. `session.compact` requires `fromItemSeq` and `throughItemSeq` to equal whole current segment boundaries, requires every selected segment to be `raw`, and requires retained ids to be unique logical source items inside that exact range; any summary, `excluded_control`, straddling, nested, or recompaction range returns `INVALID_REQUEST`. The public `summaryMarkdown` is normalized to NFC, rejects NUL/unpaired surrogates, and publishes exact `ModelTextV1` with UTF-8 bytes in `1..262144`; `summaryRef` names it and `summaryDigest` equals its `textDigest` in both the item and projection segment. It publishes summary/item/new-projection artifacts first and atomically appends one child-owned `SessionCompactionItem` at `latestItemSeq+1`, replaces the projection, increments `contextRevision`, and updates `latestItemSeq`. The new compaction item itself is always represented by an exact one-item `excluded_control` segment whose source digest binds its `{itemSeq,kind,payloadRef}` tuple; it is never model-visible or ambiguously raw. `session.fork throughItemSeq` must be zero or the `throughItemSeq` of a current segment; a cursor inside a summary/raw/control segment is rejected rather than re-expanded. One idempotent transaction creates the child with `parentSessionId`, `forkedThroughItemSeq`, `contextRevision=1`, and `latestItemSeq=throughItemSeq`, plus a new projection whose prefix entries keep exact source Session/item ids; it clones no item rows. The child's first local append uses `throughItemSeq+1`. Subsequent lookup validates the immutable ancestor chain, and a parent later append/compaction cannot enter the frozen child prefix. Only the five closed context-only legacy projections defined below may enter raw historical context; raw legacy files and control payloads remain ineligible and may be retained only as excluded display/audit history. A later RFC may add deterministic re-expansion/recompaction. Session contains no status, lease, wait, budget, worker, Journal, workspace generation, or Run frontier field.
+
+`session.handoff.create` is one exact read projection. An omitted `throughItemSeq` means the captured projection's `throughItemSeq`; an explicit cursor must be zero or the end of a current segment and no greater than that cut. The server reads Session, lineage rows, and projection in one SQLite snapshot and rejects a revision mismatch. It walks the exact prefix: each raw `run_terminal` emits one entry with its payload ref, `sourceDigest=SHA-256(JCS(SessionRunTerminalItem))`, and the section 4.2 model-visible JCS string; each closed legacy context item emits its original complete `LegacyPortablePayloadV1` ref/byte digest and only the fixed historical visible projection below; each summary emits one entry with the compaction item ref, its `summaryDigest`, and decoded `ModelTextV1.utf8`; every `excluded_control` range is copied to `excludedRanges`. Raw legacy files and control payloads remain excluded. Entries and excluded ranges are contiguous in their respective stored encounter order, indices start at zero, refs/digests rehash, and no current mutable source path, executable checkpoint, principal, credential, grant, receipt body, or hidden Run transcript enters the handoff. `contextProjectionDigest` and workspace identity equal the captured Session; `handoffDigest = SHA-256(JCS(handoff with handoffDigest omitted))`.
 
 The JSON artifact is exactly UTF-8 RFC 8785/JCS of `SessionHandoffV1`. The Markdown artifact is rendered from that decoded object only: start with `# Cliq Session Handoff\n\n`, then `Session: <JCS(sessionId)>\nContext revision: <base-10 contextRevision>\nThrough item: <base-10 throughItemSeq>\n`; for each entry append `\n## Entry <base-10 index+1>: <sourceKind>\n\n` followed by every LF-normalized content line prefixed with four ASCII spaces and one final LF; then append `\nExcluded control ranges: <base-10 excludedRanges.length>\n`. Input CRLF/CR in human text is normalized to LF when the originating `ModelTextV1` is published, so the renderer performs no platform newline choice. Markdown bytes are UTF-8, their artifact digest is SHA-256 of those exact bytes, and the result descriptors must rehash the JCS and Markdown artifacts. Identical Session/revision/cursor therefore returns identical refs; there is no creation timestamp, random id, ambient path, or renderer option.
+
+The [paged retained Session contract](../kernel/session-context-pages.md) specifies new v2 heads and bounded internal CAS pages. Pages are fully published and joined without SQL catalog writes; only the complete head enters the original unique Session/Run transaction. A failed final transaction changes no SQL metadata, while inert unreferenced CAS bytes may remain. Catalog membership never substitutes for full typed reachability or complete physical CAS inventory; an incomplete GC walk deletes nothing. Existing v1 history and all source/compaction/authority checks remain unchanged.
 
 ### 4.2 Session And Run Concurrency
 
@@ -414,6 +944,49 @@ type SessionRunTerminalItem = {
 ```
 
 The storage gate enforces the same status/result/detail matrix as the Run and uniqueness by Session plus `runId`; retry after a crash observes the existing item. The item is owned by the exact root Run's Session, `itemKey` is the literal ``run-terminal:${Run.id}``, `runId === Run.id`, `operation === decoded RunSpec.operation`, and `admittedSessionItemSeq === decoded AdmittedContextManifest.throughSessionItemSeq` reached through that RunSpec. Its status and terminal reason equal the terminal Run row; a failed/cancelled `terminalDetailRef` equals the Run's exact terminal-detail ref. `succeeded|completed_unverified` require the Run's exact `resultRef`, forbid `terminalDetailRef`, and require `summaryRef/summaryDigest` to equal the decoded `RunResult.summaryRef` and that exact `ModelTextV1.textDigest`. `failed|cancelled` require the exact detail and forbid result and summary fields. Concurrent roots receive Session sequence numbers in SQLite commit order. Each root-terminal append increments `latestItemSeq` and `contextRevision` once and extends the prior projection with a **new, never-coalesced, one-item `raw` segment** whose sole entry is the exact new `{sourceSessionId=sessionId,itemSeq,itemId,kind='run_terminal',payloadRef}` tuple and whose source digest is computed by the ordinary raw-segment rule. The model-visible rendering of that item is exactly UTF-8 RFC 8785/JCS of `{kind:'run_terminal',runId,operation,status,terminalReason,resultRef?,summaryRef?}` with absent optionals omitted; `admittedSessionItemSeq`, `terminalDetailRef`, and `summaryDigest` remain audit/control metadata and are not projected. This fixed segment and rendering rule makes later compaction/fork boundaries, projection digests, and admitted prompt bytes implementation-independent. A child never publishes directly into Session: its terminal transaction produces the parent-owned `ChildResultItem`/wake contract instead. Thus client `cliq resume` deterministically sees every committed root outcome without copying live Run transcripts or depending on an event spool.
+
+The five `LegacySessionContextKind` values enter raw Session context only through
+the complete closed `LegacyPortablePayloadV1` context projection. Its original
+`legacySessionId` equals the immutable source Session, its kind equals that
+Session item's kind, and its item id is
+`H('cliq-legacy-session-item-v1',legacySessionId,kind,sourceOrdinal,payloadDigest)`.
+The full artifact bytes rehash independently of `payloadDigest`, whose omission
+rule remains unchanged. Forks retain these original source Session/item
+identities. These bytes prove neither migration completion nor live workspace,
+StateOwner, tool, credential or recovery authority.
+
+The fixed context content is deliberately narrower than arbitrary portable JSON:
+
+| Kind / exact source schema | Required content | Optional content |
+| --- | --- | --- |
+| `legacy_record` / `record-v1` | `recordId`, `recordedAt`, `recordKind`, `contentUtf8` | Only a `recordKind='tool'` has required `toolName` and `toolStatus='ok'|'error'`; both are forbidden for other kinds |
+| `legacy_compaction` / `compaction-v1` | `compactionId`, `createdAt`, `status='active'|'superseded'`, `coveredRange={startIndexInclusive,endIndexExclusive}`, `firstKeptRecordId`, `summaryMarkdown` | None |
+| `legacy_plan` / `plan-v1` | `planId`, `title`, `contentMarkdown`, historical `status`, ordered `items=[{id,title,status,notes?}]` with unique ids | None |
+| `legacy_handoff` / `handoff-v1` | `handoffId`, `createdAt`, `summarySource='active-compaction'|'handoff-only'`, `summaryMarkdown` | None |
+| `legacy_bookmark` / `bookmark-v1` | `bookmarkId`, `createdAt`, `legacyKind='auto'|'manual'|'restore-safety'|'handoff'`, `recordIndex`, `turn` | `name` |
+
+Record kind is one exact historical `system|user|assistant|tool|tx-opened|tx-applied|tx-aborted`
+label. Plan status is `draft|finalized|approved|rejected|canceled`, and item status
+is `pending|in_progress|completed`. All records are finite, closed JSON with the
+original depth-32, 10,000-entry and 1 MiB payload ceilings. Text fields are bounded
+to 262,144 UTF-8 bytes, ids to 128, title/name to 256 and a plan-item title to
+4,096. Times are canonical; ordinals/ranges/indexes are safe nonnegative integers,
+and a covered end is strictly greater than its start. The envelope's source path
+is an exact canonical relative path and cannot name `auth.json`.
+
+Visible text is exact UTF-8 JCS of
+`{format:'cliq-legacy-context-prompt-v1',kind,content}`. The normal prompt source
+kind is `session_legacy` with **only** `role='user'`; old role labels, tool names,
+transaction events, plan approval status and bookmarks remain historical data.
+No old system message, tool frame/action, approved target mode, active skill,
+configuration, grant or restore coordinate is reinstated. Raw legacy files,
+source paths and credential/authority fields are not copied into this projection;
+literal user prose is preserved without claiming an arbitrary secret scan.
+The same fixed visible projection serves normal model requests, Session
+compaction/retained items, the Run-compaction prefix and Session handoff. Original
+terminal/summary proofs and excluded-control behavior remain unchanged. An old
+compaction is historical payload, not a fabricated Kernel summary proof; large
+history uses the existing authenticated Session compaction rather than truncation.
 
 ### 4.3 Physical Storage Is Not A Control Plane
 
@@ -533,6 +1106,9 @@ type McpAdminProbeTargetV1 = {
   format: 'cliq-mcp-admin-probe-target-v1'
   ownerPrincipalId: string
   registrationId: string
+  originalRequestRef: ArtifactRef
+  channelIdentityRef: ArtifactRef
+  channelIdentityDigest: string
   method: 'mcp.register' | 'mcp.refresh'
   expectedRegistryRevision?: number
   sourceRegistryRevisionRef?: ArtifactRef
@@ -809,6 +1385,22 @@ The primary identity is `(principalId,method,requestId,attempt)` and `adminOpera
 
 `AdminOperation.targetRef` always resolves to `McpAdminProbeTargetV1`, never an opaque request blob. For register, `expectedRegistryRevision`/`sourceRegistryRevisionRef` are absent; for refresh both are required and name the exact current revision whose immutable transport/recovery/lifecycle inputs are copied. `requestCoreDigest = SHA-256(JCS(public method body with protocolVersion/requestId/requestDigest omitted))`; `targetDigest = SHA-256(JCS(target with targetDigest omitted))`. Recovery overrides are unique and byte-sorted by tool name; missing discovered tools normalize to `manual`. Lifecycle defaults/ranges are the MCP registry contract. `probePayloadCoreRef` resolves to `AdminProbePayloadCoreV1`, whose `payloadCoreDigest` omits itself under JCS, whose adapter id/version/digest resolves to a signed RuntimeBundle helper, and whose `maximumResponseBytes` is `65536..1048576` (default `1048576`); the fixed protocol recipe contains no dispatch id, containment, credentials, endpoint payload, or caller argv. It is published before containment planning. The SandboxLaunchSpec repeats only that static core ref; after claim, `AdminProbeBrokerRequest.payloadRef` must equal it and supplies the claim/containment/target envelope separately. The admin row, admin-owned `ProcessContainment`, broker envelope target/core, probe result/receipt, and final registry core must all reference or reproduce these exact artifacts; any method/owner/registration/revision/executable/argv/endpoint/TLS/grant/recovery/lifecycle/payload/digest mismatch fails before I/O or publication.
 
+The target's mandatory `originalRequestRef` retains the complete original
+public mutation bytes. Its `channelIdentityRef/channelIdentityDigest` name the
+genuinely authenticated original channel. The historical reader rehashes and
+decodes that request, proves its request id/digest/method/registration and
+`requestCoreDigest`, and independently follows its principal/channel and first
+StateOwner history. Later attempts retain these same target/core/request/channel
+artifacts; a new caller authenticates its own current frame before joining or
+replaying them. Startup uses original historical authorization plus its genuine
+current owner and fresh endpoint/credential gates, never an old live frame.
+The fixed deadline belongs to each attempt. Only after positive original
+retirement and the existing 1s/5s backoff may the next contiguous attempt select
+its actual new `createdAt` and `deadlineAt = createdAt +` the same retained
+`launchTimeoutMs`. No deadline extends within an attempt. The independent 30s
+control transport can lose an observer while that original producer remains in
+custody; neither this nor a later same-id join creates an operation-status API.
+
 For initial stdio registration, target construction resolves the public
 `executionIdentityGrantId` to the exact active principal-owned
 `AuthorizationGrantV1(target.kind='execution_identity_read',
@@ -825,7 +1417,7 @@ closure. The final stdio `McpRegistryRevision` repeats those three identity
 fields. A raw grant id/ref, unconsumed grant, receipt for another principal/
 registration/revision, or changed executable cannot reach containment or I/O.
 
-Probe terminal artifacts are closed. `McpAdminProbeResultV1.resultDigest`, `AdminProbeClosureEvidenceV1.evidenceDigest`, and `AdminProbeErrorV1.errorDigest` each omit only themselves under JCS; every other ref/digest pair rehashes its named bytes. A result is legal only for the released dispatch and repeats the row's operation/attempt/request/target/payload/containment. Its three bounded secret-free response artifacts are the exact bytes decoded by the fixed recipe; `initializeDigest`/`capabilityDigest` are their normalized protocol projections. `normalizedTools` contains only byte-sorted unique `McpProbedToolInterfaceV1` rows, each `interfaceDigest = SHA-256(JCS(interface with interfaceDigest omitted))`, and `probedToolsListDigest = SHA-256(JCS(normalizedTools))`. It contains no requested recovery intent, profile, template, predicate, final tool contract, or registry digest. The completed row's result ref/digest names that artifact exactly.
+Probe terminal artifacts are closed. `McpAdminProbeResultV1.resultDigest`, `AdminProbeClosureEvidenceV1.evidenceDigest`, and `AdminProbeErrorV1.errorDigest` each omit only themselves under JCS; every other ref/digest pair rehashes its named bytes. A result is legal only for the released dispatch and repeats the row's operation/attempt/request/target/payload/containment. Its bounded secret-free response artifacts are the exact bytes decoded by the fixed recipe; `initializeDigest`/`capabilityDigest` are their normalized protocol projections. MCP capabilities arrive in the real initialize result, not a separate capabilities RPC: `initializeResponseRef` and `capabilityResponseRef` may name the same actual initialize response bytes, with both independent projection digests revalidated. They never name the initialized notification's empty acknowledgement or invented response bytes. The tools-list response names its separate actual bytes. This follows the CAS same-byte multi-purpose rule and adds no ledger or digest cycle. `normalizedTools` contains only byte-sorted unique `McpProbedToolInterfaceV1` rows, each `interfaceDigest = SHA-256(JCS(interface with interfaceDigest omitted))`, and `probedToolsListDigest = SHA-256(JCS(normalizedTools))`. It contains no requested recovery intent, profile, template, predicate, final tool contract, or registry digest. The completed row's result ref/digest names that artifact exactly.
 
 Every terminal attempt also names one `AdminProbeClosureEvidenceV1`. `no_spawn` decodes the exact `ProcessContainmentNoSpawnEvidenceV1` for the row's plan/spec/owner/nonce and is legal only before release, with no process/dispatch fields. `containment_dead` decodes the exact `ProcessContainmentDeathEvidenceV1`, repeats the actual containment, and requires dispatch/request iff the row reached claimed/released. Its inspector is current and every row/target/plan/spec/digest matches. An `AdminProbeErrorV1` repeats that closure; deterministic protocol target/schema/capability rejection has `deterministicRejection=true`, while preactivation/transport/timeout recovery failures are false and require the named positive no-spawn/death fact. Diagnostic bytes are bounded/redacted and never decide disposition. `retryable_recovery|retry_exhausted` require false; `final_rejection` requires true. The row's result/evidence/error/control-response ref/digest pairs are exact and forbidden outside their typed phase.
 
@@ -1613,6 +2205,13 @@ type LocalModelObjectClosureV1 = {
         sizeBytes: number
       }
     | {
+        kind: 'model_signature'
+        logicalPath: 'model-signature'
+        artifactRef: ArtifactRef
+        artifactDigest: string
+        sizeBytes: 64
+      }
+    | {
         kind: 'tokenizer'
         logicalPath: 'tokenizer'
         artifactRef: ArtifactRef
@@ -1854,6 +2453,8 @@ type LocalInferenceActivationParticipantV1 =
       requestId: string
       requestDigest: string
       runSubmitRequestRef: ArtifactRef
+      channelIdentityRef: ArtifactRef
+      channelIdentityDigest: string
       admissionKey: string
       admissionIntentDigest: string
       joinedAt: string
@@ -1880,6 +2481,7 @@ type LocalInferenceActivationFailureV1 = {
     | 'health_mismatch'
     | 'capability_mismatch'
     | 'containment_unprovable'
+    | 'activation_cancelled_for_migration'
   launchIds: string[]
   evidenceRefs: ArtifactRef[]
   observedAt: string
@@ -1891,6 +2493,8 @@ type LocalInferenceActivationCycleBaseV1 = {
   activationCycleId: string
   ownerPrincipalId: string
   serviceId: string
+  localModelRegistrationRef: ArtifactRef
+  localModelRegistrationDigest: string
   serviceSpecRef: ArtifactRef
   serviceSpecDigest: string
   cycleOrdinal: number
@@ -1959,6 +2563,7 @@ type LocalInferenceServiceLaunchBaseV1 = {
   activationNonceDigest: string
   containmentPlanRef: ArtifactRef
   sandboxLaunchSpecRef: ArtifactRef
+  nativeInputRef: ArtifactRef
   rowVersion: number
   leaseVersion: number
   createdAt: string
@@ -2088,6 +2693,8 @@ type LocalZeroCostProvenanceV1 = {
   ownerPrincipalId: string
   provider: 'ollama'
   model: string
+  localModelRegistrationRef: ArtifactRef
+  localModelRegistrationDigest: string
   serviceSpecRef: ArtifactRef
   serviceSpecDigest: string
   stableServiceIdentityDigest: string
@@ -2281,6 +2888,26 @@ type ToolContractManifestV1 = {
             adapterId: string
             adapterVersion: string
             adapterCodeDigest: string
+          } | {
+            kind: 'builtin_script'
+            adapterId: 'builtin_tools'
+            adapterVersion: '1'
+            adapterCodeDigest: string
+            guestToolchainManifestRef: ArtifactRef
+            guestToolchainManifestDigest: string
+            toolId: 'node'
+            executionPath: '/usr/bin/node'
+            executableDigest: string
+          }
+        }
+      | {
+          replayClass: 'manual'
+          execution: {
+            kind: 'supervisor_control'
+            handlerId: 'request_input'
+            supervisorEntryId: string
+            supervisorEntryVersion: string
+            supervisorExecutableDigest: string
           }
         }
       | {
@@ -2297,6 +2924,93 @@ type ToolContractManifestV1 = {
     )>
   manifestDigest: string
 }
+
+```
+
+The three builtin execution identities are disjoint, closed data. The original
+`builtin` edit still names its signed executable `tool_adapter`. The fixed
+`builtin_script` identity is legal only for `read|ls|find|grep|bash`: its adapter
+is the signed non-executable `builtin_tools`, version `1`, at
+`adapters/builtin-tools.mjs`; its complete original script bytes are retained
+in the same installed genesis/import/CAS closure. It is never classified as
+ELF. The executable is the separately signed guest Node at `/usr/bin/node`,
+under the exact original guest manifest, signature, complete image and
+all-and-only member graph. The first four tools keep `read/retry`; Bash keeps
+`exec/manual`. An input-control handler is neither script nor executable tool.
+Its five identity fields bind the original signed Supervisor image, using that
+entry's actual version. No contract decoder, same-name adapter, structural
+closure or control response supplies a native launch or death proof.
+
+The fixed script launch has `purpose='tool'` and
+`processInvocation.recipe='cliq-builtin-tools-v1'` with mandatory closed literal
+`privateGitProtection='existing_read_only'`; the old edit recipe remains
+`cliq-tool-launch-v1`. Its actual argv is only guest Node, `--no-addons`, and
+`/runtime/cliq-builtin-tools.mjs`. A private sealed input capsule contains only
+`{schemaVersion:1,tool,input,limits:{maxSingleFileBytes,maxInvocationOutputBytes}}`,
+reproduced from the original normalized call and frozen profile, not a new
+business artifact, permission or caller argv. Node and the script independently
+validate the capsule, canonical bytes and fixed limits. Read/search mount the
+same private generation read-only/no-exec; Bash uses read-write/no-exec and only
+the same signed guest `/bin/bash` admitted executable and original DSO graph.
+Bash uses `--noprofile --norc /proc/self/fd/3` with the command in its private
+script descriptor, closed stdin and bounded captured stdout/stderr. No host
+shell, ambient environment, startup files, network, or legacy executor is a
+fallback. The original 60-second Bash cap and earlier Run deadline both apply.
+The fixed Bash environment carries `GIT_OPTIONAL_LOCKS=0`. For an existing
+private `.git`, native creation independently opens it under the original held
+generation with no-follow and checks its exact device/inode/owner/mode in both
+the original producer and controller. It holds that actual FD and mounts it
+read-only/no-exec at `/work/.git`, then the trusted init verifies the mounted
+identity and flags. The caller supplies no presence boolean, host path or FD.
+Git status/diff remain available; `git add` or metadata mutation remains an OS
+refusal even if a command overrides the environment variable. Post-effect
+snapshot still requires all original frozen `.git` bytes and identities.
+This does not support committing modified Git metadata. If `.git` was absent,
+native code creates no placeholder or mount: a command creating/replacing
+workspace Git metadata is unsupported and the unchanged observer refuses it.
+Any already-real private modification requires the existing actual stop,
+retirement and original-Checkpoint recovery or explicit recovery wait; never
+infer a global basename write fence, no effect, fake Checkpoint or retry.
+Before Run admission and again on the original pre-prepare authority cut, the
+fixed script recipe requires at least 32 processes, a single-file ceiling that
+covers the actual signed guest image and is at most 256 MiB, the original
+64 KiB..64 MiB invocation output range and fixed IPC/queue ceilings. Unsupported
+explicit profiles are refused unchanged before a tool grant, preparation or
+claim; the old edit-only minimum remains eight. Native validation and actual OS
+resource enforcement independently retain the same checks. Only after the
+genuine script invocation release has succeeded may maintenance renew that
+same claimed worker lease, using the existing owner/current generation checks,
+30s renewal threshold and 60s lease ceiling capped by the Run deadline. It
+cannot renew an unreleased preparation, a received completion or a stopped Run.
+Between fully joined tool operations the installed driver also invokes this
+same renewal guard before beginning the next operation. This prevents a series
+of short invocations from depending on a timer landing in an idle gap. The
+original owner, held native resources, lease version, 30s threshold, 60s ceiling
+and Run deadline are unchanged; an already expired lease enters original worker
+recovery and never prepares the next tool.
+
+Each read/search invocation must fully join its own output/descriptors and
+prove its actual invocation domain dead before publishing its result and
+unchanged-workspace context Checkpoint. This does not prove or retire the
+still-active parent worker. The same genuine parent/generation may then receive
+the next independent claim/release nonce under the unchanged single-active
+invocation guard. Edit/Bash retain the original complete parent retirement and
+post-effect workspace Checkpoint. Ask/input first retire that parent before
+entering a worker-free wait.
+
+The native controller's fixed scope arena remains 16 monotonic slots, with
+slot zero reserved and the parent worker consuming one slot. Before preparing,
+granting or claiming an additional invocation, the genuine original holder may
+observe arena exhaustion and choose the internal `scope_capacity` retirement
+cause. It must actually retire every old scope and the parent, seal the
+unchanged generation and commit its Checkpoint in the original transaction,
+then finish the original controller and descriptor joins before any replacement
+WorkerLaunch/controller/nonce/lease can be created. The current ToolBatch call is not consumed, no attempt or account is
+reset, and the Run's total tool-call budget is unchanged. The create hard guard
+remains independent. A post-claim capacity race/failure remains UNKNOWN under
+the original recovery/rollback rules; it is not a fresh dispatch opportunity.
+
+```ts
 
 type ProviderContinuation = {
   provider: RunAssemblyV1['provider']['name']
@@ -2332,6 +3046,13 @@ type NormalPromptMessageV1 =
         | 'user_input'
         | 'verifier_repair'
         | 'child_result'
+      sourceId: string
+      contentUtf8: string
+    }
+  | {
+      index: number
+      role: 'user'
+      sourceKind: 'session_legacy'
       sourceId: string
       contentUtf8: string
     }
@@ -2534,7 +3255,31 @@ structured-root walk or WP03's executing-process/broker identity checks.
 
 The action classifier is closed: built-in tools use their manifest `access`, except `delegate` becomes `child_read_only|child_mutating`; any MCP tool is `mcp`; verifier, install-script, delivery-plan, and child admission use their named classes. Kernel Cut exposes no generic network/integration tool or child endpoint capability: model, dependency registry, and streamable-HTTP MCP access remain their own typed broker contracts. `decisionRules` freezes `cliq-permission-grammar-v0`, not an opaque policy program: contiguous unique order/rule ids, at most 256 entries/1 MiB, one listed channel, and a nonempty pattern using only exact `*`, literal, suffix ` *`, or suffix `/*` semantics (`**` has no glob meaning). Channel primary keys are canonical root-relative paths for `fs-*`, the trusted parsed command head for `bash`, `registrationId/serverToolName` for MCP, and normalized plan identity for plan channels. Kernel Cut drops the unimplemented `network` channel.
 
-Every evaluation first publishes exact `PolicyChannelEvidenceV1`; there is no ephemeral parser result or adapter-owned matcher input. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its policy ref/digest rehashes the current RunSpec snapshot; principal/Run/frontier/op/request/target equal the exact prospective subject and immutable artifacts; action class is the closed classifier result; and `evaluatedAt` uses canonical time before any approval, grant, denial item, Journal preparation, or target I/O. The fixed Supervisor evaluator plus retained `policy_engine` profile is the sole producer. Storage reruns that exact interpreter/profile over the immutable request/target and compares the full JCS output; a mutable installed parser, caller primary key, worker boolean, executable plugin, or semver-compatible engine is invalid.
+Every authoritative evaluation first publishes exact `PolicyChannelEvidenceV1`; there is no ephemeral parser result or adapter-owned matcher input used as permission. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its policy ref/digest rehashes the current RunSpec snapshot; principal/Run/frontier/op/request/target equal the exact prospective subject and immutable artifacts; action class is the closed classifier result; and `evaluatedAt` uses canonical time before any approval, grant, denial item, Journal preparation, or target I/O. The fixed Supervisor evaluator plus retained `policy_engine` profile is the sole producer. Storage reruns that exact interpreter/profile over the immutable request/target and compares the full JCS output; a mutable installed parser, caller primary key, worker boolean, executable plugin, or semver-compatible engine is invalid.
+
+The same tool-preparation entry may first return a pure `worker_required` or
+`retirement_required` scheduling decision. These internal decisions publish no
+grant, Journal, target, pending approval or input wait, carry no release nonce,
+and are not public wire states. A queued allow first needs real worker
+activation; the new active cut then reruns all original policy, owner, lease,
+budget, approval lifetime and currentness checks before preparation. A queued
+ask, deny or input requires no worker or native image borrow. An active ask or
+input first needs the original worker's actual death, unchanged workspace seal
+and Checkpoint; only after that commit and complete resource join does a new
+cut reproduce the ask/input and publish its worker-free wait. A decision from
+the previous lease epoch cannot authorize a later preparation or extend TTL.
+
+If an original interactive grant expires after `prepared` but before any
+claim, `retireToolSelection` atomically seals that original worker, preserves
+the unchanged context/workspace, appends the original zero-consumption failed
+settlement and commits the selection Checkpoint. Its closed
+`cliq-tool-grant-expiry-v1` branch names `selectionCheckpointId/frontierRef`
+instead of `waitingSubjectRef`; it does not invent a replacement wait. The
+final transaction resamples real commit time C, advances the original time
+fence, and rechecks the exact grant/prepared/lease/launch/Checkpoint/Journal
+cut, expiry at C and claim absence. Nonexpired, claimed and UNKNOWN attempts
+cannot use this refund. Historical replacement-wait evidence remains its own
+closed branch. A new wait and any later grant require their own subsequent cut.
 
 Channel extraction is exact. Filesystem evidence contains the nonempty unique byte-sorted all-and-only canonical admitted-root-relative paths touched by the normalized request; matching evaluates every path and uses the strongest result (`deny > ask > allow`). MCP evidence copies the registration id/server tool name from the exact selected tool contract. Plan evidence copies the fixed normalized plan identity from the typed request/target. Bash evidence copies exactly one closed input projection from the schema-normalized built-in shell request: `argv` is its nonempty ordered argv array and `shell_text` is its exact NFC/no-NUL command string; neither form may be synthesized from the other. The deterministic `cliq-bash-head-parser-v1` emits the optional outer executable head, every nested builtin-deny head in lexical occurrence order, and `unsafeForAllow`. Heads are NFC/no-NUL strings of at most 4096 UTF-8 bytes; the nested list is at most 64 and contains no duplicate occurrence tuple. The parser recognizes the fixed bundled shell grammar and wrappers in golden fixtures; unsupported/dynamic/ambiguous syntax yields no trusted outer head and `unsafeForAllow=true`, never an implementation guess. Artifact recovery uses these retained bytes and exact profile output rather than reparsing with a host shell or changed repository configuration.
 
@@ -2646,35 +3391,72 @@ response claims, and capability evidence/assembly claims are exactly receipt
 claims. A raw provider body, mutable discovery cache, or adapter assertion
 cannot directly set a claim.
 
-Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its Ed25519 signature is from a bundled Cliq model trust key. Managed-local evidence repeats all six model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
+Managed local evidence instead binds the exact signed service/model manifests. `LocalModelManifestV1` has unique byte-sorted file paths, safe sizes, digest-valid CAS files/tokenizer, one complete signed `claims: NormalizedModelCapabilityClaimsV1`, and `modelManifestDigest = SHA-256(JCS(manifest with modelManifestDigest and signatureRef omitted))`; its detached 64-byte Ed25519 signature covers UTF-8 `cliq-local-model-manifest-v1\0` followed by the lower-case semantic digest and is from the original bundled Cliq publisher's Ed25519 model-trust key. Its `signatureRef` hashes those complete raw signature bytes, stored at the fixed package path `objects/<signatureRef>` and retained as the `model_signature` closure member; a ref without those bytes is not verifiable evidence. Managed-local evidence repeats all five model-manifest claims byte-for-byte; the service health probe may confirm them but never widen them. All catalog/receipt/evidence times are ordered, evidence limits are safe integers, `contextLimitTokens >= 32768`, `1 <= maxOutputTokens <= floor(contextLimitTokens/4)`, and `validThrough >= Run.deadlineAt`. RunAssembly negotiation booleans/limits/digest/ref repeat the evidence exactly; mode is `native-tools` only when native tool calling is true, otherwise `text-only`. Unknown, expired, unsigned, endpoint/adapter/model-mismatched, source-claim-mismatched, or mutable evidence sets every autonomous capability false rather than enabling execution by provider name.
 
-Local model selection has one exact producer. The explicit same-user `cliq models enroll --manifest <absolute-package-path>/model-manifest.json` command is outside the Run control protocol, performs no download/network access, and accepts only this fixed descriptor-relative package layout: the selected basename is literally `model-manifest.json`, its parent contains one same-owner directory named `objects`, and the tokenizer/model bytes are regular files named `objects/<64-lower-case-hex-ArtifactRef>`. The importer opens the package root, manifest, object directory, and every object by held no-follow descriptors; rejects symlinks, hardlinks, special files, owner/mode drift, duplicate refs, extra/missing manifest entries, replacement between reads, or any object whose exact size/SHA-256 differs; and never interprets a caller path from inside the manifest. It imports those verified bytes into descriptor-protected `${stateRoot}/local-models/objects/<ArtifactRef>` and fsyncs each new object plus the directory. Source descriptors are transient input evidence, not durable authority after the content-addressed copy.
+Local model selection has one exact producer. The explicit same-user `cliq models add <alias> --manifest <absolute-package-path>/model-manifest.json` command is outside the Run control protocol, performs no download/network access, and accepts only this fixed descriptor-relative package layout: the selected basename is literally `model-manifest.json`, its parent contains one same-owner directory named `objects`, and the detached signature/tokenizer/model bytes are regular files named `objects/<64-lower-case-hex-ArtifactRef>`. The importer opens the package root, manifest, object directory, and every object by held no-follow descriptors; rejects symlinks, hardlinks, special files, owner/mode drift, duplicate refs, extra/missing manifest entries, replacement between reads, or any object whose exact size/SHA-256 differs; and never interprets a caller path from inside the manifest. It imports those verified bytes into descriptor-protected `${stateRoot}/local-models/objects/<ArtifactRef>` and fsyncs each new object plus the directory. Source descriptors are transient input evidence, not durable authority after the content-addressed copy.
 
-The importer first acquires the Kernel global/cutover gate in shared mode, then the exclusive local-model registry/object-store lock, and keeps both through object fsync and registry commit; an exclusive migration/rollback gate therefore blocks it before any publication. It publishes exact `LocalModelObjectClosureV1`: the decoded current `StateRootIdentityV1` pair; literal store-relative path; the signed model-manifest pair; and an all-and-only object sequence containing one manifest entry, one tokenizer entry, then the manifest's byte-sorted model-file entries. The manifest entry names the complete JCS artifact bytes, the tokenizer ref/digest equals its imported object SHA-256, and each model-file ref/digest/path/size equals its manifest member. Every `artifactRef === artifactDigest`; `objectCount === objects.length`; `totalBytes` is their checked sum; all sizes are positive safe integers; model-file logical paths are the manifest paths; and `closureDigest = SHA-256(JCS(closure with closureDigest omitted))`. Every object exists at the exact store path named by its ref and rehashes before commit. The embedded closure and `expectedObjectClosureRef` are byte-identical JCS and content-addressed; `registrationDigest` omits itself. No opaque source-store id, mutable lookup, download cache, or post-enrollment pathname is authority.
+The importer first acquires the Kernel global/cutover gate in shared mode, then the exclusive local-model registry/object-store lock, and keeps both through object fsync and registry commit; an exclusive migration/rollback gate therefore blocks it before any publication. It publishes exact `LocalModelObjectClosureV1`: the decoded current `StateRootIdentityV1` pair; literal store-relative path; the signed model-manifest pair; and an all-and-only object sequence containing one manifest entry, one detached 64-byte model-signature entry, one tokenizer entry, then the manifest's byte-sorted model-file entries. The manifest entry names the complete JCS artifact bytes, the tokenizer ref/digest equals its imported object SHA-256, and each model-file ref/digest/path/size equals its manifest member. Every `artifactRef === artifactDigest`; `objectCount === objects.length`; `totalBytes` is their checked sum; all sizes are positive safe integers; model-file logical paths are the manifest paths; and `closureDigest = SHA-256(JCS(closure with closureDigest omitted))`. Every object exists at the exact store path named by its ref and rehashes before commit. The embedded closure and `expectedObjectClosureRef` are byte-identical JCS and content-addressed; `registrationDigest` omits itself. No opaque source-store id, mutable lookup, download cache, or post-enrollment pathname is authority.
 
-Service construction is also fixed. Enrollment uses the currently selected signed RuntimeBundle and requires exactly one executable entry with `entryId='ollama_local_inference'`, role `local_inference`, and matching version/digest; chooses `macos_vm` on macOS or `linux_namespace` on Linux only after the strong backend probe; and publishes a `SandboxProfileV1` with sole owner `local_inference_service`, the fixed reachability policies, and the displayed default `SandboxResourceSpec`. Callers cannot select or raise those fields. The endpoint is exactly `{scheme:'http',host:'127.0.0.1',port}`; while holding the registry lock, `port` is the smallest integer in `49152..65535` not named by any retained registration and is never reused while that registration is retained. Exhaustion rejects enrollment. The trusted producer first canonicalizes every service field except identity/time/digests, then sets `serviceSpecCoreDigest = SHA-256(JCS(serviceSpec with serviceId,createdAt,serviceSpecCoreDigest,serviceSpecDigest omitted))`, `serviceId = H(ownerPrincipalId,'ollama',model,serviceSpecCoreDigest)`, one transaction timestamp, and finally `serviceSpecDigest = SHA-256(JCS(serviceSpec with serviceSpecDigest omitted))`. Same semantic core reuses the exact existing registration; changed endpoint/backend/resources/version/manifest/executable/profile or any other semantic service field changes the core and service id. Exactly one active revision exists for `(ownerPrincipalId,'ollama',model)`; a changed manifest/spec creates a higher revision/new service id and retirement never rewrites an old registration used by a Run. Broader download/catalog/update UX remains outside Kernel Cut.
+Service construction is also fixed. Enrollment uses the currently selected signed RuntimeBundle and requires exactly one executable entry with `entryId='ollama_local_inference'`, role `local_inference`, and matching version/digest; records the fixed backend requested for the supported platform; and publishes a `SandboxProfileV1` with sole owner `local_inference_service`, the fixed reachability policies, and the displayed default `SandboxResourceSpec`. Callers cannot select or raise those fields. The endpoint is exactly `{scheme:'http',host:'127.0.0.1',port}`; while holding the registry lock, `port` is the smallest integer in `49152..65535` not named by any retained registration and is never reused while that registration is retained. Exhaustion rejects enrollment. The trusted producer first canonicalizes every service field except identity/time/digests, then sets `serviceSpecCoreDigest = SHA-256(JCS(serviceSpec with serviceId,createdAt,serviceSpecCoreDigest,serviceSpecDigest omitted))`, `serviceId = H(ownerPrincipalId,'ollama',model,serviceSpecCoreDigest)`, one transaction timestamp, and finally `serviceSpecDigest = SHA-256(JCS(serviceSpec with serviceSpecDigest omitted))`. Same semantic core reuses the exact existing registration; changed endpoint/backend/resources/version/manifest/executable/profile or any other semantic service field changes the core and service id. Exactly one active revision exists for `(ownerPrincipalId,'ollama',model)`; a changed manifest/spec creates a higher revision/new service id and retirement never rewrites an old registration used by a Run. Registration publishes a signed recipe request and does not establish process qualification, Run authority or zero-cost provenance. Before final Run admission the one durable activation lifecycle must establish the real strong OS boundary, signed executable and model inputs, health and capability checks, private loopback and no external egress, and a fresh current-owner observation. Missing or incomplete physical evidence refuses admission. The original activation and stop limits apply. Broader download/catalog/update UX remains outside Kernel Cut.
 
-The registry implements that last invariant with an append-only head, never an in-place artifact rewrite. Its mutable SQLite pointer row is exactly `(ownerPrincipalId,provider,model,currentHeadRef,currentHeadDigest,headRevision)` and names one immutable `LocalModelRegistryHeadV1`; `headDigest` omits itself. `initial` requires no pointer/predecessor, head and registration revision one, and one exact active registration. `replace` CASes the current active head, publishes an immutable retired copy whose base fields are byte-identical to the predecessor active registration except `state/retiredAt/registrationDigest`, publishes the new active registration at old registration revision plus one, then advances the head by one with both refs. `retire` performs the same retired-copy projection and advances to a head with no active registration. `reenroll` is legal only from the current retired head and publishes the next active registration revision. Every noninitial predecessor pair rehashes the current head, every head revision is exactly predecessor plus one, and artifact publication plus pointer CAS is one lock-held registry transaction. Lookup/admission follows only the current active head; an old active artifact remains immutable and rooted for every admitted Run but is no longer selectable after head advance. Thus neither two current actives nor mutation of retained Run authority is possible.
+The registry implements that last invariant with an append-only head, never an in-place artifact rewrite. The fixed external model-store database is `${stateRoot}/local-models/registry.sqlite3`; it contains only the pointer table below and is opened by its original model-store lock and descriptor-bound VFS under the global shared gate. Immutable head, registration, closure and model objects reside in that same `local-models/objects/<ArtifactRef>` store. This registry is not a new Kernel business table or Run/execution ledger; migration/rollback locks and captures the complete model store before authority publication. Its mutable SQLite pointer row is exactly `(ownerPrincipalId,provider,model,currentHeadRef,currentHeadDigest,headRevision)` and names one immutable `LocalModelRegistryHeadV1`; `headDigest` omits itself. `initial` requires no pointer/predecessor, head and registration revision one, and one exact active registration. `replace` CASes the current active head, publishes an immutable retired copy whose base fields are byte-identical to the predecessor active registration except `state/retiredAt/registrationDigest`, publishes the new active registration at old registration revision plus one, then advances the head by one with both refs. `retire` performs the same retired-copy projection and advances to a head with no active registration. `reenroll` is legal only from the current retired head and publishes the next active registration revision. Every noninitial predecessor pair rehashes the current head, every head revision is exactly predecessor plus one, and artifact publication plus pointer CAS is one lock-held registry transaction. Lookup/admission follows only the current active head; an old active artifact remains immutable and rooted for every admitted Run but is no longer selectable after head advance. Thus neither two current actives nor mutation of retained Run authority is possible.
 
 `run.submit` with the Ollama model branch resolves that exact active registration, copies/verifies its objects and inline manifests into WP01 CAS, and requires the resulting refs equal the expected refs before any launch or Run row. Missing/retired/invalid registration returns `UNSUPPORTED_EXECUTION_IDENTITY` with no Run/launch. If a matching fresh active launch exists, admission uses it. Otherwise the Supervisor artifact-first publishes the validated secret-free submit request/admission intent and calls `ensureLocalInferenceActive`; this is a durable service activation cycle, not a private retry loop owned by whichever request arrived first.
 
 `activationCycleId = base64url(SHA-256(JCS({ownerPrincipalId,serviceId,serviceSpecDigest,cycleOrdinal})))`, where `cycleOrdinal` is the next contiguous positive integer for that owner/service. At most one cycle in `starting_launch|retry_wait` exists per owner/service, and at most one unretired launch exists. Before creating or joining a cycle, storage searches every retained participant for the same public request id: the same digest returns that participant's cycle/result and different bytes are `REQUEST_ID_CONFLICT`, so a request that joined another request's cycle can never replay into two fresh attempts. A new request with no prior participant joins the current nonterminal cycle when its exact service spec matches, or creates the next cycle only after the prior cycle is terminal and any blocking launch is positively retired. Participants are append-only in join order, unique by `(kind,requestId)` or `(kind,runId,frontierRef)`, bounded to 128, and `run_submission` names the exact retained request/admission bytes while `run_model_frontier` names the exact queued Run revision/frontier. Exceeding the bound returns `RESOURCE_EXHAUSTED` without joining or starting I/O. `cycleDigest = SHA-256(JCS(cycle with cycleDigest omitted))`; `failureDigest` uses the same rule for `LocalInferenceActivationFailureV1`. Service-spec digests, launch ids, participant order, and every ref are independently validated.
 
-One cycle owns a contiguous prefix of at most two launch rows. Attempt 1 has a fixed 120-second activation deadline. `starting_launch(1)` either reaches `active` or follows one mandatory failure matrix: if exact no-spawn/death retirement is obtained, it **must** become `retry_wait` with `retryNotBeforeAt = retirementTime + 1s`, and attempt 2 is the sole legal successor with another fixed 120-second deadline; if the attempt cannot be positively retired, the cycle fails immediately with `finalAttempt=1`, `failureKind='containment_unresolved'`, and the blocking launch remains fenced/unretired. Attempt 1 may not terminal-fail for timeout, launch, health, or capability mismatch after positive retirement, and may not retry without it. Any attempt-2 launch/timeout/health/capability failure is terminal after recording its positive retirement, or terminal as `containment_unresolved` if retirement cannot be proved. No third attempt, hidden background retry, request-specific counter, or counter reset after disconnect/restart is legal. Every failure publishes exact `LocalInferenceActivationFailureV1` whose final attempt/reason/retirement closure satisfies that matrix. The final cycle transaction is bounded and exhaustive over its participants. On success it requires the exact active launch/boundary, sets `phase='active'`, admits every still-valid `run_submission` (or stores its exact non-activation admission error) with the same-transaction `control_requests` response, and makes each still-matching queued `run_model_frontier` eligible without changing its frontier. On failure it sets `phase='failed'`, stores the same typed `RECOVERY_REQUIRED(recoveryKind='local_inference_service')` response for every joined submission without creating a Run, and for each still-matching existing Run proposes `runtime_failed/local_inference_unavailable` whose exact cycle/service/frontier fields carry that `failureDetailRef`; terminal `primaryEvidenceRef` equals it. A Run already stopped, terminal, or moved from that frontier is only recorded as an obsolete participant. Thus cycle completion and participant fanout cannot be split by a crash.
+Every service launch id is exactly `H('cliq-local-inference-launch-v1',activationCycleId,activationAttempt)`. One cycle owns a contiguous prefix of at most two launch rows. Attempt 1 has a fixed 120-second activation deadline. `starting_launch(1)` either reaches `active` or follows one mandatory failure matrix: if exact no-spawn/death retirement is obtained, it **must** become `retry_wait` with `retryNotBeforeAt = retirementTime + 1s`, and attempt 2 is the sole legal successor with another fixed 120-second deadline; if the attempt cannot be positively retired, the cycle fails immediately with `finalAttempt=1`, `failureKind='containment_unresolved'`, and the blocking launch remains fenced/unretired. Attempt 1 may not terminal-fail for timeout, launch, health, or capability mismatch after positive retirement, and may not retry without it. Any attempt-2 launch/timeout/health/capability failure is terminal after recording its positive retirement, or terminal as `containment_unresolved` if retirement cannot be proved. No third attempt, hidden background retry, request-specific counter, or counter reset after disconnect/restart is legal. Every failure publishes exact `LocalInferenceActivationFailureV1` whose final attempt/reason/retirement closure satisfies that matrix. The final cycle transaction is bounded and exhaustive over its participants. On success it requires the exact active launch/boundary, sets `phase='active'`, admits every still-valid `run_submission` (or stores its exact non-activation admission error) with the same-transaction `control_requests` response, and makes each still-matching queued `run_model_frontier` eligible without changing its frontier. On failure it sets `phase='failed'`, stores the same typed `RECOVERY_REQUIRED(recoveryKind='local_inference_service')` response for every joined submission without creating a Run, and for each still-matching existing Run proposes `runtime_failed/local_inference_unavailable` whose exact cycle/service/frontier fields carry that `failureDetailRef`; terminal `primaryEvidenceRef` equals it. A Run already stopped, terminal, or moved from that frontier is only recorded as an obsolete participant. Thus cycle completion and participant fanout cannot be split by a crash. The ordinary control exchange remains bounded by thirty seconds; its disconnect/timeout does not cancel a durable service cycle, reset an attempt, advance a deadline, or authorize a new request. The client retains and presents its original request identity when the send becomes uncertain. Only explicit replay of that same public request id/digest may retrieve the cycle participant's unique committed response; it may not create or join a second cycle. A longer cold-model activation therefore does not extend a control connection or permit an automatic re-send.
 
 An existing Run never chooses between waiting and failing. When its frozen local service is absent before the next model claim, the Supervisor first settles any prior model attempt, quiesces/checkpoints and retires its worker, then atomically leaves the Run `queued` at the same agent frontier and joins/creates the one service cycle; no model reservation or claim remains live. Service activation makes that exact queued frontier schedulable. Exhaustion of the cycle's bounded attempts proposes the typed failure above. A service death after admission therefore uses the same durable cycle/retry/fanout reducer as initial admission, without a new user request, ambient-endpoint fallback, or implementation-selected infinite queue.
 
-The managed local service has its own narrow durable activation and launch authority, not an untracked child process. `LocalInferenceServiceSpecV1.serviceSpecDigest` omits itself under JCS and resolves one signed RuntimeBundle `local_inference` entry, signed local model manifest, loopback endpoint, strong backend/profile, and bounded resources. The model must already be explicitly installed and trusted; `run.submit` never downloads weights or follows a workspace request. `local_inference_activation_cycles` stores exactly `LocalInferenceActivationCycleV1`; `local_inference_launches` stores exactly `LocalInferenceServiceLaunchV1`. Every launch names its owning cycle and attempt, the cycle's `launchIds` is the same contiguous ordered set, and the row/service/spec/owner identities match byte-for-byte. The launch table permits one unretired row per `(ownerPrincipalId,serviceId)`. Its productive spine is `reserved -> preactivated -> active -> revoking -> retired(death)`; recovery additionally permits `reserved -> retired(no_spawn)` and `preactivated -> retired(death)`. Reserved state durably names the containment plan and canonical SandboxLaunchSpec before spawn; preactivation is isolated, networkless, credentialless, and blocked from accepting model traffic. Activation requires an exact health/capability probe plus `LocalInferenceBoundaryEvidenceV1`, then a row CAS exposes the loopback endpoint. Heartbeat changes only `leaseVersion/leaseExpiresAt`. A reserved row that positively never spawned retires with `retirementKind='no_spawn'`, no process/boundary/quiesce fields, and exact `ProcessContainmentNoSpawnEvidenceV1`; any row that obtained a containment retires with `retirementKind='death'`, that containment, a quiesce id, and exact `ProcessContainmentDeathEvidenceV1` (boundary evidence is present iff activation reached it). A new Supervisor never adopts an old launch: it revokes, kills, proves the exact containment/spec closure dead, retires it, and advances only the owning cycle's legal next edge. No second launch or model request proceeds until that proof.
+The managed local service has its own narrow durable activation and launch authority. `LocalInferenceServiceSpecV1.serviceSpecDigest` omits itself under JCS and resolves one signed RuntimeBundle `local_inference` entry, signed local model manifest, loopback endpoint, strong backend/profile, and bounded resources. The model must already be explicitly installed and trusted. `run.submit` never downloads weights or follows a workspace request. Every activation cycle freezes `localModelRegistrationRef/localModelRegistrationDigest` before physical launch. This is the original active selection held under the model-store lock for a new submission, or the already admitted Run's frozen provenance pair for a Run-frontier participant. It reaches that exact original model object closure and detached signature without following a current registry head. Every launch and native birth repeats the same immutable source through its owning cycle. Recovery and GC require that complete original pair. The pair leaves the existing stable service identity projection unchanged. `local_inference_activation_cycles` stores exactly `LocalInferenceActivationCycleV1` and `local_inference_launches` stores exactly `LocalInferenceServiceLaunchV1`. Every launch names its owning cycle and attempt. Existing launch rows form the exact contiguous prefix of the cycle's deterministic `launchIds`, and the row, service, spec and owner identities match byte-for-byte. The current intended launch ID may precede its reservation. Before reservation, the bare controller can establish source custody but has no model, cgroup or loopback execution authority. Startup can resume the same unstarted attempt. A witness without an original durable reservation grants no execution or recovery authority. The launch table permits one unretired row per `(ownerPrincipalId,serviceId)`. Its productive spine is `reserved -> preactivated -> active -> revoking -> retired(death)`. Recovery additionally permits `reserved -> retired(no_spawn)` and `preactivated -> retired(death)`. Reserved state durably names the containment plan and canonical SandboxLaunchSpec before spawn. Preactivation is isolated, networkless, credentialless, and blocked from accepting model traffic. Activation requires an exact health/capability probe plus `LocalInferenceBoundaryEvidenceV1`, then a row CAS exposes the loopback endpoint. Heartbeat changes only `leaseVersion/leaseExpiresAt`. A reserved row that positively never spawned retires with `retirementKind='no_spawn'`, no process/boundary/quiesce fields, and exact `ProcessContainmentNoSpawnEvidenceV1`. Any row that obtained a containment retires with `retirementKind='death'`, that containment, a quiesce id, and exact `ProcessContainmentDeathEvidenceV1`. Boundary evidence is present iff activation reached it. A new Supervisor revokes the old launch, terminates it, proves the exact containment/spec closure dead, retires it, and advances only the owning cycle's legal next edge. No second launch or model request proceeds until that proof.
+
+On the fixed Linux recipe, `nativeInputRef` names the complete fixed little-endian configuration and original fsynced first birth frame. The frame binds the current StateOwner's held Root, the private witness file and the original controller and containment anchor. The launch reservation transaction retains this source together with the plan and SandboxLaunchSpec before it releases a preparer or service process. Later inspection reopens the same witness through its original identities and uses fresh physical observations. The stored first frame supplies historical source identity.
 
 Endpoint shape is also closed. `local_zero_cost` is permitted only for `LocalZeroCostProvenanceV1`: a Cliq-managed Ollama local-model service whose signed RuntimeBundle entry has role `local_inference`, whose exact service/model manifests and capability evidence are retained, and whose Supervisor-attested Linux namespace/macOS VM boundary denies external egress. Its port is an integer in `1..65535`, IPv4 and IPv6 loopback spellings are already canonical literals, and `endpointIdentityDigest = SHA-256(JCS(endpoint))`. `stableServiceIdentityDigest = SHA-256(JCS({ownerPrincipalId,serviceId,serviceSpecRef,serviceSpecDigest,runtimeBundleRef,runtimeBundleManifestDigest,executableId,executableDigest,modelManifestRef,modelManifestDigest,backend,externalNetworkEgress:'denied',loopbackOnly:true}))`; every boundary evidence and its provenance repeat it. `evidenceDigest` and `provenanceDigest` each omit only themselves under JCS.
 
-The provenance's `boundaryEvidenceRef` is the admission-time audit observation and its dynamic `serviceLaunchId`, containment, plan, SandboxLaunch, inspector, and observation fields are **not** stable service identity. Provenance binds the stable digest, service spec, provider/model, loopback endpoint, and capability evidence; both provenance and admission evidence validity cover `Run.deadlineAt`. Every boundary evidence's inspector ref/digest decodes the exact current `SupervisorInspectorIdentityV1`, repeats its instance id, and matches the active `StateOwnerRecordV1` under the ordinary five-second evidence freshness rule. A bare Supervisor id is not an attestation. RunAssembly `endpoint.localProvenanceRef` and `pricing.provenanceRef` are the same artifact, its endpoint identity equals the assembly, credential refs are empty, and `maxRunCostMicros=0`. Before every dispatch the broker reads the current active launch and fresh `LocalInferenceBoundaryEvidenceV1`, requires their service spec and stable identity digest equal the provenance, validates the current lease/dynamic containment closure, and rechecks model/capability/no-egress identity. A death-proven replacement may change only launch/containment/plan/SandboxLaunch/inspector/observation fields; it cannot change the stable projection. Mismatch reaches no provider and proposes generic `runtime_failed`. A third-party Ollama/OpenAI-compatible daemon, mere loopback URL, remote proxy, or mutable cloud-routing assertion is not zero-cost authority. Kernel Cut therefore includes only the minimal signed local-inference service/bootstrap needed for the Ollama provider contract; model download, catalog, routing, and the broader `cliq-models` product remain outside this RFC.
+The provenance's `localModelRegistrationRef/localModelRegistrationDigest` pair binds the original exact active registration selected under its original model-store lock through the final Run admission transaction. That immutable registration reaches the exact embedded/expected model object closure, manifest and detached signature. Admission and recovery validate the same original principal/runtime/model/service/closure and independently verify its original signing key. The current registry head selects only new admission; replacing or retiring it neither rebinds nor implicitly revokes an admitted Run's frozen registration. Missing original source is rejected rather than guessed from today's head. The provenance's `boundaryEvidenceRef` is the admission-time audit observation and its dynamic `serviceLaunchId`, containment, plan, SandboxLaunch, inspector, and observation fields are **not** stable service identity. Provenance binds the stable digest, service spec, provider/model, loopback endpoint, and capability evidence; both provenance and admission evidence validity cover `Run.deadlineAt`. Every boundary evidence's inspector ref/digest decodes the exact current `SupervisorInspectorIdentityV1`, repeats its instance id, and matches the active `StateOwnerRecordV1` under the ordinary five-second evidence freshness rule. A bare Supervisor id is not an attestation. RunAssembly `endpoint.localProvenanceRef` and `pricing.provenanceRef` are the same artifact, its endpoint identity equals the assembly, credential refs are empty, and `maxRunCostMicros=0`. Before every dispatch the broker reads the current active launch and fresh `LocalInferenceBoundaryEvidenceV1`, requires their service spec and stable identity digest equal the provenance, validates the current lease/dynamic containment closure, and rechecks model/capability/no-egress identity. A death-proven replacement may change only launch/containment/plan/SandboxLaunch/inspector/observation fields; it cannot change the stable projection. Mismatch reaches no provider and proposes generic `runtime_failed`. A third-party Ollama/OpenAI-compatible daemon, mere loopback URL, remote proxy, or mutable cloud-routing assertion is not zero-cost authority. Kernel Cut therefore includes only the minimal signed local-inference service/bootstrap needed for the Ollama provider contract; model download, catalog, routing, and the broader `cliq-models` product remain outside this RFC.
 
 Every billable standard or custom endpoint—including bundled OpenAI/Anthropic/OpenRouter defaults—is resolved to an immutable `registered` endpoint; `bundled_default` describes who enrolled the registration, not a weaker identity. Its assembly registration kind/ref/identity/TLS and model credential bindings must reproduce one `EndpointRegistrationV1` exactly. If a frozen binding is revoked or becomes unavailable after admission, no in-place rebind, approval loop, or free predispatch retry is permitted: a model call proposes generic `runtime_failed` with credential evidence; required dependency acquisition proposes generic `runtime_failed`; and an MCP tool call appends one identity-matched `ToolResultItem(outcome='error')` and continues the ordered batch. None reaches the target or changes immutable assembly/policy/registry refs; the user submits a new Run after repairing authority.
 
 The `authorization_grants` table stores exactly `AuthorizationGrantV1`, never a generic target JSON blob. `targetDigest = SHA-256(JCS(target))`, `grantCoreDigest = SHA-256(JCS(base fields with grantCoreDigest/rowVersion omitted))`, and `rowDigest = SHA-256(JCS(full row with rowDigest omitted))`. Paths use the same descriptor-validated canonical workspace identity/path rules as capture; workspace scripts are legal only for verifier identity, never MCP stdio. Guest/runtime entries resolve immutable signed manifests and exact executable digests. A verifier-execution target binds `verifierRequestCoreDigest` (with `executionGrantId` omitted), an active identity grant's exact target digest, candidate bound `1..6`, and attempts `1..4`. Dependency script authority binds one exact workspace/lockfile/digest. Unknown fields or target combinations fail closed.
 
 The only row transitions are `active(rowVersion=1,useCount=0) -> consumed(rowVersion=2,useCount=1)` or `active -> revoked(rowVersion=2,useCount=0)`, under owner/request-id CAS; terminal rows are immutable and a consumed grant cannot later be presented as generally active. Consumption first publishes `AuthorizationConsumptionReceiptV1`, then atomically installs that ref and the Run admission/MCP registration/derived-authorization state it authorized. The receipt digest omits itself and its consumer must match the exact state transaction. A `run_admission` receipt binds the pre-resolution `admissionIntentDigest`, never the final admitted digest: the intent is computed from the public normalized request before any receipt, projection, dependency template, or RunSpec ref exists; after those artifacts are published, storage computes the final admitted digest over the intent plus the complete resolved ref/digest closure and commits the receipt, authorization row, RunSpec, Run, Checkpoint, and control response together. This publication order is acyclic, and replay must reproduce both digests and every resolved ref. Expiry is checked before inspection/use and no later than 24 hours from creation; it cannot be extended. `authorization.list` exposes redacted target summaries/state/revision, while create/revoke are control-request-idempotent. Revoking active returns `ControlResultV1` disposition `revoked`; replaying revoked returns `already_revoked`; revoking consumed is a successful no-op result with disposition `already_consumed` plus the unchanged consumed grant summary, and never rewrites the use receipt or claims to revoke derived authority. These user authorization grants only resolve/capture identity or mint the bounded verifier template/install-script authority; they are not `OperationGrantV1`, carry no secret, and grant no direct target I/O.
+
+Authorization creation separates immutable preparation from authoritative
+commit. Let `P=grant.createdAt`: the grant, its deterministic response and
+`expiresAt=P+requestedTTL` are frozen before their original CAS publications.
+They grant no authority before the one final SQLite transaction. That
+transaction samples actual canonical `C`, advances the existing time fence
+with `C` only, requires healthy `P<=C<expiresAt`, the current StateOwner and
+the original still-current authenticated channel/frame, then records
+`control_requests.committedAt=C`. A healthy fence advancing beyond P while
+CAS completes is not itself a clock regression. A real `C<lastAcceptedAt`
+still follows the original regression refusal. No old P, maximum/clamped time,
+maintenance suspension, TTL extension or implicit reprepare/retry is allowed.
+
+Historical creation closes the complete original request, response, channel
+and target bytes, with `channel.openedAt<=P<=C<expiresAt`; the same retained
+creating StateOwner covers both P and C and selects the original signed
+bundle/toolchain. Today's installation cannot substitute for that source.
+Every consumption requires `consumedAt>=C` as well as the original unexpired
+grant, unique use and exact same-transaction consumer/receipt. Grant creation
+time alone cannot establish that consumption followed authoritative creation.
+
+Revocation likewise freezes its original decision/response before publication
+and samples actual commit C2 only inside its original owner-fenced transaction.
+For an active grant, `revokedAt=R` is that immutable preparation time and
+`createC<=R<=C2`; the original terminal row/response and
+`control_requests.committedAt=C2` commit together under the unchanged active
+row CAS. Expiry does not prevent revocation. A concurrent consumption cannot
+be overwritten or turned into a successful prepared revoke response.
+`already_consumed|already_revoked` preserves the exact original terminal
+grant and receipt; its transient preparation sample is not invented as a new
+historical field. Retained no-op responses close only their actual stored
+channel, commit and original terminal-state causal evidence. Replay returns
+the original response, never remints or extends authority. These rules reuse
+`control_requests`; they create no second ledger, target or dispatch right.
+
 
 Verifier execution derivation is the one closed consumed-identity exception. `authorization.create(verifier_execution)` atomically consumes the named active `execution_identity_read(purpose='verifier')` grant with `consumer.kind='authorization_derivation'` and publishes exactly one derived verifier-execution grant whose id/target digest the receipt names. That identity grant cannot derive again. A later `VerifierRequest` without `executionGrantId` requires and consumes an active `identityReadGrantId`; with `executionGrantId`, it must repeat the consumed identity id and admission accepts it only by following that exact derivation receipt to the active derived grant, then consumes the derived grant into this Run's template. Any other consumed identity, mismatched verifier core/target/maxima, or missing derivation receipt is `AUTHORIZATION_REQUIRED`. Thus the wire may carry both ids without treating a consumed grant as reusable authority.
 
@@ -2793,9 +3575,9 @@ No streaming qualification is implied by the general provider contract.
 Normal prompt construction is a total stored projection, not adapter assembly. `NormalPromptProjectionV1.projectionDigest = SHA-256(JCS(projection with projectionDigest omitted))`; its Run/spec/assembly/context refs equal the current authoritative Run and ready Checkpoint, `contextManifestDigest` equals the decoded `ContextManifest.projectionDigest`, `basedOnRunRevision` is the revision being dispatched, and `frontierDigest = SHA-256(JCS(the exact current RunFrontier))`. Message indices and tool indices are contiguous from zero. The producer walks only the frozen artifacts in this order:
 
 1. Emit one system message from a closed instruction projection. The first, mandatory nonempty piece is the decoded signed-RuntimeBundle `RunAssembly.instructions.systemPromptRef` `ModelTextV1.utf8`. If the decoded workspace manifest has entries, the next piece is UTF-8 JCS of `{format:'cliq-workspace-instruction-prompt-v1',entries:[{order,canonicalRootRelativePath,appliesToSubtree:true,instructionUtf8}]}`, using every manifest entry in order and the exact decoded `ModelTextV1.utf8`; this preserves each nested scope instead of guessing one ambient target path. Each selected skill then contributes UTF-8 JCS of `{format:'cliq-skill-instruction-prompt-v1',skillId,sourceScope,instructionUtf8}` in the assembly's explicit skill order. Omit only the empty workspace block, require every skill instruction to be nonempty, and join the remaining exact pieces with two LF bytes. Every ref/digest, source identity, and text digest rehashes, and `sourceKind='assembly_instructions'`, `sourceId=assemblyRef`.
-2. Walk the admitted `SessionContextProjection` segments in order. A raw segment may project only `run_terminal` items and emits one user message per item using the exact JCS rendering in section 4.2. A summary emits one user message containing its decoded `ModelTextV1.utf8`. `excluded_control` emits none; every legacy kind must be there. Then emit one user message for each `AdmittedContextManifest.parentContextRefs` and `additionalArtifactRefs`, in their stored array order, each of which must decode a bounded `ModelTextV1`. Source kind/id identify the exact Session item, compaction item, or context artifact ref.
+2. Walk the admitted `SessionContextProjection` segments in order. Each raw `run_terminal` emits one user message using the exact JCS rendering in section 4.2 and `sourceKind='session_terminal'`. Each raw legacy context item must first pass the complete closed five-kind payload reader, full artifact/digest and original source-Session/item binding; it then emits exactly one `role='user',sourceKind='session_legacy'` message using only the fixed `cliq-legacy-context-prompt-v1` visible projection in section 4.2. Preserve stored item order and the original item id as `sourceId`; no old role/tool/permission/configuration is reinstated. A summary emits one user message containing its decoded `ModelTextV1.utf8`. `excluded_control` emits none; raw legacy files and control/authority payloads remain excluded and are never decoded as model prose. Then emit one user message for each `AdmittedContextManifest.parentContextRefs` and `additionalArtifactRefs`, in their stored array order, each of which must decode a bounded `ModelTextV1`. Source kind/id identify the exact Session item, compaction item, or context artifact ref.
 3. Emit one user message for the exact `RunObjectiveV1.utf8` named by `RunSpec.objectiveRef`, with `sourceKind='run_objective'` and that ref as `sourceId`.
-4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. No authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, or legacy payload is serialized.
+4. Walk the current `ContextManifest.segments` in order. A summary emits its exact `ModelTextV1` as one user message. An `excluded_control` segment emits none. Every raw item must be one of the following model-visible forms; every other item belongs in `excluded_control`: a `ModelTurnItem` emits one assistant message whose text equals its `ModelTextV1` and whose ordered calls equal the decoded `AgentModelTurn`; each call's `arguments` retains `{encoding:'jcs_json',value}` or `{encoding:'utf8_json_fragment',utf8}` directly from its observation, with no internal stringify/parse round trip, and its ref/digest/id/index/name equal `ToolCallInputV1`; a `ToolResultItem` emits one tool message whose content is `UTF8(JCS(decoded ToolResultModelContentV1.content))`; a `UserInputItem` emits one user message containing exact text or `UTF8(JCS(value))` from its ref-free `UserInputModelContentV1`; a `RepairDiagnosticItem` emits one user message per ordered diagnostic using only `VerifierRepairModelContentV1.message`; and a `ChildResultItem` emits one user message containing `UTF8(JCS(ChildResultModelContentV1.content))`. The source item id and source kind match each message. This Run-local walk serializes no authority/audit payload, raw verifier output, principal, grant, StopIntent, containment fact, raw legacy file or legacy control payload; the closed historical legacy Session prefix is supplied only by step 2.
 
 The `tools` array is empty for text-only mode. Otherwise it is the contiguous projection of `provider.negotiation.exposedToolNames` in that order: every name selects exactly one `ToolContractManifestV1` entry, description is byte-identical, and `inputSchemaRef/inputSchemaDigest/inputSchema` rehash and decode the exact finite JSON-domain schema. There are no hidden or adapter-added tools. Before dispatch the full model-visible projection passes both the admitted context estimate and the actual provider-native JCS body limit of 1,048,576 bytes, including adapter framing and JSON escaping. The same wire constructor determines eligibility and the retained outgoing bytes; an indivisible oversized message follows the context-window failure rule rather than truncation. This byte limit never reduces the signed request-token ceiling or the frozen context/output caps.
 
@@ -2803,6 +3585,8 @@ Every normal or context-compaction model Journal `requestRef` decodes the single
 
 
 Preparation publishes the exact secret-free native body (at most 1 MiB) and one common request artifact; compaction additionally publishes its typed projection. OpenAI uses Responses with `store:false`, explicit output cap, disabled truncation and encrypted reasoning continuation; Anthropic uses Messages; OpenRouter/OpenAI-compatible/Zhipu use their explicit Chat Completions mappings; managed Ollama uses Chat. The broker sends those bytes verbatim and injects only endpoint-authorized transport/auth headers. It cannot reserialize, add messages/tools/defaults, change the path, follow redirects or retry inside an attempt. Opaque provider reasoning/signature blocks are bounded, identity-bound data retained in the turn and next projection, never tool or permission authority. All identifiable native calls and their ordered synthetic/executed results remain in history. An empty tool name remains empty in durable truth; native history uses only the reserved, unexposed `__cliq_missing_tool_name` placeholder to close its result, without repairing the call.
+
+For the OpenAI-compatible Chat mapping, an explicitly present `reasoning_content` is retained as the sole closed `ProviderContinuation.items` member `{type:'reasoning_content',reasoning_content:string|null}`, bound to the same provider/model. Absence creates no item; empty string and null retain their distinct values without text normalization. Complete SSE string fragments concatenate in wire order, with null unable to erase accumulated text; incomplete/cancelled partial responses create no continuation. The next request replays that field on every retained assistant message, including a message that made no tool call. Existing strict JSON aggregate/depth bounds, full retained-turn/request digests, response/request 1 MiB caps, whole-prefix compaction and provider/model checks remain mandatory. Other provider mappings are unchanged. This adapter contract follows the [thinking-mode guide](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/) and [Chat API](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/); it does not establish model capability, credential authority, actual usage or spend eligibility, nor disable thinking to evade the continuation requirement.
 
 
 `mcpServers` is byte-sorted by registration id, has exactly one entry for each unique public requested server id and no others, and each ref/digest/revision validates an immutable registry revision. `ToolContractManifestV1.entries` is byte-sorted by exposed `name`; names are globally unique across built-ins and every selected MCP registry, and admission rejects rather than renames/shadows any collision. An MCP entry must match exactly one selected server revision and its server tool name/schema/recovery contract digest; its `replayClass` is byte-for-byte the decoded registry tool recovery kind. A built-in entry matches the retained adapter identity and its closed type forbids `reconcile`; Kernel Cut has no hidden built-in reconciliation adapter. Provider `exposedToolNames` is exactly the manifest entry-name sequence for native mode and empty for text-only. Retry entries are the same ordered names/replay classes. The assembly `tools.manifestDigest` equals the referenced manifest's digest; there is no second schema array for adapters to reinterpret. The signed `RuntimeBundleManifest` named by `runtime.runtimeBundleRef` resolves `workerExecutableId` to role `worker`, `provider.adapter.adapterId/version/codeDigest` to one `provider_adapter` entry, every built-in tool's adapter id/version/code digest to one `tool_adapter` entry, every bundled skill's complete-byte closure ref plus independently validated semantic closure digest to a non-executable `skill_bundle` entry, and the sole `default_https_trust_store` id/content to a non-executable `trust_store` entry. Entry ids, roles, and versions match byte-for-byte; each entry's signed digest hashes its complete retained file and is compared only with that file's ArtifactRef, never with a structured artifact's self-omitting semantic digest. Selected MCP and guest executables follow their own retained manifest identities. Recovery never loads a mutable installed adapter, skill closure, trust path, or CA bundle merely because its semantic version/path appears compatible.
@@ -2827,6 +3611,36 @@ The model delay is measured from the first durable `failed|unknown` settlement t
 
 It also freezes one non-configurable policy per executable tool: `retry` is exactly three dispatched attempts with `[500ms,2000ms]`; `workspace-rollback-retry` is exactly two with `[500ms]`; `reconcile|manual` have one productive dispatch and no redispatch delay because their recovery contracts are inspection/manual closure. No public field, repository config, adapter, or tool may raise or lower these values in Kernel Cut. A user grant's `maxAttempts` equals the applicable literal. Predispatch/no-I/O replacement attempts do not consume this dispatched-attempt bound, while every post-claim attempt does. Exhaustion is closed by op kind **and Journal truth**. If the final allowed attempt is positively `failed`, an ordinary tool or MCP call appends one identity-matched error `ToolResultItem` and continues the batch's normal ordered reducer; a child merge appends its structured merge-error result and returns the parent to an agent diagnostic frontier without applying later children; dependency acquisition proposes `runtime_failed` (or the higher-precedence dependency kernel-integrity StopIntent when source integrity failed); publication proposes typed `delivery_publication_failed` and switches to the abort/reconciliation contract. If the final allowed `retry` attempt remains `unknown`, positive dispatch/containment fencing permits conservative settlement but does not invent failure evidence: the reducer proposes `runtime_failed` and closes only through terminal detail plus `RetryUnknownCancelledResult`, never continues that batch or succeeds. Model and verifier attempts use their dedicated frozen policies. None may spin until wall/tool budget happens to expire or choose between error-return and terminal stop at implementation time.
 
+For the fixed MCP `retry` profile, the independent stdio server-launch ceiling
+remains the frozen lifecycle limit (default two); the three productive-effect
+attempts are an upper bound, not a guarantee that every transport can reach
+three. Count every actual launch claim across all replacements, grants and
+effect attempts for the same immutable call. After two initialized UNKNOWN
+servers have actually retired under the default limit, resource exhaustion is
+decided before a third worker, server preparation or effect preparation. Its
+runtime failure is exactly `mcp_call_resource_exhausted`,
+`resource='server_launch_capacity'`, with the real `used=limit=2`, and the
+same exact `RetryUnknownCancelledResult` pair. It neither reports three
+effect attempts nor fabricates a third failed/not-dispatched row. An actual
+final positively failed attempt instead produces its ordinary original error
+result, and does not use the UNKNOWN terminal carrier.
+
+A fixed HTTP post-claim no-release failure retains its exact positive failure
+and zero-consumption settlement. While literal retry capacity and the original
+call deadline remain, it does not prematurely append a ToolResult or advance
+the call frontier. Only after the original worker has actually retired may a
+new contiguous attempt re-evaluate its original policy and fresh grant. A
+later real stop, original call deadline, or actual attempt/launch exhaustion
+publishes one error result for that last positively failed productive attempt
+through the original continuation or unique terminal transaction, without a
+second settlement, refund or charge. The full history verifies that same
+irreversible original zero-release proof. Older UNKNOWN attempts remain
+audited with their own full-once charges and dispatch closures; their
+cancelled-ambiguity carrier cannot replace the result of any later real
+productive claim.
+
+
+
 All ceilings are mandatory `Number.isSafeInteger` values after normalization. Defaults are 24 hours elapsed wall time (including waits/reboots), 2,000,000 model input+output tokens, 10,000,000 cost micros (10 USD), 1,000 tool attempts, 2 repairs, child depth 2, and child concurrency 4. Accepted ranges are: `wallTimeMs` 1,000 through 2,592,000,000 (30 days); `modelTokens` 0 through 100,000,000; `costMicros` 0 through 10,000,000,000; `toolCalls` 0 through 1,000,000; `repairAttempts` 0 through 5; `childDepth` 0 through 8; and `childConcurrency` 0 through 32. Zero token/tool/repair/child values disable that action class; zero wall time is invalid. An `operation='agent'` Run whose assembly can dispatch a billable model cannot set `costMicros=0`; a local zero-price model may. An `operation='delivery'` Run inherits the source assembly only for exact provenance/runtime/verifier identity, fixes model tokens/cost/repair to zero, and is storage-forbidden from preparing a model call, so the inherited provider's billing class is irrelevant to its zero model budget. Pricing eligibility is independent of tool capability: any billable model actually dispatchable by a durable agent Run—including text-only mode—requires a bundled Cliq-signed `ModelPriceTableV1` evaluated only by `cliq-price-ceil-v1`. Kernel Cut exposes no provider-cap admission effect, user-defined pricing profile, executable calculator, or hidden config authority. A trusted table must cover the exact provider/model/input/output/cache units and satisfy `validThrough >= Run.deadlineAt`. Otherwise admission fails `MODEL_COST_UNKNOWN`, so a detached Run never outlives its cost authority or degrades into an unaccounted text-only call.
 
 `RunSpec.credentialGrantRefs` is the byte-sorted unique union of provider assembly bindings, `DependencyPolicy.credentialGrantRefs`, and every selected HTTP MCP revision's bindings, with no extra ref. Storage recomputes that union at admission/recovery; it is a GC/audit index, never an independent permission source.
@@ -2836,6 +3650,16 @@ All ceilings are mandatory `Number.isSafeInteger` values after normalization. De
 For recursive Runs, token, cost, tool-attempt, and repair-attempt allocations are reserved from the direct parent's remaining ceilings and settled by inclusive descendant usage. Wall time is not summed or refunded: each child deadline is capped by the parent's remaining absolute deadline, and the parent clock continues while waiting. `childDepth` is checked from ancestry. `childConcurrency` means the maximum number of direct nonterminal child Runs admitted by that parent; a slot is released only at child terminal commit.
 
 A terminal Run never returns to `running`. The Kernel Cut has no separate Run-level retry relation; users submit a new Run explicitly, while invocation retries remain Journal attempts under one Run.
+
+### 5.1 Frozen skill capture and resource reads
+
+Skill syntax follows the [AgentSkills specification](https://agentskills.io/specification), not a custom required `resources` frontmatter. The installed closed parser accepts the standard name/description, optional string license/compatibility, string-map metadata and inert allowed-tools text; unsupported frontmatter refuses. The instruction is the exact trimmed body projected as ModelText. Its bounded resource grammar captures actual inline/image local destinations, full/collapsed/shortcut reference links and explicit relative file/code/line tokens such as `scripts/extract.py`, `references/guide.md:12` or `assets/template.txt#L3-L7`. In prose, a file token needs a relative path component and an ordinary file suffix or the fixed scripts/references/assets/templates prefix; bare names need a Markdown link, code token, standalone line or `./` path. Ambiguous product/library names such as Node.js are inert prose. It does not infer unspecified files from natural language or run programs to discover imports. External URLs and same-file fragments are inert; local HTML attributes, variable/glob/absolute paths, escapes, unsupported multiline destinations and root escapes refuse. JSON resources admit only bounded literal local `$ref` edges relative to the containing file, without rebasing, remote/dynamic references or cycles. The all-and-only graph is recomputed from original retained bytes with depth32, 128 resources and 16 MiB of resource bytes. Raw SKILL.md retains its independent 1 MiB bound. No executable-disabled resource is imported or executed.
+
+The fixed no-argument held-root `openSkillSnapshot` recipe supplies only descriptor-relative metadata/selected regular-file reads, skipping Git metadata; ordinary source and instruction-only recipes retain their original behavior. Discovery checks the real workspace and actual principal's two skill roots plus the selected signed bundle, then rejects cross-scope duplicate unqualified ids. It opens only the chosen declaration/reference closure and retains full no-follow/owner/device/mode/link/inode/EOF/hash checks through durable publication and real reader retirement. Capturing a skill does not add any path to the independent SourceProjection or grant permission to read source/tool/network state. An independently selected workspace source path may still be ordinary source; exclusions are explicit source selectors, never implicit skill authority. The signed `bundled_skill` structured family contains non-executable `skill_bundle` closures and exact signed raw `bundle_object` members. These remain inside the original aggregate 65-root and manifest 1 MiB/10k/depth32 limits; per-skill maxima do not raise any non-skill limit or guarantee that all individual maxima fit simultaneously.
+
+`skill_resource` is a closed read/retry builtin with `execution.kind='supervisor_operation'`, `handlerId='skill_resource'` and the original signed Supervisor entry id/version/complete-byte digest. It has no executable adapter, native OperationGrant, broker release or process/death claim. Its only input is `{skillId,canonicalRelativePath,offset,length}`: one explicitly selected id, canonical resource path, offset from zero through 16 MiB and length 1..65536. Callers cannot provide host paths or CAS refs. The current owner first validates the complete original assembly/source/manifest/instruction/resource graph, including the complete requested file, then returns an explicit range `{schemaVersion:1,skillId,canonicalRelativePath,kind,byteCount,offset,bytesBase64,nextOffset,eof}`; base64 is canonical and empty EOF is explicit. Unknown selection/path and an offset beyond EOF are closed ordinary charged read refusals; missing/corrupt CAS, uncertain close and cancellation retain their original failure semantics. There is no truncation or hidden text/execution interpretation. The original model JSON/token/compaction bounds still apply.
+
+Per-action permission is the original frozen read action with named-action key `skill_resource <skillId>/<canonicalRelativePath>`. The normal ToolRequest, exact target, ordinary OperationGrant, deny/ask/allow rules and authenticated approval/replay remain mandatory. This grant is narrowed to one local dispatched attempt. The distinct `skill_resource` Journal kind permits only an atomic `prepared → dispatch_claimed → completed` triplet in the same unchanged-workspace Checkpoint/result/frontier/settlement transaction. Attempt and lease are zero, prepared/completed deltas are one tool call and claim delta is zero; sandbox/native/broker/UNKNOWN fields are forbidden. The receipt binds the original Run snapshot, assembly, request/target/grant, provider batch/call/index, source Checkpoint/Journal sequence, original Supervisor inspector and preparation Q. The actual original SQL rows alone register final sampled C. All CAS bytes are durable, completely reread and joined before fresh C rechecks exact Run/Checkpoint/Journal/items, current owner/time fence, source, grant TTL, original active lease when present, ancestry Stop and deadline, with no await before effect. Rollback leaves only orphan CAS and no charge or result; successful replay never registers or charges a second read. Physical claimed/UNKNOWN attempts preserve their original charging and recovery rules. A queued Run needs no worker, and an active parent retains its same generation/lease. Model projection emits only the genuine owning provider tool result. Every recovery, including a cut before any tool call, verifies the entire original selected skill graph from CAS and never falls back to mutable directories or a later installed bundle.
 
 ## 6. Authoritative Run State
 
@@ -3044,6 +3868,8 @@ type McpRecoveryProbeEvidenceV1 = {
   brokerTargetDigest: string
   statusResponseRef: ArtifactRef
   statusResponseDigest: string
+  statusCaptureRef: ArtifactRef
+  statusCaptureDigest: string
   completedPredicateRef: ArtifactRef
   completedPredicateDigest: string
   failedPredicateRef: ArtifactRef
@@ -3052,6 +3878,26 @@ type McpRecoveryProbeEvidenceV1 = {
   observedAt: string
   evidenceDigest: string
 }
+
+type McpReconciledEffectResultV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-reconciled-effect-result-v1'; runId: string; opId: string; attempt: number;
+  originalDispatchId: string; unknownJournalSeq: number; budgetSettlementRef: string;
+  probeEvidenceRef: string; probeEvidenceDigest: string; originalResponse: 'unavailable'; observedAt: string; resultDigest: string;
+}> & (Readonly<{ disposition: 'completed'; code: 'TOOL_RESULT_UNAVAILABLE'; effect: 'confirmed_completed' }> |
+  Readonly<{ disposition: 'failed'; code: 'TOOL_EXECUTION_FAILED'; effect: 'confirmed_failed' }>);
+/** Original source intent before the in-flight wait. It contains no later
+ * wait ref or dispatch digest, and is never native birth/execution proof. */
+type McpStatusProbePreparationV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-status-probe-preparation-v1'; runId: string; principalId: string;
+  previousWaitingSubjectRef: string; reconciliationSubjectDigest: string; probeKind: 'automatic' | 'user_requested'; probeOrdinal: number;
+  probeNonceDigest: string; nonce: string; brokerDispatchId: string; brokerFenceTokenDigest: string;
+  brokerRequestRef: string; brokerRequestDigest: string; brokerTargetRef: string; brokerTargetDigest: string; nativeRecipeRef: string;
+  plannedContainmentRef: string; plannedContainmentDigest: string; sandboxLaunchSpecRef: string; sandboxLaunchSpecDigest: string;
+  inspectorSupervisorInstanceId: string; inspectorStateOwnerEpoch: number;
+  originalSupervisor: Readonly<{ pid: number; processStartToken: string }>;
+  controller: Readonly<{ pid: number; processStartToken: string }>;
+  createdAt: string; probeDeadlineAt: string; preparationDigest: string;
+}>;
 
 type WorkerRecoveryEvidenceBaseV1 = {
   schemaVersion: 1
@@ -3106,11 +3952,15 @@ type ReconciliationProbeDispatchV1 = {
       brokerRequestDigest: string
       brokerTargetDigest: string
       brokerFenceTokenDigest: string
+      previousWaitingSubjectRef: ArtifactRef
+      preparationRef: ArtifactRef
+      preparationDigest: string
     }
   | {
       subjectKind: 'publication'
       inspectorTaskId: string
       inspectionTargetDigest: string
+      previousWaitingSubjectRef: ArtifactRef
     }
   | {
       subjectKind: 'worker_recovery'
@@ -3154,6 +4004,10 @@ type ReconciliationProbeTimeoutClosureV1 = {
       brokerTargetDigest: string
       brokerFenceTokenDigest: string
       noActiveReleaseForNonce: true
+      retirementRef: ArtifactRef
+      retirementDigest: string
+      lateStatusCaptureRef?: ArtifactRef
+      lateStatusCaptureDigest?: string
     }
   | {
       subjectKind: 'publication'
@@ -3169,6 +4023,50 @@ type ReconciliationProbeTimeoutClosureV1 = {
       processContainmentRef: ArtifactRef
       inspectorTaskId: string
       taskClosure: ReconciliationInspectorTaskClosureV1
+    }
+)
+
+type ReconciliationProbeCancellationClosureV1 = {
+  schemaVersion: 1
+  format: 'cliq-reconciliation-probe-cancellation-closure-v1'
+  reason: 'owning_supervisor_shutdown'
+  runId: string
+  waitingSubjectRef: ArtifactRef
+  probeKind: 'automatic' | 'user_requested'
+  probeOrdinal: number
+  probeNonceDigest: string
+  probeDispatchDigest: string
+  probeDeadlineAt: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  closedAt: string
+  closureDigest: string
+} & (
+  | {
+      subjectKind: 'publication'
+      deliveryPlanRef: ArtifactRef
+      pathOperationId: string
+      attempt: number
+      inspectorTaskId: string
+      taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
+    }
+  | {
+      subjectKind: 'worker_recovery'
+      oldWorkerLaunchId: string
+      processContainmentRef: ArtifactRef
+      inspectorTaskId: string
+      taskClosure: { closureKind: 'cancelled_and_joined'; inspectorTaskCancelledAndJoined: true }
+    }
+  | {
+      subjectKind: 'mcp_recovery'
+      brokerDispatchId: string
+      brokerTargetDigest: string
+      brokerFenceTokenDigest: string
+      noActiveReleaseForNonce: true
+      retirementRef: ArtifactRef
+      retirementDigest: string
+      lateStatusCaptureRef?: ArtifactRef
+      lateStatusCaptureDigest?: string
     }
 )
 
@@ -3205,6 +4103,17 @@ type ReconciliationProbeEvidenceV1 = {
       subjectEvidenceKind?: never
       subjectEvidenceRef?: never
       subjectEvidenceDigest?: never
+    }
+  | {
+      outcome: 'probe_cancelled'
+      cancellationReason: 'owning_supervisor_shutdown'
+      cancellationClosureRef: ArtifactRef
+      cancellationClosureDigest: string
+      subjectEvidenceKind?: never
+      subjectEvidenceRef?: never
+      subjectEvidenceDigest?: never
+      timeoutClosureRef?: never
+      timeoutClosureDigest?: never
     }
 )
 
@@ -3380,6 +4289,11 @@ type StopIntentBase = {
   schemaVersion: 1
   runId: string
   createdAt: string
+  // The three registration fields are present together on new commits.
+  registeredCheckpointId?: string
+  registeredRunRevision?: number
+  registeredJournalSeq?: number
+  supersedesStopIntentRef?: ArtifactRef
 }
 
 type KernelIntegrityEvidenceV1 = {
@@ -3475,6 +4389,13 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       unusableResponseDigest: string
     }
   | {
+      failureKind: 'mcp_known_result_unusable'
+      toolObservationRef: ArtifactRef
+      toolObservationDigest: string
+      captureRef: ArtifactRef
+      captureDigest: string
+    }
+  | {
       failureKind: 'model_attempts_exhausted'
       attempt: number
       terminalJournalSeq: number
@@ -3502,6 +4423,14 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       retryUnknownResultDigest: string
     }
   | {
+      failureKind: 'mcp_call_resource_exhausted'
+      resource: 'server_launch_capacity'
+      used: number
+      limit: number
+      retryUnknownResultRef: ArtifactRef
+      retryUnknownResultDigest: string
+    }
+  | {
       failureKind: 'dependency_acquisition_failed'
       dependencyPlanRef: ArtifactRef
       dependencyPlanDigest: string
@@ -3520,6 +4449,32 @@ type RuntimeFailureEvidenceV1 = RuntimeFailureEvidenceBaseV1 & (
       failureCode: 'missing_active_launch' | 'stable_identity_mismatch' | 'boundary_invalid'
     }
 )
+
+type ResultSourceLimitCause = {
+  sourceCheckpointId: string
+  workspaceStateRef: ArtifactRef
+  producingItemId: string
+  modelOpId: string
+  attempt: number
+  limitKind: 'changed_paths' | 'changed_bytes'
+  observed: number
+  limit: number
+}
+
+type DeliveryMergeLimitCause = {
+  sourceCheckpointId: string // original Delivery initial Checkpoint, not a model producer
+  workspaceStateRef: ArtifactRef // original W_A
+  sourceRunResultRef: ArtifactRef
+  sourceBaseRef: ArtifactRef
+  sourceDesiredRef: ArtifactRef
+  capturedWorkspaceRef: ArtifactRef
+  sourceProjectionRef: ArtifactRef
+  sandboxProfileRef: ArtifactRef
+  mergeAlgorithm: 'cliq-diff3-v1'
+  limitKind: 'changed_paths' | 'changed_bytes' | 'generation_bytes' | 'single_file_bytes' | 'merged_entries'
+  observed: number
+  limit: number
+}
 
 type StopIntent =
   | (StopIntentBase & {
@@ -3612,6 +4567,8 @@ type StopIntent =
             | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
             | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
           ))
+        | ({ runtimeSubtype: 'result_source_limit_exceeded' } & ResultSourceLimitCause)
+        | ({ runtimeSubtype: 'delivery_merge_limit_exceeded' } & DeliveryMergeLimitCause)
         | {
             runtimeSubtype: 'delivery_merge_conflict'
             deliveryMergeConflictItemRef: ArtifactRef
@@ -3669,6 +4626,7 @@ type Run = {
   terminalReason?: RunTerminalReason
   terminalDetailRef?: ArtifactRef
   stopIntentRef?: ArtifactRef
+  parentCancellationRef?: ArtifactRef
   cancelRequested: boolean
   createdAt: string
   deadlineAt: string
@@ -3682,9 +4640,11 @@ The status/reason mapping is exact: `succeeded -> verified`; `completed_unverifi
 
 `stopIntentRef` is the authoritative target while quiescence work delays terminal commit. The store validates the artifact and chooses the winning intent by fixed precedence: any `origin='kernel_integrity'` > `cancelled_by_user` > `parent_cancelled` > `budget_exhausted` > `verification_failed` > `verifier_infrastructure_failed` > ordinary `runtime_failed`; equal-precedence intents retain the earliest committed one, with artifact digest as the deterministic tie-break inside one transaction. A later higher-precedence fact may replace the pointer, but a lower/equal one cannot. `origin='budget'` is required for additive token/cost/tool/repair exhaustion and proves `consumed + reserved + required > ceiling`; wall expiry uses only `origin='deadline'`. `cancelRequested` is a monotonic dispatch index set by any user/parent cancellation intent even if later integrity evidence wins; it is not terminal-reason truth. Every productive dispatch requires no stop intent. `commitTerminalStop` validates and retains the current winning artifact after terminal quiescence and derives status/reason/detail from it; recovery never guesses from events or the last error. Failed/cancelled terminal Runs retain that ref, while succeeded/unverified Runs require it absent.
 
-Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
+`parentCancellationRef` registers the first actual proposed direct-parent cancellation on a nonterminal child in that same fence transaction. It is absent at birth and immutable after its first set. The artifact binds the child's original Checkpoint, Run revision and complete Journal prefix, and the parent's genuinely registered Stop replacement chain. If that proposal wins it equals the new winner; if it loses to a higher winner it has no `supersedesStopIntentRef` and leaves the winner and terminal cause unchanged. Both branches set the child's cancellation index. This field proves only that the child observed this actual revocation: it is not a winning Stop, parent quiescence, child death or execution permission. A terminal child cannot acquire a retrospective observation. Missing metadata/source or an orphan/substituted artifact is recovery waiting, never repaired from today's parent. Schema 8 enforces the first-set/immutable child fence; historical readers independently validate its full original graph. The real birth transaction's revision-1 initial Checkpoint is a valid source for a freshly cancelled child, without inventing a revision-0 Checkpoint.
 
-`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
+Stop-to-**reason-detail** derivation is total and one-to-one; `StopIntentBase` deliberately has no generic evidence ref. The terminal primary-evidence matrix is exact and acyclic: verifier/dependency integrity use `integrityEvidenceRef`; parent cancellation uses `sourceStopIntentRef`; local-inference failure uses `failureDetailRef`; direct verifier/delivery/dependency policy denial uses `policyChannelEvidenceRef`; generic runtime uses `runtimeFailureRef`; manual abandon uses `attestationRef`; every user cancellation, deadline/budget, verification, context-compaction/window/result-source, delivery-merge, or delivery-publication branch uses the winning `stopIntentRef` itself after that immutable artifact has been published. The corresponding `TerminalReasonDetail` copies the exact branch fields; its `stopIntentRef|evidenceRef` where present equals that same selected primary ref. Each `origin='runtime'` variant maps only to the detail with identical `runtimeSubtype`; generic runtime requires its exact `RuntimeFailureEvidenceV1` ref/digest and matching `failingOpId`. Storage rejects a subtype/detail mismatch, missing field, alternate primary ref, or caller-selected reason projection. This post-publication pointer creates no content hash cycle because the StopIntent contains no self ref. The surrounding publication/manual/retry closure fields are a separate deterministic projection of authoritative Journal/items at terminal quiescence; they may close facts learned after the winning intent without changing its reason. Candidate, diagnostic, verifier-receipt, and child-result facts remain in their already ordered typed Run-item/Journal graph and are not copied into implementation-selected TerminalDetail lists.
+
+`RuntimeFailureEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/failing op/current-inspector fields equal the proposed Run and the inspector is fresh under the canonical five-second rule. `model_unusable_response` rehashes the exact `ModelUnusableResponseV1` that is the completed Journal result for that op. `mcp_known_result_unusable` binds `toolObservationRef/toolObservationDigest` to the same original claim's completed `ToolObservationV1` with fixed `TOOL_PROTOCOL_ERROR`, and `captureRef/captureDigest` to its exact `cliq-mcp-known-unusable-run-capture-v1`. That capture roots two real setup captures, the independently screened matching event and exact `cliq-mcp-known-unusable-response-v1` audit of the original joined native refusal; unsafe prefix bytes are not retained or claimed re-readable. Storage reproduces the ordered result item, original ready Checkpoint/current next frontier, full-once completed settlement, claim and owner history before the existing sole Stop writer may terminalize; the durable scheduler and RunResult barriers forbid later productive work across restart. UNKNOWN, no-release, unsafe-event or missing-join data cannot satisfy this branch. `model_attempts_exhausted` names the final contiguous failed model attempt, exact normal/compaction request, Journal sequence, and literal `transport_exhausted`; that failed row must satisfy the ordinary pre-dispatch or exact post-claim-no-release closure and therefore cannot claim a provider response. `credential_redemption_failed` is produced while holding the credential-authority lock before target I/O; its immutable binding/endpoint equal the Run assembly, and its latest authority-record digest/revisions plus canonical time or platform-store observation prove exactly expired, revoked, changed frozen credential binding, revoked endpoint, absent item, or unavailable store. `credential_binding_changed` requires a later active authority revision/generation that differs from the frozen original binding, without relabeling it as revoked. `endpoint_revoked` additionally binds the exact latest endpoint authority record digest/revision while the credential itself may remain active. Missing or corrupt history and noncausal time require recovery, not a synthetic authorization failure. `retry_unknown_exhausted` rehashes exact `RetryUnknownCancelledResult` and its Journal/settlement/dispatch-closure chain. `mcp_call_resource_exhausted` rehashes that same exact UNKNOWN result/claim/closure and additionally reproduces the whole original call's actual server launch count against its frozen limit; `used=limit` and both are safe integers in the accepted lifecycle range. This resource branch cannot claim literal three-attempt exhaustion, create a fictitious third attempt, reset server charges or use a positive-failure result as UNKNOWN. `dependency_acquisition_failed` equals the current candidate plan and final acquisition Journal attempt/sequence with one closed failure code. `local_service_identity_mismatch` rehashes the assembly provenance/service spec plus the current boundary evidence that failed the active-launch/stable-identity gate before provider release. No branch accepts another branch's members, generic diagnostic text, a provider/worker boolean, or an untyped Journal error. The StopIntent and TerminalDetail repeat the same evidence ref/digest/failing op, and storage re-walks the named Journal/request/authority graph before terminal commit.
 
 Kernel-integrity stop evidence is one closed chain. `KernelIntegrityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its Run/source projection/generation/current inspector match the exact Journal claim and frozen RunSpec. Canonical target paths are NFC admitted-root-relative paths with no empty/`.`/`..` component. An `audited_write_attempt` is emitted only by the strong sandbox filesystem or trusted broker at the blocked syscall/request boundary, repeats the exact request/containment/SandboxLaunch, has `sourceBeforeRef === sourceAfterRef` and equal digests, and proves no byte changed. A `source_digest_drift` rehashes two exact SourceManifests, requires unequal digests and a nonempty unique byte-sorted list of the changed WorkspaceEntry digests. Its source XOR either forbids both containment/spec refs for a trusted Supervisor rehash outside a child process, or requires both and matches them to the same owning Journal claim and actual containment; ref-only or spec-only drift is invalid. The verifier subject matches one verifier Journal op/attempt/result source, while dependency matches the exact candidate plan and acquisition op/attempt. For both kernel-integrity StopIntent variants, branch `integrityEvidenceRef` and digest name this same artifact; `TerminalReasonDetail` and `primaryEvidenceRef` copy the identical ref/digest. A verifier `source_mutation` receipt requires both violation fields and the verifier form of this artifact; every other outcome forbids both. The audited branch requires equal receipt source digests, the drift branch requires unequal ones. Dependency completion/ready state is forbidden and its integrity StopIntent uses the dependency form. A generic CAS ref, verifier text, caught un-audited read-only error, or adapter assertion cannot win kernel-integrity precedence.
 
@@ -4303,7 +5263,7 @@ Workspace entries use `cliq-exact-path-v1`, are strictly byte-sorted and unique,
 
 Every Git `indexRef|gitIndexRef|capturedIndexRef|observedIndexRef` in this RFC decodes only exact `GitIndexSnapshotV1`; a raw `.git/index` blob is never directly used as an authority ref. `snapshotDigest = SHA-256(JCS(snapshot with snapshotDigest omitted))`; `canonicalIndexBytesDigest === canonicalIndexBytesRef` is SHA-256 of the exact canonical Git-index bytes and `canonicalIndexByteCount` is their positive safe-integer length. Descriptor-held input accepts Git index version 2, 3, or 4 only after verifying the object-format checksum and complete parse. It rejects unmerged stages, gitlinks, intent-to-add, any skip-worktree bit, split/sparse index, unknown mandatory extensions, path escape/duplicate/non-NFC/NUL, invalid mode/object id, or missing referenced objects. Optional accelerator extensions are discarded. Fixed `cliq-git-index-normalize-v1` writes one version-2 index containing exactly the byte-sorted stage-0 entries shown, with every `skipWorktree` literal false, no extended flags, zeroed stat fields, the v2 NUL-terminated path and 8-byte entry padding rules, the declared object-format checksum, and no extension; reparsing those bytes must reproduce the artifact. Version-4 prefix compression/varint encoding is accepted only by the input parser and is never emitted by the canonical v2 writer. `indexTreeObjectId` is the fixed Git tree-object construction over those entries and nested directories. Thus host Git version, stat cache, fsmonitor/untracked cache, extension order, and source raw bytes cannot change tracked classification or recovery.
 
-SourceManifest and SourceInclude classification index refs rehash the same admitted snapshot, their repository identity and `indexTreeObjectId|gitIndexTreeObjectId` equal its members, and tracked classification is an all-and-only lookup in its entries. `PrivateGitStateManifest.indexRef` names the snapshot whose canonical bytes are written to its independent `.git/index`; its HEAD/refs and object format agree. `PublicationProofV1(kind='git_index_unchanged')` is a closed repository XOR: non-Git forbids all four refs/digests, while Git requires both snapshots, each digest equals the decoded `snapshotDigest`, and success requires identical snapshot refs/digests. A changed semantic entry or tree is not “unchanged” merely because a raw index file happened to retain an inode or timestamp.
+The original SourceManifest B, SourceProjection.classificationIndexRef and SourceInclude classification refs rehash the same admitted snapshot, their repository identity and original `indexTreeObjectId|gitIndexTreeObjectId` equal its members, and tracked classification is an all-and-only lookup in its entries. A later private Checkpoint and delivery A retain their own current metadata index without replacing that original projection index. `PrivateGitStateManifest.indexRef` names the snapshot whose canonical bytes are written to its independent `.git/index`; its HEAD/refs and object format agree. `PublicationProofV1(kind='git_index_unchanged')` is a closed repository XOR: non-Git forbids all four refs/digests, while Git requires both snapshots, each digest equals the decoded `snapshotDigest`, and success requires identical snapshot refs/digests. A changed semantic entry or tree is not “unchanged” merely because a raw index file happened to retain an inode or timestamp.
 
 Git object storage is equally closed. Every `GitObjectPackV1` raw pack/index ref is declared respectively as complete Git pack and pack-index-v2 bytes; the SHA-256 digest equals its ArtifactRef, byte counts are exact, the pack trailer uses the declared Git object format, and fixed trusted `index-pack` validation recomputes the trailer, object count, unique byte-sorted object-id list, per-object content hash, delta closure, and exact deterministic v2 index bytes. `packDigest` omits itself. `GitObjectClosureV1.closureDigest` omits itself; pack tuples are unique and byte-sorted by trailer hash, rehash every pack artifact, and `reachableObjectIds` is the unique byte-sorted all-and-only graph walk from private HEAD, refs, and index entries through commits/trees/tags/blobs. The disjoint union of every decoded pack's `objectIds` equals `reachableObjectIds` exactly: every reachable object occurs in exactly one retained pack, and no unreachable, deleted, or otherwise extra object is retained. A Git `PrivateGitStateManifest` uses that one closure ref/digest instead of an untyped pack list. `SanitizedGitConfigV1.configDigest` and `PrivateGitStateManifest.manifestDigest` each omit themselves under JCS; the manifest's config and object-closure pairs rehash their exact artifacts. The config is a closed allowlist containing only the displayed non-executable repository/object-format booleans/literals. Every other Git key is absent, including hooks, remotes, credentials, includes, helpers, aliases, pagers, filters, attributes drivers, diff/merge drivers, `core.fsmonitor`, `core.sshCommand`, worktree paths, and environment-driven config. Fixed trusted startup code supplies private-generation paths and disables system/global/environment config; it never copies repository/user config. A non-Git state forbids the private-Git manifest.
 
@@ -4350,7 +5310,11 @@ neither the ready Checkpoint, frontier, Journal, budgets nor lease epoch.
 
 A published Checkpoint records the pre-publication Run revision whose item, Journal, context, and workspace cut it captures. The same transaction advances the authoritative Run to `basedOnRunRevision + 1` while installing `latestCheckpointId`. A crash before step 3 leaves only unreferenced artifacts eligible for garbage collection. The database must never reference a missing or unverified artifact.
 
-Admission is the one insert form of that rule. It uses virtual pre-admission revision `0`: CAS/CAS-artifact work happens first, then one SQLite transaction inserts the initial Checkpoint with `basedOnRunRevision=0`, `runItemSeq=0`, `journalSeq=0`, and the frozen admitted context/workspace refs; inserts the Run at `revision=1`, `status='queued'`, its operation-specific initial frontier and non-null `latestCheckpointId`; appends event sequence 1; and records the idempotent admission response. An agent Run starts at its initial agent frontier. `run.apply` first performs the same descriptor-safe immutable real-workspace capture used by publication and publishes source manifest **A**. Trusted code then materializes A into a new empty private delivery generation and publishes recovery image **W_A**, an exact `WorkspaceStateManifest` whose `runId` is the new delivery Run, `baseWorkspaceManifestRef=A`, entries/private-Git state reproduce A, and source-projection/repository/index/tree identities validate against A. The admitted `RunSpec.baseWorkspaceManifestRef` and initial `delivery:merge.capturedWorkspaceRef` both equal A, while the initial Checkpoint `workspaceStateRef` equals W_A and can never equal the differently typed A artifact. The Run starts directly at `delivery:merge {sourceRunResultRef,capturedWorkspaceRef:A}`. There is no admitted delivery Run whose required capture/recovery image is absent and no post-admission `delivery:capture` choice. No revision-0 Run row is externally visible. A failed transaction leaves only unreachable artifacts and no accepted Run.
+Admission is the one insert form of that rule. It uses virtual pre-admission revision `0`: CAS/CAS-artifact work happens first, then one SQLite transaction inserts the initial Checkpoint with `basedOnRunRevision=0`, `runItemSeq=0`, `journalSeq=0`, and the frozen admitted context/workspace refs; inserts the Run at `revision=1`, `status='queued'`, its operation-specific initial frontier and non-null `latestCheckpointId`; appends event sequence 1; and records the idempotent admission response. An agent Run starts at its initial agent frontier.
+
+`run.apply` first performs the same descriptor-safe immutable real-workspace capture used by publication and publishes source manifest **A**. Before admission, trusted code completely reads, hashes and validates A's entire recovery closure and publishes **W_A**, an exact restorable `WorkspaceStateManifest` whose `runId` is the proposed delivery Run, `baseWorkspaceManifestRef=A`, entries/private-Git state reproduce A, and source-projection/repository/index/tree identities validate against A. Every referenced object must already be durable; neither an unchecked manifest nor today's mutable workspace may stand in for the captured recovery bytes. This pre-admission step publishes data only: it does not create a physical private generation or claim that such a generation has been validated. The admitted `RunSpec.baseWorkspaceManifestRef` and initial `delivery:merge.capturedWorkspaceRef` both equal A, while the initial Checkpoint `workspaceStateRef` equals W_A and can never equal the differently typed A artifact. The Run starts directly at `delivery:merge {sourceRunResultRef,capturedWorkspaceRef:A}`. There is no admitted delivery Run whose required capture/recovery image is absent and no post-admission `delivery:capture` choice. No revision-0 Run row is externally visible. A failed transaction leaves only unreachable artifacts and no accepted Run.
+
+Only after that atomic admission may the existing WorkerLaunch `preparing` lifecycle register the delivery generation's ownership intent, create its descriptor-anchored directory, materialize W_A, fsync and re-walk it, and produce the original physical snapshot/preactivation evidence. The same cancellation, resource ownership, retirement and successor-recovery rules apply as for agent generations; delivery adds no second resource ledger or lifecycle. Private merge or verification may use that generation only after those physical checks succeed. A crash before admission cannot leave an unregistered physical generation, while a crash during later preparation never converts the immutable W_A into evidence that physical creation, execution or retirement completed.
 
 Checkpoints are published only at quiescent boundaries. An open invocation is represented by the RunJournal, not embedded in a Checkpoint.
 
@@ -4435,20 +5399,24 @@ The store enforces uniqueness for `(runId, opId, attempt, phase)` and monotonic 
 
 Phase/op-kind validation is closed at storage, not left to adapters:
 
-- `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error evidence ref/digest and a settlement ref. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
-- `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields, evidence pair, or budget settlement.
+- `prepared` requires immutable request, target, ReplayClass, original epoch, applicable grant, and the complete four-counter reservation in `budgetDelta`; it forbids dispatch/result/receipt/error and a settlement ref. Evidence is absent except the exact purpose-bound original publication/server birth intent, or `opKind='mcp', replayClass='retry', attempt>0` whose immediately preceding attempt is wholly settled UNKNOWN and whose pair is the exact `McpRetryDispatchClosureV1` below. No other op/phase can borrow that retry pair. The sole zero-reservation form is a typed abort-directory recovery-maintenance request admitted by `claimRecoveryMaintenance`'s preconditions.
+- `dispatch_claimed` requires the one matching prepared row, `dispatchId`, trusted Supervisor instance plus exact active `stateOwnerEpoch`, the broker-token-digest XOR above, the complete four-counter zero value in `budgetDelta`, and no terminal fields or budget settlement. The exact original publication/server birth pair remains purpose-bound; an MCP call carries only its actual initialized stdio instance or its original HTTP retry-claim binding identity. A new retry claim drops its prepared predecessor-closure pair and can never present it as its own native identity. Other ordinary claims forbid an evidence pair.
 - `completed` requires the matching claim, exact `budgetSettlementRef`, plus an op-kind result: exact usable `AgentModelTurn` or exact `ModelUnusableResponseV1` for `model`, under their closed XOR; result artifact for `tool|mcp`; exact `McpServerInstanceIdentityV1` result plus `McpServerLaunchReceiptV1` for `mcp-server`; a passed/assertion/source-mutation verification receipt for `verifier`; or exact `PublicationProofV1(kind='terminal_receipt')` for `publish`.
-- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged private edit unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
+- `failed` is a closed XOR. `pre_dispatch` requires the exact prepared row, error, settlement, and zero consumed `budgetDelta`, while forbidding dispatch/Supervisor/owner/token/result/receipt/evidence pair/attestation fields; the absence of any claim under the universal dispatch gate is itself authoritative proof that no target capability or request byte was released. `post_claim` repeats the exact claim and is legal only in three closed forms: its `evidenceRef/evidenceDigest` decodes exact `PostClaimNoReleaseEvidenceV1`, or an `opKind='verifier'` infrastructure failure carries its cross-field-valid `infra_failed` receipt plus exact containment-death closure and forbids the generic pair; or the sole stopped-recovery terminal transaction resolves a previously fully charged fixed private builtin unknown with exact `PrivateToolRollbackV1`, preserving that original settlement. The first form consumes zero and proves the same live owner closed the second gate before any release/spawn; the verifier form consumes its exact attempt usage. Private rollback appends zero additional budget, never a refund or another settlement. Every other claimed failure with no typed result is `unknown`, while a typed negative target response is `completed` with its exact result artifact. A verifier stopped by Run cancel/deadline has a `VerifierStopItem` and no receipt. A malformed response received from an executed/billable provider is `completed` with an unusable-response artifact, not a false no-effect failure.
 - `unknown` requires the matching claim, an `evidenceRef/evidenceDigest` pair decoding exact `InvocationAmbiguityEvidenceV1`, and the exact conservative full `budgetSettlementRef`.
 - `abandoned` requires an existing `unknown` whose ReplayClass is exactly `manual`, repeats that unknown row's settlement ref with zero additional delta, carries the local-principal attestation described below, forbids its own evidence pair, fabricates no result, and has the terminal-only identity-matched `ToolAbandonedItem` when the invocation originated from a tool/MCP call. It is administrative closure, not completion/failure evidence.
 
 Every Journal evidence ref is accompanied by its digest or both are absent; the phase/op-kind decoder fixes the only legal artifact type. `InvocationAmbiguityEvidenceV1.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Its Run/frontier/op/kind/attempt/dispatch/claim sequence, immutable request and target pairs, claiming Supervisor/StateOwner epoch, current inspector, and observation time equal the exact claimed attempt and the frontier transaction entering `unknown`; no caller/worker payload is accepted. `claim_owner_lost` rehashes exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` for the historical claim owner and requires the inspector to be that strictly newer active owner. `broker_channel_lost_after_claim` is limited to a claim that stored the same broker fence-token digest; the same still-live owner records one closed deadline/connection/stream failure after the second release gate and proves the Journal has no durable terminal result. `sandbox_channel_lost_after_claim` rehashes the claim's exact SandboxLaunchSpec and actual containment; its same-owner live branch requires `observedAt >= responseDeadlineAt`, an authenticated channel-close time, and no result, while its death branch rehashes exact all-descendant `ProcessContainmentDeathEvidenceV1` and proves no terminal result was durably received before death. `publication_path_ambiguous` rehashes only the same claim's exact `PublicationProofV1(kind='path_ambiguity')`. Any other kind/mechanism combination, free error string, missing pair, current-owner mismatch, or evidence that instead proves completion/failure is invalid. The `unknown` row repeats this exact pair; a later `ManualAbandonAttestationV1` must repeat the same pair byte-for-byte, not substitute newer display or probe evidence.
 
-`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private edit domain; it is never this no-release evidence or permission to retry.
+`PostClaimNoReleaseEvidenceV1.evidenceDigest` omits itself. Its Run/op/attempt/dispatch/claim sequence, request/target/grant, claiming Supervisor/owner epoch, and current inspector ref/digest equal the prepared/claim rows and current `SupervisorInspectorIdentityV1`; the inspector is the same still-live owner and the observation is within five seconds. The broker branch is legal iff the claim stored that exact fence-token digest: while holding the broker release mutex, the same owner revokes the still-unreleased token, observes zero matching active release, publishes the artifact, and appends post-claim failed plus zero-consumption settlement in one transaction before dropping the mutex. The process branch is legal iff the claim's exact SandboxLaunchSpec has not spawned; its ref and `ProcessContainmentNoSpawnEvidenceV1` rehash the same plan/spec/nonce and positively prove zero matching process. It likewise commits with the failed row before spawn authority can be released. A restart, owner change, absent live token, observed process/release, partial rollback, generic death, adapter assertion, or inline boolean cannot produce this artifact and therefore routes the claim to `unknown` unless the verifier-specific receipt/death form applies. The separate `PrivateToolRollbackV1` exception resolves an already charged unknown only after positive rollback/retirement of the original fixed private builtin domain; it is never this no-release evidence or permission to retry.
 `PrivateToolRollbackV1` is terminal-stop-only and limited to the original signed
-Linux fixed builtin edit recipe whose native boundary permits effects only in
-its exact private generation. The original replay class remains `manual`; no
-retry authority is added. Its request/target/grant, claim, worker launch/epoch,
+Linux fixed builtin edit or `cliq-builtin-tools-v1` script recipe whose native
+boundary permits effects only in its exact private generation. The script
+branch is closed to the same five declared tools and original signed script,
+guest Node, normalized input and complete retained member bytes. Read/search
+retain their read-only envelope and `retry` class; Bash/edit retain their
+read-write envelope and `manual` class. No retry authority is added: even a
+read/search UNKNOWN is not redispatched. Its request/target/grant, claim, worker launch/epoch,
 generation identity, preceding ready Checkpoint and exact whole-domain death,
 quarantine and retirement graph must all agree. The original UNKNOWN remains
 fully charged; the added failed row reuses its immutable BudgetSettlement and
@@ -4464,21 +5432,259 @@ Every `completed|unknown|abandoned` row and every post-claim `failed` row binds 
 
 Attempts are contiguous from zero and at most one attempt per `opId` is current. Preparing attempt `n+1` is legal only when attempt `n` is fully settled and no prior dispatch remains live. A pre-dispatch `failed` attempt—local crash recovery, activation loss, or grant expiry after `prepared` but before any claim—always permits a replacement attempt for the same still-current frontier without consuming effect retry capacity. Its terminal transaction verifies that no claim row exists, releases the exact reservation, consumes the complete four-counter zero value, and records the deterministic local error; fresh authority, grant, budget, and deadline checks still apply to replacement. After a claim, a new attempt additionally requires either (a) `n` is `unknown` and its frozen ReplayClass authorizes retry after full pessimistic charge, or (b) `n` is positively `failed` and an explicit frozen same-op retry policy still has capacity. Case (b) includes same-digest verifier infrastructure retries and `workspace-rollback-retry` only after durable rollback/quarantine evidence; it never includes a completed attempt or an assertion repair against a new candidate, which receives a new opId. The new `prepared` row and reservation commit atomically, so recovery cannot schedule it twice. Once attempt `n+1` exists, a late resolution of attempt `n` may update audit/billing evidence but cannot append model/tool results, advance the typed frontier, or become the Run-visible result; only the highest prepared attempt is eligible to do so.
 
+
+A fixed MCP retry closure is a source witness in the existing Journal, not a
+second ledger or release capability. Its complete-byte ref and independent
+self-omitting digest bind the exact original prepared/claim/UNKNOWN sequences,
+request/target/grant/registry, original transport claim identity, broker token,
+whole-once settlement, claiming owner and current inspector. Its closed branch
+is either the actual original native domain irreversibly joined with its
+token revoked and zero matching active releases, or an actual strict successor
+which proves the original PID/start process domain dead under the installed
+native nontransferability rule. `transport.close`, a path, a caller boolean,
+or a digest-valid artifact cannot supply that physical fact. The original
+claimed worker/generation is already truly retired. Physical observations are
+repeated before the actual canonical transaction-time sample and retain the
+original five-second freshness, owner, installation, scope and complete join
+checks.
+
+For a later prepared MCP retry after UNKNOWN, the prior pair is committed
+with that new preparation and reservation. Historical validation follows the
+exact original claim and closure before treating the older UNKNOWN as fenced;
+acknowledging old live custody is permitted only after that actual commit.
+The original HTTP binding is published before its claim, then the same opaque
+native owner is reasserted inside that claim transaction. Neither its retained
+deadline nor a stdio instance deadline may extend the earliest actual native
+call deadline or the whole call's first prepared time plus original timeout.
+Server lifecycle history separately binds its nearest preceding effect
+preparation and exact worker lease; it never mistakes shared request bytes
+for ownership by attempt zero or resets the whole-call deadline. A historical
+before-effect local closure proves claim absence only for its exact owning
+effect attempt through its own terminal Journal sequence, not against future
+legitimate claims.
+
+A later replacement which has only prepared and positively failed without a
+claim cannot erase or resolve the last real productive attempt. In this
+closed MCP case the logical call's final visible outcome comes from the last
+actually claimed attempt: a still-unused UNKNOWN retains its exact terminal
+ambiguity carrier, while a genuinely positive failure retains its original
+error. Every intervening unclaimed attempt still requires its own exact
+no-dispatch failure/refund, and full literal history/deadline/capacity checks
+remain mandatory. A later actual claim instead supersedes that visible
+outcome, including when it has a known negative result; older UNKNOWNs remain
+audit-only. This is not permission to use a late result of a genuinely
+superseded productive claim.
+
+If that later replacement is still only prepared when its original native
+call deadline expires, or its actual local server closures prove launch
+capacity unavailable, it likewise cannot produce an ordinary not-dispatched
+result which masks the older UNKNOWN. After real current producer/server and
+worker retirement, the same unique terminal transaction refunds only that
+existing genuinely unclaimed preparation and emits the older exact unused
+ambiguity carrier. It invents no further attempt or claim. An open local
+server, live later claim, absent join or incomplete original closure forbids
+this terminal commit; an already initialized eligible server is not declared
+exhausted merely because its own launch reached the frozen ceiling.
+
+Terminal detail may name this same purpose-specific MCP closure only for its
+matching retry UNKNOWN. Earlier already-committed closures remain exact; the
+last unused UNKNOWN needs its actual current closure. The first generic
+runtime Stop, source registration, fixed result, terminal detail, ordered batch
+closure, Checkpoint and Session outcome commit in the one existing terminal
+transaction after genuine producer/worker retirement. An inert terminal
+proposal brand cannot waive the original full cut, owner, clock, original
+producer join or required successor death. Model, verifier and publication
+closure mechanisms remain independent: in particular a same-process model
+UNKNOWN still waits for its original strict model broker fence/death proof.
+
+An already committed irreversible closure keeps its original inspector and
+observation time. It is never rewritten or claimed freshly observed. A later
+exhaustion proposal separately samples its current real StateOwner inspector
+and the current full Journal/capacity decision, with the normal five-second
+freshness bound; its native closure is validated independently. The final
+transaction repeats that exact current cut and every required physical check.
+
 Before any model, tool, MCP, verifier, or semantic publication attempt, the transaction that appends `prepared` checks the frozen ceiling and moves a conservative upper bound from available budget into `Run.budgetReserved`. Immediately before I/O, the trusted DispatchArbiter appends the unique `dispatch_claimed` fact only through `claimDispatch`; only `releaseClaimedDispatch` may then release bytes/capability. The sole exception is the zero-budget abort-directory maintenance attempt governed by both recovery-maintenance checks above. A completed or positively failed attempt settles evidence-backed usage into `budgetConsumed` and releases the reservation. If usage is unknowable after timeout, disconnect, or death, Cliq charges the full reservation before any policy-authorized retry; crash recovery never refunds or resets it. Outstanding child allocations are also reservations on the parent, so concurrent child admission cannot oversubscribe a ceiling.
 
-Budget mapping is exact. A claimed `model` attempt consumes its measured or conservatively reserved `modelTokens` and `costMicros` but no `toolCalls`. Every claimed non-model **productive** attempt—`tool`, `mcp-server`, `mcp`, `verifier`, and each semantic `mkdir|create|replace|delete` publication envelope—consumes exactly one `toolCalls`; verifier retries and MCP relaunches are new attempts and count again. Exact cleanup inside an already-claimed publication envelope and an abort-only removal of a delivery-created empty directory are pre-reserved recovery maintenance, not another productive attempt, and add zero `toolCalls`. Kernel child admission/await/merge actions execute as built-in `tool` operations and therefore count through their claims rather than through a hidden counter. `repairAttempts` increments only at the repair-authorization transaction. Supervisor-only no-new-effect recovery inspection is not a productive invocation and does not consume Run tool budget.
+Budget mapping is exact. A claimed `model` attempt consumes its measured or conservatively reserved `modelTokens` and `costMicros` but no `toolCalls`. Every claimed non-model **productive** attempt—`tool`, `mcp-server`, `mcp`, `verifier`, and each semantic `mkdir|create|replace|delete` publication envelope—consumes exactly one `toolCalls`; verifier retries and MCP relaunches are new attempts and count again. Exact cleanup inside an already-claimed publication envelope and an abort-only removal of a delivery-created empty directory are pre-reserved recovery maintenance, not another productive attempt, and add zero `toolCalls`. Kernel child admission and merge use the closed `child_admission`/`child_merge` local Journal branches; one explicit await registration uses the distinct no-grant `child_await` control accounting branch. Each committed triplet consumes exactly one tool call through its local claim and settlement, never a hidden counter or a physical execution grant. Waking an already registered wait, Stop cleanup and finalize settlement add no new await charge; a new explicit re-await is a new real call and registers once. `repairAttempts` increments only at the repair-authorization transaction. Supervisor-only no-new-effect recovery inspection is not a productive invocation and does not consume Run tool budget.
 
 Reconciliation probing has no hidden infinite loop. The wait stores the exact `ReconciliationProbeStateV1` XOR. A manual invocation uses only `manual_only`. Every inspectable subject starts `automatic_pending(automaticProbeCount=0,userProbeCount=0,nextProbeAt=createdAt)` with no evidence pair. At its due time, one revision CAS enters `automatic_in_flight`, increments the automatic count, and persists one complete `ReconciliationProbeDispatchV1` before any query or inspection: `probeOrdinal=automaticProbeCount`, one unique nonce, fixed `probeDeadlineAt=probeStartedAt+30s`, current owning Supervisor, and the subject-specific broker dispatch or inspector-task identity. No prior evidence ref is carried into an in-flight state. An unresolved response at ordinal `n<8` enters `automatic_pending` with `nextProbeAt=observedAt+[1s,5s,30s,2m,10m,30m,1h][n-1]`; ordinal 8 enters `automatic_exhausted`. Every post-probe pending or exhausted state requires the exact last-evidence ref/digest pair; neither branch permits an absent or half-present pair. Counts, dispatch, and evidence survive reboot. Only the owning live Supervisor may resume the exact same dispatch/nonce without incrementing a counter; a successor first fence-closes the predecessor dispatch and follows the unresolved edge.
 
 At `automatic_exhausted`, authenticated `run.reconcile(probe_now)` is an enqueue mutation, not a synchronous inspection result. One CAS increments positive safe-integer `userProbeCount`, enters `user_in_flight`, and persists a complete dispatch whose `probeOrdinal` equals that count, nonce/deadline are fresh, and `controlRequestId/controlRequestDigest` equal the public mutation. In that same transaction it publishes/stores the deterministic `ControlResultV1.resolution={kind:'probe_enqueued',dispatchDigest,userProbeCount}` plus the post-enqueue snapshot and commits `control_requests`; only afterward may the no-new-effect probe perform I/O. Same request bytes replay that response and join the same dispatch without probing twice; different bytes conflict. Completion later stores evidence and advances the wait through the ordinary internal reducer, producing Run events/snapshot changes but no second public response. An unresolved response returns to `automatic_exhausted` with the evidence pair and unchanged automatic count. `probe_now` before automatic exhaustion or for `manual_only` is `INVALID_REQUEST`; manual permits only exact-risk abandonment, whose synchronous result instead uses `resolution={kind:'abandoned',evidenceRef}`.
 
-`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. For worker recovery, that target digest names the first retained fenced generation row and its fixed quarantine reservation described above; later dispatches retain this same immutable target but have fresh task/nonce/owner/time identities. It grants no authority to dispatch or mutate the generation. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
+`ReconciliationProbeDispatchV1.dispatchDigest = SHA-256(JCS(dispatch with dispatchDigest omitted))`, and `reconciliationSubjectDigest = SHA-256(JCS(the frozen ReconciliationSubject))`. The MCP branch persists `brokerDispatchId = H('cliq-mcp-readonly-status-dispatch-v1',runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)`, the exact no-new-effect request/target digests, and an unguessable broker fence-token digest; the broker release gate accepts only that still-current in-flight row and token. Publication/worker branches persist `inspectorTaskId = H(runId,reconciliationSubjectDigest,probeKind,probeOrdinal,probeNonceDigest)` and the exact descriptor-only target digest. For worker recovery, that target digest names the first retained fenced generation row and its fixed quarantine reservation described above; later dispatches retain this same immutable target but have fresh task/nonce/owner/time identities. It grants no authority to dispatch or mutate the generation. Those fixed in-process tasks have no broker, child-process, mutation, or credential capability. A dispatch id/task id/fence token created only in memory is invalid.
 
-Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. MCP closure first atomically revokes the exact persisted fence token, waits for the broker's matching active-release count to become zero, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true`. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. A global Supervisor ceiling bounds all probes.
+Every automatic/user result first publishes exactly one `ReconciliationProbeEvidenceV1`; its omission digest, Run/wait digest, dispatch digest, kind/ordinal/nonce/start/deadline, current inspector, and observation time equal the persisted in-flight dispatch. `subject_observation` wraps exactly one subject-allowed artifact and rehashes its ref/digest: `McpRecoveryProbeEvidenceV1`, `PublicationProofV1`, or `WorkerRecoveryEvidenceV1`; MCP evidence additionally repeats the same probe-dispatch digest and broker identities. `probe_timeout` is legal only at or after the stored deadline and its ref/digest decodes exact `ReconciliationProbeTimeoutClosureV1`; `closureDigest` omits itself under JCS and all common probe/inspector/dispatch fields equal the wrapper/in-flight state. Same-owner MCP closure irreversibly revokes the exact persisted fence token, joins all matching native release/process/pipe/output tasks, and records the same dispatch/target/token plus `noActiveReleaseForNonce=true` and the complete original retirement root. A strict successor instead uses the distinct creator-process-domain-death plus actual retained-birth cleanup branch described below; it never claims to act on the dead broker's mutex. Publication/worker closure repeats the persisted task id and either proves synchronous cancellation-and-join by its owning live Supervisor or names exact `StateOwnerAcquisitionEvidenceV1(takeover_after_owner_death)` proving that task's owning process died before the successor observed closure. Timeout authorizes no claim that the underlying effect completed or failed. It follows the same unresolved edge and schedule as an unresolved response. A late response for a closed nonce is audit-only and cannot clear a newer nonce or advance the Run. Each completed probe installs the wrapper's ref/digest or atomically applies the subject reducer. There is no public evidence payload, counter reset, automatic ninth probe, invalid ref-without-digest combination, or claim that repeated user inspection must eventually resolve. One global Supervisor ceiling of 16 counts the current in-flight Run wait pointers across worker, publication and MCP probes. Each original dispatch transaction rechecks its complete previously read pointer snapshot and rejects a full or changed snapshot without nonce, attempt or budget mutation; it never proceeds using a stale count. Public `run.reconcile` returns only fixed `RESOURCE_EXHAUSTED(resourceKind='reconciliation_probes',messageCode='run.reconciliation_capacity',retryAfterMs=1000)`; this is backpressure, not automatic retry permission.
+
+Every publication dispatch additionally roots `previousWaitingSubjectRef`,
+the exact durable pending/exhausted wait selected by that revision CAS. The
+strict reader validates this original prior wait, counts, backoff and evidence
+chain rather than inferring history from the newest progress. The fixed target
+contains only the UNKNOWN and optional progress visible when first selected;
+later cleanup progress cannot retroactively change that target. This edge
+grants no new cleanup or execution authority and introduces no separate ledger.
+
+Signed MCP status uses the existing wait/dispatch/Continuation lifecycle. The
+complete original `McpStatusProbePreparationV1` roots the preceding wait,
+original signed registry/profile/template/predicates and logical key, exact
+status request/target and fixed native recipe bytes, plan/spec, original real
+Supervisor/controller identities, nonce and its unchanged 30-second deadline.
+These source artifacts contain no later in-flight wait ref or dispatch digest:
+the preparation is published first, the dispatch roots it, the in-flight wait
+roots that dispatch, and only after its original Run transaction commits may
+native purpose 3 create its exact bound input. A partial/missing/replaced birth
+continues recovery waiting; path absence or matching content cannot adopt it.
+No Worker parent, Run/Admin effect grant, network, credential or persistent
+writable mount is present. The fixed protocol permits only initialize,
+initialized, complete tools/list and the distinct signed read-only status call.
+The original registered `mcp_server` and argv remain the profile identity.
+The status scope runs the independently signed `mcp_recovery_adapter` as
+its actual stdio program, with the exact profile argv and fixed frames.
+Its launch spec, sealed executable, mount and native recipe bind the adapter's
+same bytes and digest. The original signed worker init helper remains a
+third executable with its own role and digest. Native reservation and retained
+birth verification bind the adapter digest to the actual stdio program and
+reject a substitution of the helper or the registered server.
+
+Before the independent status query, a retained original effect owner may be
+released only after the complete original `UNKNOWN`, full-once settlement and
+actual native retirement have been validated against the durably committed
+exact `mcp_reconcile` wait. The same original owner closes its real effect fence,
+acknowledges the actual joined process/pipe/output/FD domain and closes its held
+input through the existing physical acknowledgement. A failed acknowledgement
+retains that original receiver for the next attempt to finish the same release;
+it does not create another wait, query, effect result, charge or execution
+permission. Absence of a current local owner creates no retirement evidence.
+
+`statusCaptureRef/statusCaptureDigest` separately root complete raw protocol
+captures and the exact safe response projection; `statusResponseRef/Digest`
+root the actual canonical status response, never the original effect payload.
+The capture roots one exact `cliq-mcp-stdio-recovery-retirement-v1` record with
+`linux_original_join`. This branch binds the same original native owner join,
+full lifecycle bytes and projection, and real containment death or no-spawn.
+An unresolved `linux_successor_cleanup` binds the unchanged complete original
+birth and progress bytes, separate actual current-checker cleanup, strictly
+newer StateOwner, and actual original PID/start death in the nontransferable
+`linux_installed_native_creator_process_v1` domain. Its receipt contains the
+new checker evidence and the original identity. The original creator still
+alive, incomplete original records, unjoined resources, or uncertain cleanup
+leaves the wait. The successor reobserves original process death at the unique
+close transaction at or after the original deadline.
+
+For purpose 3 only, a complete bounded payload inside authenticated native IPC
+may be refused for malformed JSON, a protocol mismatch or finite NoEcho. The
+original broker discards the refused output while still enforcing its byte
+ceiling and collecting actual output ACKs, both EOFs and client join. Its
+ordinary join, result capture and release fence still refuse this response.
+The distinct `linux_original_response_unavailable` retirement requires the
+same original native broker, binding and revoked token, zero active releases,
+authenticated full physical and output retirement within Stop2, and the
+separate continuously held original native guard at commit. The durable
+record carries fixed `native_response_refused` and the native lifecycle and
+retirement references. Refused response bytes and their digest are excluded.
+Incomplete native IPC, allocation or hash failure, output overrun, and
+uncertain resource retirement leave the wait.
+
+`linux_successor_response_unavailable_cleanup` requires the original complete
+kind-9 native progress that recorded refused output, owner drain and output
+retirement. It uses the same strict successor death and actual cleanup proof
+as `linux_successor_cleanup`. Both refused-response variants may appear only
+on the original timeout or actual owning cancellation closure, with no
+`lateStatusCaptureRef/Digest`. Only the original owner can close early on
+shutdown. Effect disposition, full-once charge, original nonce/deadline and
+the counted probe schedule are preserved.
+
+A safe actual response is retained before projection. Its full protocol,
+schema and independently signed predicates are reevaluated from complete raw
+bytes before resolution. Only a current same-nonce observation and final commit
+strictly before the original deadline may resolve the effect. A received result
+or actual join arriving later is rooted only as `lateStatusCaptureRef/Digest`
+on that same nonce's timeout/cancellation closure; it cannot use a new nonce,
+change charge/frontier or manufacture an old payload. Same-owner shutdown may
+close early only after actual native fence revocation plus complete join, using
+the distinct cancellation branch and a next backoff no earlier than
+`max(originalDeadline,closedAt)`. The eight automatic probes, seven backoffs,
+exhausted-state user probe/replay, READY 5 seconds and Stop 2 seconds are unchanged.
+This MCP probe-domain rule grants no exception to the separate model UNKNOWN
+broker fence/death rule: a still-live original model creator remains waiting.
+The candidate uses normal closed production admission for manual, explicitly
+risk-consented retry, and exact signed stdio reconciliation contracts; it has
+no qualification-only runtime bypass. HTTP cannot borrow a signed stdio status
+profile, and every selected contract retains its exact original signatures,
+claim, native purpose, owner, deadline, accounting and physical closure checks.
+Source/data/compiler tests do not qualify physical cleanup or open a release
+or default-cutover gate; complete installed Linux campaigns and typed retention
+closure must still pass, with every unverified physical case explicit.
+
+Publication, automatic worker-recovery, and MCP inspection have one additional authority-reducing closure for
+graceful Supervisor shutdown, not an early timeout. After synchronous
+cancellation and the actual original task/resource join, its still-owning
+Supervisor may publish `ReconciliationProbeCancellationClosureV1`, format
+`cliq-reconciliation-probe-cancellation-closure-v1`, reason
+`owning_supervisor_shutdown`, with the exact original Run/wait, probe
+kind/ordinal/nonce/dispatch/deadline, inspector, subject and task id. The closed
+subject XOR names the original publication plan/path/attempt, original worker
+launch/containment, or exact MCP broker dispatch/target/fence and retirement
+root; no branch accepts another's fields. MCP carries no inspector task boolean.
+The worker branch permits only its existing automatic probe, not a new public
+user-requested worker inspection capability.
+For publication/worker only, `taskClosure` is the genuine `cancelled_and_joined` branch; neither a
+caller boolean nor successor death can mint it. `closedAt` is the actual joined
+time, which may precede the deadline, and its digest omits only `closureDigest`.
+The wrapper's disjoint `probe_cancelled` variant contains only
+`cancellationReason='owning_supervisor_shutdown'` and that closure ref/digest,
+never subject evidence or timeout fields. It closes the original nonce through
+the same unresolved-count/backoff edge before graceful owner release, without
+resetting a counter, extending the deadline, observing a path outcome or
+granting cleanup/retry. A genuine received outcome takes priority and retains
+its original result/handoff; cancellation cannot overwrite it. A failed join
+or persistence leaves closure incomplete and retains the StateOwner/failure.
+The original two-second stop standard is unchanged; waiting until the
+thirty-second probe deadline is not an implementation of bounded shutdown.
+
+After revocation and join of invocation producers during Supervisor shutdown,
+the still-owning execution installs the ordinary worker-death fence from its
+verified activation and a fresh, exact Run, launch, generation and Journal
+cut. It rehashes the original frontier and activation roots and joins the
+actual worker and its resources before releasing StateOwner. The wait conveys
+unresolved recovery. Full retained-history validation is required before any
+inspection or continuation on that wait.
+
+For worker recovery this closure preserves the original wait, fixed generation
+anchor, Checkpoint, invocation outcomes and all accounting. The original
+automatic probe remains counted. For ordinal `n<8`, the next due time is
+`max(probeDeadlineAt, closedAt) + [1s,5s,30s,2m,10m,30m,1h][n-1]`; ordinal
+eight remains exhausted. Cancellation cannot advance that original schedule,
+promote or retire the generation, provide worker-death evidence, or permit
+another effect. Only the original live owner's actual task receipt can close
+this nonce, before graceful StateOwner release. The existing in-flight-owner
+release guard stays mandatory. A failed persistence retains the original task,
+receipt and owner for the same completion; a crash without durable closure
+still requires the existing genuine owner-death recovery, never a guess.
 
 Dispatch uses two mandatory checks shared by broker, sandbox launcher, model, MCP, verifier, and publish paths. `claimDispatch` reads Run plus `activeWorkerLaunchId` in one SQLite transaction and requires `status='running'`, the exact activated launch/current epoch/identity/generation/containment, unexpired launch lease, no `stopIntentRef`, no cancel flag, `now < deadlineAt`, the highest/current prepared attempt with no prior claim, matching typed frontier/operation, live grant, and matching reservation; it atomically appends the unique claim. Immediately before releasing any target capability or request bytes, `releaseClaimedDispatch` re-reads the same Run plus launch and the live stop/cancel/deadline/grant/frontier/reservation predicates and requires the exact just-created `dispatchId` as current—rather than the now-false “no claim” predicate. Failure closes or reconciles that claim without I/O. Only a successful second check authorizes new I/O.
 
-There is one narrower post-stop gate, `claimRecoveryMaintenance`, and it is not a back door into `claimDispatch`. It runs only inside the trusted publication broker, requires an approved immutable DeliveryPlan and the historical decision/grant binding for that exact plan (the productive grant may now be expired), an active StopIntent, no live semantic publication claim, and an exact `abortOperations` entry whose referenced mkdir receipt proves this delivery created the directory. It prepares/claims a zero-budget `opKind='publish', ReplayClass='reconcile'` maintenance attempt using the Run's current monotonic `leaseEpoch`, current Supervisor instance, and no worker-launch authority, then allows only descriptor-relative `rmdir` of that exact proven-empty directory plus fsync/evidence. `releaseRecoveryMaintenance` rechecks those predicates and rejects any file write, desired-path create/replace/delete, nonempty/unexpected directory, or target drift. Completing cleanup inside an already-claimed leaf uses that leaf's existing claim and a similarly bounded recovery continuation; it never creates a second claim. These two paths are the only mutation exceptions after stop/deadline.
+There is one narrower post-stop gate, `claimRecoveryMaintenance`, and it is not
+a back door into `claimDispatch`. It runs only inside the trusted publication
+broker, requires an approved immutable DeliveryPlan and the historical
+decision/grant binding for that exact plan (the productive grant may now be
+expired), an active StopIntent, no live semantic publication claim, and an exact
+`abortOperations` entry whose referenced mkdir or directory-producing replace
+receipt proves this delivery created the directory. It prepares/claims a
+zero-budget `opKind='publish', ReplayClass='reconcile'` maintenance attempt using
+the Run's current monotonic `leaseEpoch`, current Supervisor instance, and no
+worker-launch authority. This allows only descriptor-relative no-replace
+quarantine of that exact proven-empty directory into its original claim's
+fixed private `preimage`, followed by actual identity/emptiness validation,
+CAS preservation, the genuine durable PathProgress barrier and exact private
+rmdir/fsync/evidence/arena retirement. `releaseRecoveryMaintenance` rechecks
+those predicates and rejects productive file writes, create/replace/delete
+outside that exact empty-directory maintenance envelope, nonempty/unexpected
+directories, or target drift. A last-cut unexpected displaced inode remains
+retained and unknown, never cleaned. Completing cleanup inside an
+already-claimed leaf uses that leaf's existing claim and a similarly bounded
+recovery continuation; it never creates a second claim. These two paths are the
+only mutation exceptions after stop/deadline.
 
 `assertEvidenceAuthority` is deliberately different. A trusted Supervisor may accept signed broker receipts, target status evidence, or positively inspected containment/process evidence for an already claimed attempt after its lease, grant, deadline, or cancellation state changed; expiry cannot erase what happened. It validates the immutable request/claim/original epoch and evidence provenance, but authorizes no new productive I/O. If the attempt is still highest/current and the exact `frontierRef` or `WaitingSubject` still matches, one transaction may append its terminal fact, normalized op-kind item, budget settlement, and subject-specific frontier reducer. If a newer attempt/frontier exists, the evidence is audit/billing-only and cannot change Run-visible state. An unauthenticated late worker assertion is never sufficient evidence.
 
@@ -4584,7 +5790,7 @@ No general `EffectPlan` is introduced.
 
 ### 8.4 Workspace Transition Commit Invariant
 
-No transition may make changed generation bytes part of the authoritative Run frontier until the matching post-transition workspace state is recoverable. This applies to every successful `workspace-rollback-retry` tool and every kernel-owned workspace transition whose later agent frontier depends on that mutable generation, including serial application of a mutating child result. Kernel-owned transitions use a stable `opId`, a Journal invocation identity, and `ReplayClass='workspace-rollback-retry'`; they do not bypass the effect contract merely because their code is trusted. The protocol is:
+No transition may make changed generation bytes part of the authoritative Run frontier until the matching post-transition workspace state is recoverable. This applies to every successful `workspace-rollback-retry` tool and every kernel-owned transition whose later agent frontier depends on that mutable generation. The section 12 closed CAS-only `child_merge` is a distinct logical ready-Checkpoint source after real retirement of the old generation; it never adopts changed mutable generation bytes, never mints physical post-effect evidence, and must pass ordinary fresh preparation before execution. Other kernel-owned mutable transitions use a stable `opId`, a Journal invocation identity, and `ReplayClass='workspace-rollback-retry'`; they do not bypass the effect contract merely because their code is trusted. The protocol is:
 
 1. publish a ready pre-effect Checkpoint;
 2. append `prepared` and reserve budget;
@@ -4623,6 +5829,38 @@ It owns:
 
 It does not own a workflow graph, role scheduler, distributed queue, or cloud worker registry.
 
+Integrity-read executors may retain healthy idle threads and their original
+bounded scratch across completed reads, including standalone or small reads.
+They retain no borrowed FD, hash, observation or result between jobs. Every
+original full-byte read, exact EOF, held/named metadata and currentness check
+still runs; total discard scratch remains one MiB and there are at most four
+lanes. A small read without an existing executor keeps the original pipeline.
+Failure/cancellation retires the original executor with full join and unchanged
+retirement-error precedence; selection close keeps its original join barrier.
+This changes neither the sixteen-read authentication path nor any deadline.
+
+Concurrent discard-only CAS verification may share one still-running byte
+reader only after every caller independently opens and checks its actual root
+and file descriptors. Root path/device/inode/owner/mode, content ref and exact
+length, every original file metadata field, and the identical cancellation
+signal must match. The shared file/version key additionally uses exact bigint
+device/inode and nanosecond mtime/ctime; an inexact numeric root identity disables
+sharing. Each caller re-stats its own file before joining and after
+the reader's real exit; all original full-byte hash, per-chunk root, metadata,
+cancellation and close checks remain. Replaced inodes and distinct cancellation
+lifetimes never share. Remove the pending entry before fulfilling any caller;
+subsequent checks reread all bytes. Each caller holds its original bounded slot
+until its own descriptors close. No completed hash, byte buffer, observation or
+permission is cached; diagnostics count the physical bytes once. This does not
+combine installed-image revalidations, alter any transaction gate or deadline,
+or replace independent decoding of each historical claim and result.
+Whole-object recovery checks which have only a content reference use the same
+discard reader for large objects. Their original no-follow open supplies the
+exact size; they retain that same descriptor through the complete read and
+actual join. Small objects retain the existing bounded reader. Both forms
+share the four-slot bound through root/file closure, and neither retains a
+completed verification result.
+
 ### 9.1 Lease, Activation, And Process Containment
 
 The signed `sandbox_root_profile` entry is the closed, acyclic
@@ -4640,7 +5878,10 @@ no file can be required to contain its own complete-byte digest.
 `run.submit` may need trusted Git inspection before a Run or its initial
 Checkpoint exists. This work has the closed `source_inspection` owner below,
 not a fictional Run, an MCP admin probe, or a general process executor. The
-public request/response schemas and admission-key semantics are unchanged.
+original response and admission-key semantics are unchanged. Fresh Git input
+adds only the closed optional `sourceInspectionGrantId` and
+`ignoreReadGrantIds` request selections; no internal ref or native flag is wire
+input.
 One internal `source_inspection_attempts` table owns the whole capture,
 including partial input, the Git process if needed, and final worktree capture:
 
@@ -4690,6 +5931,31 @@ type SourceInspectionInputV1 = {
   inputDigest: string
 }
 
+type SourceInspectionTargetV2 = Omit<SourceInspectionTargetV1, 'schemaVersion' | 'format'> & {
+  schemaVersion: 2
+  format: 'cliq-source-inspection-target-v2'
+  inspectionGrantId: string
+  inspectionReceiptRef: ArtifactRef
+  inspectionReceiptDigest: string
+  ignoreReadConsents: Array<{ grantId: string; receiptRef: ArtifactRef; receiptDigest: string }>
+}
+
+type SourceInspectionInputV2 = {
+  schemaVersion: 2
+  format: 'cliq-source-inspection-input-v2'
+  inspectionId: string
+  targetRef: ArtifactRef
+  targetDigest: string
+  repositoryIdentityDigest: string
+  inspectionGrantId: string
+  inspectionReceiptRef: ArtifactRef
+  inspectionReceiptDigest: string
+  recipe: 'cliq-source-git-inspection-v1'
+  snapshotPolicy: 'ephemeral_native_sealed_shards'
+  resources: SandboxResourceSpec
+  inputDigest: string
+}
+
 type SourceInspectionPlanV1 = {
   launchNonceDigest: string
   containmentPlanRef: ArtifactRef
@@ -4717,6 +5983,22 @@ type SourceInspectionPlanV1 = {
       }
 }
 
+type SourceInspectionProcessIdentityV1 = Readonly<{
+  pid: number; namespaceInitPid: number; processStartToken: string; namespaceInitStartToken: string;
+  cgroupId: string; pidNamespaceId: string; cgroupPopulated: number; remainingTrackedDescendants: number;
+  namespaceInitDeadAndReaped: number; observedAtMs: number;
+}>;
+type SourceInspectionNativeRetirementV1 = Readonly<{
+  observedAtMs: number; inspectionId: string; stagingNonceDigest: string; targetRef: string; inputIntentRef: string;
+  reserved: 0 | 1; blocked: 0 | 1; released: 0 | 1; continued: 0 | 1;
+  origin: 'original_owner_joined' | 'original_birth_current_checker' | 'original_birth_registered_absent_checker'; lastBirthKind: 0 | 2 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12;
+  originalControllerPid: number; originalControllerStartToken: string;
+  cgroupDeviceId: string | null; cgroupId: string | null; launchNonceDigest: string | null;
+  containmentPlanRef: string | null; sandboxLaunchRef: string | null; sandboxLaunchDigest: string | null;
+  containment: SourceInspectionProcessIdentityV1 | null;
+}> & (Readonly<{ snapshotDigest?: never; byteCount?: never; entryCount?: never; shardCount?: never }> |
+  Readonly<{ snapshotDigest: string; byteCount: number; entryCount: number; shardCount: number }>);
+
 type SourceInspectionRetirementEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-source-inspection-retirement-v1'
@@ -4728,13 +6010,32 @@ type SourceInspectionRetirementEvidenceV1 = {
   captureOwnerClosure:
     | { kind: 'local_resources_joined'; stateOwnerEpoch: number; supervisorInstanceId: string }
     | { kind: 'owning_process_dead'; stateOwnerAcquisitionEvidenceRef: ArtifactRef }
-  stagingObservation: 'exact_reserved_root_absent'
+  stagingObservation: 'exact_reserved_root_absent' | 'registered_reserved_root_absent'
   processClosure:
     | { kind: 'not_planned' }
+    | { kind: 'input_not_started'; inputRef: ArtifactRef; inputDigest: string }
+    | { kind: 'source_native_retired'; inputRef: ArtifactRef; inputDigest: string;
+        nativeBirthIdentity: { deviceId: string; fileId: string; ownerUid: number };
+        observation: SourceInspectionNativeRetirementV1;
+        output?: { inspectionOutputRef: ArtifactRef; privateGitStateRef: ArtifactRef } }
     | { kind: 'plan_quiescent'; noSpawnEvidenceRef: ArtifactRef }
     | { kind: 'all_descendants_dead'; processContainmentRef: ArtifactRef; deathEvidenceRef: ArtifactRef }
   observedAt: string
   evidenceDigest: string
+}
+
+type SourceInspectionRetirementHandoffV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-inspection-retirement-handoff-v1'
+  originalAttemptRef: ArtifactRef
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  captureOwnerClosure: SourceInspectionRetirementEvidenceV1['captureOwnerClosure']
+  processClosure: SourceInspectionRetirementEvidenceV1['processClosure']
+  outcome: Extract<SourceInspectionAttemptV1, { phase: 'retired' }>['outcome']
+  nativeLifecycleRef?: ArtifactRef
+  observedAt: string
+  handoffDigest: string
 }
 
 type SourceInspectionAttemptBaseV1 = {
@@ -4742,7 +6043,7 @@ type SourceInspectionAttemptBaseV1 = {
   inspectionId: string
   attempt: 1
   principalId: string
-  method: 'run.submit'
+  method: 'run.submit' | 'run.apply'
   admissionKey: string
   admissionIntentDigest: string
   targetRef: ArtifactRef
@@ -4757,20 +6058,19 @@ type SourceInspectionAttemptBaseV1 = {
   createdAt: string
   deadlineAt: string
   updatedAt: string
+  retirementHandoffRef?: ArtifactRef
   rowDigest: string
 }
 
 type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
-  | {
+  | ({
       phase: 'capturing'
-      inputRef?: never
-      inputDigest?: never
       plan?: never
       processContainmentRef?: never
       retirementEvidenceRef?: never
       retiredAt?: never
       outcome?: never
-    }
+    } & ({ inputRef?: never; inputDigest?: never } | { inputRef: ArtifactRef; inputDigest: string }))
   | {
       phase: 'prepared'
       inputRef: ArtifactRef
@@ -4800,6 +6100,7 @@ type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
         | { kind: 'failed' | 'cancelled'; errorResponseRef: ArtifactRef }
     } & (
       | { inputRef?: never; inputDigest?: never; plan?: never; processContainmentRef?: never }
+      | { inputRef: ArtifactRef; inputDigest: string; plan?: never; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef?: never }
       | { inputRef: ArtifactRef; inputDigest: string; plan: SourceInspectionPlanV1; processContainmentRef: ArtifactRef }
     ))
@@ -4807,7 +6108,7 @@ type SourceInspectionAttemptV1 = SourceInspectionAttemptBaseV1 & (
 ```
 
 The table contains one exact row of this union per
-`(principalId,method='run.submit',admissionKey)`: `inspection_id` is its primary
+`(principalId,method,admissionKey)`, with method `run.submit|run.apply`: `inspection_id` is its primary
 key; `principal_id`, `method`, `admission_key`, `admission_intent_digest`,
 `original_request_id`, `original_request_digest`, `workspace_identity_digest`,
 `phase`, `row_version`, and canonical `row_json` are the other ten columns. It
@@ -4816,7 +6117,7 @@ non-retired row per workspace identity. Indexed columns equal the decoded row,
 including the target's workspace identity; the two immutable original-request
 columns instead equal the target's canonical retained original-request bytes,
 which replay must verify before adoption. No second lifecycle table exists.
-`inspectionId = H('cliq-source-inspection-v1',principalId,'run.submit',admissionKey,admissionIntentDigest)`.
+`inspectionId = H('cliq-source-inspection-v1',principalId,method,admissionKey,admissionIntentDigest)`.
 `attempt` is literally one: there is no automatic retry, new nonce, backoff,
 attempt counter, or reset after failure. Row CAS increments `rowVersion` by
 one; identity/target, original owner, staging reservation, creation/deadline,
@@ -4848,6 +6149,16 @@ and it cannot begin while an older possibly live inspection for that exact
 workspace remains unretired. No accepted Run exists before the ordinary
 initial-Checkpoint/admission transaction.
 
+Fresh ordinary Git Sessions retain the existing `Session.schemaVersion=1` and
+SQL fields. Their `repositoryIdentityRef` instead names exact
+`RepositoryIdentityV2`: it has `schemaVersion=2`,
+`format='cliq-repository-identity-v2'`, and all V1 descriptor fields but **no**
+`objectFormat`. The root and literal in-root `.git` directory are held and
+identity-checked without opening, statting, or reading config, HEAD, index,
+refs, or objects. Historical V1 identities still require their original
+object-format member and exact schema; a missing V1 member is not V2. No
+Session version column, parallel Session, or second lifecycle ledger is added.
+
 The Supervisor authenticates the principal, decides Workspace Trust, validates
 the original normalized request and exact Session/workspace identity, then
 checks the existing source-read authorization before reserving this row. The
@@ -4861,8 +6172,44 @@ reserved against competing admissions while this attempt is live, remains
 revocable, and is consumed only by the existing final `run_admission` receipt
 transaction, never by Git inspection itself. Ordinary projection reads have
 the same descriptor-proven tracked/nonignored rule as section 15.
+Git metadata inspection additionally requires the explicit default-deny
+`authorization.create` decision `source_git_inspection`, purpose
+`source_inspection`. Its target binds the principal's exact Session,
+workspace/repository descriptor refs and digests, fixed scope
+`in_root_git_metadata_and_objects`, fixed recipe
+`cliq-source-git-inspection-v1`, retention
+`ephemeral_raw_reachable_only`, all nine original resource ceilings, and the
+same signed RuntimeBundle's exact `source_git_inspector` entry identity. It
+does not grant a Run tool, workspace include/read scope, Git execution of a
+caller program, network, or credential access. Its one use and receipt
+consumer `{kind:'source_inspection',inspectionId,admissionIntentDigest}` commit
+atomically with the original `capturing` row. Rollback leaves both unused; a
+consumed grant cannot authorize another capture. Original create/revoke
+request replay and P/C time-fence semantics remain unchanged. Revocation only
+affects unused consent; a consumed receipt is immutable history, not a still
+active or renewable grant. The original attempt's cancellation/deadline and
+fresh fences continue to govern capture. Independent ignored/include read
+grants use the same first-SourceInspection consumption timing specified in
+section 10.5; final Run admission binds that original receipt without consuming again.
+Rule-source capture is distinct from an ignored workspace include. Optional
+`ignoreReadGrantIds` selects at most 128 unique independent `read_scope/source`
+grants for exact `entry` paths `.git/info/exclude` or an in-root `.gitignore`.
+Each must name the same principal, Session and workspace digest. It authorizes
+only freezing that rule file into `FrozenIgnoreRulesV1`, not the files a rule
+matches, Git input, a tool read, or a model include. Their byte-sorted exact
+grant/receipt/digest tuples belong to TargetV2; their ordinary
+`source_inspection` receipts commit once in the same `capturing` transaction.
+The transaction rechecks every original grant row and expiry; rollback
+consumes none. The attempt deadline also cannot exceed any selected rule-read
+grant expiry. The optional target `expectedDigest` is checked against the
+actual held rule bytes before publishing the frozen rules. Missing permission
+never permits a rule-source read, duplicate path scopes and unnecessary grants
+fail, and consumption cannot be reused for final `run_admission` or a later
+capture. Tracked rule sources may use only the independently validated retained
+Git index's ordinary tracked-source permission. Ignored includes retain their
+separate exact `source_inspection` receipt and atomic first-capture commit rule.
 `deadlineAt` is the earlier of `createdAt + normalized Run budgets.wallTimeMs`
-and every read grant expiry used by this attempt; it is finite and never
+and every inspection/read grant expiry used by this attempt; it is finite and never
 extended. The later admitted Run still uses its ordinary admission clock.
 
 An empty, same-user `0700` staging directory is natively reserved under the
@@ -4877,16 +6224,124 @@ and file/tree/parent fsync are mandatory. No callback, numeric caller FD,
 handcrafted manifest, boolean, or schema-valid artifact substitutes for these
 observations.
 
-For Git, capture first freezes only the authorized raw Git metadata/object
-bytes and ignore-source bytes into `SourceInspectionInputV1.entriesRef`, an
-exact `WorkspaceEntryManifest`. Its tree digest uses the existing entries
-formula, with complete byte/count closure. Paths form only the fixed input
-projection needed by the recipe; config includes, hooks, helpers, alternates,
-shared directories, reflogs, credentials, and unrelated worktree payload are
-not interpreter input. Safe synthesized config is only the existing
-`SanitizedGitConfigV1` allowlist. Do not copy the whole worktree first and
+Historical `SourceInspectionInputV1` keeps its exact old raw-CAS meaning;
+fresh Git captures never reinterpret it. New `SourceInspectionInputV2`
+(`format='cliq-source-inspection-input-v2'`) freezes only the authorized intent:
+inspection id, target ref/digest, repository identity digest, inspection grant
+id and receipt ref/digest, fixed recipe, all nine original resources,
+`snapshotPolicy='ephemeral_native_sealed_shards'`, and its omission
+`inputDigest`. Its exact `inputRef/inputDigest` pair is published as inert
+data and enters the **first capturing transaction** with the original one-use
+consent. Native input borrowing/reservation cannot precede that commit. This
+needs no same-phase update, additional table or source bytes before consent.
+Prepared preserves the exact first pair and adds its real plan. It has no
+completed snapshot, object format, entriesRef,
+treeDigest, raw path/OID list, or invented content ref. Raw Git metadata and
+objects are copied only after active release into the original native-owned
+execution domain's bounded, streaming, deterministic memfd shards. Each shard
+obeys the original per-file, aggregate storage/memory, and FD ceilings; all
+writers close and WRITE/GROW/SHRINK/SEAL are actually obtained. Allocation and
+first-touch are charged to that domain, not to Supervisor memory disguised by
+a byte cap. No raw config, inert remote/user/branch value, unreachable object,
+or per-object raw input listing enters durable CAS. Only the expressly scoped
+aggregate snapshot digest/counts and real original lifecycle identities may
+be retained. The original staging birth/plan/containment remains durable;
+ephemeral snapshot payload is intentionally not crash-durable. Restart is
+cleanup-only and cannot reconstruct, resume, or release this old input.
+
+Source retirement preserves the original native birth and its closed progress
+projection in `source_native_retired`, including original controller PID/start,
+exact cgroup device/id and plan/spec/nonce when present, actual namespace/init
+whole-domain death when created, original sealed-snapshot counts and the real
+all-reader/CAS join. The fixed `SourceInspectionNativeRetirementV1` fields are
+the source native interface's complete original birth projection: origin is
+`original_owner_joined|original_birth_current_checker|original_birth_registered_absent_checker`; local completion has
+only fully joined birth kind `0|12`, while a successor may describe only a
+complete validated original prefix. Snapshot requires released capture;
+continued Git requires the same sealed snapshot. Current-checker observations
+never claim possession or closing of old descriptors. Captured outcomes also
+bind the original four-file inspection output to the exact private-Git graph;
+retained readers fully validate every schema and binary leaf again.
+
+Whenever the attempt retains a plan, that audit reads the complete original
+containment-plan and SandboxLaunchSpec CAS bytes even if the native cleanup
+prefix predates blocked creation and therefore carries no plan/spec strings.
+It recomputes both semantic digests and compares the entire fixed source
+recipe: original owner/target/input/nonces, reserved backend, isolated root,
+signed runtime and selected complete toolchain/helper closure, mounts,
+environment, profile and resource limits. Original plan/spec creation times
+are causal and remain within the capture deadline. A row digest or matching
+reference string cannot substitute for missing or corrupt launch artifacts.
+The inspector is bound to its historical trusted StateOwner before this data
+audit; the reader cannot establish a new trust key or execution capability.
+
+Before staging removal, that same attempt installs exactly one
+`retirementHandoffRef`. It names the canonical closed handoff above and retains
+the complete original pre-handoff attempt, actual joined closure and candidate
+capture/refusal, original target/input/plan/containment, and actual joining
+inspector. A native closure also requires `nativeLifecycleRef`: the complete
+bounded original v2 native birth/header/controller/progress chain, exported
+only after the original producer or actual successor checker joins. This
+contains fixed lifecycle facts, never raw config, URLs or per-object input
+lists. Full native decoding rehashes every byte/record and binds original
+Supervisor PID/start, StateRoot/runtime/source-parent/staging, workspace and
+Git descriptor identities, original birth-file device/inode, controller,
+namespace/process/CG/nonce/plan identities, progress and sealed-input counts.
+Present native birth must still be the original inode, including after a
+byte-identical file replacement. Only a separate sealed anonymous snapshot is
+used for an already-absent stage; it cannot claim to hold the old birth FD.
+
+The handoff and all original metadata commit before any stage deletion. Schema
+7 changes only the existing update trigger: a first same-phase handoff is
+once-only, input pairs remain immutable from the first capturing transaction,
+and a handed-off attempt permits only monotone cancellation, cleanup and its
+sole retired transition. It cannot resume, capture, continue, acquire another
+nonce, or replace its candidate with a second execution. Original final-cut
+checks may still downgrade capture to a refusal; a successor always retires
+an interrupted capture as failed/cancelled and never adopts capture success.
+
+After a crash, a true no-input/no-native-attempt handoff plus exact original
+StateOwner death permits ordinary current staging cleanup. Native staging
+presence is observed only to select its fixed cleanup branch; each constructor
+independently rechecks original identity, and drift refuses. A present stage
+uses only its original full birth. An absent stage requires the previously
+registered complete handoff and exact snapshot bytes, true original
+Supervisor/controller/descendant death, original cgroup and controller-locator
+absence, and actual current parent fsync and checker join. Its distinct origin
+and `registered_reserved_root_absent` repeat the same original birth/progress
+and never claim an old unlink or old descriptor close. Returned snapshot bytes
+must hash to the original registered ref again before the sole terminal CAS.
+Missing, partial, replaced, unregistered or mismatched evidence stays waiting;
+path absence and isolated CAS content never authorize retirement or execution.
+
+`input_not_started` is legal only for the original program-owned task after it
+has revoked further work and actually joined without ever requesting a native
+input. It repeats the first input pair, has no plan/containment and cannot
+assert capture success. A successor cannot infer it from an absent directory,
+owner death, missing native birth, partial record or an already removed stage.
+Such uncertainty remains recovery-required. Staging is removed only after all
+native producers and actual consumers join; uncertain retirement preserves
+the original birth instead of deleting its recovery provenance.
+
+Paths form only the fixed input projection needed by the recipe; config
+includes, hooks, helpers, alternates, shared directories, reflogs, credentials,
+and unrelated worktree payload are not interpreter input. After original
+source cursors and writable snapshot aliases close, the same signed fixed
+Node helper alone parses the bounded raw config in that contained domain.
+Exactly inert `remote.<name>.url|pushurl|fetch`, `branch.<name>.remote|merge`,
+and `user.name|email` may be parsed and discarded in memory; they are never
+passed to Git, returned, or persisted. Safety keys retain their strict closed
+values; unknown/dangerous keys and inherited property names are refused.
+Git receives only fresh synthesized `SanitizedGitConfigV1` allowlist bytes,
+never the original config FD, strings, source directory, or Supervisor heap.
+Ignore/include classification and its separate authorization are not supplied
+by this metadata grant. Do not copy the whole worktree first and
 authorize it retrospectively: the verified canonical index and frozen ignore
 classification determine which exact worktree bytes may then be captured.
+An existing `.git/info/exclude` without its separately consumed rule-read
+scope fails during the first metadata-only walk, before opening or reading
+the file. A successful null rule output means actual absence; it never means
+that an existing rule was silently ignored.
 The final native capture rechecks the held live workspace/repository and
 input/source identities; drift, expiry, revoked authority, partial reads, or
 unsupported Git forms fail this single attempt without silently restarting.
@@ -4897,7 +6352,7 @@ no Git process, has no input/plan/actual-containment fields, and advances
 Git's process path is exactly `capturing -> prepared -> active -> retired`;
 failure/cancellation may retire any prefix only with its corresponding proof.
 Before `prepared` commits, native code creates and observes the **actual empty
-reserved backend** and retains that identity together with the frozen input,
+reserved backend** and retains that identity together with the frozen input intent,
 exact containment plan, launch spec, nonce, and signed runtime/profile. On
 Linux this is the held exact cgroup directory/id and namespace reservation
 under the observed original subreaper token; on macOS it is the exact reserved
@@ -4911,12 +6366,29 @@ before one-use native release, the Supervisor rechecks current StateOwner,
 exact row/nonce/plan/input/target, Trust/read authority, deadline and no cancel;
 release exposes only this fixed read-only inspection, never a broker or Run
 effect. Replay and successor startup cannot release an old attempt.
+Capture first reports actual sealed-ready aggregate identity on the same
+blocked owner. Before its one-use no-argument fixed-Git continuation, the
+Supervisor repeats the same current owner/authenticated frame/Session/Trust,
+exact active row/input/plan/receipt, held-root currentness, cancellation, and
+original absolute-deadline fence. No second grant, retry, new timer, or new
+deadline is created; five seconds is the existing observation-freshness rule,
+not a replacement Git execution budget.
 
-The fixed `cliq-source-git-inspection-v1` launch has `isolated_empty_root`, no
-parent containment, and exactly one `source_inspection_input` mount at
-`/input`. Only digest-verified signed runtime/toolchain executable closures
-are additional read-only mounts. `/output`, `/tmp`, and `/home/cliq` are new
-quota-bounded private ephemeral writable mounts; source, shared `.git`, host
+The fixed `cliq-source-git-inspection-v1` launch has `isolated_empty_root` and
+no parent containment. Historical InputV1 has exactly the original read-only
+`source_inspection_input` mount at `/input`. Fresh InputV2 instead has exactly
+one distinct `source_git_inspection_input` mount at `/scratch/input`, bound to
+its consent-bearing immutable input intent and the same native sealed shards;
+the two mount kinds and paths are not interchangeable. Its one fresh private
+`/scratch` aggregate contains only the fixed input, writable repository,
+output, home and tmp subtrees, with input independently mounted read-only.
+That exact source-only parent/child pair is the sole exception to the general
+nonoverlapping-mount rule; it does not allow arbitrary nested mounts. Mount
+metadata remains unique and byte-sorted. Only the same signed fixed
+non-executable helper at `/runtime/cliq-source-git-inspector.mjs` and the
+digest-verified signed Node/Git/toolchain closure are additional read-only
+inputs. Historical InputV1 keeps its original `/output`, `/tmp`, and
+`/home/cliq` private mounts, not a fallback for InputV2. Source, shared `.git`, host
 home, StateRoot, ambient PATH/environment, secrets, sockets, and network are
 unreachable. Input is immutable and descriptor-held; output is never read as
 authoritative before complete descendant death. The selected RuntimeBundle
@@ -4943,6 +6415,16 @@ IPC/invocation-output ceilings. Input, target, plan, actual containment,
 retirement, errors and captured result closures are GC roots while the attempt
 or its retained response/audit exists; an accepted Run retains its ordinary
 source roots independently.
+
+The fixed four output files are artifacts, not control/inline JSON or native
+IPC frames. `inspection.json` is exact canonical JSON bounded by the smaller
+of the original `maxInvocationOutputBytes` and `maxSingleFileBytes`; its
+purpose-specific closed graph schema also enforces the original 100,000-entry
+inventory ceiling and fixed nesting. Duplicate keys or noncanonical spellings
+fail exact byte comparison. This does not widen the control/inline 1 MiB,
+depth-32 or 10,000-container-entry limits. All downstream artifact readers must
+accept and fully validate the same declared supported graph or reject capture
+before admission; a larger metadata decoder alone is not repository support.
 
 Retirement is the only point that permits result/error publication and frees
 the source reservation. Local completion/cancellation first revokes release,
@@ -4996,6 +6478,21 @@ type ProcessContainmentOwner =
       opId: string
       attempt: number
       dispatchId: string
+    }
+  | {
+      kind: 'reconciliation_probe'
+      runId: string
+      principalId: string
+      originalOpId: string
+      originalAttempt: number
+      originalDispatchId: string
+      previousWaitingSubjectRef: ArtifactRef
+      probeKind: 'automatic' | 'user_requested'
+      probeOrdinal: number
+      probeNonceDigest: string
+      brokerDispatchId: string
+      supervisorInstanceId: string
+      stateOwnerEpoch: number
     }
   | {
       kind: 'admin_probe'
@@ -5137,7 +6634,7 @@ type SandboxExecutableIdentityV1 =
       runtimeBundleRef: ArtifactRef
       runtimeBundleManifestDigest: string
       executableId: string
-      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'local_inference' | 'platform_helper'
+      role: 'worker' | 'tool_adapter' | 'mcp_server' | 'mcp_recovery_adapter' | 'local_inference' | 'platform_helper'
       executionPath: string
       executableDigest: string
     }
@@ -5195,6 +6692,17 @@ type SandboxProcessInvocationV1 =
       stdio: SandboxCapturedStdioV1
     }
   | {
+      kind: 'reconciliation_probe'
+      purpose: 'mcp_recovery'
+      recipe: 'cliq-mcp-readonly-status-v1'
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      argvCwdSource: 'trusted_recipe_decode_of_signed_status_target_and_original_probe'
+      stdio: { stdin: 'mcp_framed'; stdout: 'mcp_framed'; stderr: 'captured'; extraFileDescriptors: 'none' }
+    }
+  | {
       kind: 'local_inference_entrypoint'
       purpose: 'local_inference_service'
       recipe: 'cliq-local-inference-entrypoint-v1'
@@ -5214,6 +6722,12 @@ type SandboxProcessInvocationV1 =
       argvCwdSource: 'trusted_recipe_decode_of_request_and_target'
     } & (
       | { purpose: 'tool'; recipe: 'cliq-tool-launch-v1'; stdio: SandboxCapturedStdioV1 }
+      | {
+          purpose: 'tool'
+          recipe: 'cliq-builtin-tools-v1'
+          privateGitProtection: 'existing_read_only'
+          stdio: SandboxCapturedStdioV1
+        }
       | { purpose: 'verifier'; recipe: 'cliq-verifier-command-v1'; stdio: SandboxCapturedStdioV1 }
       | {
           purpose: 'mcp_stdio'
@@ -5300,6 +6814,14 @@ type SandboxMountV1 =
       purpose: 'input'
     }
   | {
+      kind: 'source_git_inspection_input'
+      inputRef: ArtifactRef
+      inputDigest: string
+      targetPath: '/scratch/input'
+      access: 'read_only'
+      purpose: 'input'
+    }
+  | {
       kind: 'run_generation'
       generationRef: ArtifactRef
       canonicalRootRelativePath: string
@@ -5376,6 +6898,27 @@ type SandboxLaunchSpecV1 =
       targetRef?: never
       targetDigest?: never
       parentWorkerContainmentRef?: never
+    })
+  | (SandboxLaunchBaseV1 & {
+      owner: Extract<ProcessContainmentOwner, { kind: 'reconciliation_probe' }>
+      purpose: 'mcp_recovery'
+      executable: Extract<SandboxExecutableIdentityV1, { kind: 'runtime_bundle' }> & { role: 'mcp_recovery_adapter' }
+      processInvocation: Extract<SandboxProcessInvocationV1, { kind: 'reconciliation_probe' }>
+      requestRef: ArtifactRef
+      requestDigest: string
+      targetRef: ArtifactRef
+      targetDigest: string
+      operationGrantRef?: never
+      parentWorkerContainmentRef?: never
+      adminTargetRef?: never
+      adminTargetDigest?: never
+      probePayloadCoreRef?: never
+      sourceInspectionTargetRef?: never
+      sourceInspectionTargetDigest?: never
+      sourceInspectionInputRef?: never
+      sourceInspectionInputDigest?: never
+      serviceSpecRef?: never
+      serviceSpecDigest?: never
     })
   | (SandboxLaunchBaseV1 & {
       owner: Extract<ProcessContainmentOwner, { kind: 'source_inspection' }>
@@ -5725,7 +7268,7 @@ type WorkerPreparation = {
   generationCreationNonceDigest: string;
   generationId: string;
   generation?: { generationRef: ArtifactRef; generationIdentityDigest: string };
-  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string };
+  controller?: { birthIdentityRef: ArtifactRef; birthIdentityDigest: string; privateGitInputRef?: ArtifactRef };
   reservation?: { deviceId: string; fileId: string; ownerUid: number };
 };
 
@@ -5805,10 +7348,44 @@ type WorkerLaunch = PreparingWorkerLaunch | RetiredWorkerPreparation | BoundWork
 physical allocation. It contains only logical ownership and fixed locators;
 it has no worker, lease, launch spec, broker release or private-write authority.
 The original owner registers the actual generation identity and materializing
-row before copying, then the actual controller and reservation births. Only a
+row before copying. It registers the original controller and reservation births
+before any native Git preparation, and otherwise before worker launch. Only a
 complete readonly snapshot, reproduced plan/spec and genuine original BIND
 allow promotion to `reserved`, without resetting the preparation deadline.
 An interrupted or substituted birth is recovery-required, never backfilled.
+
+For an ordinary Git Checkpoint, the same controller registration transaction
+also retains `preparation.controller.privateGitInputRef`, the canonical existing
+`cliq-source-git-inspection-output-v1` data reconstructed from that original
+Checkpoint's completely read private Git closure. It is not an old inspection
+proof. The admitted SourceManifest classification index is independently
+retained and may differ from the current private Checkpoint index. The original
+generation birth and original WorkerReservation descriptors bind the native
+preparation input to Run/Session/Checkpoint, generation identity/creation nonce,
+launch/spawn/activation nonces, original StateOwner row and actual Supervisor
+PID/start identity, repository identity, and exact resource profile.
+
+The versioned preparation prelude lives in that same reservation before its
+existing final binding and five worker frames. It first registers ownership,
+then records real containment/fork/READY progress, transfers exactly four
+fully hashed CAS leaves (metadata, canonical index, normalized reachable pack,
+pack index), seals all four, and releases only the fixed signed CAS-only Git
+recipe. The recipe has no live-source, config, rule, host-Git, command or network
+input. Fresh index-pack/fsck/type/reachability/all-and-only checks must pass;
+its outputs retain the original four byte identities rather than assuming a
+new repack is byte-identical. Original readers, CAS streams, runtime resources,
+processes and containment all actually join before native normal completion.
+Only that exact original opaque completion can authorize copying those bytes
+into the original generation. A schema-valid manifest, checksum, old source
+receipt, successor cleanup receipt, caller boolean or callback cannot do so.
+The completed generation is fully descriptor-rewalked with exact directory
+and file identities, modes, all bytes and no extra private Git entries before
+the existing readonly snapshot and final BIND. Any partial or half-written
+prelude, lost original input, substituted birth, aborted task or incomplete join
+retains recovery waiting; it never becomes not-attempted, reconstructed final
+binding, sealed generation or permission to execute. Shutdown revokes and joins
+the same controller's preparation before closing generation/reservation
+resources, under the unchanged two-second deadline.
 
 Preparation retirement uses the closed `cliq-worker-preparation-retirement-evidence-v1`
 union. Its `born` branch binds the original preparing row, generation birth,
@@ -5822,6 +7399,39 @@ branch accepts only the still-held original materialization owner's joined
 receipt whose allocation-request latch was never entered. A failed native
 allocation attempt, absent path, row count or owner loss cannot mint that
 receipt. Neither branch is worker no-spawn, preactivation failure or sealing.
+
+The `born_current_checker` branch is the same preparing retirement inspected
+by a strictly later StateOwner; it never adopts the original producer. Its
+read-only context first fully validates the original Run/Checkpoint, registered
+generation, controller/reservation and four-leaf private Git closure, and the
+retained StateOwner death/acquisition chain. The original immutable active-row
+digest is reproduced only as inert prelude comparison data. Productive recovery
+and original preparation release still reject that dead owner.
+
+A genuine same-lock retained input accepts only the complete original native
+reservation prefix and exact generation birth/nonces, original fixed recipe,
+and independently absent original Supervisor and controller PID/start
+identities. The fresh checker may stop and join only the resources registered
+by that prefix, remove their exact empty containment and join itself. It cannot
+append or resume the prelude, produce normal completion, bind a worker, read
+payloads or seal the generation. Missing, half-written (including phases one
+and three), replaced or final-worker-bound reservations remain recovery-required;
+absence alone is not not-attempted. Cancellation or storage failure preserves
+waiting and never fabricates a cleanup result.
+
+The proof retains the actual `original_birth_current_checker` observation,
+original input and fixed recipe, original owner-death acquisition reference,
+and the fresh checker's exact birth and actual join. After the original input
+and reservation descriptors actually close, a genuine same-owner observer
+opens and closes only the registered directory identity, explicitly yielding
+`unverified_preparation`, without claiming a complete tree or Git state. The
+existing no-replace quarantine and sole preparing/generation retirement
+transaction then commit this branch under the current inspector and unchanged
+freshness/time fence. Startup runs this bounded cleanup under the existing
+cancellable admission owner before productive loading, with the original
+one-thousand-active-Run bound, two-second native stop, five-second READY and
+thirty-second preparation constraints unchanged. This does not reset the Run,
+Checkpoint, accounting, attempt, original deadline or lease epoch.
 
 The immutable identity binds PID/start token/spawn/activation nonce **and** an immutable `ProcessContainmentRef` whose backend identity covers every descendant for the lifetime of the activation. The containment owner is a closed union: a worker identity must reference `worker_activation` matching its Run/epoch/launch; an invocation containment must reference `run_invocation` matching the exact durable claim and a parent containment in the same Run activation; an admin row must reference `admin_probe` matching its operation/attempt/principal/method/request/target/Supervisor and may not contain Run/lease/worker fields; a local-inference launch must reference `local_inference_service` matching the exact service/launch/principal/spec/Supervisor row and may not contain Run, Journal, or admin fields; a source inspection must reference `source_inspection` matching its sole attempt/principal/target/original Supervisor and has no Run, worker, Journal, admin or service fields. Worker activations use `run-generation`; admin probes, local inference and source inspection use `isolated-empty-root`; invocation bindings follow the frozen tool contract. A top-level worker, admin, local-inference or source-inspection containment has no parent, while a run invocation's parent chain must terminate at its exact worker activation.
 
@@ -5869,6 +7479,26 @@ extra or changed seed objects, a replaced/closed installation or a different hel
 StateRoot fail closed. Ordinary `fresh_empty` still requires an empty CAS; later
 clean acquisition never reinterprets a grown namespace as a new installed seed.
 This source adds no ledger, Run authority or execution permission.
+
+The initial installer publishes the already verified complete CAS roots in
+their original order, in groups of at most four. Each group reuses the existing
+four CAS durability stages: every actual file write and file sync completes
+before its stage's shared directory sync, and all failures/cleanup join before
+return. Each original root retains its installation-scope identity checks;
+every final root still receives the original full-byte verification. Streamed
+image publication, complete installed/source/CAS revalidation, source and
+destination retirement, and selection publication keep their original order.
+No selection or control channel may use a partial group. This changes no
+installation, readiness, authentication or shutdown deadline.
+
+Retained genesis is evaluated against its original, explicitly supported birth
+schema, including the complete original DDL digest, schema-manifest version and
+empty-database content identity. A later database migration cannot substitute
+the current schema or table count for those original facts. Unknown historical
+recipes and mismatched version/digest pairs fail closed. This historical data
+validation grants no upgrade or execution authority: fresh bootstrap still
+requires the exact opened current schema, and runtime activation must separately
+prove compatibility with every retained nonterminal Run and pinned bundle.
 
 `fresh_installed.modelAuthoritySource` records the original optional companion
 as the closed union `{kind:'none'}` or
@@ -5923,6 +7553,32 @@ CAS loss, channel loss, timeout, or Supervisor crash forces termination and proo
 Strong containment is backend-specific but semantically identical:
 
 - Linux uses bubblewrap with a private PID namespace plus a dedicated cgroup v2 subtree and Supervisor subreaper. Empty-cgroup proof, not `killpg`, establishes descendant death.
+
+The production package builds bubblewrap 0.12.0 from the fixed official
+`bubblewrap-0.12.0.tar.xz` archive (126,452 bytes,
+SHA-256 `9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314`).
+The original RuntimeBundle release signs the actual resulting executable's
+complete bytes, digest and size as the existing `linux_bubblewrap` entry.
+Build provenance retains the exact source, compiler, Meson, libcap, libselinux
+and fixed build options. The build disables neither SELinux support nor any
+recipe check; 0.12.0 has no setuid support. It never selects the host's APT/PATH
+bubblewrap as a fallback. The fixed recipe never uses
+`--not-a-security-boundary`. Unsupported `--size` syntax is a package-build
+refusal, not permission to create an unbounded tmpfs. Ubuntu 22.04's original
+0.6.1 cannot execute this recipe.
+
+Syntax probing is distinct from namespace qualification. Before source or
+private-Git preparation sends READY, its trusted producer opens the actual
+private root and scratch directories, verifies distinct real tmpfs mounts and
+their complete block capacities against the original root/runtime and scratch
+ceilings, and closes both descriptors. Every tmpfs size is rounded down to the
+existing 4096-byte source accounting unit, preventing kernel rounding from
+adding a writable page beyond a non-aligned original ceiling.
+Existing full hashing, confinement,
+resource accounting, five-second READY and two-second stop remain mandatory.
+Only the original real Linux namespace/campaign success can qualify that
+physical behavior; a version string, `--help`, build or ordinary-filesystem
+component cannot do so.
 - macOS uses the bundled, signed Virtualization.framework Linux microVM backend. Each activation has a disposable guest PID namespace/cgroup and no host credentials or writable host mount; guest containment emptiness plus VM termination establishes death. Seatbelt without that VM may protect descriptor-safe non-Run inspection helpers, but it is not a Run execution backend because it cannot provide the required durable worker/claim/all-descendant recovery contract.
 
 Every takeover first stops dispatch and performs one transaction that changes the old launch to `reconciling` with `generationWriteState='fenced_reconciling'`, creates the exact typed `worker_death` subject containing launch/identity/epoch/containment/generation/open attempts, CASes the generation from its current `active|revoking|checkpointing` phase to `fenced_reconciling` while retaining its prior snapshot/launch/epoch and binding that wait ref/digest/source phase/quiesce id, clears the Run's active pointer/lease, and installs the wait. This transaction is mandatory even when positive all-descendant death evidence is already immediately available; there is no direct pointer-bound generation-to-quarantine edge. The inspector then terminates or reobserves the old containment, and only a completed `WorkerRecoveryEvidenceV1` for that installed wait may drive `fenced_reconciling -> quarantined`. No second worker starts before that transition, and no branch falsely quarantines bytes before death proof.
@@ -5987,6 +7643,22 @@ and tool effects are never rebuilt or replayed. An unrelated Run advancing
 the global time fence does not invalidate immutable preparation; an exact
 prepared cut change rejects it. A cold StateStore command has no refresh
 capability and must supply valid current canonical evidence or refuse.
+The original in-memory completion owner may revalidate a strictly monotonic
+StopIntent-only revision change, including its complete retained authority and
+precedence, without rebuilding its prepared seal or resetting the three-attempt
+budget. Every other Run field, original Checkpoint, Journal, item, launch and
+generation cut remains exact. When this happens before final-candidate commit,
+the same owner may only seal the already-accounted workspace at the original
+snapshot's Checkpoint id, preserving the original context and agent frontier
+and appending no candidate. It retains the winning StopIntent/cancel fields;
+deadline must first persist its ordinary StopIntent. D0/S may precede that
+intent because the original containment is already irreversibly dead; D1/C
+ordering and freshness are unchanged. The existing worker-free terminal-stop
+transaction then writes its separate stop Checkpoint and Session outcome.
+This is not candidate/verification/result authority after stop, a cold-owner
+adoption capability, or a seal-only branch for ordinary Supervisor shutdown
+without a StopIntent. Unreachable CAS objects published before stop won remain
+ordinary retained orphans, never registered candidates or success evidence.
 Uncertain death, exhausted freshness, owner/cut loss or clock regression
 publishes no completion, ready Checkpoint or charge. This does not promise
 success under arbitrary disk blocking, nor freshness at the unknowable future
@@ -6046,8 +7718,11 @@ prompt, schema, or audit refs. If more calls remain the transaction preserves a
 tool frontier; otherwise it creates an agent frontier with cause `input`.
 
 `request_input` is the closed built-in control contract: `access='control'`,
-`replayClass='manual'`, adapter id `request_input`, version `1`, and no manifest
-output schema. It is not an ordinary policy action and cannot mint an
+`replayClass='manual'`, `execution.kind='supervisor_control'`, fixed handler id
+`request_input`, and no manifest output schema. Its signed Supervisor entry
+id, actual entry version and complete image digest match the original bundle;
+current handling additionally matches the genuine held StateOwner image.
+It is not an ordinary policy action and cannot mint an
 OperationGrant, prepare/claim a Journal invocation, perform target I/O, or
 charge a tool dispatch. A same-named MCP tool remains an ordinary MCP call.
 Its native input is `{prompt,responseKind,maximumResponseBytes,responseSchema?}`:
@@ -6058,10 +7733,13 @@ Other fields, unsupported schemas and malformed prompts reject the call before
 any call in that batch dispatches. Requesting input does not grant any file,
 command, network or child authority, in any policy mode.
 
-The wait atomically appends the exact InputRequestItem, unchanged-workspace
-ready Checkpoint and input WaitingSubject. If a worker exists, current-inspector
-containment-death and unchanged-workspace snapshot proof seal its generation
-and retire it in that transaction; competing unretired launches forbid waiting.
+If a worker exists, the pure selection first requires current-inspector
+containment-death and unchanged-workspace snapshot proof to seal its generation
+and retire it in the original retirement/Checkpoint transaction. That operation
+fully joins the old resources, then reproduces the input on a new cut; it never
+creates an old-epoch pending input. The worker-free wait atomically appends the
+exact InputRequestItem, unchanged-workspace ready Checkpoint and input
+WaitingSubject. Competing unretired launches forbid waiting.
 The request item is excluded from model content. Answering is a worker-free
 control commit, retaining the exact WaitingSubject, canonical request identity
 and authenticated channel in UserInputPayloadV1. Recovery replays the prompt
@@ -6085,7 +7763,7 @@ batches and uses this same model-message order, not audit-item order.
 
 `run.reconcile(resolution='probe_now')` only asks the trusted Supervisor to run the exact inspection contract already frozen by `ReconciliationSubject` and its immutable Journal/registry/DeliveryPlan/containment graph. It is legal only with no probe in flight. The invocation form exists only for `opKind='mcp'` with `recovery='mcp_reconcile'` and repeats the immutable registry/profile/template/predicate refs and digests; model, verifier, MCP-server, ordinary built-in tool, retry, and manual invocations cannot enter that branch. Model/verifier unknowns use their frozen retry-or-runtime-stop reducers, MCP-server uncertainty uses exact instance/containment lifecycle recovery, publication has its own subject, and worker loss has its own subject. The control request supplies no target, adapter, predicate, or response payload and cannot widen frozen bytes.
 
-An MCP subject observation contains only `McpRecoveryProbeEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Run/wait/op/attempt, automatic-or-user probe ordinal and in-flight nonce, registry/tool/profile/template/predicates, broker dispatch/target, and response ref/digest equal the current subject, outer probe wrapper, and exact secretless status request. The response is bounded canonical JSON under the registered status-output contract. `disposition` is `completed` iff only the completed predicate matches, `failed` iff only the failed predicate matches, otherwise `unresolved`; both/neither/schema failure is unresolved and cannot advance. A completed/failed disposition appends the matching Journal resolution plus normalized result/error and advances the exact tool frontier; unresolved only records the outer evidence and clears the nonce.
+An MCP subject observation contains only `McpRecoveryProbeEvidenceV1`; `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Run/wait/op/attempt, automatic-or-user probe ordinal and in-flight nonce, registry/tool/profile/template/predicates, broker dispatch/target, and response ref/digest equal the current subject, outer probe wrapper, and exact secretless status request. The response is bounded canonical JSON under the registered status-output contract. `disposition` is `completed` iff only the completed predicate matches, `failed` iff only the failed predicate matches, otherwise `unresolved`; both/neither/schema failure is unresolved and cannot advance. A completed/failed disposition appends the matching zero-delta Journal resolution, retains the same original full-once UNKNOWN BudgetSettlement, publishes its dedicated `McpReconciledEffectResultV1` and truthful ordered local result, and advances only the exact original tool frontier. A completed effect whose original payload is unavailable remains Journal `completed` and uses fixed local `TOOL_RESULT_UNAVAILABLE`, `effect='confirmed_completed'`, `originalResponse='unavailable'`; a signed failed effect uses `TOOL_EXECUTION_FAILED`/`confirmed_failed`. Neither invents the old payload, downgrades a completed effect to a failed Journal, recharges/refunds the old UNKNOWN or resends its claim. Unresolved only records the outer evidence and clears the nonce.
 
 A publication subject observation wraps the exact appropriate `PublicationProofV1` branch and validates its path/operation/claim/inspector fields before appending a `PublicationPathResultItem` or retaining the wait. A worker subject observation wraps only `WorkerRecoveryEvidenceV1`; its omission digest, wait/launch/epoch/worker/containment/generation fields, exact `ProcessContainmentDeathEvidenceV1`, current `SupervisorInspectorIdentityV1`, and generation-disposition XOR must match. Its `generationTreeDigest` is the old generation row's last-verified tree, never a claim that unreadable dirty bytes were rehashed. `restored_from_checkpoint` requires `restoredCheckpointId`, `restoredWorkspaceStateRef`, and a distinct `replacementWorkspaceGenerationRef`; that id resolves the same Run's ready immutable Checkpoint, its workspace-state ref equals the evidence, and the replacement decodes an exact preactivated-readonly generation materialized from that Checkpoint. Both disposition branches publish a `WorkspaceGenerationQuarantineEvidenceV1(reason='worker_recovery')` that references this worker evidence and atomically CAS the old generation only from its exact `fenced_reconciling` wait to `quarantined`, retire the old launch, and clear the wait. `restored_from_checkpoint` additionally queues an unstopped Run against the exact replacement; `quarantined` forbids the three replacement fields and leaves the Run queued for later fresh materialization. No branch leaves the old dirty generation active, revoking, checkpointing, or selectable. Waiting `lastProbeEvidenceRef/digest` must decode to `ReconciliationProbeEvidenceV1`, whose wrapped branch is the sole one allowed by its subject. Positive evidence uses `assertEvidenceAuthority`; arbitrary schema-valid bytes, a public-client payload, or a worker assertion are not proof.
 
@@ -6156,7 +7834,7 @@ type SandboxProfileV1 = {
   format: 'cliq-sandbox-profile-v1'
   backend: 'macos_vm' | 'linux_namespace'
   allowedOwners: Array<
-    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection'
+    'worker_activation' | 'run_invocation' | 'admin_probe' | 'local_inference_service' | 'source_inspection' | 'reconciliation_probe'
   >
   filesystemPolicy: 'typed_launch_spec_only'
   hostFilesystemReachability: 'none'
@@ -6274,19 +7952,46 @@ type DependencyPolicy = {
   maxDownloadBytes: number
 }
 
+type DependencyScriptConditionsV1 = {
+  profile: 'npm-ci-v1'
+  lockfilePath: 'package-lock.json'
+  lockfileDigest: string
+  packageManifestDigest: string
+  bindingGyp: { kind: 'absent' } | { kind: 'present'; contentDigest: string }
+  source: {
+    sourceManifestRef: ArtifactRef; sourceManifestDigest: string; sourceRole: 'base' | 'result'
+    projectedEntriesRef: ArtifactRef; projectedTreeDigest: string
+    sourceProjectionRef: ArtifactRef; sourceProjectionDigest: string
+    workspaceEntriesRef: ArtifactRef; workspaceTreeDigest: string; scriptInputTreeDigest: string
+    privateGit: { kind: 'absent' } | { kind: 'present'; stateRef: ArtifactRef }
+  }
+  execution: {
+    runtimeBundleRef: ArtifactRef; runtimeBundleManifestDigest: string
+    guestToolchainManifestRef: ArtifactRef; guestToolchainManifestDigest: string
+    nodeExecutionPath: '/usr/bin/node'; nodeExecutableDigest: string
+    adapterCodeRef: ArtifactRef; npmDataRef: ArtifactRef
+    registryTargetsDigest: string; environmentDigest: string
+  }
+}
 type DependencyInstallScriptsAuthorizationTemplateV1 = {
   schemaVersion: 1
   format: 'cliq-dependency-install-scripts-authorization-v1'
   runId: string
   ownerPrincipalId: string
   workspaceIdentityDigest: string
-  sourceAuthorizationGrantId: string
-  sourceConsumptionReceiptRef: ArtifactRef
+  provenance:
+    | { kind: 'run_admission'; sourceAuthorizationGrantId: string; sourceConsumptionReceiptRef: ArtifactRef }
+    | { kind: 'candidate_approval'; waitingSubjectRef: ArtifactRef; decisionRef: ArtifactRef; responseRef: ArtifactRef;
+        requestId: string; requestDigest: string; candidateOrdinal: number; dependencyPlanRef: ArtifactRef; resultSourceRef: ArtifactRef }
+  scriptConditions: DependencyScriptConditionsV1
   guestToolchainManifestRef: ArtifactRef
   allowedAdapters: Array<DependencyAcquisitionPlan['adapter']>
   lockfilePath: 'package-lock.json' | 'pnpm-lock.yaml' | 'yarn.lock'
   lockfileRef: ArtifactRef
   lockfileDigest: string
+  packageManifestRef: ArtifactRef
+  packageManifestDigest: string
+  bindingGyp: { kind: 'absent' } | { kind: 'present'; contentRef: ArtifactRef; contentDigest: string }
   registryTargetsDigest: string
   maxCandidateGenerations: number
   maxDispatchedAttemptsPerPlan: 1
@@ -6298,6 +8003,10 @@ type DependencyInstallScriptsAuthorizationTemplateV1 = {
 `run.submit dependency.mode='locked'` resolves the public endpoint/credential ids to immutable registration/grant refs, freezes canonical HTTPS endpoint identity plus TLS policy digests, and validates each credential grant is principal-owned and bound to the same endpoint/purpose, exact authority/service revision, secret generation, and external subject. Re-registering an id cannot redirect an admitted Run: every candidate plan copies these frozen refs/digests unchanged, and the broker redeems only the exact still-current frozen-generation platform item against that target or returns authorization-required without dispatch. Kernel Cut accepts one sharp Node layout only: literal root `package.json`, exactly one literal root lockfile, no `workspaces` member, no nested package manifest, and no second supported lockfile. `packageManifest.contentRef/digest` and `lockfileRef/digest` rehash those exact candidate `SourceManifest` file entries. `package-lock.json` selects only `npm-ci-v1`, `pnpm-lock.yaml` only `pnpm-frozen-v1`, and `yarn.lock` only `yarn-immutable-v1`; the selected pinned package-manager entry must exist in the guest toolchain. Missing integrity, nested/workspace layout, ambiguity, or unlocked resolution fails before Run creation/candidate verification rather than invoking a package-manager heuristic. `planDigest = SHA-256(JCS(plan with planDigest omitted))`.
 
 At every FinalCandidate, trusted code derives a new immutable `DependencyAcquisitionPlan` from the **candidate** SourceManifest's exact root manifest/lockfile under that policy and binds it into `VerifierPlan`; it never reuses an admission-time plan against changed files. If scripts are authorized, admission consumes the exact `dependency_install_scripts` `AuthorizationGrantV1` and publishes the template above in the same transaction. `installScriptsGrantRef` names only that template. `registryTargetsDigest = SHA-256(JCS({registryEndpoints,credentialGrantRefs}))`, using the policy's byte-sorted endpoint tuples and byte-sorted unique credential refs exactly; `templateDigest = SHA-256(JCS(template with templateDigest omitted))`. Template workspace/lockfile/toolchain/allowed-adapter/registry-target bytes must equal the policy and admitted source. Its `sourceConsumptionReceiptRef` decodes to the identity-matched consumed grant and exact `{kind:'run_admission',runId,admissionIntentDigest}` consumer; it never binds the final admitted digest, which is computed only after the template and dependency-policy refs exist and then binds the complete closure. `maxCandidateGenerations = RunSpec.budgets.repairAttempts + 1`, and `expiresAt = Run.deadlineAt`. Each script-bearing candidate plan must retain the same lockfile digest and the exact endpoint/credential projection and consumes one of those generation ordinals through its exact Journal-backed `OperationGrantV1`; there is no resettable counter. A changed lock digest cannot reuse the template: scripts remain denied and the Run creates a typed approval subject for that candidate or fails in noninteractive deny mode. Defaults/maxima are 50,000/200,000 packages and 5/20 GiB downloaded. Repository registry config is declarative endpoints only; endpoints/credentials must be pre-registered user ids. The trusted broker fetches HTTPS package artifacts by frozen lockfile URL+integrity into CAS and may use the bounded integrity-GET exception; it passes no secret into the guest. A bundled adapter then performs a networkless, frozen-lockfile install. Install scripts are off by default; an exact lockfile template runs integrity-pinned package code inside the same strong secretless/networkless containment and never grants host access.
+
+Script consent closes the complete original source and interpreter graph, not a lock digest alone. A zero-Run refusal may retain a genuinely captured, fully retired `run.submit` source with paired `dependencyScriptIntentRef` and `admissionErrorResponseRef` on that captured attempt; its original AUTHORIZATION_REQUIRED first response remains immutable. The exact authorization target includes that `sourceInspectionId`. Authorization creation independently rereads the original normalized request, full source/handoff/retirement, signed execution and original endpoint registration/channel/bundle/CA graph. A fresh admission key performs a new capture and consumes the active authorization together with the Run, receipt, template, metadata and first response in the original sole admission transaction. Failed attempts and arbitrary old refs are never capture evidence. Historical reads obtain root data from the real retained owner/lock and trusted release configuration; only activity-owning code may use a genuine active StateOwner and authenticated frame.
+
+For a script-bearing candidate whose complete script inputs are no longer covered by the original admission template, the fixed Supervisor creates a `dependency_install_scripts` approval wait bound to candidate id/ordinal, full plan ref plus its separate semantic digest, original source Checkpoint/Run snapshot, workspace state and result source. The current frozen named-action policy is rerun over `dependency_install_scripts/<lockfileDigest>`. Deny remains deny. An allow disposition is preserved honestly as allow: this additional exact-source consent is still required and is never fabricated as policy ask or granted by mode alone. Scriptless policy never opens this consent path. `run.approve` uses the original principal/channel/request/revision/wait/owner/inspector and P≤C<expiry gates. One transaction registers the decision, excluded-control policy item, decision Checkpoint, first response and metadata. The item has no template ref: the candidate template is uniquely reconstructed from that registered decision and first response, avoiding a cyclic response/context/item/template graph. Its expiry is the requested/default TTL clipped to the Run deadline; admission templates retain expiry at the original Run deadline. The frozen RunSpec policy is not replaced. Each history read reconstructs the whole provenance XOR and exact first-response bytes. Unused expired allows may request new consent; a deny is sticky and an already claimed candidate/plan, including UNKNOWN, cannot receive a new script template or redispatch. The execution owner separately enforces the original one-attempt ordinal and native release gates. Stop may fence the validated wait without manufacturing an approval, template, native death proof or package readiness.
 
 The whole acquisition is one built-in `opKind='tool'`, target `builtin:dependency-acquire`, `ReplayClass='workspace-rollback-retry'`, and one `toolCalls` reservation. Its request binds the complete plan. During it, the candidate source projection is mounted read-only; only plan-declared dependency/cache/temp roots are writable. Install scripts therefore cannot modify candidate source even when authorized. Before completion Cliq rehashes the exact candidate source and requires equality with the verify frontier's `resultSourceRef`; a detected/audited source write or digest drift quarantines the generation and fails as kernel integrity rather than verifying stale bytes. Partial CAS downloads are harmless orphans; a partial install is discarded with the generation.
 
@@ -6380,6 +8089,7 @@ type SourceIncludeClassificationEvidenceV1 = {
   schemaVersion: 1
   format: 'cliq-source-include-classification-v1'
   principalId: string
+  inspectionId: string
   runId: string
   sessionId: string
   workspaceIdentityRef: ArtifactRef
@@ -6389,24 +8099,40 @@ type SourceIncludeClassificationEvidenceV1 = {
   admissionIntentDigest: string
   frozenIgnoreRulesRef: ArtifactRef
   frozenIgnoreRulesDigest: string
+  capturedEntriesRef: ArtifactRef // complete original entries, not a later child/Delivery base
+  capturedTreeDigest: string
   gitIndexRef?: ArtifactRef
   gitIndexTreeObjectId?: string
+  pageRefs: ArtifactRef[] // 1..8192, exact ordinal order
+  entryCount: number // 1..100000
+  entriesDigest: string // SHA-256 of the complete canonical entry sequence
+  observedAt: string
+  evidenceDigest: string
+}
+
+type SourceIncludeClassificationPageV1 = {
+  schemaVersion: 1
+  format: 'cliq-source-include-classification-page-v1'
+  inspectionId: string
+  selectorDigest: string
+  pageIndex: number
   entries: Array<{
     path: string
+    entryKind: 'directory' | 'file' | 'symlink'
     workspaceEntryDigest: string
     deviceId: string
     fileId: string
     linkCount: number
-    classification: 'tracked_in_git_index' | 'nonignored_in_root'
+    classification: 'tracked_in_git_index' | 'tracked_ancestor_in_git_index' | 'nonignored_in_root'
   }>
-  observedAt: string
-  evidenceDigest: string
+  pageDigest: string
 }
 
 type SourceIncludeAuthorizationV1 = {
   schemaVersion: 1
   format: 'cliq-source-include-authorization-v1'
   principalId: string
+  inspectionId: string
   runId: string
   sessionId: string
   workspaceIdentityRef: ArtifactRef
@@ -6414,6 +8140,8 @@ type SourceIncludeAuthorizationV1 = {
   selector: { path: string; scope: 'entry' | 'subtree' }
   selectorDigest: string
   admissionIntentDigest: string
+  capturedEntriesRef: ArtifactRef // complete original typed source artifact
+  capturedTreeDigest: string
   createdAt: string
   authorizationDigest: string
 } & (
@@ -6429,6 +8157,7 @@ type SourceIncludeAuthorizationV1 = {
       kind: 'consumed_user_read_grant'
       authorizationGrantId: string
       authorizationGrantTargetDigest: string
+      consumedGrantSnapshotRef: ArtifactRef // exact original Target snapshot, including expectedDigest
       consumptionReceiptRef: ArtifactRef
       consumptionReceiptDigest: string
     }
@@ -6436,6 +8165,7 @@ type SourceIncludeAuthorizationV1 = {
 
 type SourceProjectionSpec = {
   schemaVersion: 1
+  classificationIndexRef?: ArtifactRef // required for Git; forbidden for non-Git
   matcherVersion: 'cliq-exact-path-v1'
   frozenIgnoreRulesRef: ArtifactRef
   frozenIgnoreRulesDigest: string
@@ -6454,11 +8184,51 @@ type SourceProjectionSpec = {
 }
 ```
 
-`SourceProjectionSpec.projectionDigest = SHA-256(JCS(spec with projectionDigest omitted))`; every SourceManifest `sourceProjectionRef` decodes that exact artifact and `sourceProjectionDigest` equals its member, while every WorkspaceStateManifest copies the same value. `frozenIgnoreRulesRef` decodes only to `FrozenIgnoreRulesV1`; `rulesDigest = SHA-256(JCS(manifest with rulesDigest omitted))`. A Git manifest's optional repository digest is required/equal to the live identity; non-Git forbids it and uses the canonical empty sources/rules arrays. Sources are descriptor-held regular files: `.git/info/exclude` first when present, then every admitted `.gitignore` ordered by `(directoryDepth,canonicalRootRelativePath)` from root to deep; indices are contiguous. Content refs/digests rehash exact UTF-8 bytes. Trusted parsing implements the fixed `cliq-git-wildmatch-v1` profile (Git 2.45 `gitignore` pattern semantics with `/` separators and case-sensitive matching), rejects invalid UTF-8/NUL, and emits contiguous rules in source/line order with normalized base directory, negation, directory-only, anchoring, and pattern fields. For one path, only ancestor-base rules apply and the last matching rule wins; later/deeper sources therefore override earlier sources. SourceManifest and SourceProjection frozen-ignore ref/digest pairs must be identical. Recovery/result construction uses only this parsed artifact, never mutable Git config/files or an ambient Git version.
+`SourceProjectionSpec.projectionDigest = SHA-256(JCS(spec with projectionDigest omitted))`; every SourceManifest `sourceProjectionRef` decodes that exact artifact and `sourceProjectionDigest` equals its member, while every WorkspaceStateManifest copies the same value. `frozenIgnoreRulesRef` decodes only to `FrozenIgnoreRulesV1`; `rulesDigest = SHA-256(JCS(manifest with rulesDigest omitted))`. A Git manifest's optional repository digest is required/equal to the live identity; non-Git forbids it and uses the canonical empty sources/rules arrays. Sources are descriptor-held regular files: `.git/info/exclude` first when present, then every admitted `.gitignore` ordered by `(directoryDepth,canonicalRootRelativePath)` from root to deep; indices are contiguous. Content refs/digests rehash exact UTF-8 bytes. Trusted parsing implements the fixed `cliq-git-wildmatch-v1` profile (Git 2.45 `gitignore` pattern semantics with `/` separators and case-sensitive matching), rejects invalid UTF-8/NUL, and emits contiguous rules in source/line order with normalized base directory, negation, directory-only, anchoring, and pattern fields. The fixed parser permits at most 4096 rule sources, 1 MiB per source, 16 MiB total source bytes and 65536 parsed rules; the original capture/resource ceilings apply independently and can only tighten those limits. A retained consumer completely reads every declared content ref and recomputes this exact parse; a rehashed invented rule array is not accepted. For one path, only ancestor-base rules apply and the last matching rule wins; later/deeper sources therefore override earlier sources. An excluded directory must itself be re-included before any descendant can be re-included; a deeper rule cannot bypass that parent boundary. SourceManifest and SourceProjection frozen-ignore ref/digest pairs must be identical. Recovery/result construction uses only this parsed artifact, never mutable Git config/files or an ambient Git version.
 
-Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal/Run/Session/live workspace ref+digest, selector bytes, and admission-intent digest equal the admitted request/projection. For an ordinary tracked/non-ignored in-root selector, the Supervisor first publishes exact `SourceIncludeClassificationEvidenceV1`, then publishes `builtin_nonignored` with the identical evidence ref/digest and frozen-ignore pair. `evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`; its entries are nonempty, unique, byte-sorted paths and exactly cover the descriptor-walked entries selected for capture. Each `workspaceEntryDigest` equals `SHA-256(JCS(the exact captured WorkspaceEntry))`, the later SourceManifest entry set contains the same entries, and device/file/link-count observations come from the same no-follow descriptors. `tracked_in_git_index` is legal only when both Git-index fields are present, the ref equals the later SourceManifest Git index, and fixed canonical Git-index parsing proves that path tracked; any such entry requires the fields. `nonignored_in_root` re-evaluates under the exact frozen rules and requires a non-ignored result. If no entry is tracked, Git-index fields may be absent; if either Git-index field is present both are required. An ignored in-root selector requires `consumed_user_read_grant`: the supplied `readGrantId` resolves an active principal/workspace/path/scope-exact `AuthorizationGrantV1(read_scope)`, and the admission transaction consumes it once. The artifact's target and receipt digests must match; `AuthorizationConsumptionReceiptV1.consumer` is exactly `{kind:'run_admission',runId,admissionIntentDigest}`. The receipt never names the final admitted digest. Grant consumption, final admitted-digest computation, Run/Checkpoint/projection/control response, and receipt/ref installation commit atomically. A missing optional wire grant selects only the builtin branch and therefore cannot include ignored bytes; an unnecessary/mismatched grant is rejected rather than ignored. Outside-root/external selectors are rejected. A repository can request a selector but cannot manufacture either authorization form or reuse one across a Run/workspace/selector.
+For Git, `classificationIndexRef` is the complete canonical snapshot emitted by
+the original source capture B and equals that original SourceManifest Git index.
+Every retained matcher rereads its exact snapshot, canonical bytes, tree and
+repository/object-format identities before using the tracked-path set. A later
+private Checkpoint index or live delivery capture A index may differ; neither
+replaces this frozen classification ref. Delivery A and its result M retain
+A's own HEAD/index metadata while inheriting B's exact projection/rules and
+classification index. Non-Git forbids this field. Neither a today's index nor a
+historical source payload grants new include/read permission.
 
-Normalization defaults to 10,000 changed paths and 512 MiB of changed/new file content; accepted maxima are 100,000 paths and 4 GiB. Exceeding either fails result construction with `runtime_failed` detail rather than truncating the result.
+Every include's `authorizationRef` decodes only to `SourceIncludeAuthorizationV1`; `selectorDigest = SHA-256(JCS(selector))` and `authorizationDigest = SHA-256(JCS(authorization with authorizationDigest omitted))`. Principal, original SourceInspection, planned Run id, Session/live workspace ref+digest, exact selector bytes and admission-intent digest bind the same original request. A planned id is data, never Run or execution authority.
+
+For an ordinary tracked/nonignored selector, publish the exact `SourceIncludeClassificationEvidenceV1` closure before `builtin_nonignored`. Classification pages contain at most 128 entries and 512 KiB of complete canonical bytes; the root contains at most 8192 unique ordered page refs and 100000 total entries. The root remains below the original JSON byte/node bounds even with worst-case escaped canonical paths in its bounded pages. Original 1 MiB JSON, 10000-node and depth-32 guards remain unchanged. `pageDigest` and `evidenceDigest` omit only their own digest field. `entriesDigest` hashes the complete canonical array sequence incrementally, including brackets and commas. All pages, ordinals, context, count, full bytes, unique byte-sorted paths and sequence digest must verify. This explicitly replaces the unpublished unbounded inline classification array; it does not relax an existing JSON guard.
+
+The sequence exactly covers the selected entries in the original captured SourceManifest. Each `workspaceEntryDigest` hashes the complete original WorkspaceEntry, including its kind; `entryKind`, device/file/link-count observations come from that same still-held no-follow descriptor walk. `tracked_in_git_index` requires the exact original `SourceProjection.classificationIndexRef` and tree id and proves the path tracked. `tracked_ancestor_in_git_index` is restricted to directory metadata with a component-boundary descendant proved tracked in that same index; it never authorizes an ignored leaf. This explicitly represents the ancestor metadata already required by ordinary tracked capture. `nonignored_in_root` reproduces the frozen matcher with the original entry kind. Any Git-index fields occur as a complete pair and match the original index even if all entries are nonignored. Excludes and every hard exclusion still win. Entry-only directory selection captures only its directory metadata; it does not borrow permission for children or reinterpret an ordinary empty-directory proof.
+
+An ignored untracked include requires an active, principal/Session/workspace/path/scope-exact `AuthorizationGrantV1(read_scope, purpose=source)`. The original first SourceInspection transaction consumes it once, registers its exact receipt and consumed-grant snapshot, binds those snapshot refs in the existing `SourceInspectionTarget.sourceReadGrantRefs`, and registers the actual capture attempt before any source payload read. This explicitly revises the former unpublished requirement to consume only at Run admission: a sealed capture cannot contain a future receipt. Inert CAS publication alone supplies no read permission. The receipt consumer is exactly `{kind:'source_inspection',inspectionId,admissionIntentDigest}`. Prepared time P and actual commit time C retain the real owner/frame/time-fence checks and require original creation commit <= P <= C < original expiry. Capture retains the original deadline/expiry boundary; failed or cancelled capture burns the one authorized attempt and cannot restore or transfer it.
+
+Run admission later binds that same fully captured, retired source, original authenticated creation/consumption history, immutable authorization closure and original intent in the existing Run/Checkpoint/projection/first-response transaction. It does not consume the grant again or invent a receipt. Missing original evidence requires recovery; replay cannot reopen mutable source. A missing optional grant selects only the builtin branch and cannot include ignored bytes. Unnecessary, mismatched, repeated or cross-purpose grants refuse. Outside-root/external selectors refuse; a repository can request selectors but cannot manufacture authorization, retarget an old receipt, or reuse it for another live capture.
+
+Every builtin classification root retains `capturedEntriesRef` and `capturedTreeDigest` for its exact original complete entries manifest. Consumers fully reread and verify that manifest before checking selector coverage, entry kinds and complete entry digests. Original admission binds both fields to its actual captured and retired SourceManifest. A result, child fork or fresh Delivery A never substitutes its newer entries simply because its manifest has role `base`.
+
+Both authorization branches carry that exact original entries ref/tree; the
+builtin classification root repeats it only under strict equality. The complete
+WorkspaceEntryManifest retains its original full typed source reader, canonical
+ref and tree validation, rather than the narrower inline JSON reader used for
+authorization/root/page artifacts. Their original 1 MiB/10000-node/depth-32
+guards remain unchanged. The user authorization also carries the complete
+`consumedGrantSnapshotRef` from the original Target, with exact grant id, target,
+principal, workspace, selector, time and receipt equality. Its optional
+`expectedDigest` supports only an `entry` regular file's full blob digest.
+Constrained `subtree` refuses before consumption; constrained directory, symlink
+or missing entries refuse. Retained readers validate the full original grant
+and complete original file bytes. A later private result or child is not
+required to preserve those original bytes and cannot replace their provenance.
+
+Fresh `run.apply.sourceReadGrantIds` is a bounded unique array of at most 128 grant ids, in B's original user-include order. The Supervisor fully verifies B's projection/authorization closure and derives exact path/scope from it; the caller supplies no path, scope or authorization ref. Builtin selectors take no grant; ignored user selectors require a new exact active grant and cannot reuse the original consumed id. Extra, missing, duplicate or ignore-rule-overlapping ids refuse. Fresh grant snapshots/receipts commit in the same original Delivery SourceInspection target and first capture transaction. A preserves B's exact frozen projection without rewriting its authorizations; a deleted unconstrained selector entry is captured as absence under that same selection. A fresh expectedDigest must match A's actual complete regular-file bytes, independently of B's retained constraint; missing or non-file A refuses. Retained Delivery reconstructs that same snapshot/A comparison. A fresh receipt does not grant tool or publication permission. Child inheritance remains private immutable data bound to the actual parent allocation/fork, never authority to recapture mutable user source.
+
+Normalization defaults to 10,000 changed paths and 512 MiB of changed/new file content; accepted maxima are 100,000 paths and 4 GiB. Equality is allowed; strictly exceeding either fails result construction with `runtime_failed(result_source_limit_exceeded)` rather than truncating the result. Count the complete byte-sorted projected diff: add/delete/modify each contributes one changed path, including mode-only changes; changed bytes sum the full new file size only for additions or modifications whose size/blob differs. Deletes, directories, symlinks and mode-only file changes contribute no changed file bytes. If both limits are exceeded, `changed_paths` wins deterministically.
+
+This resource cause is reproduced from the original accounted final-model Checkpoint, never a caught exception, arbitrary diagnostic or uncommitted snapshot. The settled Journal tail is exactly the highest prepared normal model attempt, with one nonempty `end` response and no tool calls, inputs or later invocation. Its immediately corresponding last Run item is the exact `ModelTurnItem`. Reproduce the original pre-model Context from that request's `NormalPromptProjectionV1.contextManifestRef`, append this one model item's raw segment and increment `throughItemSeq`, then rehash `projectionDigest` and the complete post-model Context. `sourceCheckpointId = H('cliq-continuation-checkpoint-v1',runId,completed.resultRef,postContextRef)` must name the real `auto` Checkpoint whose Run/item/Journal cursors and context match, with `createdAt === completed.timestamp === ModelTurnItem.createdAt`. Its accounted workspace, the immutable RunSpec base and frozen SourceProjection reproduce the exact count/limit; no current filesystem or refreshed configuration enters. `workspaceStateRef` equals that Checkpoint's value and every later seal-only/terminal Checkpoint preserves its context, workspace and item/Journal cursors. `producingItemId`, `modelOpId` and `attempt` name that same final producer. `observed` and `limit` are nonnegative safe integers and `observed > limit`. A final response within both limits proves no resource stop and cannot be reinterpreted as a next-model context or budget failure.
+
+The original FinalCandidateOwner may use this independently derived StopIntent only through the existing same-owner Stop-only seal: retain its original D0/snapshot and cumulative three-attempt D1 budget, preserve cancellation/deadline precedence, append no candidate, and seal only the already-accounted workspace at the original snapshot's Checkpoint id. The ordinary worker-free terminal transaction then publishes exactly one failed Session outcome. CAS/SQLite retry retains this same owner and cannot dispatch a model/tool or rebuild a candidate. This subtype and its identical reason detail use the winning StopIntent itself as primary evidence, not a generic RuntimeFailureEvidence. Every stop read, terminal commit and recovery/reopen independently reproduces the original producer/Checkpoint/projection and complete cause; missing, changed, unaccounted or unsupported source data requires recovery, never a synthetic resource failure.
 
 - every admitted tracked and ordinary non-ignored untracked path, including modification, deletion, executable-bit change, binary bytes, and safe in-root symlink-target change;
 - every newly created ordinary file or safe in-root symlink under the admitted root that is not ignored by the **frozen admission-time** Git ignore rules;
@@ -6638,7 +8408,7 @@ The Kernel Cut has no provider- or UI-specific continuation state. These are the
 | `verify:dependencies` | completed exact `DependencyReadyItem` plus post-effect Checkpoint, or an already matching ready Checkpoint | `verify:verifiers` at index zero; no verifier launch before readiness |
 | `verify:verifiers` | one matching verifier receipt/skip and its Journal evidence | same frontier/index or retry; `agent` for a counted assertion repair on agent Runs only; publish one closure and install `finalize` when `afterPass='finalize'`, or the proof-carrying `delivery:approval` frontier when `afterPass='delivery_approval'`; otherwise exact failure/cancel path |
 | `finalize` | candidate + Journal-backed verification/provenance closure | `commitRunResult` and terminal state |
-| `delivery:merge` | admission-owned immutable current-workspace capture plus merged candidate/diff/plan or conflict | shared `verify` frontier with `afterPass='delivery_approval'`, proof-carrying `delivery:approval` when identical provenance is valid, direct verified no-op projection/finalize when the plan is empty, or `runtime_failed(delivery_merge_conflict)` StopIntent/detail |
+| `delivery:merge` | admission-owned immutable current-workspace capture plus merged candidate/diff/plan or conflict | shared `verify` frontier with `afterPass='delivery_approval'`, proof-carrying `delivery:approval` when identical provenance is valid, direct verified no-op projection/finalize when the plan is empty, or `runtime_failed(delivery_merge_conflict)` / `runtime_failed(delivery_merge_limit_exceeded)` StopIntent/detail |
 | `delivery:approval` | typed allow decision over the carried candidate/plan/closure | `delivery:publish` at path index zero preserving those refs; denial cancels |
 | `delivery:publish` | one path receipt/reconciliation result for the exact index | next index preserving candidate/plan/closure, or publish forward projection evidence and install `finalize(operation='delivery')` with the same closure after all paths close |
 
@@ -6694,6 +8464,70 @@ attempt; only positively proven no-release follows the separate refund protocol.
 
 For every non-read contract, `postEffect` is mandatory even on an error;
 read-only contracts forbid it and preserve the preceding workspace state.
+The fixed builtin data script may remain held as one genuine, immutable native
+seal in the original installation's launcher scope, like its existing sealed
+executable images. Acquisition stays lazy until an actual claimed invocation;
+queued admission does not open it. The original signed source read, complete
+pre/post installation revalidation, native sealing and exact identity checks
+still occur when that resource is created. Each use independently checks the
+complete claim/script/guest closure and current controller/generation, creates
+its own guest with both full installation revalidations, and passes the same
+native-tagged seal through the existing descriptor transfer. This is retention
+of an actual sealed resource, not cached integrity evidence or permission. It
+cannot cross an installation or process lifetime. Invocation cleanup joins its
+own extraction producer; launcher cleanup joins every controller and opening
+before closing the seal, and retains construction/retirement uncertainty.
+Historical readers and prepare/claim/release still reread their original bytes.
+
+The fixed `builtin_script` recipe additionally requires the closed
+`captureRef/captureDigest` pair. Its `cliq-builtin-tool-capture-v1` data binds
+the original claim/lease/request/target/grant, fixed tool, SandboxLaunchSpec,
+actual start/end/duration and closed termination union, exact stdout/stderr CAS
+refs and byte counts, independent native truncation flags, original invocation
+containment and positive whole-invocation death. The original native result's
+private bytes are copied before the first await. Every publication and output
+read joins before settlement; joined persistence failure retains this one
+result and its original fence, never another dispatch. Recovery rereads all raw
+bytes and original signed script/guest closure and verifies the claiming
+StateOwner's process/lock/image inspector and invocation reservation.
+Only after both original raw outputs and the canonical capture quartet are
+durable, every original reader/publication has joined, and the unique
+`completeTool` transaction has committed may that builtin producer acknowledge
+its exact native result. The fixed scope/parent/nonce acknowledgement closes
+both original controller capture memfds before dropping the exact NAPI value
+and producer-owned raw/result caches. Borrowed buffers and physical RSS are not
+claimed to disappear. Persistence failure, UNKNOWN, and any unsettled operation
+retain the original result and fence. After a committed completion, a failed
+acknowledgement can retry only the original data release; it cannot repeat
+settlement, charge, or dispatch. Socket revocation alone is insufficient for
+local data release: only the original controller's actual cleanup, reap and
+successful resource join permit it. Shutdown retains the existing two-second
+cancel-and-join requirement. No acknowledgement reclaims a scope number,
+resets a lease/budget, or supplies worker-death or execution authority.
+The installed builtin capability is version 2 and the live private descriptor
+packet is version 7; public worker semantics remain version 1. Retained source
+history explicitly decodes closed version-6 or version-7 data with one version
+throughout its original hash chain; productive version-6 traffic remains
+rejected. These data-history branches provide no successor execution permission
+and do not define an installation or signed-runtime upgrade transition.
+Read/search exit-zero output must decode as the exact fixed structured frame
+for the original normalized input; a cut/malformed frame is a retained protocol
+error. Bash and other genuine termination outcomes retain their actual exit
+code, signal, timeout, resource failure or native spawn code. The model receives
+a bounded reproducible projection with explicit UTF-8-lossy encoding and
+separate model-prefix/native-truncation flags; raw output refs and authority
+artifacts are private. An invocation's death does not prove parent worker death.
+If a valid structured directory/search frame plus captured stderr exceeds the
+model byte ceiling, select its largest complete entry prefix. Preserve the
+original `sourceComplete`, mark `modelTruncated=true`, and give the derived
+frame `complete=false` plus `output_limit`; never edit the original raw frame
+or silently promote a partial frame to complete. A real `controller_stop`
+may originate from Supervisor shutdown without a user StopIntent. Retain that
+actual termination, charge once and seal any original RW post-effect; do not
+invent user cancellation, no-effect evidence, a refund or another dispatch.
+A fully validated read/search completion may keep the same active parent and
+generation; each subsequent call still passes its own grant/claim/release and
+complete output/death checks. The old native edit recipe forbids capture fields.
 `checkpointId = H('cliq-tool-checkpoint-v1', runId, opId, String(attempt))` binds
 the positive sealed snapshot to this exact observation. Its workspace, tree,
 generation and retirement closure must agree with the quiesced owning launch;
@@ -6853,6 +8687,8 @@ type ToolObservationV1 = {
   dispatchId: string
   observedAt: string
   observationDigest: string
+  captureRef?: ArtifactRef
+  captureDigest?: string
   postEffect?: {
     workspaceStateRef: ArtifactRef
     snapshotEvidenceRef: ArtifactRef
@@ -7063,6 +8899,7 @@ type ToolResultPayloadV1 = ToolResultPayloadBaseV1 & (
         | 'TOOL_EXECUTION_FAILED'
         | 'TOOL_PROTOCOL_ERROR'
         | 'TOOL_RESOURCE_EXHAUSTED'
+        | 'TOOL_RESULT_UNAVAILABLE'
       diagnosticRef: ArtifactRef
       diagnosticDigest: string
       opId?: string
@@ -7330,6 +9167,27 @@ type InvocationDispatchClosureEvidenceV1 = {
         brokerProcessDeathEvidenceRef: ArtifactRef
         brokerProcessDeathEvidenceDigest: string
       }
+    | {
+        kind: 'verifier_parent_domain_dead'
+        claimJournalSeq: number
+        claimingSupervisorInstanceId: string
+        claimingStateOwnerEpoch: number
+        requestRef: ArtifactRef
+        targetRef: ArtifactRef
+        grantRef: ArtifactRef
+        sandboxLaunchSpecRef: ArtifactRef
+        workerLaunchId: string
+        leaseEpoch: number
+        generationRef: ArtifactRef
+        parentContainmentRef: ArtifactRef
+        parentDeathEvidenceRef: ArtifactRef
+        parentDeathEvidenceDigest: string
+        quarantineEvidenceRef: ArtifactRef
+        quarantineEvidenceDigest: string
+        retirementEvidenceRef: ArtifactRef
+        retirementEvidenceDigest: string
+        controllerLifetime: 'original_subreaper_absent_and_inspector_joined'
+      }
   observedAt: string
   evidenceDigest: string
 }
@@ -7345,6 +9203,40 @@ type RetryUnknownCancelledResult = {
   message: 'Run stopped without using the ambiguous result'
 }
 
+type McpHttpRetryClaimBindingData = Readonly<{
+  runId: string; opId: string; attempt: number; dispatchId: string; dispatchJournalSeq: number;
+  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string; grantRef: string; grantDigest: string;
+  registryRef: string; manifestDigest: string; toolContractDigest: string; batchItemId: string; callId: string; callIndex: number;
+  supervisorInstanceId: string; stateOwnerEpoch: number; workerLaunchId: string; leaseEpoch: number;
+  brokerFenceTokenDigest: string; deadlineMs: number;
+}>;
+type McpHttpRetryClaimIdentityV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-http-retry-claim-identity-v1'; binding: McpHttpRetryClaimBindingData; identityDigest: string;
+}>;
+
+type McpJoinedDispatchData = Readonly<{
+  kind: 'mcp_http_owner_joined'; purpose: 'run'; brokerFenceTokenDigest: string;
+  networkStarted: boolean; requestStarted: boolean; setupReleased: boolean; effectReleased: boolean;
+  completedStages: readonly string[]; tokenRevoked: true; matchingActiveReleaseCount: 0; networkJoined: true; tasksJoined: true;
+}> | Readonly<{
+  kind: 'mcp_stdio_owner_joined'; purpose: 'run'; releaseFenceTokenDigest: string;
+  execReleased: true; setupReleased: true; effectReleased: boolean; completedStages: readonly string[];
+  tokenRevoked: true; matchingActiveReleaseCount: 0; processJoined: true; pipesJoined: true; tasksJoined: true; outputCustodyRetired: true;
+}>;
+type McpRetryDispatchClosureV1 = Readonly<{
+  schemaVersion: 1; format: 'cliq-mcp-retry-dispatch-closure-v1'; runId: string; opId: string; attempt: number; nextAttempt: number;
+  preparedJournalSeq: number; dispatchId: string; dispatchJournalSeq: number; unknownJournalSeq: number;
+  requestRef: string; requestDigest: string; targetRef: string; targetDigest: string; grantRef: string; grantDigest: string;
+  registryRef: string; manifestDigest: string; toolContractDigest: string; brokerFenceTokenDigest: string;
+  unknownEvidenceRef: string; unknownEvidenceDigest: string; budgetSettlementRef: string;
+  originalClaimIdentity: Readonly<{ kind: 'stdio_instance' | 'http_retry_binding'; ref: string; digest: string }>;
+  claimingSupervisorInstanceId: string; claimingStateOwnerEpoch: number;
+  inspectorIdentityRef: string; inspectorIdentityDigest: string; inspectorStateOwnerEpoch: number;
+  callDeadlineMs: number; observedAt: string; evidenceDigest: string;
+}> & (Readonly<{ kind: 'original_native_joined'; joined: McpJoinedDispatchData }> |
+  Readonly<{ kind: 'broker_process_domain_dead'; deathEvidenceRef: string; deathEvidenceDigest: string }>);
+
+
 type PolicyDenialOutcomeV1 =
   | {
       kind: 'tool_result_denied'
@@ -7352,7 +9244,7 @@ type PolicyDenialOutcomeV1 =
       outcomeItemRef: ArtifactRef
     }
   | {
-      kind: 'required_verifier_stopped'
+      kind: 'stop_intent'
       subjectKind: 'verifier_launch'
       stopIntentRef: ArtifactRef
     }
@@ -7545,13 +9437,16 @@ type DependencyReadyItem = {
   runId: string
   kind: 'dependency_ready'
   planRef: ArtifactRef
-  opId: string
-  attempt: number
-  packageCacheManifestRef: ArtifactRef
   readyCheckpointId: string
   installedTreeDigest: string
   createdAt: string
-}
+} & (
+  | { origin: 'acquired'; opId: string; attempt: number; packageCacheManifestRef: ArtifactRef }
+  | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef
+      parentReadyCheckpointId: string; parentReadyWorkspaceStateRef: ArtifactRef
+      childAdmissionRequestRef: ArtifactRef
+      childPreparation: { workerLaunchId: string; snapshotEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef } }
+)
 
 type VerifierExecutableIdentityV1 =
   | {
@@ -7671,6 +9566,7 @@ type VerificationReceipt = {
     | 'spawn_error'
     | 'sandbox_denial'
     | 'resource_failure'
+    | 'controller_stop' // only source_mutation; never a gating or retry receipt
   exitCode?: number
   signal?: string
   stdoutRef: ArtifactRef
@@ -7773,10 +9669,19 @@ type VerificationClosureV1 = {
         dependencyPolicyRef: ArtifactRef
         dependencyPlanRef: ArtifactRef
         dependencyReadyItemId: string
-        acquisitionOpId: string
-        acquisitionAttempt: number
-        completedJournalSeq: number
         readyCheckpointId: string
+      } & (
+        | { origin: 'acquired'; acquisitionOpId: string; acquisitionAttempt: number; completedJournalSeq: number }
+        | { origin: 'inherited_parent_ready'; parentRunId: string; parentReadyItemRef: ArtifactRef; childAdmissionRequestRef: ArtifactRef }
+      )
+    | {
+        kind: 'inherited_verification'
+        dependencyPolicyRef: ArtifactRef
+        dependencyPlanRef: ArtifactRef
+        sourceRunId: string
+        sourceRunResultRef: ArtifactRef
+        sourceVerificationClosureRef: ArtifactRef
+        inheritedProvenanceRef: ArtifactRef
       }
   verification:
     | {
@@ -7847,6 +9752,7 @@ type ChildWaitSet = {
     | {
         kind: 'stop_settlement'
         stopIntentRef: ArtifactRef
+        interruptedWaitRef?: ArtifactRef
         awaitOrigin?: { batchItemId: string; callId: string; callIndex: number }
       }
   childRunIds: string[]
@@ -7869,6 +9775,25 @@ type ChildMergeBatchItem = {
     admittedForkBaseRef: ArtifactRef
   }>
   createdAt: string
+}
+
+type ChildMergeResultItem = {
+  schemaVersion: 1
+  kind: 'child_merge_result'
+  itemId: string
+  runId: string
+  createdAt: string
+  mergeBatchItemId: string
+  callId: string
+  callIndex: number
+  opId: string
+  requestRef: ArtifactRef
+  policyDecisionItemRef: ArtifactRef
+  resultRef: ArtifactRef
+  outcome: 'merged' | 'conflict' | 'resource_limit' | 'denied'
+  // Present together only for the final finalize-settlement presentation.
+  modelContentRef?: ArtifactRef
+  modelContentDigest?: string
 }
 
 type VerifierStopItem = {
@@ -7993,13 +9918,18 @@ type McpServerStoppedItem = {
 
 type PathState =
   | { kind: 'absent' }
-  | { kind: 'directory'; mode: number; identityDigest?: string }
+  | { kind: 'directory'; mode: number; identityDigest: string; empty: boolean }
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
 
 type PublicationLeafState =
   | { kind: 'file'; digest: string; mode: number }
   | { kind: 'symlink'; target: string; digest: string }
+
+type PublicationExpectedEntry = PublicationLeafState |
+  { kind: 'directory'; mode: number; identityDigest: string; empty: true }
+type PublicationDesiredEntry = PublicationLeafState |
+  { kind: 'directory'; mode: 493 }
 
 type PublicationParent =
   | { kind: 'existing_directory'; expectedIdentityDigest: string }
@@ -8033,8 +9963,8 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'replace'
-      expected: PublicationLeafState
-      desired: PublicationLeafState
+      expected: PublicationExpectedEntry
+      desired: PublicationDesiredEntry
       stagingName: string
       stagingExpected: { kind: 'absent' }
       quarantineName: string
@@ -8042,7 +9972,7 @@ type PublicationOperation = PublicationOperationBase & (
     }
   | {
       kind: 'delete'
-      expected: PublicationLeafState
+      expected: PublicationExpectedEntry
       desired: { kind: 'absent' }
       stagingName?: never
       stagingExpected?: never
@@ -8057,6 +9987,8 @@ type PublicationAbortOperation = {
   kind: 'abort_rmdir'
   path: string
   createdByOperationId: string
+  quarantineName: 'preimage'
+  quarantineExpected: { kind: 'absent' }
 }
 
 type DeliveryPlan = {
@@ -8066,6 +9998,8 @@ type DeliveryPlan = {
   sourceBaseRef: ArtifactRef
   sourceDesiredRef: ArtifactRef
   capturedWorkspaceRef: ArtifactRef
+  captureTopologyRef: ArtifactRef
+  captureTopologyDigest: string
   desiredSourceRef: ArtifactRef
   diffRef: ArtifactRef
   mergeAlgorithm: 'cliq-diff3-v1'
@@ -8074,8 +10008,41 @@ type DeliveryPlan = {
   abortOperations: PublicationAbortOperation[]
 }
 
+type PublicationLocationV1 =
+  | { kind: 'workspace'; path: string }
+  | { kind: 'publication_arena'; arenaId: string; component: string }
+
+type PublicationArenaBirthV1 = {
+  schemaVersion: 1
+  format: 'cliq-publication-arena-birth-v1'
+  deliveryRunId: string
+  deliveryPlanRef: ArtifactRef
+  workspaceIdentityRef: ArtifactRef
+  workspaceIdentityDigest: string
+  stateRootIdentityRef: ArtifactRef
+  stateRootIdentityDigest: string
+  inspectorIdentityRef: ArtifactRef
+  inspectorIdentityDigest: string
+  sequence: 'forward' | 'abort'
+  operationIndex: number
+  operationId: string
+  opId: string
+  attempt: number
+  dispatchId: string
+  arenaId: string
+  arenaIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  parentIdentity: { deviceId: string; fileId: string; ownerUid: number; mode: 448 }
+  observedAt: string
+  birthDigest: string
+}
+
+type PublicationArenaRetirementObservation =
+  | { kind: 'linux_unlinked'; linkCount: 0 }
+  | { kind: 'darwin_unlinked'; heldPathUnchanged: true;
+      parentPathUnchanged: true; observedLinkCount: number }
+
 type PublicationPathObservationV1 = {
-  path: string
+  location: PublicationLocationV1
   state: PathState
   parentDeviceId: string
   parentFileId: string
@@ -8099,11 +10066,51 @@ type PublicationProofBaseV1 = {
 
 type PublicationProofV1 = PublicationProofBaseV1 & (
   | {
-      kind: 'path_observation'
-      observation: PublicationPathObservationV1
+      kind: 'arena_namespace_absence'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      registeredArenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      namespaceParentIdentity: PublicationArenaBirthV1['parentIdentity']
+      coveredLocations: PublicationLocationV1[]
+      destinationObservationRef: ArtifactRef
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      workspaceParentFsyncCompleted: true
+      namespaceHandlesJoined: true
+      recoveryOriginRef: ArtifactRef
+      recoveryOriginDigest: string
       proofDigest: string
     }
   | {
+      kind: 'arena_retirement'
+      arenaId: string
+      stateRootIdentityRef: ArtifactRef
+      stateRootIdentityDigest: string
+      arenaIdentity: PublicationArenaBirthV1['arenaIdentity']
+      parentIdentity: PublicationArenaBirthV1['parentIdentity']
+      arenaAbsent: true
+      arenaParentFsyncCompleted: true
+      retirementObservation: PublicationArenaRetirementObservation
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
+      proofDigest: string
+    }
+  | {
+      kind: 'path_observation'
+      observation: PublicationPathObservationV1
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
+      proofDigest: string
+    }
+  | {
+      kind: 'ancestor_projection_absence'
+      path: string
+      ancestorPath: string
+      ancestorObservationRef: ArtifactRef
+      proofDigest: string
+    }
+  | ({
       kind: 'terminal_receipt'
       sequence: 'forward' | 'abort'
       operationIndex: number
@@ -8113,12 +10120,17 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
       before: PublicationPathObservationV1
       after: PublicationPathObservationV1
       preservedPreimageRef?: ArtifactRef
-      transientFinalObservations: PublicationPathObservationV1[]
       parentIdentityBeforeDigest: string
       parentIdentityAfterDigest: string
       directoryFsyncCompleted: true
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
-    }
+    } & (
+      | { transientFinalObservations: PublicationPathObservationV1[]; namespaceRetirementEvidenceRef?: never }
+      | { namespaceRetirementEvidenceRef: ArtifactRef; transientFinalObservations?: never;
+          recoveryOriginRef: ArtifactRef; recoveryOriginDigest: string }
+    ))
   | {
       kind: 'planned_descendant'
       abortOperationId: string
@@ -8140,14 +10152,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
         | 'transient_state_ambiguous'
         | 'parent_fsync_unconfirmed'
       lastKnownObservationRefs: ArtifactRef[]
+      recoveryOriginRef?: ArtifactRef
+      recoveryOriginDigest?: string
       proofDigest: string
     }
-  | {
+  | ({
       kind: 'transient_absence'
-      transientPaths: string[]
-      observationRefs: ArtifactRef[]
+      transientLocations: PublicationLocationV1[]
       proofDigest: string
-    }
+    } & (
+      | { observationRefs: ArtifactRef[]; arenaRetirementRefs: ArtifactRef[]; envelopeRetirements?: never }
+      | { envelopeRetirements: Array<{ arenaId: string; retirement: PublicationPathRetirementV1 }>;
+          observationRefs?: never; arenaRetirementRefs?: never }
+    ))
   | {
       kind: 'projection_closure'
       selectedBranch: 'forward_finalize' | 'abort'
@@ -8175,6 +10192,19 @@ type PublicationProofV1 = PublicationProofBaseV1 & (
           capturedIndexDigest: string
           observedIndexRef: ArtifactRef
           observedIndexDigest: string
+          repositoryIdentityRef: ArtifactRef
+          repositoryIdentityDigest: string
+          capturedSourceRef: ArtifactRef
+          objectFormat: 'sha1' | 'sha256'
+          canonicalIndexBytesRef: ArtifactRef
+          canonicalIndexByteCount: number
+          indexTreeObjectId: string
+          observedIndex:
+            | { kind: 'present'; deviceId: string; fileId: string; ownerUid: number;
+                rawByteCount: number; rawBytesDigest: string }
+            | { kind: 'absent'; rawByteCount: 0 }
+          descriptorReadComplete: true
+          readerJoined: true
         }
     ))
 )
@@ -8210,12 +10240,36 @@ type PublicationPathProgressItem = {
   operationId: string
   opId: string
   attempt: number
-  state: 'desired_committed_cleanup_pending'
-  destinationEvidenceRef: ArtifactRef
-  preservedPreimageRef?: ArtifactRef
-  transientObservationRef?: ArtifactRef
   createdAt: string
-}
+} & (
+  | {
+      state: 'desired_committed_cleanup_pending'
+      beforeObservationRef: ArtifactRef
+      destinationEvidenceRef: ArtifactRef
+      preservedPreimageRef?: ArtifactRef
+      transientObservationRef?: ArtifactRef
+    }
+  | {
+      state: 'received_handoff'
+      sequence: 'forward'
+      attempt: 0
+      dispatchId: string
+      claimJournalSeq: number
+      receiptRef: ArtifactRef
+      receiptDigest: string
+      retirement: PublicationPathRetirementV1
+      generationResources:
+        | { kind: 'sealed'; workerLaunchId: string; generationRef: ArtifactRef; snapshotEvidenceRef: ArtifactRef }
+        | { kind: 'genuinely_retired_from_verified_checkpoint'; workerLaunchId: string; generationRef: ArtifactRef;
+            sourceCheckpointId: string; quarantineEvidenceRef: ArtifactRef; retirementEvidenceRef: ArtifactRef }
+      reconciliationEvidenceRef?: ArtifactRef
+      reconciliationEvidenceDigest?: string
+    }
+)
+
+type PublicationPathRetirementV1 =
+  | { slotObservationRefs: ArtifactRef[]; arenaRetirementRef: ArtifactRef }
+  | { kind: 'current_namespace'; namespaceEvidenceRef: ArtifactRef }
 
 type PublicationPathResultItem = {
   schemaVersion: 1
@@ -8231,9 +10285,157 @@ type PublicationPathResultItem = {
   outcome: 'completed' | 'not_created' | 'retained_planned_descendant' | 'failed' | 'unknown'
   receiptRef?: ArtifactRef
   evidenceRef: ArtifactRef
+  abortStopIntentRef?: ArtifactRef
+  reconciliationEvidenceRef?: ArtifactRef
+  reconciliationEvidenceDigest?: string
+  retirement?: PublicationPathRetirementV1
   createdAt: string
 }
+
+type PublicationLateObservationItem = {
+  schemaVersion: 1
+  itemId: string
+  runId: string
+  kind: 'publication_late_observation'
+  deliveryPlanRef: ArtifactRef
+  sequence: 'forward' | 'abort'
+  operationIndex: number
+  operationId: string
+  opId: string
+  attempt: 0
+  dispatchId: string
+  claimJournalSeq: number
+  probeWaitingSubjectRef: ArtifactRef
+  probeDispatchDigest: string
+  evidenceRef: ArtifactRef
+  evidenceDigest: string
+  completedAt: string
+  createdAt: string
+} & (
+  | { disposition: 'unknown'; retirement?: never }
+  | { disposition: 'received' | 'stopped_before_effect' | 'retained_planned_descendant';
+      retirement: PublicationPathRetirementV1 }
+)
 ```
+
+`PublicationPathResultItem.retirement` is required for every claimed
+`completed|failed|retained_planned_descendant` result and forbidden for
+`unknown|not_created`. In the original-descriptor branch it retains only the
+original producer's actual joined retirement: `slotObservationRefs` names all and only that claim's private
+components in `PublicationLocationV1` order, and `arenaRetirementRef` names
+that original arena's completed retirement. The owning result-item/Checkpoint
+transaction registers these artifacts and this exact edge together with the
+original Journal terminal fact and once-only settlement; the last forward
+result includes it in the sole publication/RunResult/Session transaction.
+Readers revalidate each absence observation, original claim/birth/inspector
+and StateOwner lifetime, arena and parent inode, StateRoot/platform, and
+absence-before-retirement-before-terminal ordering. A receipt's inline
+transient observations equal these named observations. A later terminal
+projection repeats these exact original refs, rather than substituting a
+fresh inspector's guess about an old arena. This durable graph lets recovery
+read a genuinely retired envelope after restart; it never recreates its live
+native owner, authorizes another effect/cleanup, adopts a remnant by name, or
+discovers missing provenance by scanning orphan CAS objects.
+
+The disjoint `current_namespace` branch never manufactures those old-FD
+observations. Its `arena_namespace_absence` must bind the complete original
+claim/birth, original durable cleanup progress and complete preserved payload,
+strict successor StateOwner acquisition with real original-holder death, and
+the current inspector's independent namespace observation. Its registered
+arena identity is historical provenance, not a claim to hold that old FD.
+The actual private parent must equal the original birth parent. The current
+desired destination must retain the original progress inode/type/complete
+bytes and captured parent; an equivalent replacement is not enough. All and
+only the original private locations are covered, the actual arena is absent,
+both actual parents are fsynced and every observer/temporary descriptor is
+joined. Only an exact held empty original arena may be removed by this
+fixed same-claim maintenance; no preimage may be unlinked by the namespace
+observer. A unique registered original preimage may route to the unchanged
+retained cleanup contract only after this observer closes/joins. Extra names,
+foreign identity, incomplete provenance or uncertain close have no fallback.
+The namespace receipt requires the same recovery origin/current inspector
+and fresh desired observation; it forbids inline old-slot observations.
+Unclaimed preparation cannot use this branch. A terminal transient aggregate
+using `envelopeRetirements` covers every claimed arena exactly once, in arena
+order, with complete original private-location coverage; it is XOR with the
+old descriptor arrays, not permission to omit an unproven slot.
+
+A genuine original probe result completed after its persisted deadline is
+retained only as `PublicationLateObservationItem` in the same Continuation.
+`completedAt` is the original producer's fixed actual completion sample,
+including required fsync/join, and is later than the original deadline. Raw
+evidence `observedAt` is unchanged and no later than `completedAt`; the item
+creation and Checkpoint cannot predate completion or the actual selected Stop.
+Known dispositions require their actual complete retirement, UNKNOWN forbids
+it. The fixed item/Checkpoint identity domains bind Run/op/attempt, original
+dispatch digest and evidence ref. Only this producer's opaque result can
+append one excluded-control item and same-W_M Checkpoint plus Run revision and
+time; it must not alter status/wait/nonce/frontier, Journal, budget or original
+BudgetSettlement. A synchronous exact committed-delta transfer updates its
+two original closure caches before any cancellable follow-up. Joined storage
+failure preserves this original fact and item; a newer monotonic Stop may be
+reselected but neither the raw evidence nor completion sample may be retimed.
+
+This late item is audit, not a current subject-observation wrapper or positive
+authority for a new nonce. Its original task must actually join and close
+under the existing deadline/shutdown contract. Further progress requires a
+new genuine bounded readonly probe and independently satisfied original-death,
+birth/progress, current full-byte, fsync/join and unique terminal-writer checks.
+A still-live original claim holder remains waiting; transport closure does
+not substitute for its death. A timely known result's complete retirement
+must be within its own original probe deadline. Missing original evidence
+remains recovery, without replay, a second charge, epoch-only adoption or CAS
+scanning. These contracts require independent installed Linux late-return,
+cleanup-before-ack, restart/once-only, storage/Stop and two-second stop evidence;
+schema or native component passes do not qualify those unexecuted cuts.
+
+An original publication owner may retire its preparation before any permanent
+claim. It synchronously revokes release, joins its original pending
+factory/claim, and proves that the Journal still contains only its original
+`prepared`, with no claim, arm or commit. Native factory state is one of
+`not_attempted|returned|unknown`: the call is marked `unknown` before entry and
+only its actual return changes it to `returned`. An exception or partial birth
+cannot be represented as no birth, reopened by name or refunded as retired.
+`not_attempted` needs no arena; `returned` requires the original held native
+object's discard, complete private-slot absence, arena retirement and actual
+joined close. A close failure stays sticky. Neither branch performs a
+workspace effect or manufactures a claim.
+
+The resulting `failed.errorRef` is exactly one closed
+`PublicationPreparationClosureV1` with format
+`cliq-publication-preparation-closure-v1`. It repeats Run/Plan/sequence/index,
+operation/op/attempt zero, `preparedJournalSeq`, original request/target/grant
+refs, original unclaimed `dispatchId`, StateOwner epoch/Supervisor/lease,
+inspector ref/digest, `observedAt` and an omission `closureDigest`. Its sole
+`retirement` branch is `{kind:'no_birth'}` or
+`{kind:'retired',arenaBirthRef,slotObservationRefs,arenaRetirementRef}`. The
+same original owner's fixed typed adapter atomically registers that graph,
+appends its original `prepared -> failed` fact and one `BudgetSettlementV1`
+with `consumed=ZERO` and exact original reservation refund. It appends no path
+result, native effect, claim or synthetic Checkpoint. CAS/rolled-back SQL
+failure retains that same owner, closure and settlement. Recovery validates
+the complete original StateOwner/activated-worker or maintenance-Stop graph,
+actual returned birth/retirement when present, exact Journal and zero
+settlement. Only this proved unclaimed suffix remains semantic `unstarted`;
+it does not erase a prior claimed forward prefix. It is not ordinary or
+verifier preparation failure evidence. Closing an unclaimed attempt does not
+authorize a replacement attempt or rearm: with the current fixed-attempt
+contract, any needed replacement remains explicitly waiting rather than
+silently redispatched, including closure without a Run StopIntent.
+
+`PublicationPathResultItem.abortStopIntentRef` is present exactly when a
+forward `completed|failed` result selects `abort_cleanup`. It names the
+winning StopIntent actually selected by that result's original transaction;
+abort results, unknown results, and normal forward finalization forbid it.
+The same transaction installs the ordinary path-result Checkpoint. Readers
+validate that exact result/Checkpoint edge and the original Stop's complete
+cause/control graph against the actual recovery closure, then prove it is the
+current winner or a legal monotonic predecessor of that winner. A later Stop,
+same-millisecond timestamps, current cancellation flags, or prunable events
+cannot retroactively turn a successful final forward operation into an abort
+handoff. A retained settlement after a rolled-back transaction keeps its
+original charge and effect; its uncommitted result's Stop edge may be prepared
+again with the actual selected winner, never by dispatching again.
 
 `InheritedVerificationProvenanceV1` is the only artifact legal at `inheritedProvenanceRef` or a delivery `RunResult.verificationProvenanceRef`. `provenanceDigest = SHA-256(JCS(provenance with provenanceDigest omitted))`. The source Run must be terminal `succeeded(verified)` with the exact result/result digest and required `verificationClosureRef`; the source closure digest, result source, verifier spec/digest, and ordered receipt refs/digests must equal that immutable source graph. `deliveryRunId` is the consuming delivery Run, which must have produced the identical `resultSourceRef`; neither receipts nor source-owned ids are copied or relabeled. The delivery `VerificationClosureV1.inherited_verified` fields and final RunResult must repeat these exact refs. Storage decodes and re-walks the source result/closure/Journal/receipt graph before publishing or accepting the provenance; a loose list of passing receipts or equal directory bytes is insufficient.
 
@@ -8301,13 +10503,174 @@ executed-Journal rule above applies only to `source='invocation'`.
 
 Every completed visible model attempt first appends one `ModelTurnItem`; a call turn's `ToolBatchItem.modelTurnRef` and `modelOpId/attempt` must match it. Every `FinalCandidateItem` decodes its base/result SourceManifests and exact `WorkspaceDiffV1`; the diff base/result refs equal the candidate, `sourceDigest` equals the result SourceManifest's `manifestDigest`, and `diffDigest` equals the decoded diff's self digest. The `agent` branch names a same-Run `ModelTurnItem(stopReason='end')`, requires `producingOpId === modelOpId`, and requires `summaryRef === textRef` where that `ModelTextV1` is nonempty. The `delivery` branch structurally forbids `producingOpId`, names the exact same-Run `DeliveryMergeItem`, and copies its captured-base/result/diff/summary refs; that summary also decodes `ModelTextV1`, while source Run, B/S/A/M, and plan fields satisfy the delivery equations above. No candidate points directly at an unowned provider artifact. `commitRunResult` requires its `baseSourceRef`, `resultSourceRef`, `diffRef`, and `summaryRef` to equal the current candidate byte-for-byte, then independently rehashes the result source and diff; `SessionRunTerminalItem.resultRef` names only that committed RunResult. A caller-derived summary, alternate diff, tree digest substituted for manifest digest, or delivery merge op invented after the fact is invalid.
 
-`DeliveryPlan.forwardOperations` is contiguous, ancestor-before-descendant for creation, contains no duplicate path/operation id/transient sibling, and represents every semantic materialization action; `abortOperations` is a separately indexed deepest-first list over planned delivery-created directories. Both arrays may be empty only when the captured real-workspace source ref already equals `desiredSourceRef`; that no-op delivery creates no approval/publish frontier and proceeds directly through the shared verification/provenance and finalize closure. Otherwise forward operations are nonempty. The discriminated union is exact: `mkdir` has only expected absence and fixed mode `0755`; `create` has one absent staging sibling and no quarantine; `replace` has absent staging plus quarantine siblings; `delete` has one absent quarantine sibling and no staging. Every leaf expected/desired state is a file or symlink, never a directory. `parent` is present on every operation and either binds an already captured directory identity or the earlier exact mkdir operation that created it; no optional parent/transient field is inferred by kind.
+`DeliveryPlan.forwardOperations` is contiguous, has no duplicate path or
+operation id, and includes every semantic materialization action. Missing
+parents precede children; removed descendants precede directory removal or
+conversion. `abortOperations` is a separately indexed deepest-first list over
+planned delivery-created directories. Both lists may be empty only when the
+captured workspace normalized to result role equals `desiredSourceRef`; that
+no-op creates no approval/publish frontier and uses the shared verification and
+native final-projection closure directly. `mkdir` has only expected absence and
+fixed desired mode `0755`; `create` has one private staging component;
+`replace` has private staging and quarantine components; `delete` has only
+quarantine. Their expected-absence fields are mandatory exactly in those
+branches. Components are relative to the original claim's arena, never the
+workspace parent. Replace/delete may expect a captured directory only with its
+exact raw mode/identity and fresh emptiness proof. A directory-to-directory
+replacement is not an unneeded semantic edit. `parent` binds a captured
+directory or the earlier exact mkdir/type-conversion creator; no omitted
+parent or transient field is inferred from an operation's name.
 
-Every publication receipt/evidence ref decodes only `PublicationProofV1`, and `proofDigest = SHA-256(JCS(proof with proofDigest omitted))`. Base fields equal the delivery Run, immutable plan, live Session workspace identity, and the exact current signed Supervisor inspector. A path observation is produced by no-follow descriptor traversal from that root: absent forbids all entry identity fields, every present state requires all three, and the file/symlink/directory state is rehashed or reidentified from the held entry. `PublicationPathProgressItem.destinationEvidenceRef` is the exact post-swap destination `path_observation`; optional `transientObservationRef` is present iff this plan operation has a staging/quarantine sibling still pending cleanup and decodes to the exact present sibling path/descriptor state frozen by the plan. It replaces any untyped transient identity handle. A terminal receipt matches one plan operation and Journal claim byte-for-byte; `before` equals its expected state, `after` equals desired for forward completion or the abort operation's exact postcondition, transient observations are unique byte-sorted and all absent, preserved preimage is required exactly when the leaf displaced bytes, the parent identities satisfy the plan parent edge, and `directoryFsyncCompleted` is the inspector's retained post-fsync fact. Journal `opKind='publish',phase='completed'` has `receiptRef` and `evidenceRef` equal to this terminal-receipt artifact, and the matching completed `PublicationPathResultItem` repeats it in both fields. `not_created` has no receipt and requires a `path_observation` proving exact absence plus no completed creating operation. `retained_planned_descendant` has no receipt and requires a `planned_descendant` proof whose operation ids are exactly still-retained completed plan descendants. `failed` has no terminal receipt and carries the exact final path observation. `unknown` carries only `path_ambiguity`: it repeats the claim dispatch/op/attempt/plan operation, a closed failure literal, and any unique byte-sorted last-known path-observation refs; an adapter string/exception is forbidden. Neither outcome satisfies forward or abort closure. Publish is `reconcile`, so this item has no abandoned outcome.
+The no-op comparison never mutates captured manifest A or substitutes a tree
+digest for its identity. Copy A, change only `role` to `result`, recompute its
+self-omitting `manifestDigest`, and hash the complete canonical artifact; that
+ref must equal M. A itself remains the exact base-role artifact in admission,
+the merge item, and the A-to-M diff. This role normalization is only the
+no-materialization test. Inherited verification still requires strict equality
+of M and the original source result S, with its complete provenance closure;
+equal trees, a no-op, or normalized A alone never grants that reuse.
 
-The three terminal-projection proof refs are likewise exact. `transient_absence` lists every plan-derived staging/quarantine path exactly once in byte order and its parallel observation refs all decode to absent `path_observation` proofs for those paths. `projection_closure` repeats the projection artifact's branch/source, its observed-path evidence refs in path order, its plan-ordered result refs, and its exact unstarted suffix. `git_index_unchanged` is the canonical all-absent four-field form for a non-Git workspace; for Git, all four fields are required, both refs rehash their digest members, captured fields equal captured manifest A, and observed digest/ref are byte-identical. No opaque adapter receipt, unhashed boolean, or alternate proof shape may advance publication or terminalize the Run.
+Every publication receipt/evidence ref decodes only `PublicationProofV1`, and
+`proofDigest = SHA-256(JCS(proof with proofDigest omitted))`. Its base binds the
+delivery Run, immutable Plan, live Session workspace, and original signed
+Supervisor inspector. Historical inspector identity alone does not prove a
+physical observation: the owning reader validates the original producer's
+claim/arena/resource provenance and durable item/Checkpoint graph. A workspace
+observation traverses the held workspace root; an arena observation traverses
+the same claim's held StateRoot arena and validates that exact arena identity.
+Absent forbids entry identity fields; present requires all three and actual
+content/type/raw-mode or directory-identity validation.
 
-`DeliveryTerminalProjectionEvidence.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`. Observed paths are canonical, unique, byte-sorted, and exactly cover every plan-touched destination/transient; each state/evidence ref is descriptor-derived from the admitted root and the Git-index proof matches the capture. `forward_finalize` requires every forward operation's plan-ordered completed result, empty abort/unstarted lists, no transient, and `observedSourceRef === DeliveryPlan.desiredSourceRef`. `abort` requires one non-unknown result for every started forward operation, the exact remaining contiguous forward-operation-id suffix in `unstartedForwardOperationIds`, and one plan-ordered non-unknown result for every abort operation. A known failed result may explain retained partial state but never proves rollback; abort `observedSourceRef` need equal neither base nor desired. Missing/unknown/unmatched evidence remains reconciliation. Successful delivery installs this artifact in the delivery finalize frontier and `RunResult`. A failed/cancelled delivery requires `TerminalDetail.deliveryTerminalProjectionEvidenceRef` only when a forward publication claim existed; merge conflict, approval denial, or cancellation before the first forward claim forbids it. The reason-bound `primaryEvidenceRef` follows the exact StopIntent branch matrix (and is the StopIntent ref for delivery merge/publication stops), while `publicationResultItemRefs` equals the abort evidence's forward-then-abort result refs. Therefore success and safe partial publication retain one authoritative projection proof without mutating or replacing StopIntent truth.
+A `path_observation` always records its actual existing direct parent, including
+that parent's actual positive link count. For a top-level destination, the
+original held workspace-root FD supplies that count through a fresh fstat under
+the same identity/no-follow checks as its raw-mode observation; it is not an
+identity-digest member. A removed or non-directory direct parent cannot be
+replaced by the root, a former receipt, an invented inode or a zero link count.
+Only terminal projection or the read-only `not_created` branch below may
+instead use `ancestor_projection_absence`: `path`
+is a strict canonical descendant of `ancestorPath` at a slash boundary, and
+`ancestorObservationRef` names exactly one actual workspace `path_observation`
+for that ancestor in state `absent`, `file` or `symlink`, never `directory`.
+Under the frozen no-follow SourceProjection that ancestor cannot be traversed,
+so only the descendant's projected state is absent; a symlink says nothing about
+existence at its target. This covers a planned child deletion followed by
+directory deletion or directory-to-leaf conversion without fictional parent
+metadata. Both proofs retain exactly the same Run, Plan, workspace, inspector
+and original physical `observedAt`; logical derivation samples no new clock.
+The owning reader fully rehashes and validates both proofs and their original
+owner graph, rejects arena anchors and recursive derived-proof chains, and
+binds the target path to the terminal projection's exact touched-path list, or
+to the exact original abort operation in that read-only not-created branch.
+`projection_closure` roots the derived ref and its exact single anchor edge.
+This branch cannot substitute for an operation receipt, PathProgress, release,
+preimage preservation or cleanup authority.
+
+For `state='desired_committed_cleanup_pending'`,
+`PublicationPathProgressItem.beforeObservationRef` roots the original complete
+pre-release path observation, including its captured parent identity and link
+count. The original producer must publish it before the release and retain it
+in this same progress item; a successor cannot reconstruct that observation
+from a displaced inode, a current parent or matching bytes. Missing original
+before evidence remains recovery-required. `destinationEvidenceRef` is the
+post-release workspace observation. `transientObservationRef` is present exactly when an
+original private component still awaits cleanup and binds its arena locator,
+parent and entry identities. A terminal receipt matches one Plan operation and
+Journal claim; `before` equals its expected state, `after` equals desired or the
+exact abort postcondition, final transient locators are unique/canonical and
+absent, and every displaced preimage is preserved with its actual type. Parent
+identity edges and both-parent fsync facts are mandatory. Journal publish
+`completed` uses that same terminal-receipt artifact for receipt/evidence, and
+the completed result repeats it in both fields. `not_created` proves that the
+planned directory was not created, not that every such path is absent. There
+must be no unresolved creator: it is unstarted, has a joined unclaimed
+preparation closure, or has an earlier fully settled stopped-before-effect
+result with complete original retirement and no PathProgress. A later failure
+cannot retroactively justify this observation. Read-only evidence records
+actual absence, or the complete unchanged captured `A` file (raw mode and
+full-byte hash) / symlink (exact target bytes and hash) for an unperformed
+leaf-to-directory conversion. This does not claim the capture retained a leaf
+inode identity and grants no deletion, normalization or new cleanup authority
+over that original leaf. An unchanged captured non-directory ancestor can
+derive only the existing no-follow projection absence for a descendant; its
+own observation remains a present leaf. `retained_planned_descendant` names exactly
+the retained completed descendants. `failed` carries the final concrete
+observation. `unknown` carries only `path_ambiguity` with the original
+dispatch/operation/attempt, a closed failure literal and canonical last-known
+observation refs, never an adapter string. Neither failure nor ambiguity proves
+forward or abort completion; publish has no abandoned outcome.
+
+The three terminal-projection proof refs are likewise exact.
+`transient_absence` lists each original-claim arena component required by the
+started envelope exactly once in canonical locator order; parallel observation
+refs prove exact absence in that same held arena. Unstarted operations have no
+claim-derived arena and cannot invent one for the absence list. Its ordered
+`arenaRetirementRefs` covers each actual claimed arena exactly once, including
+a mkdir whose desired component was consumed by release. Every retirement
+proof matches the original birth's arena/private-parent identities and
+StateRoot. Slot cleanup is not arena retirement: the genuine operation must
+remove the exact empty arena, observe its name absent, fsync the private parent,
+and actually join every descriptor before the retired-resource friend can be
+consumed. A removed-but-not-fsynced retry must really fsync again. Linux records
+the held unlinked inode's actual zero link count. Darwin uses the existing
+source-staging mechanism: successful exact rmdir, original held-inode identity,
+unchanged held/parent F_GETPATH observations, named absence, and its truthful
+observed link count; APFS may retain a cached count of two. Platform branches
+must match the original StateRoot and actual producer; neither invents zero or
+substitutes a pathname for descriptor-relative I/O. Reappearing foreign arenas,
+failed joins or missing durable birth/retirement evidence remain reconciliation.
+`projection_closure` repeats the projection branch/source, its workspace-path
+evidence refs in path order, plan-ordered result refs, and exact unstarted
+suffix. `git_index_unchanged` is the canonical all-absent four-field form for a
+non-Git workspace; Git requires all four fields, both refs rehash their digest
+members, captured fields equal A, and observed digest/ref are byte-identical.
+No adapter receipt, unhashed boolean or alternate proof shape grants progress.
+
+The Git branch is produced only after the existing publication task has
+validated its original approval/claim/current cut and complete captured A.
+Its fixed native reader accepts the genuine original StateOwner/held workspace
+and V2 repository directory identity, and opens only `.git/index`: same device,
+no-follow, same uid, single-link regular file, original profile byte ceiling,
+actual EOF, complete before/after descriptor/name metadata checks, and actual
+close/join. It never broadens the source cursor or borrows source inspection or
+ignore-read consent. The producer then applies the same fixed canonical index
+normalizer to the complete actual bytes and compares all canonical bytes,
+entries and tree to A's full CAS snapshot. The observed snapshot is therefore
+the identical existing snapshot ref/digest; no raw-byte hash, inode or timestamp
+substitutes for canonical equality, and no duplicate snapshot publication is
+required. The explicit `present` observation retains only its real file
+identity, exact raw length and raw-byte SHA-256 as additional audit data.
+
+Actual native ENOENT uses the separate `absent` observation, never an index FD,
+old inode, unlink action or guessed empty file. It must still reach the real
+native EOF/complete checks and close/join. It is canonically equivalent only
+when A's completely verified snapshot has no entries and its complete bytes
+equal the exact empty version-2 header and declared object-format checksum,
+with the corresponding empty tree. Missing index with a nonempty A snapshot,
+symlink/directory/hardlink, replaced repository/file, incomplete read, changed
+canonical entry, half identity or uncertain close is rejected. A retirement
+failure keeps the genuine native owner fenced. This supplies no write, retry,
+execution or new authorization, and the original static-workspace/concurrent
+directory-move boundary remains unchanged.
+
+`DeliveryTerminalProjectionEvidence.evidenceDigest = SHA-256(JCS(evidence with evidenceDigest omitted))`.
+Workspace paths are canonical, unique, byte-sorted and exactly cover the
+Plan-touched destinations. Private transient locators have their own complete
+arena absence proof; they are never interpreted as workspace paths. All
+observations have actual producer/root provenance and the Git-index proof
+matches the capture. `forward_finalize` requires every Plan-ordered forward
+completed result, empty abort/unstarted lists, no transient, and
+`observedSourceRef === DeliveryPlan.desiredSourceRef`. `abort` requires one
+non-unknown result for each started forward operation, the exact unstarted
+contiguous suffix, and one Plan-ordered non-unknown result for each abort
+operation. Known failure may explain partial state but never proves rollback;
+abort's source need equal neither base nor desired. Missing/unknown/unmatched
+evidence remains reconciliation. Success installs this artifact in both the
+delivery finalize frontier and RunResult. Failure/cancellation requires it only
+when a forward publication claim existed; pre-claim conflict, denial or
+cancellation forbids it. The reason-bound `primaryEvidenceRef` follows the
+StopIntent matrix, and `publicationResultItemRefs` equals the abort proof's
+forward-then-abort list. Partial publication never rewrites StopIntent truth.
 
 Terminal detail is also typed:
 
@@ -8352,6 +10715,8 @@ type TerminalReasonDetail =
       | { trigger?: never; modelVisiblePromptDigest?: never; requestBodyBytes?: never; requestBodyLimitBytes?: never }
       | { trigger: 'request_body_bytes'; modelVisiblePromptDigest: ArtifactRef; requestBodyBytes: number; requestBodyLimitBytes: 1048576 }
     ))
+  | ({ kind: 'result_source_limit_exceeded'; evidenceRef: ArtifactRef } & ResultSourceLimitCause)
+  | ({ kind: 'delivery_merge_limit_exceeded'; evidenceRef: ArtifactRef } & DeliveryMergeLimitCause)
   | {
       kind: 'dependency_source_integrity'
       dependencyPlanRef: ArtifactRef
@@ -8506,8 +10871,18 @@ type DelegateResult = {
 
 type AwaitChildrenResult = {
   schemaVersion: 1
-  waitSetRef: ArtifactRef
-  childResultItemIds: string[]
+  results: Array<{ childRunId: string; mode: 'read_only' | 'mutating' } & ChildResultModelContentV1['content']>
+  merge?: ChildMergeModelDiagnostic
+}
+
+type ChildMergeModelDiagnostic = {
+  outcome: 'merged' | 'conflict' | 'resource_limit' | 'denied'
+  processedCalls: number
+  chargedCalls: number
+  appliedCalls: number
+  unattemptedCalls: number
+  conflicts?: { total: number; truncated: boolean; paths: Array<{ path?: string; reason: string }> }
+  limit?: { kind: string; observed: number; limit: number }
 }
 
 type ChildPatchManifest = {
@@ -8685,15 +11060,41 @@ Child assembly/policy derivation is an equation, not an adapter choice. The chil
 
 Verifier/dependency derivation is equally closed. `inherit_parent` sets `childVerifierSpecRef` to the exact parent verifier spec and `childDependencyPolicyRef` to the exact parent policy when present; `none` uses the canonical empty VerifierSpec, requires `childDependencyPolicyRef` absent, and requires the derived consent. `childCredentialGrantRefs` is the byte-sorted unique union recomputed from the child provider, filtered MCP revisions, and inherited dependency policy, contains no other ref, and is a subset of the parent's frozen union. `ChildCapabilityGrantV1` binds all those refs plus parent refs, full delegate identity, granted set, child assembly/tool/policy refs, verifier mode, budgets, and deadline. `grantCoreDigest` hashes JCS with both digest fields and `derivedUnverifiedConsentRef` omitted; `grantDigest` omits only itself. The child RunSpec must name the exact assembly/policy/verifier/dependency/credential/consent refs, and storage validates parent request + operation grant + capability grant + child allocation + child admission atomically. A child never inherits a broader parent manifest merely because the parent could use it.
 
+`delegate` is a closed signed-Supervisor `supervisor_operation`; `await_children` is a signed-Supervisor `supervisor_control`. Neither is a disguised executable adapter. Successful child admission uses `opKind='child_admission'` with exactly three local phases `prepared → dispatch_claimed → completed` in the same effect transaction. Local Journal rows bind original P and true final C, the full original normalized request/grant/capability/parent Checkpoint, and the actual Supervisor owner. `leaseEpoch=0` means no execution lease; attempt is zero, replay is local `retry`, and all sandbox/broker/native/receipt/unknown fields are forbidden. Prepared and completed each record the same one-tool-call cost and the intermediate claim records zero; the unique budget settlement consumes that one call once. No half-triplet is an execution or recovery permission. All referenced CAS must be durable, completely verified and joined before the sole transaction rechecks the exact parent/Journal/allocation cut, grant, original frozen credential expiries, ancestry Stop, direct-child concurrency, global Run capacity, and fresh C within every original deadline. No raw secret or today's rotated binding substitutes for the admitted credential refs.
+
 Admission atomically reserves the direct parent's allocation, creates the child/spec/context/base fork, appends `ChildHandleItem`, and resolves the delegate call. `read_only` removes mutation/publish capabilities. `mutating` receives a private fork of the parent's current ready workspace state. `inherit_parent` freezes the applicable parent verifier set; `none` is legal only through the exact derived consent rule and its result cannot be delivered directly.
 
+An explicit child additive ceiling is either accepted unchanged or refused; admission does not silently reduce it to today's available remainder. The original transaction preserves a **single shared** parent continuation floor: the complete frozen normal `CostEnvelope` plus the complete frozen maximum compaction `CostEnvelope`, one explicit await registration, and one merge call for each unsettled mutating child including the proposed child. The normal and compaction envelopes use the same original signed `requestTokenCeiling` and pricing algorithm (or their respective output caps with local zero-cost provenance), not a previous smaller prompt estimate. Existing sibling ceilings are already reserved and are not reserved again. This floor is a deterministic admission constraint, not a second budget row, execution permission or automatic await. It funds one possible compression followed by one normal continuation; it does not guarantee arbitrary future output fits the token/serialized-byte limit, succeeds in one compression, or funds unlimited later turns. All actual model requests retain their complete original token, byte, compaction, credential, claim and budget gates. Wall time, depth and direct-child concurrency still use their original bounded intersections and absolute deadlines.
+
+The distinct `child_await` operation means only “register this exact explicit await once”. Its closed request binds the real assistant batch/call/index and normalized input, original ready Checkpoint/Run snapshot, ordered owned child handles, wait set and the actual signed Supervisor control identity. Its unique original transaction commits the registration effect and the `prepared → dispatch_claimed → completed` accounting triplet at preparation Q and final sampled C. It has attempt/lease zero, local retry and one/zero/one tool-call deltas, but **forbids** `grantRef`, native/broker/containment fields, UNKNOWN and external execution. Prepared/claim/completed have exactly 14/17/19 fields; the original grant-bearing local operations retain their own 15/18/20-field guards. The completed receipt proves registration, not that the children finished or a native domain died. A blocking registration and an already-satisfied registration each charge once; its later wake, original-wait replay, Stop conversion and finalize cleanup do not. A new explicit re-await call registers and charges once even when it reads old owned results. CAS artifacts fully publish/verify/join first; any failed final transaction leaves no wait, Journal, charge or cursor. The final C rechecks the exact original parent/Checkpoint/Journal/children, owner, time fence, no Stop, ancestry and deadline. Recovery independently reconstructs its original control source, accounting and original owner through C rather than trusting a receipt's shape.
+
+An authorized delegate that cannot fit its explicit ceiling and the continuation floor may complete as `not_admitted` through the same one-call `child_admission` local transaction. Only a genuine fully validated original refusal is accepted; a caught error string or structural object is not a permit. Its closed request/receipt and ordinary ToolResult preserve the exact original batch, grant, source and budget failure. It creates no child Run, allocation, capability or handle. CAS/SQL failure leaves no charge, result or frontier change. If even this real local call cannot fit, it follows the original reproducible resource Stop instead of a free response.
+
+The actual await model content contains the supplied ordered child handles, modes and full original bounded summaries or terminal reasons, plus the ref-free merge diagnostic. Audit wait-set/CAS/item refs remain only in the retained payload. Await-delivered child summaries do not also append duplicate user messages. The existing single-summary, 64-child, complete one-MiB request and token/compaction limits remain authoritative; summaries are never truncated or replaced with refs to pass admission.
+
 `await_children` accepts only unique direct child handles owned by this parent, in supplied deterministic order. It freezes that order plus the owning batch id/call id/call index into an `await_tool` child subject; provider call id alone is never identity. An empty list is invalid. If every child is already terminal, the same reducer runs without entering waiting. Otherwise it releases the parent lease. When the set becomes satisfied, one transaction settles allocations and appends exactly one wait-set/identity-matched `ChildResultItem` per child in order, then computes `successfulMutatingChildren` as precisely those items with `mode='mutating'` and `status='succeeded|completed_unverified'`. If that list is empty, an `await_tool` subject appends the normalized await `ToolResultItem` containing **all** ordered child results—including failed/cancelled mutating children—and advances the exact original batch; a `finalize_settlement` subject installs the `child_results` agent frontier with the same ordered results. Declared mutating mode alone never forces an empty merge frontier.
+
+Re-awaiting an already settled owned child is an explicit read-only branch: it re-reads the original result and complete original provenance, and the current await ToolResult refers to those original owned result items in this request's supplied order. It never settles again, appends another ChildResultItem, or reapplies a patch. A mixed set waits/settles/first-merges only its previously unsettled children. An earlier failed merge is not a retry authorization. The ordinary call's existing charge rules are unchanged.
+
+The child summary projected to the parent includes its exact `childRunId` beside its ref-free summary or reason. The id is the owned handle identity required by `await_children`; audit CAS refs, policy JSON, receipt JSON and raw planner summaries are not model instructions.
+
+Each internal `child_merge` has its own closed request, B/S/A target, exact changed-path set and signed Supervisor handler identity. Policy evaluates `fs-write/write` for every changed path using the frozen parent rules; aggregate precedence is deny, then ask, then allow. An empty changed-path set uses the write mode fallback and invents no path. Delegate approval never grants merge permission. Ask uses the existing authenticated `run.approve` channel/frame with an explicit `child_merge` subject. Approval checkpoints do not change A: the request permanently binds the first registered source Checkpoint and full B/S/A closure. Replays route from the original control row and response/decision identity even after the parent leaves waiting. An expired unused interactive allow may create a new wait only after proving the original grant expired, never after a deny or a local claim; the original request/source and old grant expiry remain unchanged.
+
+Grant issue time P, actual current-owner merge preparation Q and the sole final transaction time C are distinct: `P ≤ Q ≤ C < original expiry` and the original parent deadline. The three local Journal rows carry Q and the same C; their actual owner must span Q through C. The final transaction resamples C and rechecks the original source/current cut, owner, time fence, ancestry, approval and conservative sibling reservations. A granted merge consumes exactly one tool call; a policy-denied merge has no local Journal or charge. Earlier genuine UNKNOWN operations remain charged and block this cut. The stable operation id cannot be used twice.
+
+Every merge appends one `ChildMergeResultItem` bound to its original policy item, request, B/S/A receipt and logical Checkpoint. It is kernel audit, with no provider tool-call/result pair. A conflict, resource failure or deny ends this synthetic batch without attempting later children. The final **real** await ToolResult carries all ordered original child results plus a closed, ref-free diagnostic: outcome, processed/charged/applied/unattempted counts, at most 32 conflict paths with truthful truncation, or the exact resource limit. Finalize settlement uses a kernel user presentation instead of inventing a tool result. Neither path copies the planner's audit summary into model context. History reconstructs the complete receipt and logical Checkpoint from original data, all-and-only local Journal triplets, the exact serial prefix and original owner provenance before accepting this presentation.
+
+If a pending allowed merge cannot pay its one call after later ordinary parent/child consumption, it uses the original resource Stop. A narrow data reader reconstructs its registered original source Checkpoint/revision/Journal, B/S/A, full child result/wait/merge prefix and either the original unused unexpired approval or the frozen policy's exact reproducible per-path allow. It mints no grant. Deny, unresolved ask, expired approval or an already used operation cannot prove a chargeable merge. The final Stop transaction rechecks that complete source and the ordinary budget inequality before registering the intent; drain/terminal retain it without creating a local claim, charge, merge effect or second child settlement.
+
+New Stop winners persist `registeredCheckpointId`, `registeredRunRevision` and `registeredJournalSeq` together in the same transaction as the real `Run.stopIntentRef`. A higher-priority replacement additionally binds `supersedesStopIntentRef`; priorities strictly increase along the finite registered chain. The registered Journal sequence includes an actual in-flight producer after the Checkpoint and fixes the complete original prefix; equal timestamps never identify a source cut. Display events are not Stop authority. A retained noncurrent reference must belong to this actual registered winner chain or have its independent original authenticated-control registration. Missing registration bytes are not reconstructed from today's state or an orphan CAS object.
+
+Parent cancellation uses a one-way reader of the actual parent Run's registered Stop chain and complete immutable child admission. It proves only the registered observation/revocation source, not the parent's full Stop cause, quiescence or terminal state. The child's own termination still requires its genuine resource retirement, UNKNOWN reconciliation, conservative child settlement and unique terminal transaction. The final child transaction rechecks the exact current parent fields and source edges. No child reader calls the parent's full recovery, avoiding a parent/child recovery cycle.
 
 A model cannot finalize around live delegated work. If a positively complete no-tool model turn arrives while any direct child allocation is nonterminal or terminal-but-unsettled, storage durably keeps its `ModelTurnItem` but creates **no** `FinalCandidateItem`. Instead it freezes every outstanding direct child in Run-id order into a `finalize_settlement` child subject tied to that model turn and releases the lease. Once settled (and after any required serial patch merges), the premature final text remains excluded from the next context manifest, normalized `ChildResultItem`s enter context, and the reducer returns to an agent frontier with cause `child_results`. The model must produce a new complete final turn against those results. Thus child completion can neither be silently ignored nor force unverifiable text into finalization.
 
 If a StopIntent arrives while any direct child allocation is nonterminal—even when the model never called `await_children`—the stop reducer creates a `stop_settlement` child subject over every outstanding direct child in deterministic Run-id order and cascades the stop. When replacing an active await subject it carries the exact await origin. Child terminal commits append audit-only `ChildResultItem`s bound to that StopIntent and settle allocations; they never return child-success payload to the model. After the last settlement, an await origin receives exactly one identity-matched `ToolResultItem(outcome='cancelled')` with a typed stop notice; a no-await stop creates no ToolResult. In either case the reducer closes the remaining batch suffix and evaluates terminal quiescence without resuming the model.
 
-If `successfulMutatingChildren.length > 0`, that transaction instead installs a `ChildMergeBatchItem`/tool frontier containing synthetic stable merge call ids for only those successful patch-bearing children, preserving their relative wait-set order, and its exact resume kind (`await_tool` or `finalize_settlement`). Failed/cancelled and read-only `ChildResultItem`s remain in the ordered final await result/context but never create merge calls. Each merge is a separately claimed `workspace-rollback-retry` built-in tool and uses the atomic post-effect Checkpoint contract. A conflict appends a structured merge error and returns diagnostics plus every already known child result to the agent without applying later children. Otherwise the final merge either appends the await ToolResult containing all ordered child results and resumes the original batch, or installs the child-results agent frontier for finalize settlement. Cancellation/deadline skips undispatched merges and evaluates terminal quiescence. No child item, merge, or wake is inferred from Session text.
+If `successfulMutatingChildren.length > 0`, that transaction instead installs a `ChildMergeBatchItem`/tool frontier containing synthetic stable merge call ids for only those successful patch-bearing children, preserving their relative wait-set order, and its exact resume kind (`await_tool` or `finalize_settlement`). Failed/cancelled and read-only `ChildResultItem`s remain in the ordered final await result/context but never create merge calls. Each merge is a separately authorized, closed `child_merge` local Supervisor operation. The parent first truly retires and seals its old worker/generation to the unchanged old Checkpoint and joins every original operation. The merge then reads only complete immutable B (the child's admitted fork), S (its unique terminal result), and A (the parent's current ready workspace), uses the existing `cliq-diff3-v1` planner, and commits its three local Journal phases, one-tool-call settlement, merge outcome, logical ready Checkpoint, frontier, revision, and event in one SQLite transaction. No native/broker grant, synthetic lease, physical post-effect proof or newly sealed generation is created. The parent WorkspaceState retains the parent RunSpec's original base; A is only this merge's input source. The new logical workspace is explicitly not yet materialized. The next ordinary preparing lifecycle must completely validate, create, materialize, fsync and re-read it before execution authority. The existing physical tool post-effect contract is unchanged. CAS failure leaves only orphans and a failed SQL transaction has no merge effect; recovery re-reads the same stable local identity, never manufactures UNKNOWN or retries an earlier genuine UNKNOWN. A conflict appends a structured merge error and returns diagnostics plus every already known child result to the agent without applying later children. Otherwise the final merge either appends the await ToolResult containing all ordered child results and resumes the original batch, or installs the child-results agent frontier for finalize settlement. Cancellation/deadline skips undispatched merges and evaluates terminal quiescence. No child item, merge, or wake is inferred from Session text.
 
 Rules:
 
@@ -8711,6 +11112,20 @@ Rules:
 The parent settles `child_terminal` rows only inside its own next expected-revision state transaction, explicit await reducer, Checkpoint boundary, or stop reducer; settlement moves inclusive usage from `budgetReserved` to `budgetConsumed` exactly once and appends the appropriate ChildResult item. The sole asynchronous parent mutation is safe: when the parent is already lease-free waiting on the exact child set, the final child transaction may also settle that set and install its matching wake/merge/stop frontier atomically. If the parent is running or no longer has that subject, only the allocation row changes. Startup recovery idempotently scans satisfied child subjects/terminal allocations and performs the same revision-checked reducer, so a crash cannot strand a waiting parent or double-settle usage.
 
 All parent/child and delivery drift merges use frozen `cliq-diff3-v1`; “may merge” is not an implementation choice. Per path, exact base/current/desired digest equality resolves unchanged/already-applied/one-sided changes first. Only same-type, same-mode regular UTF-8 files without NUL may text-merge. The algorithm splits while retaining line terminators, computes deterministic Myers shortest-edit scripts from base to current and base to desired with lowest-base-index then deletion-before-insertion tie breaks, represents edits as half-open base-line ranges, and accepts only disjoint edits or byte-identical replacements of the identical range. It applies accepted edits in base order without conflict markers. Every other overlap—binary, symlink, type/mode, delete/modify, add/add with different bytes, or overlapping nonidentical text—returns a structured conflict before verification/publication. `assemblyRef` pins the algorithm version.
+
+Lines are separated only by LF, retaining that terminator and any preceding
+CR verbatim; a bare CR remains content. No newline or Unicode normalization
+changes the merged file bytes. The shortest-edit tie selects the earliest actual base edit, not whichever
+alignment a greedy forward implementation happens to retain: changing
+`x\nx\n` to `x\n` deletes base line 0. Zero-width insertions have positional
+semantics: two insertions at the same base position merge only when their bytes
+are identical; an insertion strictly inside a nonempty edit conflicts, while
+one touching its start or end remains disjoint. A start-boundary insertion is
+emitted before that range's replacement bytes and an end-boundary insertion
+after them. Thus replacing `x\n` with `a\n` and independently inserting
+`y\n` before the original line yields `y\na\n`, not `a\ny\n`.
+Deletion-before-insertion resolves shortest-edit alignment ties; it does not
+reverse these boundary positions when applying accepted merge edits.
 
 Invocation retries remain Journal attempts inside the same Run. A user-requested retry after any terminal outcome is a new admitted Run; delivery is likewise a new `operation='delivery'` Run linked to, but never mutating, the source RunResult.
 
@@ -8730,6 +11145,10 @@ A trusted `.cliq/config` verifier definition is a declarative gate request, not 
 The resolved chain is one exact set of immutable artifacts. `VerifierCommandV1.commandDigest`, `VerifierEnvironmentV1.environmentDigest`, `VerifierSpec.specDigest`, every verifier `entryDigest`, `VerifierAuthorizationTemplateV1.templateDigest`, and `VerifierPlan.planDigest` are SHA-256 over RFC 8785/JCS bytes with only their own digest member omitted. Verifier ids are unique; indices are contiguous from zero. Command argv retains request order and contains only bounded `non_secret_literal` values; environment variables are unique and byte-sorted by name; cwd and writable roots are canonical admitted-root-relative paths, with unique byte-sorted writable roots. The environment's command ref/digest must decode to the exact same id/version, its source projection and runtime/guest identities equal the RunSpec/RunAssembly, and guest refs are both present or both absent according to the selected backend. A workspace script's workspace identity/path/digest and mandatory interpreter ref/digest reproduce the consumed execution-identity grant exactly. `InterpreterIdentityV1.identityDigest` omits itself under JCS and resolves one retained signed guest-toolchain executable by id/path/version/digest using only `script_path_as_first_argument-v1`; shebang lookup, host PATH, ambient shell, and an optional implementation-chosen interpreter are forbidden. The spec entry repeats the exact command/environment refs and digests; the plan repeats the exact spec/entry/command/environment bytes and only adds the current candidate/result and attempt bound. Unknown fields, shell strings, raw secret arguments/environment, undeclared writes, network, mutable executable paths, and alternate command/environment artifacts fail admission or launch before I/O.
 
 Execution permission is a second grant. Because a future candidate digest does not exist at admission, an admission-time allow creates one `VerifierAuthorizationTemplateV1` per verifier entry, bound to the exact Run/spec/index/id/version/entry, command and environment refs/digests, source projection, maximum candidate generations `repairAttempts+1`, that verifier's attempt ceiling, and Run deadline. When a candidate becomes durable, the Supervisor atomically consumes one bounded template allowance and mints the exact per-candidate launch grant binding `resultSourceRef`; the broker accepts only that grant. Without a matching template/user policy, the exact candidate produces a typed `verifier_launch` approval subject. Workspace Trust and pre-admission identity-read authorization never imply either template or launch permission.
+
+Explicit `verifier_execution` consent is consumed into its template in the original Run admission transaction. The template's `decisionRef` is exactly that `run_admission` consumption receipt; historical validation follows its derived execution grant, the identity's unique `authorization_derivation` receipt, and the original signed identity/control-channel/time closure. It is neither a direct-policy allow nor an `ApprovalDecisionV1`. The ordered nonempty `{verifierIndex,templateRef,templateDigest}` roots are deterministically reconstructed from that closure and included in the admitted resolved digest and recovery/GC roots. They are absent, rather than an empty array, when the original request supplied no execution grant, preserving that branch's original canonical encoding. A template never points back from `VerifierSpec`; missing bytes are an error, not permission to regenerate authority.
+
+The frozen named-action policy is still evaluated for each candidate. Explicit deny always wins; a template may satisfy an exact ask without changing its ask evidence. Otherwise an ask first retires any actual worker into its original ready-source Checkpoint, then records a worker-free exact `verifier_launch` wait before any new worker, reservation or claim. Only the authenticated exact `run.approve` transaction may allow or deny that wait. Required denial records the original `stop_intent` outcome and user cancellation, with no verification receipt; advisory denial records only the exact `VerifierSkipItem` and advances that candidate's verifier index. An allow committed before preparation is valid only through its exact original wait, decision, control response and Checkpoint. Expiry does not renew a template or grant: only a new exact approval can authorize eligible unclaimed/settled work. Original claimed/UNKNOWN/claimed-failed work is never resent, and every original dispatch claim for the same candidate/op counts against the frozen attempt ceiling across all replacement grants. Candidate ordinals follow the actual contiguous final-candidate/repair history and cannot reset on source equality or restart.
 
 ### 13.2 Outcomes
 
@@ -8753,6 +11172,42 @@ Repair diagnostics have one closed audit-to-model projection. `VerifierRepairDia
 `RepairDiagnosticItem.failedVerifierResultItemIds` and `diagnostics` are equal-length, nonempty, and ordered by the corresponding contiguous `VerifierPlan.entries` indices. Every result item is unique, required, assertion-failed for this candidate, and its exact receipt is the same receipt named by the same-index diagnostic. The entry repeats the diagnostic's verifier id, diagnostic ref/digest, and model-content ref/digest byte-for-byte; verifier ids and result item ids are unique. The repair reducer publishes all diagnostics and model-content artifacts before the single counter/frontier transaction. Normal prompt construction decodes only the ordered `VerifierRepairModelContentV1` artifacts; it never serializes the audit diagnostic or verifier output.
 
 If required assertions still fail when the frozen repair budget is exhausted, the Run terminates as `failed` with reason `verification_failed`. Candidate source, diff, diagnostics, and failed receipts remain inspectable, but they are not a verified `RunResult` and cannot enter the safe delivery path. `completed_unverified` means only that the RunSpec declared no required verifier.
+
+The fixed Linux Node recipe may retain `controller_stop` only when the original controller actually observed RELEASE, then irreversibly stopped that same containment and joined every output stream. Its measured interval is RELEASE-to-quiescence, not an assertion that Node exec succeeded. A previously received real wait result takes precedence. `controller_stop` has no exit code, signal or guessed native error; it can appear only in typed verifier-stop evidence tied to an already durable cancellation/deadline, or in a fatal `source_mutation` receipt backed by the independent exact trusted rehash. It is forbidden in pass, assertion-failure and infrastructure receipts, grants no retry/repair, and cannot by itself stop a Run. Before RELEASE, or without the complete original death/output proof, the claim remains unknown and fully charged; no measurement is fabricated.
+
+For this fixed Linux recipe only, a stopped Run may leave that original verifier
+`unknown` and unused at terminal through the separate closed dispatch-closure
+branch `verifier_parent_domain_dead`. This is not `containment_death` for an
+unobserved child, a no-spawn claim, an infrastructure receipt, or an
+`unknown -> failed` resolution. Its exact original claim/request/grant/child
+SandboxLaunch/plan, claiming StateOwner epoch, parent worker containment,
+lease and generation must reproduce the frozen verifier policy and candidate.
+The child plan must be directly nested under that exact parent cgroup and
+select the same sole native controller/subreaper lifetime. The existing parent
+worker recovery task must positively prove all descendants dead, the original
+subreaper process absent or its start token changed, and the inspecting native
+controller fully joined with no retained scopes/mounts. The same genuine native
+retirement owner is reasserted at the final transaction; an empty parent cgroup
+while its spawning controller remains live is insufficient. The complete
+private source must be unchanged under the trusted rehash, then quarantined
+and retired, never represented as a sealed verifier Checkpoint.
+
+This uses only the existing physical `worker_death` wait and its original
+30-second inspection dispatch, not a verifier ReconciliationSubject, target
+query, public verifier probe, new execution, or retry. The dispatch closure
+retains the exact parent death, quarantine and generation-retirement ref/digest
+pairs and literal `controllerLifetime='original_subreaper_absent_and_inspector_joined'`.
+The sole existing terminal Stop transaction retains the original UNKNOWN and
+full settlement unchanged in `abandonedRetryInvocations`; no non-call result
+item, refund or additional charge is created. It independently rechecks the
+current owner, full SQL/Journal cut, time fence and original five-second native
+freshness. Historical recovery rewalks both original child policy/claim and
+the complete parent death/retirement graph. Any positively received native
+result still takes its original completion path and cannot be abandoned by
+this branch. Missing, ambiguous, changed, stale or unjoined proof remains
+recovery-required; elapsed timeout or absence of a child result proves nothing.
+
+For trusted source drift, union the canonical paths from the exact before/after WorkspaceEntry manifests. For every unequal entry pair, include each existing side's SHA-256(JCS(WorkspaceEntry)); deduplicate those digests and sort by UTF-8 bytes. An added or removed entry contributes only its existing side. The resulting nonempty list is `changedEntryDigests`, never an implementation-chosen sample.
 
 ### 13.3 Verification Receipt
 
@@ -8781,7 +11236,7 @@ Run.status == succeeded
 => RunResult and receipts are durable before the terminal Run commit
 ```
 
-This invariant is enforced at the storage API, not merely by the verifier reducer. Generic Run compare-and-swap cannot set any terminal status. `commitRunResult` is the sole transition to `succeeded|completed_unverified` and first requires `stopIntentRef` absent, `cancelRequested=false`, no active stop proposal, and the same terminal-quiescence/closed-frontier checks. `succeeded` validates the frozen required verifier set and exact receipt/inherited-provenance closure in the same transaction; `completed_unverified` validates that the frozen required set is empty. Required verifier ids are unique. Each required verifier maps one-to-one to a unique passed receipt, and that receipt must be the `receiptRef` of the highest eligible `opKind='verifier'` Journal `completed` attempt whose immutable request binds the exact verifier id/version, `VerifierSpec`, command, environment, and `resultSourceRef`; one receipt cannot satisfy two requirements. Dependency closure is equally storage-enforced: `RunResult.dependencyPlanRef` is absent iff `RunSpec.dependencyPolicyRef` is absent/disabled; otherwise it equals the current candidate's `VerifierPlan.dependencyPlanRef` and has a **current-Run-owned**, identity-matched `DependencyReadyItem`, completed acquisition attempt, unchanged candidate source digest, and exact ready Checkpoint whose id equals `readyCheckpointId` and whose decoded workspace-entry tree digest equals `installedTreeDigest` for that candidate/plan. Inherited delivery verification provenance revalidates only the source Run's identical Journal-backed verifier closure; it cannot stand in for the delivery Run's dependency readiness. For `RunSpec.operation='agent'`, both current finalize frontier and RunResult forbid `deliveryTerminalProjectionEvidenceRef`. For `operation='delivery'`, both require the same exact forward-finalize `DeliveryTerminalProjectionEvidence` ref, whose plan/result/result-item/projection fields revalidate against the carried closure/frontier and current descriptor observations. `commitTerminalStop` is the sole failure/cancellation path; it requires the current winning StopIntent, derives status/reason/detail from it, and enforces terminal quiescence in the same transaction.
+This invariant is enforced at the storage API, not merely by the verifier reducer. Generic Run compare-and-swap cannot set any terminal status. `commitRunResult` is the sole transition to `succeeded|completed_unverified` and first requires `stopIntentRef` absent, `cancelRequested=false`, no active stop proposal, and the same terminal-quiescence/closed-frontier checks. `succeeded` validates the frozen required verifier set and exact receipt/inherited-provenance closure in the same transaction; `completed_unverified` validates that the frozen required set is empty. Required verifier ids are unique. Each required verifier maps one-to-one to a unique passed receipt, and that receipt must be the `receiptRef` of the highest eligible `opKind='verifier'` Journal `completed` attempt whose immutable request binds the exact verifier id/version, `VerifierSpec`, command, environment, and `resultSourceRef`; one receipt cannot satisfy two requirements. Dependency closure is equally storage-enforced: `RunResult.dependencyPlanRef` is absent iff `RunSpec.dependencyPolicyRef` is absent/disabled; otherwise it equals the current candidate's `VerifierPlan.dependencyPlanRef` and has a **current-Run-owned**, identity-matched `DependencyReadyItem`, completed acquisition attempt, unchanged candidate source digest, and exact ready Checkpoint whose id equals `readyCheckpointId` and whose decoded workspace-entry tree digest equals `installedTreeDigest` for that candidate/plan. For the explicit identical-source Delivery exception, `dependency.kind='inherited_verification'` instead binds the exact source Run/result, source verification closure and the same immutable inherited provenance plus policy/plan refs. The complete source dependency receipt/Journal/retirement is revalidated. This proves inherited verification only: no delivery-owned Ready, GET, installed M or script permission is invented. Every other dependency-enabled candidate requires its current-Run-owned acquired or narrowly inherited-parent Ready and its actual local sealed M. For `RunSpec.operation='agent'`, both current finalize frontier and RunResult forbid `deliveryTerminalProjectionEvidenceRef`. For `operation='delivery'`, both require the same exact forward-finalize `DeliveryTerminalProjectionEvidence` ref, whose plan/result/result-item/projection fields revalidate against the carried closure/frontier and current descriptor observations. `commitTerminalStop` is the sole failure/cancellation path; it requires the current winning StopIntent, derives status/reason/detail from it, and enforces terminal quiescence in the same transaction.
 
 ## 14. Result And Delivery
 
@@ -8806,7 +11261,7 @@ The default result is immutable and reviewable. A successful agent Run does not 
 
 `cliq apply <runId>` descriptor-captures current real-workspace SourceManifest A as part of admission, installs A in RunSpec/initial `delivery:merge`, installs its distinct restorable WorkspaceStateManifest W_A in the initial Checkpoint, and then creates a narrow delivery Run that:
 
-1. uses the already-admitted immutable current-workspace capture without changing it;
+1. uses the already-admitted immutable current-workspace capture without changing it; creates its physical private generation only through section 7.2's post-admission `preparing` ownership/materialization/validation lifecycle, never by treating pre-admission W_A publication as physical evidence;
 2. applies the verified diff in a private merge view;
 3. detects conflicts and result digest drift;
 4. reruns required verifiers when the merged result reference differs; when it is the identical content-addressed `resultSourceRef`, validates and records explicit inherited-verification provenance instead of manufacturing delivery-owned receipts;
@@ -8822,10 +11277,13 @@ final delivery admission digest binds that inherited ref. It does **not**
 inherit an admission-time dependency plan or source-Run dependency readiness.
 Each delivery merge candidate derives its own candidate-bound
 `DependencyAcquisitionPlan` from that policy and exact manifest/lockfile
-digest. When the policy is enabled, the delivery Run executes and records its
-own setup even for an identical `resultSourceRef` and plan; only a ready
-Checkpoint already owned by that same delivery Run may satisfy recovery without
-another dispatch. The delivery Run sets `modelTokens=0`, `costMicros=0`,
+digest. A nonidentical candidate executes and records its own setup; only its
+own true ready Checkpoint can satisfy local recovery. An identical candidate
+may instead retain the closed `inherited_verification` branch bound to its
+original fully verified source and the same inherited provenance. It does not
+claim dependency materialization in the Delivery M or produce a local Ready.
+The source Run's lifecycle script permission never transfers; a local setup
+requires this Delivery's own genuine exact-source approval. The delivery Run sets `modelTokens=0`, `costMicros=0`,
 `repairAttempts=0`, `childDepth=0`, and `childConcurrency=0`, and accepts only
 wall/tool ceilings through `run.apply`. It never invokes a model or repairs
 verifier assertions. Candidate-bound dependency setup consumes one delivery
@@ -8837,29 +11295,455 @@ otherwise an exact launch may wait for approval. This keeps delivery
 deterministic and makes a failed drift check return to a new agent Run rather
 than smuggling an undefined repair frontier into apply.
 
-Publication is descriptor-anchored. The broker opens and holds the admitted real-workspace root as a no-follow directory handle and revalidates device/file identity against the delivery capture. Every parent component is walked relative to that handle with no symlink traversal or escape: Linux uses `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`; macOS uses `openat(O_DIRECTORY|O_NOFOLLOW)` one component at a time plus `fstat` identity checks. Leaf temp/create/exchange/quarantine operations use only the resulting directory descriptors; an absolute path is never reopened after validation. Any root/ancestor identity change enters typed publication reconciliation before another write.
+Publication is descriptor-anchored and authorizes the exact captured root and
+parent inode objects, not an atomic lock on their future namespace ancestry.
+The broker opens and holds the admitted real-workspace root as a no-follow
+directory handle and revalidates device/file identity against the delivery
+capture. Every parent component is walked relative to that handle without
+symlink traversal or resolution-time escape: Linux uses
+`openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS)`; macOS uses
+`openat(O_DIRECTORY|O_NOFOLLOW)` one component at a time plus `fstat` identity
+checks. Leaf create/exchange/quarantine operations use only the resulting
+directory descriptors; an absolute path is never reopened after validation.
+The complete source, projection, permission/grant, root, parent, device and
+entry checks remain mandatory. A root/ancestor identity or linkage change
+detected by preflight or a precheck refuses the operation before its write and
+enters typed publication reconciliation; it never retargets the captured object
+or authorizes a replacement found at the old path.
 
-`DeliveryPlan.forwardOperations` includes every missing parent directory before its children and contains only `mkdir|create|replace|delete`. A directory create requires expected absence, `mkdirat`, normalized mode `0755`, descriptor re-open/no-follow verification, and directory fsync. Recovery may accept an already-created directory only when its identity/type/mode and contents are exactly the prefix permitted by this same immutable plan; unexpected contents wait for reconciliation. The separate immutable `abortOperations` list enumerates planned delivery-created directories deepest first. If its forward mkdir never completed, a read-only reducer proves there is no creation receipt and the path is still absent, appends `not_created`, and advances without a maintenance claim. Otherwise maintenance removes it only when its creation receipt belongs to this delivery and it is proven empty; it records `retained_planned_descendant` when the only contents are already-completed desired descendants, and waits on any unexpected content. It never removes a pre-existing directory. Each operation has a stable id, required evidence, and reconciliation predicate; multi-path publication remains explicitly non-atomic.
+The supported contract requires a quiescent human workspace. No-follow
+resolution and a final ancestry check do not atomically fence an uncooperative
+actor from moving an already captured root or parent between that check and the
+namespace syscall. In that final gap the syscall may affect the original
+captured object, including after it has moved outside the current workspace
+path. On detecting that drift the producer must refuse successful completion,
+stop further semantic publication, retain the original descriptors and every
+actual displaced inode/preimage, and reconcile the same claim. It cannot claim
+zero namespace effect, an atomic current-path/no-outside-write guarantee, or
+blindly roll the operation back over another edit. Detection does not grant new
+permission, another semantic dispatch, or permission to discard retained data.
 
-Every leaf plan freezes exactly the unpredictable sibling components required by its union branch, their expected absence, desired digest/type/mode, admitted destination preimage, parent identity/linkage, and operation id; none is derived after a crash. Replace reconciliation follows one versioned state machine: `none -> desired_staged_and_fsynced -> exchanged (destination=desired, staging=actual displaced) -> displaced_quarantined -> displaced_preserved_in_CAS -> leaf_completed`. Create uses its stage/no-replace subset; delete uses destination-to-quarantine/preserve and has no staging state. Each observation is descriptor-relative and validates all involved identities/digests; a field forbidden by the operation branch makes the plan invalid rather than ignored.
+`DeliveryPlan.forwardOperations` contains only `mkdir|create|replace|delete` and
+represents directory removal and file/symlink/directory type conversion as well
+as ordinary leaf edits. Missing parents precede children; planned descendant
+removals precede removal or conversion of their directory. An expected directory
+binds its captured physical identity and raw mode, and must actually be empty
+before removal or conversion. Unexpected children block publication and remain
+untouched. Desired directories have normalized mode `0755`; captured raw modes
+are not confused with logical SourceManifest modes.
 
-A leaf is one indivisible publication envelope and one `toolCalls` reservation: staging/exchange or no-replace, preservation of the actual displaced bytes in CAS, exact transient cleanup, and parent fsync. Before deleting a staging/quarantine sibling, the Supervisor commits a `PublicationPathProgressItem` that binds the destination evidence, actual preserved preimage CAS ref, and exact transient identity while the same Journal attempt remains open. A crash before that item leaves the sibling intact; a crash after it can prove either the exact pending sibling or its exact absence and cannot lose the preimage association. Journal `completed` plus `PublicationPathResultItem` is legal only after every transient for that leaf is absent and the directory is fsynced. “Destination has desired digest” alone is never completion.
+Publication uses one private arena for each original permanent Journal claim:
+`StateRoot/runtime/publications/<arenaId>`, where
+`arenaId = identityHash('cliq-publication-arena-v1', runId, operationId, opId, String(attempt), dispatchId)`.
+This is a physical resource of the existing claim, not a new permission ledger,
+retry owner, or worker lifecycle. The same StateOwner holds and validates the
+actual no-follow directory descriptors and private `0700` ownership boundary.
+Every staging and displaced-preimage component is inside this arena, never a
+mutable workspace sibling. The canonical Plan uses the fixed private
+components `desired` and `preimage`; it does not allocate collision-avoiding
+workspace siblings. A directory or symlink is born, opened, normalized
+where applicable, and fsynced inside that boundary before its atomic release to
+the captured workspace parent. A path, matching bytes or target text never
+substitutes for the original inode's birth identity. An arena is protected by
+the existing StateRoot threat boundary; `0700` is not claimed to isolate an
+arbitrary malicious process running as the same OS user.
 
-Cancellation, deadline, or another StopIntent forbids a new semantic forward operation, but it cannot strand a claimed publication envelope. The already-reserved envelope may perform only bounded no-new-semantic-effect recovery after stop: status/identity queries, CAS preservation, removal of its exact staging/quarantine sibling, fsync, and terminal evidence. It then switches the delivery frontier to `abort_cleanup`; undispatched semantic forward operations are skipped, and the deterministic deepest-first abort list handles only delivery-created directories. Abort cleanup and completion of an already-claimed envelope consume no additional `toolCalls` and are allowed after deadline because they reduce external ambiguity rather than create new desired state. Failure to prove exact identity/emptiness remains `waiting(reconciliation)`; it is never guessed away. Normal success never executes the abort list. Thus one linear reducer never mixes success and rollback branches, and terminalization requires the chosen branch complete with no transient sibling.
+Before the first workspace write, one complete read-only preflight checks all
+planned touched existing parents against the held root/topology and verifies
+that every arena-to-workspace move is on the same actual filesystem. It also
+rejects every touched multiply linked regular file before any workspace write;
+the actual operation rechecks this single-link requirement. Capture may read
+such a file but cannot authorize publication over it. Capability probing does
+not create a file or directory in the user workspace. Cross-filesystem
+publication is unsupported and explicitly unqualified: it fails before any
+workspace write, with no sibling fallback, copy/delete emulation or weaker
+primitive. Mount drift, `EXDEV` and a failed preflight do not grant a fallback.
+
+The separate immutable `abortOperations` list enumerates only planned
+delivery-created directories deepest first, including a directory created by a
+type conversion. If its forward creator never completed, a read-only reducer
+proves that no creator remains unresolved and that there is no completed
+creation receipt. It records actual absence or the completely unchanged
+captured `A` leaf described above, appends `not_created`, and advances without
+a maintenance claim. A present original file or symlink is never called an
+absent path and is left untouched. Changed bytes, raw file mode, symlink
+target, a present directory, or an unresolved create require reconciliation.
+Otherwise maintenance
+removes it only when its creation receipt belongs to this delivery and it is
+proven empty; it records `retained_planned_descendant` when the only contents are
+already-completed desired descendants, and waits on any unexpected content. It
+never removes a pre-existing directory. A claimed `abort_rmdir` is a distinct
+empty-directory maintenance operation, not a productive `delete` cast. It uses
+the same original physical arm/revoke fence: a revoked native object cannot be
+rearmed, while a separately authorized abort claim has its own original object.
+It no-replace moves the actual directory into that claim's fixed private
+`preimage` slot before rechecking the exact creator inode and emptiness. A
+foreign or newly nonempty displaced directory remains retained and unknown;
+it is never unlinked or treated as successful maintenance. The workspace-absent
+observation, exact empty-directory CAS preimage and still-present private slot
+enter the existing `desired_committed_cleanup_pending` PathProgress lifecycle;
+only the genuine durable progress barrier authorizes exact private rmdir,
+both-parent fsync, arena retirement and joined close. This consumes the same
+zero-budget maintenance claim, not another dispatch or permission. Recovery requires original durable
+claim/birth/progress evidence for the same exact inode; a derived arena name,
+directory scan, matching mode or hash cannot adopt a crash remnant. Missing or
+insufficient birth evidence remains reconciliation. Multi-path publication
+remains explicitly non-atomic.
+
+Every plan freezes exactly its branch-specific private staging/quarantine
+components, expected absence, desired digest/type/mode, captured destination
+preimage, parent identity/linkage, and operation id. Arena identity is derived
+only from that immutable operation and its original permanent claim, never the
+successor's owner epoch. Create and mkdir use no-replace release from the held
+arena to the held workspace parent. Replace follows one versioned state
+machine: `none -> desired_staged_and_fsynced -> exchanged (destination=desired,
+private staging=actual displaced) -> displaced_quarantined ->
+displaced_preserved_in_CAS -> leaf_completed`. Delete uses a no-replace move
+into the private quarantine and has no desired staging state. Both affected
+directories must be fsynced after an arena/workspace move. Observations use a
+closed workspace-or-publication-arena locator and retain the actual parent and
+entry descriptor identities; a StateRoot slot is never disguised as a path
+under the workspace identity. Forbidden branch fields are errors, not ignored.
+
+An uncooperative writer can change a destination after its last precheck.
+Exchange or quarantine must retain the **actual** displaced inode and bounded
+bytes/type in the private arena. A mismatch with the captured preimage enters
+typed reconciliation: it cannot produce a successful receipt, delete the
+unexpected preimage, or blindly exchange it back over a later edit. These
+primitives do not promise zero namespace effect in that concurrent cut.
+
+A path is one indivisible publication envelope and one `toolCalls`
+reservation: private staging, exchange or no-replace release, preservation of
+the actual displaced preimage in CAS, exact transient cleanup, and fsync of all
+affected parents. Before deleting a private staging/quarantine object, the
+Supervisor commits a `PublicationPathProgressItem` binding the destination
+evidence, actual preserved preimage CAS ref, and exact arena/slot/inode identity
+while the same Journal attempt remains open. Only the genuine producer-owned
+native operation can supply the progress object to that SQL barrier; a decoded
+artifact or caller-provided boolean does not authorize cleanup. A crash before
+the barrier leaves the object intact; a crash after it can prove the exact
+pending object or its exact absence without losing the preimage association.
+CAS or rolled-back SQL failure retains the original live owner and operation,
+not a new semantic dispatch. Journal `completed` plus
+`PublicationPathResultItem` is legal only after every transient for that path
+is absent and the affected directories are fsynced. Desired destination bytes
+alone never prove completion.
+
+Cancellation, deadline, or another StopIntent forbids a new semantic forward
+operation, but cannot strand a claimed publication envelope. Revoke semantic
+release before joining producers. The already-reserved envelope may perform
+only bounded no-new-semantic-effect recovery after stop: status/identity
+queries, CAS preservation, removal of its exact private staging/quarantine
+object, fsync, and terminal evidence. It then switches the delivery frontier to
+`abort_cleanup`; undispatched semantic forward operations are skipped, and the
+deterministic deepest-first abort list handles only delivery-created
+directories. Abort maintenance and completion of an already-claimed envelope
+consume no additional `toolCalls` and remain allowed after deadline because
+they reduce ambiguity rather than create new desired state. Their distinct
+maintenance authority must bind the original Plan/claim, actual creator
+receipt, correct abort prefix and stopping/retirement facts; it is not obtained
+by relaxing an ordinary productive grant's expiry or release gate. Failure to
+prove exact identity/emptiness remains `waiting(reconciliation)`. Normal
+success never executes abort, and terminalization requires the chosen branch
+complete with no private transient. None of these rules extends the existing
+stop, freshness or recovery time bounds.
+
+The productive child `PublicationPathGrantV1` has only
+`subject.sequence='forward'`, exactly one dispatched attempt, and the original
+plan grant's unchanged expiry. It cannot represent an abort. The separate
+closed `PublicationMaintenanceAuthorityV1` has format
+`cliq-publication-maintenance-authority-v1`, the original principal, Run,
+policy, frontier, operation request/target refs and digests, and this subject:
+
+```ts
+subject: {
+  kind: 'publication_abort_maintenance'
+  deliveryPlanRef: ArtifactRef
+  operationIndex: number
+  operationId: string
+  operationDigest: Digest
+  createdByOperationId: string
+  creatorReceiptRef: ArtifactRef
+  stopIntentRef: ArtifactRef
+}
+```
+
+Its provenance is exactly `delivery_plan_maintenance` with the original
+`planAuthorizationGrantRef` and `deliveryDecisionItemId`; it has
+`maxDispatchedAttempts=1`, `issuedAt`, and `authorityDigest`, but no productive
+expiry or execution capability. The authority id binds Run, exact abort op id,
+request digest, original parent grant ref and decision item id, winning Stop
+ref, actual completed creator receipt ref, and issue time under domain
+`cliq-publication-maintenance-authority-v1`. The authority digest hashes the
+whole canonical object with that member omitted. Unknown fields, an ordinary
+grant in an abort preparation, or a maintenance authority in a forward
+preparation are rejected. The existing preparation's grant ref retains this
+typed authority; no second ledger is introduced.
+
+Retained validation reconstructs the exact authority and revalidates the
+original completed creator, creation receipt, Stop and ordered abort prefix.
+The live owner independently checks the same facts, actual original directory
+identity and emptiness before arming the native operation. An expired parent
+may identify that original approved Plan for maintenance only; neither its age
+nor these canonical bytes grants productive release or makes a missing native
+proof true. Already-claimed forward cleanup retains its original claim rather
+than minting another maintenance dispatch.
+
+The original private M resource Checkpoint has the stable intended id
+`identityHash('cliq-delivery-publication-checkpoint-v1', runId, deliveryPlanRef)`.
+The original M worker's quiescence/snapshot owner can therefore bind that id
+before the later fresh real-workspace projection exists. A genuine known
+completion of the last forward operation first publishes the closed
+`received_handoff` item. Its distinct id is
+`identityHash('cliq-publication-received-handoff-item-v1', runId, opId, '0')`;
+it never replaces the earlier cleanup-pending item or grants cleanup. Only
+the actual original producer, after the exact receipt and complete private
+slot/arena retirement and joined descriptors, may commit it. The same
+StateOwner transaction registers the complete immutable graph, commits that
+original M seal once, appends this excluded-control continuation item and its
+resource auto-Checkpoint, clears the active worker pointer and queues the Run.
+The Run remains nonterminal and occupies capacity. Its publication frontier,
+Journal, PathResults, reserved/consumed budgets and reservation do not advance
+or settle. An unresolved UNKNOWN, uncertain join or unreturned birth cannot
+hand off. A genuinely resolved original UNKNOWN follows the explicit
+same-claim recovery branch below, not this ordinary new-settlement branch.
+
+The closed `generationResources` union distinguishes the actual resource
+history. `sealed` binds the original `workerLaunchId`, `generationRef` and
+`snapshotEvidenceRef`. `genuinely_retired_from_verified_checkpoint` instead
+binds the original launch/generation, `sourceCheckpointId`,
+`quarantineEvidenceRef` and `retirementEvidenceRef`; it requires complete
+reconciliation evidence and the actual retired SQL launch/generation graph,
+original whole-domain death/quarantine/retirement and unchanged verified W_M.
+It never manufactures a snapshot, changes retired to sealed, recreates M or
+waives physical retirement. Readers accept neither missing fields nor a
+legacy fallback that treats these histories as equivalent.
+
+For a publication UNKNOWN, worker retirement and publication inspection are
+separate, ordered parts of the same lifecycle. A forward claim requires the
+genuinely retired original M. An abort-maintenance claim may bind its same
+already sealed M and retired original launch, but only with the complete
+original seal graph, exact current Stop, creator and maintenance authority;
+it cannot fake a sealed-to-retired transition or adopt a newer worker. Retiring
+M revokes semantic release but retains continuously held original publication handles until their
+actual reconciliation/close. The first `PublicationInspectionTargetV1` freezes
+only the original complete prefix's prepared/claim/UNKNOWN Journal sequences,
+original ambiguity/settlement and optional durable progress/Checkpoint. A
+successor may reopen a cleanup-only original envelope only with the exact
+durable birth/progress and inode/resource graph; missing records, unreturned
+births or an unsupported missing slot remain waiting. A path, derived name,
+hash or CAS enumeration cannot adopt a resource. A read-only probe performs
+no rename, cleanup or semantic operation; any later exact private cleanup
+requires its separate original-claim gate and real joined producer.
+
+`PublicationRecoveryOriginV1` binds Run/Plan/op/attempt/dispatch/claim sequence,
+the original birth, current inspector and exact original-process death evidence
+under the same StateRoot. The existing takeover branch retains the exact
+`ownerDeathAcquisitionEvidenceRef/ownerDeathAcquisitionEvidenceDigest` pair.
+It is an exclusive union with `gracefulOwnerDeath`, a closed object containing
+`kind='observed_after_graceful_release'`, `priorOwnerRowDigest`,
+`priorProcessIdentityRef/priorProcessIdentityDigest`,
+`gracefulTransitionEvidenceRef/gracefulTransitionEvidenceDigest`, and fixed
+`processObservation='absent_or_start_token_mismatch'`. Both or neither branch,
+partial pairs, unknown fields and accessors are refused; `originDigest` covers
+the entire selected branch with only itself omitted.
+
+The graceful branch does not treat release, a larger epoch, lock acquisition or
+the old receipt as process death. Before any original-envelope inspection, the
+genuine strictly newer current StateOwner uses its held native lock to observe
+the exact PID/start token from the fully retained original owner's process
+identity. A live exact lifetime or unavailable/uncertain observation refuses.
+`origin.observedAt` is that actual native observation time, no earlier than the
+original graceful release or current inspector acquisition. The full retained
+owner/transition/process/runtime/lock/StateRoot graph must match the exact claim
+and birth, and its SQL history must remain unchanged at the original writer's
+commit. Neither historical row, transition, acquisition nor epoch is rewritten.
+This is publication provenance only: it grants no broker/worker containment
+death, old FD, semantic release, new claim or budget allowance. The probe's
+original deadline, current desired inode/full hash, durable progress and actual
+joined maintenance checks remain required. Only claim-bound observations, ambiguity,
+receipt or arena retirement may name this origin, never a fresh whole-root
+projection. Same-owner observations retain their original exact owner checks.
+An original claimed attempt lacking UNKNOWN first needs that truthful
+claim-loss ambiguity and its sole full settlement before an inspection wait;
+it is not silently skipped. A real original worker-death inspection may write
+that ambiguity and full reservation charge before the same worker's quarantine,
+without changing its wait, anchor or fenced Journal cursor. A worker-free
+abort instead requires its genuine readonly maintenance task and already
+closed original resource graph, plus the actual original-claim owner death;
+it uses the same initial-ambiguity item/Checkpoint writer with zero reservation,
+release and consumption, never a fabricated worker-death wait. Both retain
+the original W_M and frontier and re-read the complete actual cut afterwards;
+neither opens an arena or proves a successful path operation. The acyclic retained graph is
+result/handoff → reconciliation wrapper → actual receipt/proof → recovery
+origin, while the frozen target refers only to older UNKNOWN/progress facts.
+
+Positive same-claim resolution preserves the immutable original UNKNOWN and
+its full BudgetSettlement. It appends the actual completed/failed Journal fact
+with zero additional budget and that exact settlement, never refunding,
+charging again or creating another claim/attempt. A last recovered outcome
+first persists the actual sealed-or-retired resource handoff, then freshly
+validates the complete workspace. The sole terminal transaction still commits
+the final Journal/result/Checkpoint/RunResult/Session graph. Stop chooses the
+original abort contract without erasing or repeating the real effect. Missing
+or ambiguous outcome/resources continue waiting.
+
+Only after this actual transaction succeeds may shutdown cancel and join the
+separate expensive read-only root projection. Storage failure keeps the same
+original owner and fixed item/graph; it cannot permit a second dispatch,
+another M retirement/seal owner, early settlement or a timeout-as-join.
+A successor fully validates the original claim, birth, receipt/semantic digest,
+slot/arena retirement, original sealed generation/WorkerLaunch and actual
+resource Checkpoint, plus predecessor retirement under the existing fence.
+It may mint only the fixed non-release read-only recovery task, never an old
+native owner, arm/retry capability or a freshly invented generation-free cut.
+It must recapture the actual original workspace through the same full
+projection and current inspector. Stop selects the original receipt's
+once-only settlement and abort branch without changing that received fact.
+Missing, partial, corrupt or unreadable handoffs require recovery. All existing
+two-second shutdown and five-second evidence limits remain unchanged.
+
+When and only when that complete handoff exists, the final publication
+Checkpoint has id
+`identityHash('cliq-delivery-publication-terminal-checkpoint-v1', runId, deliveryPlanRef)`.
+Without a handoff, the early-Stop and no-op branches keep the original resource
+Checkpoint id as their terminal publication Checkpoint. Readers determine this
+closed branch from the fully validated handoff, never by fallback or name
+existence. The terminal projection is bound by the exact
+last-result/Journal/frontier/Checkpoint transaction, not by its inclusion in
+an id. CAS or rolled-back SQL failure retains the same owner, snapshot and
+cumulative D1 budget; a changed fresh observation cannot mint a new seal owner.
+The successful delivery becomes terminal only when the last path's
+Journal/result/settlement, publication Checkpoint/finalize edge and the sole
+RunResult and Session outcome commit in **one** transaction. Its original M
+seal is either already rooted by that exact handoff, or commits in the same
+terminal transaction on the branch without a handoff; it never commits twice.
+No productive or externally visible forward-finalize-ready Run is committed
+between those steps. The
+transaction first installs the genuine publication Checkpoint based on revision
+`r` and its finalize row at `r+1`, then the existing unique result writer installs
+the result Checkpoint based on `r+1` and the terminal row at `r+2`. The no-op
+branch keeps its verification/publication Checkpoints based on the same original
+revision and uses the same terminal writer, without a publish claim or worker.
+
+Immutable result/Session bytes are prepared before that transaction. For atomic
+delivery only, result `createdAt` is the truthful preparation time: it must not
+precede the actual terminal projection observation or exceed the accepted
+commit time. Publication/result Checkpoint times are the actual accepted SQL
+commit time, not backdated to make the old two-transaction inequality pass.
+Likewise, a path result resolving a fully validated original UNKNOWN retains
+`receipt/probe observation <= item.createdAt <= new Journal.timestamp`, with
+that Journal time exactly equal to its original atomic result Checkpoint time.
+Initial path settlement keeps its original settled-time-before-item ordering;
+neither branch retimes the old receipt, UNKNOWN or BudgetSettlement.
+The genuine owner rechecks projection/death freshness and the exact original
+Run/Stop/Session cut at final commit. Ordinary agent-result timing is unchanged.
+The internal result writer accepts only the original genuine publication
+completion and synchronously rechecks its just-installed exact SQL graph; a
+structural future cut or caller callback is not proof. There is no asynchronous
+CAS/recovery read inside the SQL transaction, and a result or Session conflict
+rolls back the **whole** transaction rather than leaving a publication-only
+commit. Retrying immutable/Session preparation retains the original physical
+completion and cumulative D1 budget, never another path effect or claim.
+
+A Stop or expiry that wins before the transaction follows the complete abort
+branch and fresh abort projection required above, not the old forward
+projection. After the transaction, cancellation receives the existing terminal
+Run refusal. No Stop-adoption ledger, early terminal Stop Checkpoint, or
+post-success re-insertion of the publication Checkpoint is introduced.
 
 Verification receipts always retain the `runId` that actually executed the verifier. A delivery Run may reuse source-Run receipts only when its normalized private merge view resolves to the exact same content-addressed `resultSourceRef`, the source Run is still `succeeded(verified)`, every receipt/artifact digest and the frozen `VerifierSpec` validate, and an immutable provenance artifact binds the delivery Run, source RunResult, identical result reference, verifier spec, and receipt set. If any condition differs, the delivery Run executes the required verifiers and produces receipts bound to its own `runId`. Arbitrary historical receipts or digest-only similarity are never proof.
 
-If delivery fails, the original agent Run remains succeeded for its original immutable result. A partial or ambiguous materialization never rewrites that truth; the delivery Run waits for reconciliation or fails independently. Multi-path application is not claimed to be atomic, and the explicit apply UI requires a quiescent human workspace; same-user concurrent writers are outside global fencing, but any displaced bytes observed at an atomic swap must be preserved rather than silently lost.
+If delivery fails, the original agent Run remains succeeded for its original immutable result. A partial or ambiguous materialization never rewrites that truth; the delivery Run waits for reconciliation or fails independently. Multi-path application is not claimed to be atomic, and the explicit apply UI requires a quiescent human workspace. Same-user concurrent writers are outside global fencing: the captured-object contract above does not promise that a final-gap ancestor move has no effect outside the current workspace path. Every detected drift still blocks successful completion, and any actual displaced bytes must be retained rather than silently lost.
 
 Delivery adds no new terminal-reason enum. A deterministic `cliq-diff3-v1` conflict proposes `runtime_failed` with typed detail subtype `delivery_merge_conflict`; a positively failed forward/cleanup/abort operation proposes `runtime_failed` with subtype `delivery_publication_failed` and exact plan/operation/evidence refs. An ambiguous publication remains waiting and cannot be mislabeled failed. Cancellation/deadline/integrity StopIntent precedence still wins according to section 6.
+
+A complete deterministic Delivery merge that exceeds a frozen output limit instead proposes the separate `runtime_failed(delivery_merge_limit_exceeded)` cause. It is not the Agent final-model `result_source_limit_exceeded` branch. Independently reproduce B/S/A from the original verified source RunResult, original retired capture, initial Checkpoint and W_A, immutable SourceProjection and strict SandboxProfile. Exhaust and hash every original file object before accepting any measurement, then run the fixed merge and validate the complete combined graph. No planned/unpublished M artifact, caller count, caught error, output truncation or physical allocation failure is evidence. A conflict is still a conflict; invalid/missing/corrupt data, I/O, cancellation, arbitrary computation failure or memory exhaustion cannot become a resource Stop.
+
+For a complete conflict-free M, compare in this fixed priority: `changed_paths`, `changed_bytes` (the exact A→M diff counts defined in section 10.5), `generation_bytes` (sum of the full sizes of all regular-file entries in M, counting each path even when CAS bytes are shared), `single_file_bytes` (maximum regular-file size in M, or zero when none), then `merged_entries` (the complete M.entries length versus the existing `MAX_SOURCE_PROJECTION_ENTRIES = 100000` fixed walker guard). The two byte ceilings are exactly the original SandboxProfile `maxGenerationBytes` / `maxSingleFileBytes`; symlink target bytes, directories, native filesystem allocation/quota and metadata inventory are not regular-file bytes. The `merged_entries` measurement is only a necessary lower bound: more than 100000 projected entries proves a complete walker must refuse, while at most 100000 does not prove that hidden/excluded inventory, allocation or any other physical check will fit. It is not a fabricated live inventory and does not replace any walker guard. Equality passes; `observed` and `limit` are nonnegative safe integers with `observed > limit`. The complete deterministic merged graph may itself exceed an output ceiling even when each input fits. No arbitrary semantic length limit or timeout is added.
+
+The source resource branch owns only the original worker-free merge cut: no Run item, Journal invocation, worker launch, workspace generation, child, reservation or consumption, with lease epoch zero. Before terminalization its frontier remains the exact original `delivery:merge` and its latest Checkpoint remains initial; terminal/reopen validation requires the same initial context, W_A and zero cursors. The owning merge composes the existing resource-Stop reducer, which independently re-reads this full admission/source graph and derives the closed cause before the existing Stop transaction. It publishes no M/candidate/merge item/Plan and grants no execution authority. The unchanged sole Stop/Session transaction produces one failed outcome and releases capacity only when genuinely terminal. Winning cancellation/deadline/integrity, CAS/SQL failure, recovery and replay preserve their existing rules; unsupported or incomplete evidence remains recovery-required.
 
 ## 15. Surfaces And Ecosystem Thin Waist
 
 The kernel exposes one versioned local control protocol used by CLI, TUI, JSONL, and RPC adapters.
 
+The connected frontend's headless schema 3 is authored with the original
+control codecs in `src/kernel/control-wire.ts` and exported by the deterministic
+`src/control/v1.ts` generator. It does not redefine the application protocol.
+A JSONL request is exactly `{schemaVersion:3,request:<ControlRequestV1>}`;
+a response is exactly `{schemaVersion:3,protocolVersion:1,type:'response',
+response:<ControlResponseV1>}`. The entire outer JSON object, not just its
+application payload, remains within the original 1 MiB frame and strict JSON
+depth/entry bounds. JSONL emits its already authenticated hello first, then
+awaits each response write before reading or dispatching another request.
+Stdio JSON-RPC uses exactly `jsonrpc:'2.0'`, a bounded string or safe-integer
+`id`, the same application `method`, and `params` equal to the JSONL request
+envelope. Its `result` is the identical response envelope. A first explicit
+`control.hello` is required; incompatible ranges produce the closed application
+refusal. Notifications cannot invoke state methods. RPC correlation and fixed
+JSON-RPC parse/parameter errors remain outside application results; raw causes
+or rejected source bytes are never emitted.
+
+An explicit schema3 `run.attach` is a finite catch-up consumer of the same
+bounded native pages. JSONL emits each closed page response followed by that
+page's canonical event presentation records, awaiting every write before
+requesting another page. It fixes the first successful page's high-water as
+the target, limits later native requests to the remaining original interval,
+and stops at that target even if newer pages report a growing high-water. It
+does not subscribe for future events. RPC emits these same records through fixed
+`control.record` display notifications with exactly `params:{id,record}`,
+where `id` is the original RPC request id; it then returns exactly one result
+for that id containing the last authoritative page response. That final
+confirmation is not an additional event. Every page is validated against the
+actual readonly request/cursor sent for that page, rather than against the
+first request's cursor. No mutation is
+created or retried by this finite display drain.
+
+An attached consumer drains the exact returned cursor/high-water pages. On
+`EVENT_CURSOR_EXPIRED` it exposes that authoritative inline snapshot and ends
+the original cut; a later explicit attach may read from `earliestEventSeq-1`.
+It never chases a moving retention window or invents omitted display events.
+Committed event presentation is exactly `{schemaVersion:3,protocolVersion:1,
+runId,eventSeq,timestamp,type,payload}`: `timestamp` is the original
+`occurredAt`, `type` is `state_changed|progress`, and `payload` contains only
+the original event's remaining fields after omitting its schema/kind/identity/
+sequence/time envelope. Event presentation cannot update authoritative Run
+truth; the original page snapshot owns that truth. This is an explicit
+`run.attach` page consumer, not server push or a new control method.
+
+Reconnection is explicit, joins the old client before authenticating a fresh
+one, and never resends an operation automatically. An explicitly replayed
+request retains its original request id/digest/admission key. A new explicit
+user action may generate its own UUIDv7 request id and canonical digest; the
+UUID's timestamp is client identity data, not canonical-time authority.
+EOF, a failed output, closing an adapter or losing a client process detaches
+only. Cancellation requires a separate explicit revisioned `run.cancel`.
+Whole-artifact consumers follow returned offsets, bind an unchanged descriptor,
+check complete size, ref, digest and EOF, and expose bytes only after the
+complete hash passes their explicit bounded allocation ceiling. The buffered
+consumer ceiling of 64 MiB is not a change to `artifact.get`'s chunk protocol
+or permission to truncate a larger artifact.
+
+The current connected-client implementation does not make unconnected methods
+available. Schema 3 requires a genuine compatible hello; it cannot silently
+downgrade to the old installed range 1. Legacy default CLI/TUI and schema 2
+composition remain until their complete migration/release gate, and controlled
+signed installation fixtures do not substitute for public release trust roots.
+
+The implemented internal thin-client composition and its precise qualification
+boundary are documented in [Installed thin client applications](../kernel/installed-client-applications.md).
+The natural CLI and Ink view call the same authenticated application as JSONL/RPC;
+its lifetime is a connection/view lifetime, never execution ownership. Run and
+authorization lists reuse the same materialized-cut lifecycle as Session lists.
+This does not select a default entry or satisfy the public release-root, platform,
+large-state Stop or complete frontend qualification gates.
+
 The exact initial method names are `control.hello`; `session.create|list|get|fork|compact|handoff.create`; `run.submit|list|get|attach|cancel|approve|input|reconcile|diff|result|apply`; `authorization.create|list|revoke`; `mcp.register|refresh|list`; `artifact.get`; and `supervisor.status`. Authorization and MCP registry methods are Supervisor-owned user administration, not adapter-specific Run lifecycle methods.
 
 Session continuity remains first-class but non-executing. The exact public methods are `session.create`, `session.list`, `session.get`, `session.fork`, `session.compact`, and `session.handoff.create`. There is deliberately no public `session.append`, `session.items`, handoff import, bookmark mutation, global active-Session setter, Session lease, or Run-Checkpoint mutation. `session.get` is the bounded item read; root Run terminal publication is the only internal Session append path. `cliq resume` is client composition of `session.get` plus a new `run.submit`, never resumption of an old Session execution. Imported legacy bookmarks/handoffs appear as typed legacy Session items/artifact refs through `session.get` plus `artifact.get`; `session.fork` may use their preserved cursor, but no hidden compatibility mutation method exists. No CLI/TUI/RPC adapter writes SQLite or legacy JSON directly.
+
+The shared installed client exposes this composition as `prepareResume`: an explicit new Run intent supplies its new request/admission identities, `session.get` captures the current context revision, and the helper returns the complete immutable `run.submit` request and canonical digest before dispatch. The caller then submits and retains those exact bytes across an explicit reconnect. A transport failure or revision refusal never causes an automatic replacement request; no new `session.resume` wire method, execution authority or default legacy-CLI switch is introduced.
 
 Implementation boundary: an internal StateStore bounded-read integration for `session.get`, `run.get` and `run.attach` is not public wire routing or installed qualification. It must preserve the canonical cuts and native authentication without claiming that generated client routing, `control.hello`, signed installed composition or Linux qualification is complete. A public server still requires compatibility and native peer authorization before any state query.
 
@@ -8890,6 +11774,25 @@ The v1 wire contract is generated from one canonical TypeScript/JSON-Schema pack
 | `session.create/fork` | `requestId`, admission key+digest, bounded workspace/source/cursor fields; fork also expected context revision | one idempotent Session snapshot |
 | `session.compact` | `requestId`, request digest, Session id, expected context revision, bounded item range and <=256 KiB UTF-8 summary | idempotently replayable post-commit Session snapshot; raw items preserved |
 | `session.handoff.create` | Session id, expected context revision and optional cursor | deterministic immutable JSON/Markdown artifact refs |
+
+For `artifact.get`, `length` is a requested upper bound in `1..4194304`, not
+an exact response size. The server may return a shorter verified chunk to keep
+the complete base64 response within its unchanged transport frame limit. A
+non-EOF response advances `nextOffset` by the decoded nonempty byte count;
+clients use that returned cursor. `offset` is a nonnegative safe integer no
+greater than the complete size; an exact-end read returns empty bytes and
+`eof=true`, including an empty artifact. The complete original object must
+pass its existing hash, length, descriptor and resource-retirement checks
+before any selected bytes are returned.
+
+The exact StateRoot, platform and owner uid determine its sole genuine local
+principal. A fresh authenticated request for that root may read only a
+registered artifact from the same root's captured catalog cut; unregistered
+orphan bytes and a different root's channel are not readable by this method.
+The descriptor's first media/schema labels are neither a read ACL nor typed-use
+or execution authority. Result, delivery and dispatch consumers still validate
+their own complete typed provenance and permission graphs; downloading bytes
+does not validate or authorize any of those operations.
 
 Every `requestId`, admission key, id, ref, integer, enum, and payload has a schema/count/byte bound before state access. Mutator responses are idempotently replayable by authenticated principal plus method/request id. The closed error union is `INVALID_REQUEST | INCOMPATIBLE_PROTOCOL | NOT_FOUND | REVISION_CONFLICT | WAIT_SUBJECT_MISMATCH | REQUEST_ID_CONFLICT | ADMISSION_KEY_CONFLICT | AUTHORIZATION_REQUIRED | POLICY_DENIED | MODEL_COST_UNKNOWN | BUDGET_EXHAUSTED | RESOURCE_EXHAUSTED | RESULT_UNAVAILABLE | RUN_TERMINAL | CANCEL_REQUESTED | UNSUPPORTED_PLATFORM | UNSUPPORTED_EXECUTION_IDENTITY | ARTIFACT_MISMATCH | RECOVERY_REQUIRED | EVENT_CURSOR_EXPIRED | RATE_LIMITED | INTERNAL`. Revision conflict inlines the exact current Session-or-Run snapshot, wait mismatch returns the exact current `WaitingSubject` ref/digest, and cursor expiry inlines the authoritative `RunSnapshotV1` captured with its bounds; other variants expose only their schema-required retry/range/resource/redacted fields. No generic current ref, snapshot artifact, or arbitrary stack data exists.
 
@@ -9204,6 +12107,9 @@ type RunApplyRequest = MutationBase & {
   expectedRunResultRef: ArtifactRef
   budgets?: { wallTimeMs?: number; toolCalls?: number }
   verifierExecutionGrantIds?: string[]
+  sourceInspectionGrantId?: string
+  ignoreReadGrantIds?: string[]
+  sourceReadGrantIds?: string[] // fresh exact grants in B's user-include selector order
 }
 
 type SessionCreateRequest = MutationBase & {
@@ -9571,6 +12477,7 @@ type ControlErrorV1 =
         | 'worker_capacity'
         | 'admin_probe_capacity'
         | 'local_inference_activation_cycle'
+        | 'reconciliation_probes'
         | 'state_storage'
       retryAfterMs: number
     })
@@ -9644,11 +12551,15 @@ type ControlApplicationResponseV1 =
 
 Every success carries exactly one method-discriminated result above and unknown fields fail validation. `run.result|run.diff` may return their success variants only when the Run has `resultRef`, hence only for `succeeded|completed_unverified`; a nonterminal Run returns the retryable `RESULT_UNAVAILABLE` variant, while `failed|cancelled` returns its nonretryable variant and exact terminal detail. No query selects an arbitrary failed candidate. `SessionItem`, Journal, Checkpoint, and Run-item metadata are returned only to the same local principal and contain refs/digests rather than artifact bytes; clients fetch bytes through `artifact.get`. Authorization summaries omit paths, executable names, argv, and receipt bodies; MCP summaries omit endpoint, credential, and argv bytes. `authorization.revoke` maps active to `revoked`, immutable revoked replay to `already_revoked`, and immutable consumed no-op to `already_consumed`; its summary state must be `revoked|revoked|consumed` respectively. `ControlErrorV1` is a strict discriminated union: its literal retryability and required metadata are part of the schema, unlisted members are forbidden, issue lists are at most 64 entries, issue path/code and message/error ids use the ordinary string bounds, and event/resource/rate integers are safe and range-checked. `currentRevision` occurs only for revision/wait conflicts and retryable `RESULT_UNAVAILABLE`; `retryAfterMs` occurs only for resource/rate errors. A method that parsed as a known discriminator uses the known-method error variant; an unknown/removed method uses only `rejectedMethodDigest = SHA-256(NFC UTF-8 method bytes)` plus the `INVALID_REQUEST` parse variant, so it can be rejected without echoing or pretending the method is known. Any `detailRef` is a same-principal bounded artifact. No error carries arbitrary stack text, raw rejected value, or adapter-local metadata. Transport adapters preserve their own request correlation id outside this application object but may not alter the result/error payload.
 
-The four list methods use one exact materialized-cut protocol; they never keyset-page a changing live filter. Normalize omitted filters to their displayed absent values, `run.list.statuses` to its required unique byte-sorted sequence, and limit to the method default. Then `normalizedFilterDigest = SHA-256(JCS({ownerPrincipalId,method,workspacePath-or-null,sessionId-or-null,operation-or-null,statuses-or-empty,targetKind-or-null,state-or-null,normalizedLimit}))`, retaining only fields applicable to that method. A request without `cursor` performs one StateOwner-gated SQLite transaction: it captures current authoritative rows, applies owner and normalized filters, constructs each exact typed public summary, orders matches by canonical timestamp then bytewise NFC `stableId`, materializes ordinals `1..entryCount` into `list_read_cut_entries`, and inserts one `list_read_cuts` row. Stable ids are Session id, Run id, grant id, and registration id respectively. Session/Run fields are captured at that revision; authorization captures the current immutable grant row; MCP captures exactly the current registry head for each registration, never old revisions. Later state, status, revision, or registration changes cannot change membership/order/value in this cut. A fresh cursorless request creates a new cut and sees later state.
+The four list methods use one exact materialized-cut protocol; they never keyset-page a changing live filter. Normalize omitted filters to their displayed absent values, `run.list.statuses` to its required unique byte-sorted sequence, and limit to the method default. Then `normalizedFilterDigest = SHA-256(JCS({ownerPrincipalId,method,workspacePath-or-null,sessionId-or-null,operation-or-null,statuses-or-empty,targetKind-or-null,state-or-null,normalizedLimit}))`, retaining only fields applicable to that method. A request without `cursor` captures a complete current SQL source cut, applies owner and normalized filters, constructs each exact typed public summary, and orders matches by canonical timestamp then bytewise NFC `stableId`. One final StateOwner-gated SQLite transaction proves the complete source membership and values still match, materializes ordinals `1..entryCount` into `list_read_cut_entries`, and inserts one `list_read_cuts` row atomically. Stable ids are Session id, Run id, grant id, and registration id respectively. Session/Run fields are captured at that revision; authorization captures the current immutable grant row; MCP captures exactly the current registry head for each registration, never old revisions. Later state, status, revision, or registration changes cannot change membership/order/value in this cut. A fresh cursorless request creates a new cut and sees later state.
 
 The cut id and cursor secret are independent CSPRNG 256-bit unpadded-base64url values. `createdAt` is the transaction's canonical time and `expiresAt=createdAt+15 minutes` using checked arithmetic. `ListReadCutEntryV1.rowDigest` omits itself; `entriesDigest=SHA-256(JCS(the complete rowDigest sequence in ordinal order))`; and `cutDigest=SHA-256(JCS(cut with cursorSecretBase64url and cutDigest omitted))`. The cache allows at most 100,000 matching rows and 64 MiB encoded typed summaries per cut; exceeding either returns `RESOURCE_EXHAUSTED(resourceKind='state_storage')` and publishes no partial cut. `list_read_cuts` and entries are non-authoritative query cache, cannot influence reducers/admission/recovery, and root their referenced artifacts only until expiry. Deletion is allowed only after expiry; corruption fails the request and deletes nothing authoritative.
 
 Every issued cursor is unpadded base64url of the exact UTF-8 JCS `ListCursorPayloadV1`. Its `macBase64url = HMAC-SHA-256(cursorSecret, ASCII('cliq-list-cursor-v1\0') || JCS({schemaVersion:1,cutId,afterOrdinal}))`, rendered as unpadded base64url. `afterOrdinal` is zero only internally for the first page and otherwise the last ordinal returned by the page that issued this cursor. The server decodes canonical bytes, looks up the cut, authenticates the MAC in constant time, and requires current principal, method, normalized filter digest, normalized limit, unexpired canonical time fence, cut/entry digests, and exact ordinal range to match. Malformed base64/JCS, unknown/deleted/expired cut, noncanonical encoding, bad MAC, changed filter/limit/principal/method, or an unissued/out-of-range ordinal returns `INVALID_REQUEST` with a stable non-echoing list-cursor issue code. The cursor contains no trusted unsigned state and survives Supervisor restart because the cut and secret are SQLite rows.
+
+List materialization, page-expiry checks and expired-cache deletion share the sole canonical time fence and original owner/current authenticated frame. A clock-regression observation must commit its sticky fence before refusal is thrown outside the transaction. An expired-page refusal likewise commits its real accepted high-water without modifying cache membership; otherwise a later wall-clock rollback could revive the expired cut. Replays neither renew the original fifteen-minute TTL nor change stored values, and cache GC deletes only rows expired at the accepted fence. No second clock, expiry ledger or issued-ordinal ledger is introduced: with the fixed normalized page size, only exact nonfinal page-end ordinals can carry valid issued cursors.
+
+Large-cut preparation may capture one complete bounded SQL source snapshot, perform all closed decoding/JCS/hash work in cancellable yielded batches outside a transaction, and use connection-private temporary source/entry scratch. One process-wide preparation permit bounds concurrent scratch; another authenticated list request receives only fixed `RATE_LIMITED`, retryable with `retryAfterMs=1000` and `messageCode='control.list_cut_busy'`. This is backpressure, not execution or network retry permission. No transaction/iterator escapes across a yield and no partial scratch is a public cut. The final current-owner/frame/time-fence transaction must prove exact full membership and every original value still match, then publish the cut and all original verified entries atomically. Unique keys plus exact cardinality and null-safe full-byte/integer equality of every original tuple prove both directions; a changed source is recaptured rather than mixed. Old pages validate the complete original cut/entry graph outside SQL and recheck its full exact values at the final expiry fence, without reevaluating today's Sessions. Temporary scratch is dropped and joined before releasing the permit; uncertain cleanup is a retirement failure. GC performs bounded deletions of already-expired entries and then empty expired cut rows, rather than an unbounded cascade in one synchronous stop-critical section. These steps retain the original 100000/64 MiB caps; supported-runtime measurements and genuine installed Stop qualification remain separate evidence.
 
 A page returns the next `normalizedLimit` rows with `ordinal>afterOrdinal`, preserving the materialized order. Reusing the same valid cursor returns byte-identical summaries and next cursor. `nextCursor` is omitted exactly when the last returned ordinal equals `entryCount` or the cut is empty; otherwise it is the deterministic authenticated cursor for that last ordinal. There is no empty middle page, next-unread interpretation, live-row re-evaluation, duplicate, or skip. Equal `createdAt` values are harmless because the full membership and bytewise id tie-break are materialized before page one. Golden tests cover empty/one/exact-limit/multi-page lists, equal timestamps, all filters, MCP refresh and Run/auth status changes between pages, concurrent inserts before/after the cut, repeat/restart, changed limit/filter/principal/method, malformed/forged/future/end/expired cursors, capacity refusal, and cut GC.
 
@@ -9662,6 +12573,8 @@ A Checkpoint cursor is unpadded base64url of `JCS({schemaVersion:1,runId,created
 
 The combined run metadata limit is exactly 1 MiB for `JCS({items,journal,checkpoints})`. The server considers candidates deterministically in stream priority `items`, then `journal`, then `checkpoints`, preserving each stream's order and limit. It appends a candidate only if the resulting complete three-array encoding remains within the cap; the first candidate that would exceed the cap ends construction, leaving that candidate and every later candidate for the next request. This rule, the three next cursors, and the three captured high-waters are computed from the same snapshot, so clients can advance each stream independently without gaps even when the byte cap truncates a page. Golden fixtures cover initial, empty, exact-end, byte-truncated, future, wrong-Run, and malformed Checkpoint cursors.
 
+For Delivery, explicitly supplied fresh execution grants are uniquely matched to the original source request by verifier id/index and their bound new identity grant. The source may be a root Agent Run, an inherited-verifier child, or a previously verified Delivery; the existing complete source/child lineage must close to the unique original normalized verifier request. Preserve optional-field presence and every original command/environment/resource field; replace only the approved `identityReadGrantId`, replace `executionGrantId`, and omit only that execution id for the core digest. The re-resolved signed Node identity, command, environment, source projection and frozen complete spec must remain exact. Duplicate, ambiguous, foreign or partially matching grants are refused. Each supplied fresh grant is consumed once at this Delivery's admission and creates this Run's own bounded template, even if the eventual exact-source inheritance branch performs zero local verification. This is consent for potential checks in this Run, not a refundable grant or evidence that a worker/receipt exists. The consumed source grant proves only provenance and is never borrowed as new execution permission.
+
 Verifier `id` and `version` are required nonempty UTF-8 strings of at most 128 bytes; version is user-visible identity metadata while executable/command digests remain execution authority. `verifierRequestCoreDigest = SHA-256(JCS(VerifierRequest with executionGrantId omitted))`. `authorization.create(kind='verifier_execution')` binds that core digest plus the already resolved execution-identity grant; admission verifies the supplied grant against the same id/version/core and only then adds its id to the final Run admission digest. This ordering is non-circular and prevents one verifier grant from being replayed for a changed version, argv, cwd, or environment.
 
 `run.get/list/attach`, `session.get/list`, `authorization.list`, `mcp.list`, `artifact.get`, `run.diff/result`, `session.handoff.create`, and `supervisor.status` are read-only and reject `requestId`. `session.handoff.create` is deterministic by Session/revision/cursor and returns identical CAS refs. `control.hello` carries `protocolVersion=1`, client build, schema range, requested feature ids (max 64), and returns server build/schema range/capabilities before any other request.
@@ -9674,7 +12587,36 @@ The initial Supervisor transport is a local Unix-domain socket protected with pe
 
 Long Runs survive package upgrades. Before admitting a Run, Cliq publishes a read-only, digest-addressed runtime bundle containing the exact Supervisor-compatible worker, provider/tool adapters, schemas, and platform helpers referenced by `assemblyRef`; guest image/toolchain manifests are retained by digest too. The user-service definition points to a stable state-root bootstrap and an atomically selected versioned Supervisor bundle, never directly to a replaceable global npm path. Bundles referenced by any nonterminal Run or retained audit/result cannot be garbage-collected.
 
-An update stages and self-tests a new bundle. It may activate a new Supervisor only when that Supervisor declares compatibility with every nonterminal Run schema/assembly and can launch their pinned worker bundles; otherwise the current Supervisor remains active across reboot and the update reports `drain_required`. It is never killed or replaced under active incompatible Runs. After drain, the bootstrap atomically switches bundles with rollback-on-startup-failure. Thus an external reinstall can replace the client package without deleting the executable needed to recover an accepted Run.
+An update stages and self-tests a new bundle. It may activate a new Supervisor only when that Supervisor declares compatibility with every nonterminal Run schema/assembly and can launch their pinned worker bundles; otherwise the current Supervisor remains active across reboot and the update reports `drain_required`. It is never killed or replaced under active incompatible Runs. A same-schema selection may roll back on startup failure only while the original runtime remains permitted to write that schema. A committed schema transition instead completes its registered target selection; it cannot reactivate an incompatible old writer. Thus an external reinstall can replace the client package without deleting the executable needed to recover an accepted Run.
+
+The first explicit signed schema transition is the fully retired 7-to-8 recipe
+specified in [Signed runtime and schema upgrade](../kernel/i4-signed-runtime-upgrade.md).
+It uses the existing `schema` bundle role for complete fixed schema bytes and
+the exact conversion profile, original generated schema 7 provenance and the
+same actual publisher public key. Fresh signed 8 genesis registers its schema
+source in the original first owner transaction. Upgrade holds the original
+StateRoot/flock, verifies all original retirement and actual Supervisor/keeper
+death, then uses one fixed DDL/StateOwner transaction and a registered receipt
+for selector recovery. Before that transaction the old selection is retained;
+after it old 7 is never a writer, including when publication or startup fails.
+Original source records and response bytes are not rewritten. Runtime-bound
+endpoint/credential authorization does not transfer implicitly. The official
+release roots, actual installed/crash qualification and default Kernel Cut
+remain separate release gates.
+
+For this conversion, an original dormant `sealed` workspace generation may
+remain in its exact historical phase and row version. It must belong to a
+terminal, zero-reservation Run, have no active Run pointer or other referencing
+launch, and match the unique original activated worker's `retired`/`sealed`
+record in the complete retained resource graph. Both conversion and subsequent
+receipt reads revalidate the ordinary complete sealed Checkpoint, file bytes,
+snapshot, containment, inspector, all-descendant death and freshness at the
+original commit. No current pathname, matching content or phase label supplies
+this proof, and no generation is relabeled `retired` or resealed by conversion.
+Other unretired generation phases still refuse. Later target-runtime Runs do
+not replace or enlarge this immutable original resource graph. This branch
+requires its own real installed upgrade validation; component regressions do
+not establish that qualification.
 
 The Kernel Cut includes:
 
@@ -9757,7 +12699,7 @@ type McpRecoveryAdapterManifestV1 = {
   protocol: 'cliq-mcp-reconcile-v1'
   profiles: Array<{
     profileId: string
-    serverExecutionIdentityDigest: string
+    profileSigningIdentityDigest: string
     serverToolName: string
     initializeDigest: string
     capabilityDigest: string
@@ -9796,6 +12738,7 @@ type McpRecoveryStatusRequestTemplateV1 = {
   probeResultDigest: string
   serverToolName: string
   serverExecutionIdentityDigest: string
+  profileSigningIdentityDigest: string
   initializeDigest: string
   capabilityDigest: string
   probedToolsListDigest: string
@@ -9953,13 +12896,156 @@ Generic MCP metadata cannot make an operation queryable by assertion. Missing me
 
 `reconcile` is accepted only when `adapterRef` decodes to `McpRecoveryAdapterManifestV1` selected by the active RuntimeBundle's unique external `structuredArtifacts(kind='mcp_recovery_adapter',artifactId=adapterId)` record. The manifest deliberately contains no RuntimeBundle ref/digest: the outer signed record binds its complete-byte `adapterRef`, semantic `adapterDigest`, and `entryId/version/executableDigest` to one executable `mcp_recovery_adapter` entry, so the bundle never hashes an artifact that points back to itself. The profile catalog is independently release-signed: `adapterDigest = SHA-256(JCS(adapter with adapterDigest and signature omitted))`, `signature` signs the ASCII domain `cliq-mcp-recovery-adapter-v1\0` plus that digest, and `publisherKeyId` resolves through the same immutable Cliq release trust store as the RuntimeBundle. ArtifactRef still hashes the complete signed bytes. An authentic executable paired with unsigned, user-signed, unknown-key, digest-mismatched, later substituted, or differently bundle-bound profile metadata is invalid.
 
-Every profile, status template, and predicate otherwise uses the digest-member-omission JCS rule. Kernel Cut `reconcile` profiles apply only to stdio registrations whose server executable and exact normalized argv were known to the release publisher; streamable HTTP and an unprofiled stdio target may use only `manual|retry`. For a stdio admin target, `serverExecutionIdentityDigest = SHA-256(JCS({executable: resolvedTransport.executable, argv: resolvedTransport.argv}))`. Profiles are nonempty, byte-sorted, and unique by both profile id and the tuple `(serverExecutionIdentityDigest,serverToolName,effectToolInterfaceDigest)`. A profile repeats only pre-final facts: that execution identity, normalized initialize/capability/probed-list digests, the effecting interface digest, and a **distinct** status operation's interface/input/output schema digests. The named effect and status interfaces must exist in the raw probe result and rehash exactly. `statusOperationSemantics` is the release publisher's narrow assertion that this exact profiled status interface on that exact signed executable/argv identity is a no-new-effect query; server annotations cannot supply or widen it. Public `bundledAdapterId` must equal the manifest adapter id, and the probe selects exactly one signed profile. Absence, ambiguity, HTTP transport, execution-identity drift, raw-list drift, status-interface mismatch, or schema mismatch rejects `reconcile` rather than falling back to a name match.
+Every profile, status template, and predicate otherwise uses the digest-member-omission JCS rule. Kernel Cut `reconcile` profiles apply only to stdio registrations whose server executable and exact normalized argv were known to the release publisher; streamable HTTP and an unprofiled stdio target may use only `manual|retry`. The full per-registration `serverExecutionIdentityDigest = SHA-256(JCS({executable: resolvedTransport.executable, argv: resolvedTransport.argv}))` continues to retain the original outer `runtimeBundleRef`. The independently signed profile instead carries `profileSigningIdentityDigest`: hash the same exact runtime-bundle executable and argv with only the outer `runtimeBundleRef` selector omitted and the fixed executable role `mcp_server` included. Executable kind/id/path/full digest and every normalized argv literal remain present. This avoids the indirect Bundle -> adapter -> profile -> Bundle hash cycle. The selector-free projection grants no executable authority: selection must first verify the actual original Bundle's unique `mcp_recovery_adapter` structured root and exact signed `mcp_server` role/entry/digest; neither a later Bundle nor a same-named executable can adopt it. Profiles are nonempty, byte-sorted, and unique by both profile id and `(profileSigningIdentityDigest,serverToolName,effectToolInterfaceDigest)`. A profile repeats only pre-final facts: that signing identity, normalized initialize/capability/probed-list digests, the effecting interface digest, and a **distinct** status operation's interface/input/output schema digests. The named effect and status interfaces must exist in the raw probe result and rehash exactly. `statusOperationSemantics` is the release publisher's narrow assertion that the separately signed adapter implements the exact profiled status interface as a no-new-effect query under the original exact executable and argv identity; server annotations cannot supply or widen it. Public `bundledAdapterId` must equal the manifest adapter id, and the probe selects exactly one signed profile. Absence, ambiguity, HTTP transport, execution-identity drift, raw-list drift, status-interface mismatch, or schema mismatch rejects `reconcile` rather than falling back to a name match.
 
-The Supervisor publishes the per-registration status template only after the raw result is durable. It copies every profile identity, operation, schema, static-argument, and predicate field exactly, adds the exact registration/revision, admin-target ref/digest, raw probe-result ref/digest, and public RFC-6901 idempotency pointer, then computes `templateDigest`. Those target and result refs rehash, `serverExecutionIdentityDigest` recomputes from the target, and initialize/capability/probed-list/effect/status interface digests equal the result. The template deliberately contains no registry ref, registry-core/manifest digest, final tool-contract/list digest, recovery-contract ref, or value derived from itself. The resulting final recovery contract names the adapter/profile/template/predicates, and only then does the reducer compute the final tool-contract/list/core/registry digests. This is the sole allowed publication direction: raw target/result -> signed profile -> per-registration template/final recovery contracts -> registry core/receipt/final revision.
+The Supervisor publishes the per-registration status template only after the raw result is durable. It copies every profile identity, operation, schema, static-argument, and predicate field exactly, adds the exact registration/revision, admin-target ref/digest, raw probe-result ref/digest, full `serverExecutionIdentityDigest`, and public RFC-6901 idempotency pointer, then computes `templateDigest`. Those target and result refs rehash, both the full execution digest and separate `profileSigningIdentityDigest` recompute from the target, and initialize/capability/probed-list/effect/status interface digests equal the result. The template deliberately contains no registry ref, registry-core/manifest digest, final tool-contract/list digest, recovery-contract ref, or value derived from itself. The resulting final recovery contract names the adapter/profile/template/predicates, and only then does the reducer compute the final tool-contract/list/core/registry digests. This is the sole allowed publication direction: raw target/result -> signed profile -> per-registration template/final recovery contracts -> registry core/receipt/final revision.
 
 The recovery contract repeats the same profile id/digest, and its injection pointer, the status template pointer, and the public per-tool request pointer are byte-identical. `recoveryRequestDigest` covers the normalized reconcile request `{kind,bundledAdapterId,idempotencyKeyJsonPointer}` and is included in the admin target/request digest; changed selection bytes cannot reuse the signed profile closure. The recovery contract's adapter/template/predicate refs/digests must equal that same signed profile, so no adapter iteration order or implementation default chooses semantics. The status template is bound to that adapter/profile/registration/revision/target/result/tool, one NFC operation name, one valid RFC-6901 key pointer, and bounded canonical JSON static arguments. Predicate expressions are the complete closed IR: maximum depth 8, maximum 64 nodes, nonempty `and|or`, finite safe-integer numbers, valid RFC-6901 pointers, and no script, regex, path, network target, or executable reference. Completed and failed predicates must be distinct, cannot both match a response, and any neither/both/schema-invalid result remains unresolved. At recovery time the invocation separately carries the immutable final registry ref/manifest digest and must equal the registration/revision/template target and tool; the signed adapter may issue only the template's exact no-new-effect status operation through that original stdio target. It cannot invoke the effecting tool, change executable/argv, use HTTP, call a same-named operation on another revision, or perform a conditional retry unless a separately Journaled retry transition is authorized. Repository or user executable bytes cannot define/load an adapter; the Kernel Cut has no trusted plugin ABI. Every MCP call freezes the exact `McpRegistryRevision` ref/manifest digest, tool contract, batch/call/index identity, and stable idempotency key into its request artifact.
 
 The Kernel Cut never trusts a probe or server assertion to prove statelessness. It enforces the recoverable portion structurally. Every stdio tool call gets a fresh process/containment with a fresh empty private HOME/TMP, read-only registered executable/toolchain, no persistent writable mount, no network, and teardown/death proof after that call; no stdio instance is reused across calls. Streamable HTTP uses a fresh broker request with no cookie jar, session id, ambient header, or cross-call client state. External service state remains part of the target and therefore must be covered by the tool's `manual|retry|reconcile` contract. A server that requires client-held session state is unsupported rather than “proved safe” by registration. Recovery never checkpoints hidden server memory; a future stateful MCP mode requires a typed server-state/restore RFC.
+
+The first installed Streamable HTTP profile fixes MCP protocol `2025-11-25`
+and supports public endpoints or exactly one principal-owned
+`mcp_streamable_http` Bearer credential binding. The general public request
+bound remains 32 credential ids; two or more are an explicitly unimplemented
+authentication profile, rejected as `UNSUPPORTED_PLATFORM` after request
+authentication and before registration resources, claim, probe or authority
+artifact publication. No first-key selection, trial, header merging or
+ambient authentication is permitted. Refresh copies the original exact
+transport; both actual release gates recheck original owner, purpose,
+endpoint/TLS identity, active authority, expiry and exact zero-or-one binding.
+Current implementation support never rewrites historical declarations.
+
+The provider-facing exposed tool name is exactly `mcp_` plus the first 16 ASCII
+characters of `registrationId + '_' + serverToolName` after every character
+outside `[A-Za-z0-9_-]` is replaced by `_`, then `_`, then the full 43-character
+base64url SHA-256 of JCS `['cliq-mcp-exposed-tool-v1', registrationId,
+serverToolName]`. It is at most 64 provider-safe ASCII characters and remains
+stable across revisions without truncating qualified identity. Its exact
+description begins `MCP registration ` + JSON string of the registration id +
+`, server tool ` + JSON string of the server tool name + `.\n`, followed by
+the original description. Policy, display, frozen execution and actual
+tools/call retain the complete original names; the exposed name never changes
+the server request or grants authority.
+
+Stateless HTTP does not skip the protocol lifecycle. Every fresh admin or Run
+logical client performs real initialize, validates the exact negotiated
+version, sends `notifications/initialized`, then performs tools/list. A Run
+compares the original immutable initialize/capability/interface closure before
+its sole effecting tools/call; setup and effect belong to the same original
+permanent claim. The request Accept header advertises both application/json
+and text/event-stream, and the fixed decoder supports both actual response
+types. There is no SDK-fabricated initialized state, separate capabilities
+RPC, session id, cookie jar, redirect, retry, reconnect, GET resume or hidden
+request. MCP-Protocol-Version is fixed on every post-initialize message.
+Encountering pagination nextCursor rejects before effects: pagination's
+protocol SHOULD remains explicitly unsupported, never silently truncated.
+
+A matching SSE response event already screened and delivered by the original
+native owner is known received data even if the joined complete finite prefix
+later fails NoEcho. The closed `cliq-mcp-known-unusable-response-v1` audit keeps
+only that safe event's exact bytes/ref/digest, and the original opaque native
+receipt's full received prefix byte count/hash, event-end offset, tail count
+and fixed `full_capture_no_echo_refused` code. Tail count may be zero when an
+unsafe comment preceded the safe event. Unsafe prefix bytes are never exported
+or published; this audit explicitly does not claim they can be re-read.
+The distinct `cliq-mcp-known-unusable-run-capture-v1` joins the actual two setup
+captures, that audit, the immutable full claim binding and genuine original
+response/owner joins. Only the actual native refusal receipt can produce it;
+generic network, storage or unsafe-event errors cannot. The same invocation
+settles completed on the same original claim with its full original charge and
+fixed `TOOL_PROTOCOL_ERROR` observation. The closed
+`RuntimeFailureEvidenceV1(failureKind='mcp_known_result_unusable')` repeats the
+exact `toolObservationRef/toolObservationDigest` and `captureRef/captureDigest`.
+History reproduces that ordered result item, original ready Checkpoint/next
+frontier, claim/owner and full-once completed settlement before the existing
+sole Stop writer records the failed runtime cause with unchanged precedence.
+The installed scheduler reproduces that cause before any later tool/model
+scheduling after restart, and RunResult publication rejects the same retained
+cause. The complete safe-event/audit/setup/claim/settlement graph remains a
+recovery and GC root; the omitted unsafe prefix never becomes a purported raw
+capture. This branch never becomes UNKNOWN, no-release, retry, success
+or a manual-discard request. An unsafe matching event or missing native join
+remains recovery-required with original custody retained.
+
+If a Supervisor dies before any recoverable completed result is durably handed
+off, a strictly newer actual StateOwner may observe the original signed MCP
+creator process absent or with a different start token. The native token is
+nontransferable and all HTTP workers are threads in that creator process;
+its real death closes only the local domain, not remote effects. The original
+claim/registry/grant/root/owner-history tuple and current signed inspector are
+revalidated, the death is reobserved before the sole UNKNOWN transaction's
+actual commit clock, and paired creator-death evidence is retained in the
+original ambiguity artifact. The original claim is charged full once. Actual
+worker quarantine/retirement then precedes the same exact manual-risk wait;
+no old FD, mutex, receipt, credential lifetime or request is recreated.
+
+Each real data response's entire received finite capture is bounded by the probe core's B
+(`65536..1048576`, default `1048576`), including all SSE framing, fragments
+and notifications without resetting per event. Admin has exactly two data
+responses, Run exactly three, deriving total data bounds 2B and 3B. The
+initialized acknowledgement must be HTTP 202 with no body. A genuinely
+received server ping is answered promptly with a fixed empty result bound to
+its exact parsed id: at most eight pings over the whole native owner, with
+the same original target, credential purpose, claim and total deadline.
+Both Admin and Run perform a fresh original-domain SQL gate immediately before
+receipt-bound async `connectPing`, await that bounded DNS/TLS connection, then
+perform another current SQL gate immediately before synchronous `releasePing`
+with no intervening await. The actual receipt's original id/nonce/stream/owner
+binding is unchanged; no cached pre-CONNECT consent, new target or generic
+connect-and-send operation may authorize body release.
+Their acknowledgements must also be empty HTTP 202; no active periodic ping
+or arbitrary server-request handler is provided. Every individual header
+limit remains enforced, deriving whole-owner header bounds from at most 11
+Admin or 12 Run total responses. Empty acknowledgements carry no extra data
+and cannot expand NoEcho limits. Unknown server requests, additional data
+responses, exhausted bounds or interrupted unmatched responses fail closed
+under original claim/result truth, never silently continuing. Native code
+reconstructs each complete SSE event's JSON and applies the full original
+NoEcho projections before that message can cross into JS or the fixed helper,
+including ping and notifications. Nonfinal events export no raw frame or
+unchecked slice. The complete unchanged raw finite capture, including earlier
+frames/comments and all received read-ahead/tail, stays native-owned under the
+same original B through final freeze and actual response join; it must pass
+the complete raw/projection screen before any raw export. Screening a
+nonfinal event must not discard or prevent decoding a later matching safe
+response already held in that same bounded buffer. Cancellation/deadline
+removes live I/O/release authority but does not cancel the bounded offline
+screen of already received bytes; no byte/stream/entry/file/time counter
+resets. An unsafe event yields no screened message or response receipt, and
+only the exact safe-event/full-capture-refusal branch may retain a known
+unusable result. Whole source bytes remain exact and bounded. An SDK close or JS promise is not
+actual cancel-and-join or whole-containment death evidence.
+
+The genuine original-owner native response receipt distinguishes actual
+`http_eof` from `sse_response_event`. JSON retains its original complete HTTP
+body/EOF guard. Only SSE may finish on an actual complete matching JSON-RPC
+response event, including the blank-line dispatch delimiter, followed by real
+read/worker/network close and join; this does not claim the HTTP body reached
+EOF. The retained raw artifact is then a finite received entity prefix. Its
+byte length and SHA-256 cover every original byte delivered by an issued read,
+including read-ahead after the complete event and any bytes delivered before
+join. The receipt records the exact response-event end offset and received
+tail byte count. Tail bytes, including partial SSE/UTF-8 fragments, remain in
+the same original B and finite native NoEcho raw/SSE-data projections. They
+are never discarded, omitted from the hash, exported unscreened or relabeled
+complete-body evidence. A pure JS parser's reported completion/offset/hash
+cannot substitute the opaque native receipt or actual join. No provider HTTP
+EOF guard, model/dependency native interface, execution ledger, claim or
+refund rule is changed by this SSE-specific representation.
+
+These are explicit fixed multi-response profile contracts, not evidence that
+an earlier single-response MCP path was production-qualified. Setup I/O is
+already I/O for `PostClaimNoReleaseEvidence`: `effectReleased=false` is only
+diagnostic after setup, provides no refund, zero charge or replacement claim,
+and an unresolved call retains original UNKNOWN/full-once settlement plus
+real closure and exact manual disposition. A client disconnect cancels only
+side-effect-free preparation reads, never custody of the producer, real
+result or original fence after permanent claim. The 30-second control
+deadline is unchanged by the admin launch timeout; delayed first responses
+join/replay the original request id/digest and attempt. This profile does not
+claim general MCP feature parity, multi-credential, stdio, signed-reconcile
+or complete WP02 qualification without their separate physical evidence.
 
 A stdio instance is call-scoped while its registration is user-scoped. For the exact owning batch/call, `lifecycleSeq` starts at zero and stable launch `opId = H(runId, batchItemId, callIndex, callId, registryManifestDigest, lifecycleSeq)`. Launch uses `ReplayClass='retry'` only after any old call-scoped containment is proven dead. Every launch has fresh `prepared`, reservation, claim, and one `toolCalls` charge. After containment spawn, MCP initialize, capability validation, and exact `tools/list` digest match, the Supervisor publishes `McpServerInstanceIdentityV1`; `identityDigest = SHA-256(JCS(identity with identityDigest omitted))`. Its Run/batch/call/index, registry revision/manifest, lifecycle/op/attempt/dispatch, SandboxLaunch/containment, nonce, and initialize/capability/probed-tools-list digests must equal the exact call request, claim, containment, and immutable registry. Only that identity may receive the owning `tools/call`; no address, PID, socket, or adapter-local handle is authority.
 
@@ -11159,6 +14245,24 @@ state schema is version 4; emitting 1 merely because this is a V1 artifact is
 invalid. This distinction does not change the separate migration/schema-profile
 types or qualify their unimplemented image/cutover closure.
 
+For new schema-eight installed Linux rollback archives, the fixed
+[original-connection archive profile](../kernel/original-connection-archive.md)
+is normative. It replaces the historical closed-main-file descriptor-copy and
+fanout-CAS archive recipe below for that profile: the one genuine original
+Node driver performs the fixed original-FD online backup; all twenty
+non-clock SQL families remain equal across the complete cut; the copied image
+still receives all twenty-one-table and physical integrity checks; and every
+actual flat-CAS name, including both temporary orphan classes, is captured.
+The fixed `cliq-owned-kernel-archive-v1` manifest binds those facts outside live
+CAS. It cannot be decoded, relabelled or cast as a historical
+`descriptor_copy_of_closed_checkpointed_source` image. Historical birth/archive
+formats retain their old exact checks, rather than rewriting their provenance.
+The local-model store must be actually observed absent under the same original
+Root/EX until its separately locked complete capture is implemented; an empty
+registry or missing path string is no substitute. The profile's native and
+encoded metadata ceilings are separate from actual peak JS/SQLite heap, and
+none of these bounds qualifies Stop2, full scale or marker-last restoration.
+
 Rollback archives are a second, acyclic snapshot closure rather than a reuse
 of the admission-time generation identity. After `rollback_draining` is
 durable and every productive authority is globally quiescent, the Supervisor
@@ -11298,6 +14402,27 @@ The importer runs under a global Cliq state lock and:
 
 Before step 8, legacy state and the observed auth state remain authoritative: raw ProviderAuthStore-v1 bytes for `present`, exact absence for `absent`. A crash may leave only replayable credential operations, the secret-free ready manifest, backup, or unpublished candidate. If a crash occurs after marker publication but before Kernel authority publication, the new binary restores the observed branch before clearing control. `present` reads the exact ready platform items and non-secret projection and deterministically renders, validates, file-fsyncs, atomically installs, and directory-fsyncs semantically identical normalized ProviderAuthStore-v1 bytes; it does not claim byte identity with arbitrary original whitespace/key order. `absent` unlinks the marker through the held parent descriptor, verifies no-follow `ENOENT`, and directory-fsyncs. Legacy remains usable in either case. After authority publication recovery completes/validates the marker. Unsupported/plain-HTTP/raw-Ollama/ambiguous entries, unavailable platform store, failed round trip/replacement/restoration, or observation drift blocks authority publication. The packaged command cannot admit new legacy work while control exists. A deliberately launched unsupported old binary from another installation is outside the same-user trust boundary; its later JSON writes never enter new authority, are detected as post-cutover divergence, and block downgrade rollback until exported. Migration fails closed when process enumeration, open-file inspection, platform-secret access, or legacy-lock acquisition is unavailable.
 
+The signed Linux client submits `state.migrate` or `state.rollback` through the
+current authenticated installed v1 UDS connection, only when Hello enables
+the exact method. Its closed request identifies the migration and one UUIDv7
+request. The Supervisor derives the principal and the complete durable
+request from the original authenticated frame. Before taking exclusive
+custody it stops new dispatches and joins earlier dispatches and accepted-peer
+authentication tasks. The original migration frame stays current.
+
+These two methods alone may return a frame containing exactly
+`protocolVersion`, `method`, `requestId` and `progressSequence` while their
+original operation is active. The sequence starts at one and increases by one
+on the original verified connection. A valid progress frame starts the next
+30-second receive interval. The ordinary response deadline is unchanged.
+Progress carries no receipt, durable status, recovery authority or permission
+to resubmit. The client requires the exact final response and current peer
+verification. Connection loss leaves the existing durable migration recovery
+rules in force. The client sends no replacement request automatically. After
+the final rollback marker and original resource retirement, the Supervisor
+serves the final response on that connection alone and exits when the
+connection retires, with a 30-second bound on retaining it for the response.
+
 Inventory/backup never follows legacy links. Each declared legacy root is opened as a same-user directory handle and traversed component-by-component with descriptor-relative no-follow operations. A recognized state file must be a same-user regular file with link count one and stable device/inode/size/digest while its handle is held; a symlink, hardlink, special file, mount escape, ownership mismatch, or changed identity aborts. Unknown entries are preserved in the backup manifest only as non-followed metadata/link text unless they are safe regular files inside the root; they never become typed state. The second scan revalidates the same held identities immediately before authority publication.
 
 Old checkpoints never become Run recovery checkpoints. No synthetic nonterminal Run is created from a legacy Session lifecycle flag.
@@ -11313,7 +14438,7 @@ Rollback is an explicit command executed by the new binary before installing an 
 - first reuses that current held state-owner token and acquires the remaining locks in the one migration/rollback order—exclusive Kernel global/cutover gate, local-model registry/object-store lock, legacy auth-store, every legacy Session/transaction/plan lock in canonical byte order, then credential-authority—gates the control socket and every broker release, and rejects every new admission, Session/Run/admin/auth/MCP mutation, credential/local-model operation, local-service activation/join, worker/admin/invocation claim, and model/tool/provider request; under those locks it refuses and restores ordinary service without publishing a sentinel if any nonterminal Run exists;
 - exports terminal Run results and audit references;
 - durably publishes a non-authoritative rollback-in-progress sentinel that is also the persistent global rollback fence, names the selected verified backup/new legacy generation, and causes restart to resume only this drain/rollback path;
-- closes every remaining nonterminal authority before touching legacy bytes: a prepared/active `admin_operations` attempt receives no further probe release, is no-spawn/death-proven, and advances through only bounded no-spawn recovery attempts to the existing terminal `retry_exhausted` response; every nonterminal local-inference activation cycle stops accepting participants, death/no-spawn retires its attempt, uses at most the already-defined second no-spawn attempt, and atomically fails all submission participants with `RECOVERY_REQUIRED(local_inference_service)`; every unretired worker/invocation/admin/local-inference launch or containment is revoked, killed, positively whole-containment-death/no-spawn proven, and retired through its exact typed branch; incomplete credential operations reach their existing committed/aborted terminal state under the credential-authority lock;
+- closes every remaining nonterminal authority before touching legacy bytes. A prepared or active `admin_operations` attempt receives no further probe release, is no-spawn/death-proven, and advances through only bounded no-spawn recovery attempts to the existing terminal `retry_exhausted` response. Each pending local-inference cycle stops accepting participants. Its current attempt completes the original reservation if needed, then actually joins and records no-spawn or whole-containment death. Positive attempt-1 retirement retains the original one-second retry gate. The sole unstarted second attempt reserves using its original signed plan and joins without launching a preparer or service. Exact positive attempt-2 retirement allows `activation_cancelled_for_migration` and atomically fails all submission participants with `RECOVERY_REQUIRED(local_inference_service)`. Unresolved retirement keeps the blocking launch and prevents the EX source cut. Every unretired worker, invocation, admin, or local-inference launch or containment is revoked, killed, positively whole-containment-death/no-spawn proven, and retired through its exact typed branch. Incomplete credential operations reach their existing committed/aborted terminal state under the credential-authority lock.
 - closes the broker/control listener, proves the Supervisor has no released dispatch capability, live descendant process/VM, nonterminal admin operation/cycle, unretired launch, or pending credential write, and keeps all four locks through legacy credential rendering and authority publication. Any `unknown`, inaccessible containment, failed kill/death/no-spawn proof, unmatched platform-store state, or nonterminal row blocks rollback with the sentinel/fence intact; it is never waved through because there are zero Runs;
 - while `rollback_draining` and that global no-write proof remain current, closes/checkpoints the database, publishes the exact current `KernelDatabaseImageIdentityV1`, copies and seals its bytes as `ArchivedKernelDatabaseImageV1`, publishes the complete current `CasNamespaceManifestV1(snapshotBoundary='rollback_final')`, and then publishes their `ArchivedKernelGenerationManifestV1`. The snapshot is rooted outside the archived namespace and must verify before any legacy byte is restored or control may advance to `rollback_restoring`; a crash resumes this same boundary and never silently substitutes the admission-time generation image;
 - stages/restores every backed-up **noncredential** legacy byte, fsyncs files/directories, verifies the full manifest under those locks, and on crash resumes or rolls back this staging while the sentinel remains;
@@ -11479,3 +14604,135 @@ The following decisions are closed:
 - one-time migration, no long-term dual write, and one Kernel Cut.
 
 Implementation may optimize storage, copy-on-write, batching, and internal library choices without changing these contracts. Any proposal that changes a closed decision requires a new RFC and must explain how it preserves the product promise and release invariants.
+
+### First installed locked Node profile refinement
+
+The first complete implementation profile and its exact execution/reuse
+limits are specified in [Installed Node dependencies](../kernel/installed-node-dependencies.md)
+and the [public integrity-GET native contract](../kernel/dependency-public-get-native.md).
+These are fixed-purpose refinements of this lifecycle, not a general URL fetch,
+package-manager executable choice, additional ledger, resource-cap increase or
+qualification declaration. The two signed non-executable npm adapter/data
+entries are interpreted only by the exact signed guest Node. The original
+wire/model JSON bounds and all old 32-file recipes remain unchanged. The
+new data image alone uses its explicit 4096-file/32-MiB bounded volatile mapper.
+
+`DependencyReadyItem.origin` is a closed XOR: acquired records its original
+whole-operation Journal/cache/actual parent retirement; inherited_parent_ready
+records the original parent sealed Ready/Checkpoint/allocation plus the child's
+own true preparation/candidate seal. `installedTreeDigest` in this profile is
+the exact managed `node_modules` subtree digest; the full actual Checkpoint M
+and snapshot/native retirement remain independently mandatory. No standalone
+subtree digest, original refusal, same pathname, data template or CAS presence
+provides capture, execution, death or reuse authority.
+
+### Single-CAS installed data custody (2026-10-28)
+
+This installation-contract revision was approved on 2026-10-28. Its implementation
+and real Linux installation, cross-layout upgrade, rollback, restart and storage
+qualification remain pending. Earlier four-copy qualification is not evidence
+for this layout.
+
+New installed runtime manifests use `schemaVersion:2` and the mandatory signed
+literal `installedLayout:'single_cas_streams_v1'`. The complete JCS core, including
+both fields, remains covered by the existing `cliq-runtime-bundle-v1` signature
+envelope and Ed25519 trust roots. Version 1 has its original closed shape without
+that field and remains readable only as original signed history or as the exact
+source of the existing installed-upgrade controller. A new normal installation
+or execution opening cannot infer a layout from missing fields or paths, or fall
+back to the historical layout.
+
+The only delegated members are non-executable `bundle_object` entries selected
+as complete raw guest images by the fully verified signed guest-toolchain
+closure, and the exact fixed npm data image accepted by `NPM_DATA_RECIPE`.
+Other members, including host executables, native helpers, bootstrap, policy,
+Trust, schema, prompts, skills and credentials, retain their original physical
+locations and independent identity/read obligations. Guest/npm data grants no
+host execution authority and is usable only by its original fixed consumer.
+
+The source package retains every signed member at its original `relativePath`.
+Its full bytes, signature, EOF, no-follow, named/held identities and complete
+namespace are verified. The installed bundle namespace exactly excludes the
+delegated members and ancestors needed only by them; an extra old-position
+copy is an error. Their sole installed physical holder is the original
+StateRoot CAS object named by the signed digest. The original CAS publication,
+file sync, directory/crash stages, complete readback and resource join all
+precede activation. Shared or orphan CAS objects are not deleted on install or
+upgrade rollback. No caller-selected locator or second installation ledger is
+introduced.
+
+The existing Scope, borrow, producer revocation, tail and verification joins
+retain this physical holder. Each of the original sixteen R operations reads
+every authority-bearing physical object from byte zero through exact EOF with
+new hashing, named/held identity and directory checks. Only this explicit signed
+delegation maps a logical signed member and CAS edge to one physical holder;
+there is no general inode/content deduplication or cross-operation/epoch cache.
+For guest images, build/source/unique-installed-CAS are three real independent
+files. The fixed npm builder constructs its image in memory and writes the
+complete source member: its source/CAS files are two actual independent images;
+the original official archive is verified separately and is not another image
+inode. Evidence records these actual objects, without inventing a build copy.
+Host image and bootstrap independence remains unchanged.
+
+First `fresh_installed` genesis still records the complete original CAS closure,
+signed bundle and original model-authority source in its sole StateOwner
+transaction. Upgrade stage, receipt, original/target identities and recovery
+read each signed source according to its own layout. Original generation,
+runtime/upgrade and receipt edges remain GC roots, including delegated data
+absent from a bundle directory. No collector may infer cross-process retirement
+from a local WeakMap or delete data without original stage/borrow retirement.
+
+Maximum fixtures, the original 1-MiB scratch budget, READY5, Stop2, RPC/probe30,
+all byte/cardinality/secret-scan caps and every unverified physical cut remain
+unchanged. Timing eligibility requires actual new-layout evidence.
+
+Source Git preparation must also retain the exact original signed
+`source_git_inspector` and `linux_worker_controller` bytes as inert CAS audit
+data through the same genuine installed Scope, before any native birth or
+prepared launch. The launch publisher completely rereads both original members
+and registers their metadata in the existing prepared transaction. Their host
+files, native seals and execution authority remain independently held; these
+audit copies are not delegated installed data or host execution capabilities.
+Retained replay continues to require both complete original CAS members. Missing
+historical members remain recovery-required and cannot be filled from today's
+installation. A failed/cancelled preparation joins its actual publications and
+may leave inert CAS orphans; it never acquires launch permission from them.
+
+#### Native callback qualification profile v2 (2026-10-28)
+
+The fixed four-case campaign must observe genuine callback resources, including
+the original `cliq-linux-credential-platform` async-work resource and the explicit
+custom callback resource. Both require actual before/after/destroy balance.
+Node supplies the async context for managed async-work completion
+([Node-API v24.21.0](https://nodejs.org/download/release/v24.21.0/docs/api/n-api.html#napi_make_callback)).
+Absence of a newly introduced implementation label is not a product failure.
+
+The pinned original source must pass its queue and two managed credential cases;
+its custom broker close must fail through the actual private idle-delivery
+sentinel. The candidate must pass all four cases. The original executing
+inspection/preparation, connection retirement, child joins, 1500-ms bounds,
+carrier, workload and before/after provenance checks remain mandatory for both
+views. Unknown failures remain refusals. The report uses the explicit
+`cliq-native-callback-lifecycle-v2` format; prior v1 reports and their failures are
+not reinterpreted as passing qualification. New Linux evidence is required.
+
+#### First-submit diagnostic binding after an early busy observation (2026-10-28)
+
+An optional pre-client owner-history read can encounter a real SQLite exclusive
+writer while reading `PRAGMA user_version`. Its fixed `owner_history_schema`
+stage identifies the attempted read, not a schema-mismatch diagnosis. Failure
+produces no complete owner cut or process binding and its original fixed stage
+is retained without inspecting arbitrary exception text.
+
+Before the first Session/source/Run submission, the installed journey may reuse
+its complete original owner-history cut already obtained within the unchanged
+five-second readiness budget. Only the original signed selected Supervisor's
+complete actual image, retained process identity, actual PID/start token and
+unchanged unit invocation can establish the live diagnostic binding. This
+fallback opens no additional owner-history transaction, resets no deadline and
+cannot reconstruct provenance after a failure. A failed recheck keeps the
+binding absent; original PID absence still does not mean the server joined.
+All publication/assembly journal bounds, full bytes, secret scanning, original
+Stop2 assertions and qualification results remain unchanged. This correction
+restores diagnosis of the original submit30 failure; it is not a production
+latency fix or proof that the delayed-volume campaign now passes.

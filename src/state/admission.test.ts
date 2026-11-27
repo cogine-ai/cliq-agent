@@ -7,7 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
-import { canonicalSha256 } from '../kernel/canonical.js';
+import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
   FrozenIgnoreRulesV1,
@@ -22,6 +22,7 @@ import type {
 import { KernelStorageError } from './errors.js';
 import type { LocalControlConnection } from './control-channel.js';
 import { openSqliteDriver } from './sqlite-driver.js';
+import { KERNEL_SCHEMA_V2_SQL } from './schema.js';
 import { openStateStore, publishInProcessChannel, type StateStore } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
@@ -331,6 +332,44 @@ test('new request ids replay the accepted admission snapshots after progress and
   }
 });
 
+test('Run admission replay rejects another genuine Run response for the original request and preserves its first snapshot', async () => {
+  const fixture = await createAgentFixture('run-admission-response-substitution', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const channel = await publishInProcessChannel(fixture.store);
+    const created = await fixture.store.createSession({ ...channel, requestId: uuidv7(),
+      admissionKey: admissionKey('run-response-owner'), workspacePath: fixture.workspace });
+    const { runSpec } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const projection = await fixture.store.artifacts.readCanonical<SourceProjectionSpec>(runSpec.sourceProjectionRef);
+    const input = { ...channel, requestId: uuidv7(), admissionKey: admissionKey('run-response-original'),
+      sessionId: created.session.id, expectedContextRevision: 1, workspacePath: fixture.workspace,
+      objective: 'retain the first Run admission response', allowUnverified: true,
+      assemblyRef: runSpec.assemblyRef, policyRef: runSpec.policyRef, sandboxProfileRef: runSpec.sandboxProfileRef,
+      verifierSpecRef: runSpec.verifierSpecRef, credentialGrantRefs: runSpec.credentialGrantRefs,
+      budgets: runSpec.budgets, sourceProjectionRef: runSpec.sourceProjectionRef,
+      frozenIgnoreRulesRef: projection.frozenIgnoreRulesRef, baseWorkspaceManifestRef: runSpec.baseWorkspaceManifestRef };
+    const original = await fixture.store.admitRun(input);
+    const other = await fixture.store.admitRun({ ...input, requestId: uuidv7(), admissionKey: admissionKey('run-response-other'),
+      expectedContextRevision: fixture.store.getSession(created.session.id).contextRevision });
+    assert.notEqual(other.run.id, original.run.id);
+    const before = fixture.store.getRun(original.run.id), sessionBefore = fixture.store.getSession(created.session.id);
+    try {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.submit' AND request_id=?")
+        .run(canonicalSha256(other.response), channel.principalId, input.requestId);
+      await assert.rejects(fixture.store.admitRun({ ...input, ...await publishInProcessChannel(fixture.store) }),
+        { code: 'RECOVERY_REQUIRED' });
+    } finally {
+      writer.prepare("UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method='run.submit' AND request_id=?")
+        .run(canonicalSha256(original.response), channel.principalId, input.requestId);
+    }
+    const replay = await fixture.store.admitRun({ ...input, ...await publishInProcessChannel(fixture.store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(original.response));
+    assert.deepEqual(fixture.store.getRun(original.run.id), before);
+    assert.deepEqual(fixture.store.getSession(created.session.id), sessionBefore);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
 test('admission replay rejects a corrupted original response link without claiming its new request id', async () => {
   const stateRoot = await makePrivateDir('.cliq-admission-response-corruption-');
   const workspace = await makePrivateDir('.cliq-admission-response-ws-');
@@ -344,9 +383,16 @@ test('admission replay rejects a corrupted original response link without claimi
     const newRequestId = uuidv7();
     fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
       .run(canonicalSha256(other.response), channel.principalId, 'session.create', input.requestId);
-    await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'RECOVERY_REQUIRED' });
-    fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
-      .run(canonicalSha256(original.response), channel.principalId, 'session.create', input.requestId);
+    try {
+      await assert.rejects(store.createSession({ ...input, ...await publishInProcessChannel(store) }), { code: 'RECOVERY_REQUIRED' });
+      await assert.rejects(store.createSession({ ...input, requestId: newRequestId }), { code: 'RECOVERY_REQUIRED' });
+    } finally {
+      fault.prepare('UPDATE control_requests SET response_ref = ? WHERE principal_id = ? AND method = ? AND request_id = ?')
+        .run(canonicalSha256(original.response), channel.principalId, 'session.create', input.requestId);
+    }
+    const replay = await store.createSession({ ...input, ...await publishInProcessChannel(store) });
+    assert.equal(replay.replayed, true);
+    assert.deepEqual(canonicalJsonBytes(replay.response), canonicalJsonBytes(original.response));
     const different = await store.createSession({ ...input, requestId: newRequestId, admissionKey: admissionKey('new-after-corruption') });
     assert.equal(different.replayed, false);
     assert.notEqual(different.session.id, original.session.id);
@@ -428,6 +474,9 @@ test('schema v3 admissions without original links stay recoverable but cannot in
       sessionId: created.session.id, expectedContextRevision: 1, workspacePath: workspace,
       objective: 'retain admitted work across the storage upgrade', allowUnverified: true };
     const admitted = await store.admitRun(runInput);
+    const otherSession = await store.createSession({ ...sessionInput, requestId: uuidv7(), admissionKey: admissionKey('v3-other-session') });
+    const otherRun = await store.admitRun({ ...runInput, requestId: uuidv7(), admissionKey: admissionKey('v3-other-run'),
+      expectedContextRevision: store.getSession(created.session.id).contextRevision });
     await store.close();
     // Recreate the exact pre-link v3 SQL layout around real accepted artifacts
     // and owner history; migration must not guess a response from these rows.
@@ -436,6 +485,21 @@ test('schema v3 admissions without original links stay recoverable but cannot in
       connection.exec('DROP TRIGGER runs_admission_identity_immutable');
       connection.exec('ALTER TABLE sessions DROP COLUMN admission_request_id');
       connection.exec('ALTER TABLE runs DROP COLUMN admission_request_id');
+      // V3 also predates the complete V8 column/guards. Remove only those
+      // exact later definitions; production migration must still refuse a
+      // relabelled newer layout rather than tolerate duplicate columns.
+      assert.equal(connection.prepare('SELECT count(*) AS n FROM child_allocations').get<{ n: bigint }>()!.n, 0n);
+      for (const name of ['runs_parent_cancellation_immutable', 'runs_parent_cancellation_unseeded',
+        'runs_parent_cancellation_register', 'runs_parent_cancellation_fenced']) connection.exec(`DROP TRIGGER ${name}`);
+      connection.exec('ALTER TABLE runs DROP COLUMN parent_cancellation_ref');
+      connection.exec('DROP INDEX authorization_grants_list_order_v1');
+      for (const name of ['child_allocations_validate_insert', 'child_allocations_validate_update', 'child_allocations_immutable_delete'])
+        connection.exec(`DROP TRIGGER ${name}`);
+      for (const name of ['child_allocations_one_parent', 'child_allocations_one_admission', 'child_allocations_one_delegate',
+        'child_allocations_one_call_index', 'child_allocations_one_call_id']) connection.exec(`DROP INDEX ${name}`);
+      connection.exec('DROP TRIGGER run_journal_validate_insert');
+      connection.exec(KERNEL_SCHEMA_V2_SQL.slice(KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_validate_insert'),
+        KERNEL_SCHEMA_V2_SQL.indexOf('CREATE TRIGGER run_journal_immutable_update')));
       // V3 also predates the inspection ledger. Keeping this V4 table while
       // relabeling the fixture would test a corrupt layout, not an upgrade.
       connection.exec('DROP TABLE source_inspection_attempts');
@@ -446,6 +510,25 @@ test('schema v3 admissions without original links stay recoverable but cannot in
     assert.deepEqual((await store.readRecoveryClosure(admitted.run.id)).run, admitted.run);
     assert.deepEqual((await store.createSession({ ...sessionInput, ...freshChannel })).response, created.response);
     assert.deepEqual((await store.admitRun({ ...runInput, ...freshChannel })).response, admitted.response);
+    const responseFault = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
+    try {
+      for (const [method, requestId, original, other, replay] of [
+        ['session.create', sessionInput.requestId, created.response, otherSession.response,
+          () => store.createSession({ ...sessionInput, ...freshChannel })],
+        ['run.submit', runInput.requestId, admitted.response, otherRun.response,
+          () => store.admitRun({ ...runInput, ...freshChannel })]
+      ] as const) {
+        try {
+          responseFault.prepare('UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method=? AND request_id=?')
+            .run(canonicalSha256(other), freshChannel.principalId, method, requestId);
+          await assert.rejects(replay(), { code: 'RECOVERY_REQUIRED' });
+        } finally {
+          responseFault.prepare('UPDATE control_requests SET response_ref=? WHERE principal_id=? AND method=? AND request_id=?')
+            .run(canonicalSha256(original), freshChannel.principalId, method, requestId);
+        }
+        assert.deepEqual(canonicalJsonBytes((await replay()).response), canonicalJsonBytes(original));
+      }
+    } finally { responseFault.close(); }
     await assert.rejects(store.createSession({ ...sessionInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
     await assert.rejects(store.admitRun({ ...runInput, ...freshChannel, requestId: uuidv7() }), { code: 'RECOVERY_REQUIRED' });
     inspectKernel(stateRoot, driver => {
@@ -950,27 +1033,28 @@ test('same admission key with different budgets is ADMISSION_KEY_CONFLICT', asyn
   }
 });
 
-test('session.create rejects a symlinked .git/config', async () => {
+test('session.create records the Git directory identity without following even a dangling config symlink', async () => {
   const stateRoot = await makePrivateDir('.cliq-m1-gitcfg-');
   const workspace = await makePrivateDir('.cliq-m1-ws-');
   const outside = await makePrivateDir('.cliq-m1-gitcfg-target-');
   await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
-  await writeFile(path.join(outside, 'config'), '[core]\n\trepositoryformatversion = 0\n', { mode: 0o600 });
   await symlink(path.join(outside, 'config'), path.join(workspace, '.git', 'config'));
   const store = await openStateStore(stateRoot);
   try {
     const { principalId, ...channel } = await publishInProcessChannel(store);
-    await assert.rejects(
-      () =>
-        store.createSession({
+    const created = await store.createSession({
           principalId,
           requestId: uuidv7(),
           admissionKey: admissionKey('session-gitcfg'),
           workspacePath: workspace,
           ...channel
-        }),
-      (error: unknown) => error instanceof KernelStorageError && error.code === 'INVALID_REQUEST'
-    );
+        });
+    const identity = await store.artifacts.readCanonical<import('../kernel/types.js').WorkspaceIdentityV1>(created.session.workspaceIdentityRef);
+    assert.equal(identity.kind, 'live');
+    assert(identity.kind === 'live' && identity.repositoryIdentityRef);
+    const repository = await store.artifacts.readCanonical<import('../kernel/types.js').RepositoryIdentity>(identity.repositoryIdentityRef);
+    assert.equal(repository.schemaVersion, 2);
+    assert.equal(repository.gitDirectoryRelativePath, '.git');
   } finally {
     await store.close();
     await rm(stateRoot, { recursive: true, force: true });

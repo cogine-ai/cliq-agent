@@ -1,0 +1,439 @@
+// Real StateStore consumer seam with retained offline model/seal fixtures.
+// These checks establish terminal invariants, not provider/native qualification.
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import path from 'node:path';
+import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { digestOmitting, identityHash } from '../kernel/identity.js';
+import type { FinalCandidateItem, RunResult, VerificationClosureV1 } from '../kernel/result.js';
+import type { DirectUnverifiedConsentV1, RunFrontier, RunSpec, SessionRunTerminalItem } from '../kernel/types.js';
+import type { ArtifactCatalog } from './artifacts.js';
+import { sampleCanonicalNow } from './canonical-time.js';
+import { ResultUnavailableError } from './control-read.js';
+import { readRecoveryClosure, type RecoveryClosurePhase } from './recovery-closure.js';
+import { readVerifiedDeliverySource } from './delivery-source-authority.js';
+import { loadRunResult, type RunResultPhase } from './run-result.js';
+import { prepareDeliveryNoOpVerification, readDeliveryVerification, readDeliveryVerificationMode } from './run-result-recovery.js';
+import { openStateStore, publishInProcessChannel } from './store.js';
+import { openSqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import type { StateOwnerContext } from './state-owner.js';
+import { createInstalledControlSession, readInstalledSessionContext } from '../control/session.js';
+import type { InstalledSupervisorClient } from './installed-control-client.js';
+import { hello as inertClientHello } from '../client/testing/protocol.js';
+import { walkSessionContextPageEdges } from '../kernel/session-context-page-reader.js';
+import { readSessionContextGraphHead } from './session-context-stream.js';
+import { fixtureSessionContextSegments } from './testing/session-context.js';
+import { createAgentFixture } from './testing/agent-fixtures.js';
+import { admissionKey, disposeFixture, uuidv7 } from './testing/fixtures.js';
+import { quiescedToolCheckpoint } from './testing/tool-effects.js';
+
+type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
+const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
+async function candidate(fixture: Fixture) {
+  const prepared = await fixture.agent.prepareModel({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+  await fixture.store.claimInvocationDispatch({ runId: fixture.runId, expectedRunRevision: prepared.run.revision,
+    leaseEpoch: fixture.leaseEpoch, opId: prepared.entry.opId, attempt: prepared.entry.attempt, dispatchId: 'run-result-dispatch' });
+  const reader = fixture.agent.model.start(prepared.prepared, { status: 200, mediaType: 'application/json' });
+  reader.push(Buffer.from(JSON.stringify({ id: 'run-result-response', object: 'response', status: 'completed', model: 'model-1',
+    output: [{ type: 'message', id: 'run-result-message', role: 'assistant', status: 'completed',
+      content: [{ type: 'output_text', text: 'The proposed change is ready.', annotations: [] }] }] })));
+  const completed = await fixture.agent.completeModel({ opId: prepared.entry.opId, attempt: prepared.entry.attempt,
+    expectedRunRevision: prepared.run.revision, result: reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput) });
+  assert.equal(completed.disposition, 'candidate_required');
+  const producerId = identityHash('cliq-model-turn-item-v1', fixture.runId, prepared.entry.opId, String(prepared.entry.attempt));
+  const owner = await fixture.agent.beginFinalCandidate({ expectedRunRevision: completed.run.revision });
+  const proof = await quiescedToolCheckpoint(fixture,
+    identityHash('cliq-final-candidate-checkpoint-v1', fixture.runId, producerId), true);
+  return owner.complete({ expectedRunRevision: completed.run.revision, checkpoint: proof.checkpoint });
+}
+async function reopen(fixture: Fixture) {
+  await fixture.store.close();
+  fixture.store = await openStateStore(fixture.stateRoot, fixture.signed);
+  fixture.agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material,
+    releaseKeys: fixture.signed.releaseKeys });
+}
+
+test('explicitly consented empty verification publishes one unverified immutable result and Session outcome across reopen and replay', async t => {
+  const fixture = await createAgentFixture('run-result-empty', undefined, { mode: 'plan' });
+  try {
+    await candidate(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const item = await fixture.store.artifacts.readCanonical<FinalCandidateItem>(before.items.at(-1)!.payloadRef);
+    const session = fixture.store.getSession(before.run.sessionId);
+    const verificationRequest = { expectedRunRevision: revision(fixture) };
+    const verified = await fixture.agent.completeVerification(verificationRequest);
+    assert.equal(verified.run.status, 'queued'); assert.equal(verified.run.nextStep, 'finalize');
+    assert.equal(verified.run.resultRef, undefined);
+    const frontier = await fixture.store.artifacts.readCanonical<Extract<RunFrontier, { kind: 'finalize' }>>(verified.run.frontierRef!);
+    const closure = await fixture.store.artifacts.readCanonical<VerificationClosureV1>(frontier.verificationClosureRef);
+    assert.deepEqual(closure.dependency, { kind: 'none' });
+    assert.deepEqual(closure.verification, { kind: 'local', outcome: 'unverified',
+      unverifiedConsentRef: before.runSpec.unverifiedConsentRef, entries: [] });
+    assert.equal(closure.candidateItemId, item.itemId); assert.equal(closure.resultSourceRef, item.resultSourceRef);
+    assert.equal(fixture.store.getSession(session.id).latestItemSeq, session.latestItemSeq);
+    await reopen(fixture);
+    assert.equal((await fixture.agent.completeVerification(verificationRequest)).verificationClosureRef, frontier.verificationClosureRef);
+    const request = { expectedRunRevision: revision(fixture) };
+    const phases: RunResultPhase[] = [];
+    // Borrow the actual already-held fixture owner, never manufacture a lock
+    // or native proof merely to exercise an inert diagnostic callback.
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const recoveryPhases: RecoveryClosurePhase[] = [];
+    const recovered = await readRecoveryClosure(held.driver, fixture.store.artifacts, fixture.runId, value => {
+      recoveryPhases.push(value);
+      throw new Error('an inert recovery diagnosis cannot decide the retained cut');
+    });
+    assert.deepEqual(recovered.run, fixture.store.getRun(fixture.runId));
+    assert.deepEqual(recoveryPhases, ['cut', 'preparation', 'spec', 'context', 'journal', 'generations', 'history', 'history_model',
+      'history_items', 'history_candidate', 'history_verifier', 'history_tool', 'history_input', 'history_broker', 'seals', 'terminal']);
+    const resultOwner = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
+      { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
+        phases.push(value);
+        throw new Error('an inert diagnosis consumer cannot decide the result');
+      });
+    const committed = await resultOwner.commitRunResult(request);
+    await assert.rejects(readVerifiedDeliverySource(held.driver, fixture.store.artifacts, held.owner, {
+      principalId: fixture.principalId, sourceRunId: fixture.runId, expectedRunResultRef: committed.resultRef
+    }), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(phases, ['result_recovery', 'result_recovery_cut', 'result_recovery_preparation', 'result_recovery_spec', 'result_recovery_context', 'result_recovery_journal',
+      'result_recovery_generations', 'result_recovery_history', 'result_recovery_history_model', 'result_recovery_history_items',
+      'result_recovery_history_candidate', 'result_recovery_history_verifier', 'result_recovery_history_tool',
+      'result_recovery_history_input', 'result_recovery_history_broker', 'result_recovery_seals', 'result_recovery_terminal',
+      'result_basis', 'result_finalization', 'result_publication', 'result_session', 'result_commit']);
+    assert.equal(committed.run.status, 'completed_unverified'); assert.equal(committed.run.terminalReason, 'no_required_verifier');
+    assert.equal(committed.run.nextStep, null); assert.equal(committed.run.frontierRef, undefined);
+    assert.equal(committed.run.stopIntentRef, undefined); assert.equal(committed.run.terminalDetailRef, undefined);
+    const result = await fixture.store.artifacts.readCanonical<RunResult>(committed.resultRef);
+    const inspectionIdentity = await publishInProcessChannel(fixture.store);
+    const inspected = await fixture.store.readControl({ protocolVersion: 1, method: 'run.result', runId: fixture.runId }, inspectionIdentity);
+    assert.equal(inspected.method, 'run.result');
+    if (inspected.method !== 'run.result') throw new Error('result inspection selected another method');
+    assert.equal(inspected.runId, fixture.runId); assert.equal(inspected.result.ref, committed.resultRef);
+    assert.equal(inspected.result.digest, committed.resultRef); assert.equal(inspected.result.schemaVersion, 1);
+    assert.equal(inspected.result.sizeBytes, (await fixture.store.artifacts.readBytes(committed.resultRef)).byteLength);
+    assert.equal(inspected.verificationClosureRef, result.verificationClosureRef);
+    const inspectedDiff = await fixture.store.readControl({ protocolVersion: 1, method: 'run.diff', runId: fixture.runId }, inspectionIdentity);
+    assert.equal(inspectedDiff.method, 'run.diff');
+    if (inspectedDiff.method !== 'run.diff') throw new Error('diff inspection selected another method');
+    assert.equal(inspectedDiff.diff.ref, result.diffRef); assert.equal(inspectedDiff.diff.digest, result.diffRef);
+    assert.equal(inspectedDiff.diff.sizeBytes, (await fixture.store.artifacts.readBytes(result.diffRef)).byteLength);
+    for (const key of ['baseSourceRef', 'resultSourceRef', 'diffRef', 'summaryRef'] as const) assert.equal(result[key], item[key]);
+    assert.equal(result.verificationClosureRef, frontier.verificationClosureRef); assert.deepEqual(result.verificationReceiptRefs, []);
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.journal, before.journal); assert.deepEqual(after.items, before.items);
+    assert.deepEqual(after.run.budgetConsumed, before.run.budgetConsumed); assert.deepEqual(after.run.budgetReserved, before.run.budgetReserved);
+    const terminalSession = fixture.store.getSession(session.id);
+    assert.equal(terminalSession.latestItemSeq, session.latestItemSeq + 1); assert.equal(terminalSession.contextRevision, session.contextRevision + 1);
+    const head = await readSessionContextGraphHead(fixture.store.artifacts, terminalSession.contextProjectionRef);
+    for await (const edge of walkSessionContextPageEdges(fixture.store.artifacts, head)) {
+      assert.equal(held.driver.prepare('SELECT ref FROM artifacts WHERE ref=?').get(edge.ref), undefined);
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method: 'artifact.get', digest: edge.ref,
+        offset: 0, length: 65536 }, inspectionIdentity), { code: 'NOT_FOUND' }, 'internal reachability is not public catalog membership');
+    }
+    // Actual Store/CAS/SQL -> closed wire consumer -> real client page walker.
+    // Only the transport is in-process; this is not native/provider qualification.
+    const exchange = async (request: Parameters<typeof fixture.store.readControl>[0]) => ({ protocolVersion: 1, ok: true,
+      result: await fixture.store.readControl(request, inspectionIdentity) });
+    const client = createInstalledControlSession({ hello: inertClientHello, close: async () => {},
+      'artifact.get': exchange, 'session.get': exchange } as unknown as InstalledSupervisorClient);
+    try {
+      const output = [];
+      for await (const value of readInstalledSessionContext(client, terminalSession)) output.push(value);
+      assert.deepEqual(output.map(value => value.kind), ['head', 'boundary', 'complete']);
+      const query = { protocolVersion: 1 as const, method: 'session.get' as const, sessionId: terminalSession.id,
+        contextPage: { contextProjectionRef: terminalSession.contextProjectionRef, expectedContextRevision: terminalSession.contextRevision, path: [] } };
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, expectedContextRevision: terminalSession.contextRevision + 1 } }, inspectionIdentity),
+        { code: 'REVISION_CONFLICT' });
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, contextProjectionRef: session.contextProjectionRef } }, inspectionIdentity),
+        { code: 'REVISION_CONFLICT' });
+      await assert.rejects(fixture.store.readControl({ ...query, contextPage: { ...query.contextPage, path: [0] } }, inspectionIdentity),
+        { code: 'INVALID_REQUEST' }, 'a caller cannot continue beyond the real current leaf');
+      assert(head.schemaVersion === 2 && head.rootPageRef !== null);
+      const pageDeclaration = await fixture.store.artifacts.describe(head.rootPageRef, 'application/octet-stream', 'cliq-source-file-blob-v1');
+      const { insertArtifactMetadata } = await import('./artifacts.js');
+      held.driver.transaction(connection => insertArtifactMetadata(connection, pageDeclaration, terminalSession.updatedAt));
+      const firstDescriptor = held.driver.prepare('SELECT * FROM artifacts WHERE ref=?').get(head.rootPageRef);
+      const typedPage = await fixture.store.readControl(query, inspectionIdentity); assert(typedPage.method === 'session.get');
+      assert.equal(typedPage.contextPage!.artifact.mediaType, 'application/octet-stream');
+      assert.deepEqual(held.driver.prepare('SELECT * FROM artifacts WHERE ref=?').get(head.rootPageRef), firstDescriptor);
+      const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+      const prototype = Object.getPrototypeOf(fixture.store.artifacts) as { readBoundedBytes: ArtifactCatalog['readBoundedBytes'] };
+      const read = prototype.readBoundedBytes, metadata = writer.prepare('SELECT * FROM artifacts ORDER BY ref').all();
+      let changed = false;
+      const changedHead = t.mock.method(prototype, 'readBoundedBytes', async function(this: ArtifactCatalog, ...args: Parameters<ArtifactCatalog['readBoundedBytes']>) {
+        const bytes = await Reflect.apply(read, this, args);
+        if (!changed && head.schemaVersion === 2 && args[0] === head.rootPageRef) {
+          changed = true;
+          // A real concurrent SQL change after complete page I/O. This is a
+          // refusal fixture, never a new committed Session/Run authority.
+          writer.prepare('UPDATE sessions SET context_revision=context_revision+1 WHERE id=?').run(terminalSession.id);
+        }
+        return bytes;
+      });
+      try {
+        await assert.rejects(fixture.store.readControl(query, inspectionIdentity), { code: 'REVISION_CONFLICT' });
+        assert.equal(changed, true, 'the actual page finished before the concurrent head change');
+        assert.deepEqual(writer.prepare('SELECT * FROM artifacts ORDER BY ref').all(), metadata);
+      } finally {
+        changedHead.mock.restore();
+        writer.prepare('UPDATE sessions SET context_revision=? WHERE id=?').run(terminalSession.contextRevision, terminalSession.id); writer.close();
+      }
+
+    } finally { await client.close(); }
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, terminalSession.contextProjectionRef);
+    const segment = segments.at(-1)!;
+    assert.equal(segment.kind, 'raw'); assert(segment.kind === 'raw'); assert.equal(segment.items.length, 1);
+    const terminal = await fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef);
+    assert.equal(terminal.resultRef, committed.resultRef); assert.equal(terminal.summaryRef, item.summaryRef);
+    assert.equal(terminal.status, 'completed_unverified'); assert.equal(terminal.terminalDetailRef, undefined);
+    await reopen(fixture);
+    assert.deepEqual(await fixture.agent.commitRunResult(request), committed);
+    assert.deepEqual(fixture.store.getSession(session.id), terminalSession);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), after);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('delivery-shaped terminal proof refs cannot expand a real Agent result or provide delivery verification authority', async () => {
+  const fixture = await createAgentFixture('run-result-no-delivery-proof', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture); await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    const committed = await fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) });
+    const before = await fixture.store.readRecoveryClosure(fixture.runId), session = fixture.store.getSession(before.run.sessionId);
+    const inspectionIdentity = await publishInProcessChannel(fixture.store);
+    const held = fixture.store as unknown as { driver: SqliteDriver };
+    await assert.rejects(readDeliveryVerification(held.driver, fixture.store.artifacts, before, 'a'.repeat(64)), /cannot reinterpret an Agent Run/);
+    await assert.rejects(prepareDeliveryNoOpVerification(held.driver, fixture.store.artifacts, before, sampleCanonicalNow()), /cannot reinterpret an Agent Run/);
+    await assert.rejects(readDeliveryVerificationMode(held.driver, fixture.store.artifacts, before), /delivery continuation cannot carry/);
+    const result = await fixture.store.artifacts.readCanonical<RunResult>(committed.resultRef);
+    for (const extra of [{ deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64) },
+      { deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64), verificationProvenanceRef: 'c'.repeat(64) }]) {
+      const changed = await fixture.store.artifacts.publishCanonical({ ...result, ...extra }, 'cliq-run-result-v1');
+      writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(changed.ref, fixture.runId);
+      try {
+        for (const method of ['run.result', 'run.diff'] as const)
+          await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, inspectionIdentity),
+            { code: 'RECOVERY_REQUIRED' });
+        await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), error => {
+          assert.equal((error as { code: string }).code, 'RECOVERY_REQUIRED');
+          assert.match((error as Error).message, /Agent finalization cannot borrow delivery projection proof/); return true;
+        });
+        assert.deepEqual(fixture.store.getSession(before.run.sessionId), session);
+      } finally { writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(committed.resultRef, fixture.runId); }
+    }
+    const originalClosure = await fixture.store.artifacts.readCanonical<VerificationClosureV1>(result.verificationClosureRef);
+    const inherited: VerificationClosureV1 = { ...originalClosure, verification: { kind: 'inherited_verified',
+      sourceRunId: 'data-only-other-source', sourceRunResultRef: 'd'.repeat(64), sourceVerificationClosureRef: 'e'.repeat(64),
+      inheritedProvenanceRef: 'c'.repeat(64) }, closureDigest: '' };
+    inherited.closureDigest = digestOmitting(inherited, 'closureDigest');
+    const closureRef = (await fixture.store.artifacts.publishCanonical(inherited, 'inert-inherited-closure-not-authority')).ref;
+    const changed = await fixture.store.artifacts.publishCanonical({ ...result, verificationClosureRef: closureRef,
+      deliveryTerminalProjectionEvidenceRef: 'b'.repeat(64), verificationProvenanceRef: 'c'.repeat(64) }, 'cliq-run-result-v1');
+    writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(changed.ref, fixture.runId);
+    try {
+      for (const method of ['run.result', 'run.diff'] as const)
+        await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, inspectionIdentity),
+          { code: 'RECOVERY_REQUIRED' });
+      assert.deepEqual(fixture.store.getSession(before.run.sessionId), session);
+    } finally { writer.prepare('UPDATE runs SET result_ref=? WHERE id=?').run(committed.resultRef, fixture.runId); }
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+test('an actual later channel cannot be substituted as the historical consent channel even with rehashed matching control data', async () => {
+  const fixture = await createAgentFixture('run-result-late-channel', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture);
+    const cut = await fixture.store.readRecoveryClosure(fixture.runId);
+    const original = writer.prepare(`SELECT c.response_ref FROM control_requests c JOIN runs r
+      ON c.principal_id=r.principal_id AND c.request_id=r.admission_request_id AND c.method='run.submit' WHERE r.id=?`)
+      .get<{ response_ref: string }>(fixture.runId)!;
+    const later = await publishInProcessChannel(fixture.store);
+    const consent = await fixture.store.artifacts.readCanonical<DirectUnverifiedConsentV1>(cut.runSpec.unverifiedConsentRef!);
+    Object.assign(consent, { channelIdentityRef: later.channelIdentityRef, channelIdentityDigest: later.channelIdentityDigest });
+    consent.consentDigest = digestOmitting(consent, 'consentDigest');
+    const consentRef = (await fixture.store.artifacts.publishCanonical(consent, 'cliq-direct-unverified-consent-v1')).ref;
+    const spec: RunSpec = { ...cut.runSpec, unverifiedConsentRef: consentRef };
+    const specRef = (await fixture.store.artifacts.publishCanonical(spec, 'cliq-run-spec-v1')).ref;
+    const response = await fixture.store.artifacts.readCanonical<{ result: { snapshot: { run: { specRef: string } } } }>(original.response_ref);
+    response.result.snapshot.run.specRef = specRef;
+    const responseRef = (await fixture.store.artifacts.publishCanonical(response, 'cliq-control-application-response-v1')).ref;
+    writer.prepare('UPDATE runs SET spec_ref=? WHERE id=?').run(specRef, fixture.runId);
+    writer.prepare('UPDATE control_requests SET response_ref=?,channel_identity_ref=?,channel_identity_digest=? WHERE response_ref=?')
+      .run(responseRef, later.channelIdentityRef, later.channelIdentityDigest, original.response_ref);
+    const before = fixture.store.getRun(fixture.runId);
+    await assert.rejects(async () => {
+      const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+      await agent.completeVerification({ expectedRunRevision: before.revision });
+    });
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+for (const stop of ['cancel', 'deadline'] as const) test(`a durable finalize frontier remains ${stop === 'cancel' ? 'cancellable' : 'deadline-fenced'} and never publishes a stopped result`, async t => {
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const fixture = await createAgentFixture(`run-result-stop-${stop}`, { wallTimeMs: 60_000 }, { mode: 'plan' });
+  try {
+    await candidate(fixture); await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    await reopen(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    if (stop === 'deadline') {
+      now = Date.parse(before.run.deadlineAt);
+      await assert.rejects(fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) }), { code: 'LEASE_FENCED' });
+      assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+      await fixture.agent.expireRun({ expectedRunRevision: revision(fixture) });
+    } else await fixture.agent.cancelRun({ requestId: uuidv7(), expectedRunRevision: revision(fixture), ...await publishInProcessChannel(fixture.store) });
+    await assert.rejects(fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) }), { code: 'STATE_TRANSITION_INVALID' });
+    await assert.rejects(fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) }), { code: 'STATE_TRANSITION_INVALID' });
+    const terminal = await fixture.agent.commitTerminalStop({ expectedRunRevision: revision(fixture) });
+    assert.equal(terminal.run.status, stop === 'cancel' ? 'cancelled' : 'failed');
+    assert.equal(terminal.run.terminalReason, stop === 'cancel' ? 'cancelled_by_user' : 'budget_exhausted');
+    assert.equal(terminal.run.resultRef, undefined);
+    await reopen(fixture);
+    const after = await fixture.store.readRecoveryClosure(fixture.runId);
+    assert.deepEqual(after.run, terminal.run); assert.deepEqual(after.items, before.items); assert.deepEqual(after.journal, before.journal);
+    const identity = await publishInProcessChannel(fixture.store);
+    for (const method of ['run.result', 'run.diff'] as const) {
+      await assert.rejects(fixture.store.readControl({ protocolVersion: 1, method, runId: fixture.runId }, identity), error => {
+        assert.ok(error instanceof ResultUnavailableError);
+        assert.deepEqual(error.controlError, { schemaVersion: 1, code: 'RESULT_UNAVAILABLE', messageCode: 'run.result_unavailable',
+          retryable: false, runId: fixture.runId, status: terminal.run.status, terminalDetailRef: terminal.run.terminalDetailRef });
+        return true;
+      });
+    }
+    assert.equal(fixture.store.getSession(before.run.sessionId).latestItemSeq, 1);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('verification and result transaction failures leave no partial frontier, result or Session outcome and retry once', async () => {
+  const fixture = await createAgentFixture('run-result-atomic', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture);
+    const before = await fixture.store.readRecoveryClosure(fixture.runId);
+    const held = fixture.store as unknown as { driver: SqliteDriver; owner: StateOwnerContext };
+    const phases: RunResultPhase[] = [];
+    const observed = loadRunResult(held.driver, fixture.store.artifacts, held.owner,
+      { run: before.run, spec: before.runSpec, principalId: fixture.principalId }, value => {
+        phases.push(value);
+        throw new Error('diagnosis must not replace the original transaction failure');
+      });
+    writer.exec("CREATE TRIGGER fail_verification BEFORE INSERT ON checkpoints BEGIN SELECT RAISE(ABORT, 'injected verification failure'); END");
+    await assert.rejects(observed.completeVerification({ expectedRunRevision: revision(fixture) }), /injected verification failure/);
+    assert(phases.includes('result_recovery_history_candidate')); assert(phases.includes('result_recovery_history_tool'));
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), before);
+    writer.exec('DROP TRIGGER fail_verification');
+    await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    const finalized = await fixture.store.readRecoveryClosure(fixture.runId), session = fixture.store.getSession(before.run.sessionId);
+    writer.exec("CREATE TRIGGER fail_result BEFORE INSERT ON items WHEN NEW.session_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected result failure'); END");
+    await assert.rejects(observed.commitRunResult({ expectedRunRevision: revision(fixture) }), /injected result failure/);
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), finalized);
+    assert.deepEqual(fixture.store.getSession(session.id), session);
+    writer.exec('DROP TRIGGER fail_result');
+    const metadata = writer.prepare('SELECT * FROM artifacts ORDER BY ref').all();
+    const checkpoints = writer.prepare('SELECT * FROM checkpoints WHERE run_id=? ORDER BY id').all(fixture.runId);
+    // Real SQLite fault at artifact registration, after asynchronous immutable
+    // preparation. Neither the Session change nor any terminal prefix may
+    // survive the original transaction's rejection.
+    writer.exec(`CREATE TABLE result_session_drift_probe (value INTEGER);
+      CREATE TRIGGER drift_result_session BEFORE INSERT ON artifacts WHEN NEW.schema_kind='cliq-run-result-v1'
+      BEGIN INSERT INTO result_session_drift_probe VALUES (1);
+        UPDATE sessions SET updated_at='${new Date(Date.parse(session.updatedAt) + 1).toISOString()}' WHERE id='${session.id}'; END`);
+    await assert.rejects(fixture.agent.commitRunResult({ expectedRunRevision: revision(fixture) }),
+      { code: 'REVISION_CONFLICT', message: 'result Session changed during artifact registration' });
+    assert.deepEqual(await fixture.store.readRecoveryClosure(fixture.runId), finalized);
+    assert.deepEqual(fixture.store.getSession(session.id), session);
+    assert.deepEqual(writer.prepare('SELECT * FROM artifacts ORDER BY ref').all(), metadata);
+    assert.deepEqual(writer.prepare('SELECT * FROM checkpoints WHERE run_id=? ORDER BY id').all(fixture.runId), checkpoints);
+    assert.deepEqual(writer.prepare('SELECT * FROM result_session_drift_probe').all(), []);
+    writer.exec('DROP TRIGGER drift_result_session');
+    const request = { expectedRunRevision: revision(fixture) }, result = await fixture.agent.commitRunResult(request);
+    assert.deepEqual(await fixture.agent.commitRunResult(request), result);
+    assert.equal(fixture.store.getSession(session.id).latestItemSeq, session.latestItemSeq + 1);
+    await reopen(fixture);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+test('a result and an independent root stop share Session commit order without losing or coalescing either outcome', async () => {
+  const fixture = await createAgentFixture('run-result-session', undefined, { mode: 'plan' });
+  try {
+    await candidate(fixture); await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    const { run, runSpec: spec } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const source = await fixture.store.artifacts.readCanonical<{ frozenIgnoreRulesRef: string }>(spec.sourceProjectionRef);
+    const second = await fixture.store.admitRun({ requestId: uuidv7(), admissionKey: admissionKey('result-second-root'),
+      sessionId: run.sessionId, expectedContextRevision: 1, workspacePath: fixture.workspace, objective: 'another root', allowUnverified: true,
+      assemblyRef: spec.assemblyRef, policyRef: spec.policyRef, sandboxProfileRef: spec.sandboxProfileRef, verifierSpecRef: spec.verifierSpecRef,
+      sourceProjectionRef: spec.sourceProjectionRef, baseWorkspaceManifestRef: spec.baseWorkspaceManifestRef,
+      frozenIgnoreRulesRef: source.frozenIgnoreRulesRef, credentialGrantRefs: spec.credentialGrantRefs, budgets: spec.budgets,
+      ...await publishInProcessChannel(fixture.store) });
+    const secondAgent = await fixture.store.loadAgentRun({ runId: second.run.id, material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+    const stopped = await secondAgent.cancelRun({ requestId: uuidv7(), expectedRunRevision: second.run.revision, ...await publishInProcessChannel(fixture.store) });
+    const [completed] = await Promise.all([fixture.agent.commitRunResult({ expectedRunRevision: run.revision }),
+      secondAgent.commitTerminalStop({ expectedRunRevision: stopped.run.revision })]);
+    assert.equal(completed.run.status, 'completed_unverified');
+    const session = fixture.store.getSession(run.sessionId);
+    assert.equal(session.latestItemSeq, 2); assert.equal(session.contextRevision, 3);
+    const segments = await fixtureSessionContextSegments(fixture.store.artifacts, session.contextProjectionRef);
+    assert.deepEqual(segments.map(segment => [segment.kind, segment.fromItemSeq, segment.throughItemSeq]), [['raw', 1, 1], ['raw', 2, 2]]);
+    const items = await Promise.all(segments.map(segment => {
+      assert(segment.kind === 'raw'); return fixture.store.artifacts.readCanonical<SessionRunTerminalItem>(segment.items[0]!.payloadRef);
+    }));
+    assert.deepEqual(items.map(item => item.runId).sort(), [run.id, second.run.id].sort());
+    await fixture.store.readRecoveryClosure(second.run.id); await reopen(fixture);
+    await fixture.store.readRecoveryClosure(second.run.id);
+  } finally { await disposeFixture(fixture); }
+});
+
+test('a missing original unverified consent cannot be replaced by the empty verifier list', async () => {
+  const fixture = await createAgentFixture('run-result-no-consent', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture);
+    const { runSpec: original } = await fixture.store.readRecoveryClosure(fixture.runId);
+    const { unverifiedConsentRef: _consent, ...spec } = original;
+    const specRef = (await fixture.store.artifacts.publishCanonical(spec, 'cliq-run-spec-v1')).ref;
+    writer.prepare('UPDATE runs SET spec_ref=? WHERE id=?').run(specRef, fixture.runId);
+    const before = fixture.store.getRun(fixture.runId);
+    await assert.rejects(async () => {
+      const agent = await fixture.store.loadAgentRun({ runId: fixture.runId, material: fixture.authority.material, releaseKeys: fixture.signed.releaseKeys });
+      await agent.completeVerification({ expectedRunRevision: before.revision });
+    });
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+test('empty verification rejects a rehashed foreign original admission response instead of accepting only its channel and timestamp', async () => {
+  const fixture = await createAgentFixture('run-result-original-response', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture);
+    const row = writer.prepare(`SELECT c.response_ref FROM control_requests c JOIN runs r
+      ON c.principal_id=r.principal_id AND c.request_id=r.admission_request_id AND c.method='run.submit' WHERE r.id=?`)
+      .get<{ response_ref: string }>(fixture.runId)!;
+    const original = await fixture.store.artifacts.readCanonical<{ result: { snapshot: { run: { id: string } } } }>(row.response_ref);
+    original.result.snapshot.run.id = 'foreign-original-run';
+    const replacement = await fixture.store.artifacts.publishCanonical(original, 'cliq-control-application-response-v1');
+    writer.prepare('UPDATE control_requests SET response_ref=? WHERE response_ref=?').run(replacement.ref, row.response_ref);
+    const before = fixture.store.getRun(fixture.runId), session = fixture.store.getSession(before.sessionId);
+    await assert.rejects(fixture.agent.completeVerification({ expectedRunRevision: before.revision }));
+    assert.deepEqual(fixture.store.getRun(fixture.runId), before); assert.deepEqual(fixture.store.getSession(session.id), session);
+  } finally { writer.close(); await disposeFixture(fixture); }
+});
+
+test('a rehashed same-source closure cannot replace the exact proof installed by the finalize transaction', async t => {
+  let now = Date.now(); t.mock.method(Date, 'now', () => now);
+  const fixture = await createAgentFixture('run-result-exact-closure', undefined, { mode: 'plan' });
+  const writer = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    await candidate(fixture); now += 10;
+    const finalized = await fixture.agent.completeVerification({ expectedRunRevision: revision(fixture) });
+    const frontier = await fixture.store.artifacts.readCanonical<Extract<RunFrontier, { kind: 'finalize' }>>(finalized.run.frontierRef!);
+    const closure = await fixture.store.artifacts.readCanonical<VerificationClosureV1>(frontier.verificationClosureRef);
+    closure.createdAt = new Date(now - 1).toISOString(); closure.closureDigest = digestOmitting(closure, 'closureDigest');
+    frontier.verificationClosureRef = (await fixture.store.artifacts.publishCanonical(closure, closure.format)).ref;
+    const frontierRef = (await fixture.store.artifacts.publishCanonical(frontier, 'cliq-run-frontier-v1')).ref;
+    writer.prepare('UPDATE runs SET frontier_ref=? WHERE id=?').run(frontierRef, fixture.runId);
+    await assert.rejects(fixture.store.readRecoveryClosure(fixture.runId), { code: 'RECOVERY_REQUIRED' });
+  } finally { writer.close(); await disposeFixture(fixture); }
+});

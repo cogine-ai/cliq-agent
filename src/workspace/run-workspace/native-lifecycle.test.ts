@@ -6,7 +6,24 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { identityHash } from '../../kernel/identity.js';
-import { loadNativeStateOwner, openGenerationFileWriter, openGenerationSnapshot, STATE_OWNER_NATIVE_PATH } from '../../state/native-owner.js';
+import { assertRetiredGenerationTree, loadNativeStateOwner, openGenerationFileWriter, openGenerationSnapshot, STATE_OWNER_NATIVE_PATH } from '../../state/native-owner.js';
+
+test('each retired-generation check samples a fresh time under the same actual native owner', async (t) => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), '.cliq-generation-retired-clock-'));
+  await chmod(root, 0o700);
+  const native = await loadNativeStateOwner(), held = native.acquireLock(root, true);
+  const tree = held.createGenerationTree('retired-clock', identityHash('retired-clock-generation'));
+  t.after(async () => { tree.close(); held.close(); await rm(root, { recursive: true, force: true }); });
+  assert.throws(() => assertRetiredGenerationTree(tree), { code: 'RECOVERY_REQUIRED' });
+  tree.close();
+  const original = assertRetiredGenerationTree(tree);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const rechecked = assertRetiredGenerationTree(tree);
+  assert(Number.isSafeInteger(original) && original > 0);
+  assert(rechecked > original, 'a fresh native scan must not be treated as an immutable close timestamp');
+  held.close();
+  assert.throws(() => assertRetiredGenerationTree(tree), { code: 'RECOVERY_REQUIRED' });
+});
 
 test('a maximum-length valid nested private tree does not exhaust the Supervisor C stack', { timeout: 120_000 }, async (t) => {
   // Keep this >PATH_MAX fixture out of backed-up workspaces. Resolve macOS's

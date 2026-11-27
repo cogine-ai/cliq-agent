@@ -164,6 +164,22 @@ async function complete(fixture: Fixture, bytes = '{', status = 200) {
   return { prepared, completed, result };
 }
 
+test('retained model failure cannot infer a missing original Stop registration from a still-reproducible current response', async () => {
+  const f = await createAgentFixture('model-failure-original-registration-required', undefined, { mode: 'plan' });
+  try {
+    await complete(f, '{', 200);
+    const stopped = await stop(f), before = await f.store.readRecoveryClosure(f.runId);
+    const original = await f.store.artifacts.readCanonical<ModelFailureStopIntent>(stopped.run.stopIntentRef!);
+    const { registeredCheckpointId: _checkpoint, registeredRunRevision: _revision, registeredJournalSeq: _journal, ...missing } = original;
+    const replacement = await f.store.artifacts.publishCanonical(missing, 'cliq-stop-intent-v1');
+    const driver = Reflect.get(f.store, 'driver') as import('./sqlite-driver.js').SqliteDriver;
+    driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(replacement.ref, f.runId);
+    try { await assert.rejects(f.store.readRecoveryClosure(f.runId), /original registration cut/); }
+    finally { driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(stopped.run.stopIntentRef!, f.runId); }
+    assert.deepEqual(await f.store.readRecoveryClosure(f.runId), before);
+  } finally { await disposeFixture(f); }
+});
+
 for (const [label, bytes, status] of [
   ['malformed', '{', 200],
   ['provider-rejected', '{"error":{"message":"rate limited"}}', 429],
@@ -187,7 +203,8 @@ for (const [label, bytes, status] of [
     const evidence = await fixture.store.artifacts.readCanonical<ModelResponseFailureEvidenceV1>(intent.runtimeFailureRef);
     assert.deepEqual(intent, { schemaVersion: 1, runId: fixture.runId, createdAt: stopped.run.updatedAt, origin: 'runtime',
       targetStatus: 'failed', reason: 'runtime_failed', runtimeSubtype: 'runtime', failingOpId: prepared.entry.opId,
-      runtimeFailureRef: canonicalSha256(evidence), runtimeFailureDigest: evidence.evidenceDigest });
+      runtimeFailureRef: canonicalSha256(evidence), runtimeFailureDigest: evidence.evidenceDigest,
+      registeredCheckpointId: before.latestCheckpoint.id, registeredRunRevision: before.run.revision, registeredJournalSeq: before.journal.length });
     assert.equal(evidence.failureKind, 'model_unusable_response');
     assert.equal(evidence.unusableResponseRef, completed.entry.resultRef);
     assert.equal(evidence.evidenceDigest, digestOmitting(evidence, 'evidenceDigest'));

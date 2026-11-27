@@ -4,6 +4,8 @@
 # containment-death authority. --secrets observes credential-platform and SQLite
 # path prerequisites without qualifying production credential authority.
 # --credentials exercises one actual installed enrollment/read journey, not I1.
+# --credentials-model-input independently retains every model-input refusal,
+# actual rotate/revoke/cleanup and complete secret scan, not lifecycle or I1.
 # Invoke with sudo, an absolute existing Node path
 # and an optional new output directory. Do not run on a host
 # without an independently disposable test UID and actual systemd user manager.
@@ -13,14 +15,66 @@ export LC_ALL=C
 
 probe_campaign_kind=diagnostic
 probe_run_driver_mode=--campaign
+probe_credential_driver_mode=--campaign
 probe_finalizer_shutdown=0
+probe_volume_mode=loop
+probe_upgrade_source=
+probe_locked_node_archive=
+probe_provider_configuration=
+probe_local_inference_inputs=
+if [[ ${1:-} = --delay-volume ]]; then probe_volume_mode=delay-50ms; shift; fi
 case ${1:-} in
   --installed) probe_campaign_kind=installed; shift ;;
   --installed-retirement-refusal) probe_campaign_kind=retirement; shift ;;
   --secrets) probe_campaign_kind=secrets; shift ;;
   --credentials) probe_campaign_kind=credentials; shift ;;
+  --credentials-model-input) probe_campaign_kind=credentials; probe_credential_driver_mode=--model-input-campaign; shift ;;
   --credential-finalizer-shutdown) probe_campaign_kind=credentials; probe_finalizer_shutdown=1; shift ;;
   --run-journey) probe_campaign_kind=run-journey; shift ;;
+  --runtime-upgrade-journey)
+    [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
+      printf 'upgrade qualification requires the exact original source directory\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--runtime-upgrade-campaign; probe_upgrade_source=$2; shift 2 ;;
+  --run-final-source-limits-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--final-source-limits-campaign; shift ;;
+  --run-builtin-node-probe) probe_campaign_kind=run-journey; probe_run_driver_mode=--builtin-node-campaign; shift ;;
+  --run-verifier-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--verifier-campaign; shift ;;
+  --run-permission-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--permission-campaign; shift ;;
+  --run-mcp-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-campaign; shift ;;
+  --run-mcp-stdio-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-stdio-campaign; shift ;;
+  --run-migration-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-campaign; shift ;;
+  --run-migration-live-legacy-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-live-legacy-campaign; shift ;;
+  --run-migration-archive-ready-crash-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-archive-ready-crash-campaign; shift ;;
+  --run-migration-restoring-crash-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--migration-restoring-crash-campaign; shift ;;
+  --run-mcp-recovery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-recovery-campaign; shift ;;
+  --run-mcp-status-user-replay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--mcp-status-user-replay-campaign; shift ;;
+  --run-daily-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--daily-campaign; shift ;;
+  --run-pr532-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--pr532-campaign; shift ;;
+  --run-pr532-cpu-diagnostic) probe_campaign_kind=run-journey; probe_run_driver_mode=--pr532-cpu-diagnostic; shift ;;
+  --run-local-inference-journey)
+    [[ $# -ge 2 && "$2" = /* && -d "$2" && ! -L "$2" ]] || {
+      printf 'local inference qualification requires its pinned offline input directory\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--local-inference-campaign; probe_local_inference_inputs=$2; shift 2 ;;
+  --run-provider-journey)
+    [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+      printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-campaign; probe_provider_configuration=$2; shift 2 ;;
+  --run-provider-daily-journey)
+    [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+      printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-daily-campaign; probe_provider_configuration=$2; shift 2 ;;
+  --run-provider-pr532-journey)
+    [[ $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+      printf 'provider qualification requires its root-owned non-secret configuration\n' >&2; exit 2;
+    }
+    probe_campaign_kind=run-journey; probe_run_driver_mode=--provider-pr532-campaign; probe_provider_configuration=$2; shift 2 ;;
+  --run-delivery-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-campaign; shift ;;
+  --run-delivery-delay-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-delay-campaign; shift ;;
+  --run-delivery-stop-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-stop-campaign; shift ;;
+  --run-delivery-late-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--delivery-late-campaign; shift ;;
   --run-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--failure-campaign; shift ;;
   --run-retry-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--retry-campaign; shift ;;
   --run-authority-failure-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--authority-failure-campaign; shift ;;
@@ -33,9 +87,56 @@ case ${1:-} in
   --run-shutdown-pending-model-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-pending-model-campaign; shift ;;
   --run-shutdown-startup-journey) probe_campaign_kind=run-journey; probe_run_driver_mode=--shutdown-startup-campaign; shift ;;
 esac
-readonly probe_campaign_kind probe_run_driver_mode probe_finalizer_shutdown
+if [[ ${1:-} = --locked-node ]]; then
+  [[ "$probe_run_driver_mode" = --verifier-campaign && $# -ge 2 && "$2" = /* && -f "$2" && ! -L "$2" ]] || {
+    printf 'locked Node qualification requires its fixed verifier campaign and official archive\n' >&2; exit 2;
+  }
+  probe_locked_node_archive=$2; shift 2
+fi
+readonly probe_campaign_kind probe_run_driver_mode probe_credential_driver_mode probe_finalizer_shutdown probe_volume_mode probe_upgrade_source probe_locked_node_archive probe_provider_configuration
+readonly probe_local_inference_inputs
+# After the optional fixed volume, one campaign and its bounded official npm
+# source, only positional paths are allowed. Reject mixed/duplicate modes
+# before even inspecting host identities.
+for probe_argument in "$@"; do
+  [[ "$probe_argument" != --* ]] || {
+    printf 'campaign flags must be unique and precede the Node path\n' >&2; exit 2;
+  }
+done
+[[ "$probe_volume_mode" = loop || "$probe_campaign_kind" = run-journey ]] || {
+  printf 'the fixed delayed volume is only supported by the installed Run campaign\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --runtime-upgrade-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the fixed upgrade scope requires its original owned non-delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --provider-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the explicit provider scope requires the original non-delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --provider-daily-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the explicit provider scope requires the original non-delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --local-inference-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the local inference scope requires the original non-delayed volume\n' >&2; exit 2;
+}
+[[ ( "$probe_run_driver_mode" != --pr532-campaign && "$probe_run_driver_mode" != --provider-pr532-campaign && "$probe_run_driver_mode" != --pr532-cpu-diagnostic ) || "$probe_volume_mode" = loop ]] || {
+  printf 'the PR 532 preview requires the original non-delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --daily-campaign || "$probe_volume_mode" = loop ]] || {
+  printf 'the normal daily scope requires the original non-delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --delivery-delay-campaign || "$probe_volume_mode" = delay-50ms ]] || {
+  printf 'the fixed delayed Delivery campaign requires its owned delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --delivery-stop-campaign || "$probe_volume_mode" = delay-50ms ]] || {
+  printf 'the fixed publication-stop campaign requires its owned delayed volume\n' >&2; exit 2;
+}
+[[ "$probe_run_driver_mode" != --delivery-late-campaign || "$probe_volume_mode" = delay-50ms ]] || {
+  printf 'the fixed publication-late campaign requires its owned delayed volume\n' >&2; exit 2;
+}
 if [[ $(id -u) != 0 || $# -lt 1 || $# -gt 2 ]]; then
-  printf 'usage: sudo bash %s [--installed|--installed-retirement-refusal|--secrets|--credentials|--credential-finalizer-shutdown|--run-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'usage: sudo bash %s [--delay-volume] [--installed|--installed-retirement-refusal|--secrets|--credentials|--credentials-model-input|--credential-finalizer-shutdown|--runtime-upgrade-journey ORIGINAL_SOURCE_ROOT|--run-journey|--run-final-source-limits-journey|--run-verifier-journey|--run-builtin-node-probe|--run-permission-journey|--run-mcp-journey|--run-mcp-stdio-journey|--run-mcp-recovery-journey|--run-mcp-status-user-replay-journey|--run-daily-journey|--run-pr532-journey|--run-pr532-cpu-diagnostic|--run-provider-pr532-journey PUBLIC_CONFIG|--run-provider-journey PUBLIC_CONFIG|--run-provider-daily-journey PUBLIC_CONFIG|--run-delivery-journey|--run-delivery-delay-journey|--run-delivery-stop-journey|--run-delivery-late-journey|--run-failure-journey|--run-retry-journey|--run-authority-failure-journey|--run-storage-failure-journey|--run-request-resource-journey|--run-shutdown-admission-journey|--run-shutdown-session-journey|--run-shutdown-preparation-journey|--run-shutdown-received-tool-journey|--run-shutdown-pending-model-journey|--run-shutdown-startup-journey] ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' "$0" >&2
+  printf 'verifier source option: --run-verifier-journey --locked-node OFFICIAL_NPM_ARCHIVE ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
+  printf 'local model option: --run-local-inference-journey PINNED_INPUT_DIRECTORY ABSOLUTE_NODE_PATH [NEW_OUTPUT_DIRECTORY]\n' >&2
   exit 2
 fi
 readonly probe_node=$1
@@ -66,8 +167,34 @@ else
 fi
 readonly probe_credential_source="$probe_source_dir/testing/credential-journey-observer.c"
 readonly probe_credential_store_source="$probe_source_dir/testing/credential-store-fixture.c"
+readonly probe_publication_observer_source="$probe_source_dir/testing/publication-cleanup-crash-observer.c"
 readonly probe_finalizer_source="$probe_source_dir/testing/credential-finalizer-service.c"
-readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"
+if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-runtime-upgrade.ts"
+elif [[ "$probe_run_driver_mode" = --verifier-campaign || "$probe_run_driver_mode" = --builtin-node-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-verifier-journey.ts"
+elif [[ "$probe_run_driver_mode" = --permission-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-permission-journey.ts"
+elif [[ "$probe_run_driver_mode" = --mcp-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-journey.ts"
+elif [[ "$probe_run_driver_mode" = --mcp-stdio-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-stdio-journey.ts"
+elif [[ "$probe_run_driver_mode" = --migration-campaign || "$probe_run_driver_mode" = --migration-live-legacy-campaign ||
+        "$probe_run_driver_mode" = --migration-archive-ready-crash-campaign || "$probe_run_driver_mode" = --migration-restoring-crash-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-migration-journey.ts"
+elif [[ "$probe_run_driver_mode" = --mcp-recovery-campaign || "$probe_run_driver_mode" = --mcp-status-user-replay-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-mcp-recovery-journey.ts"
+elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign || "$probe_run_driver_mode" = --provider-pr532-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-provider-journey.ts"
+elif [[ "$probe_run_driver_mode" = --daily-campaign || "$probe_run_driver_mode" = --pr532-campaign || "$probe_run_driver_mode" = --pr532-cpu-diagnostic ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-daily-journey.ts"
+elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-local-inference-journey.ts"
+elif [[ "$probe_run_driver_mode" = --delivery-campaign || "$probe_run_driver_mode" = --delivery-delay-campaign || "$probe_run_driver_mode" = --delivery-late-campaign || "$probe_run_driver_mode" = --delivery-stop-campaign ]]; then
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-delivery-journey.ts"
+else
+  readonly probe_run_driver="$probe_source_dir/qualify-installed-run-journey.ts"
+fi
 if [[ "$probe_campaign_kind" = installed || "$probe_campaign_kind" = retirement || "$probe_campaign_kind" = secrets || "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then
   probe_typescript_driver=$probe_installed_driver
   if [[ "$probe_campaign_kind" = secrets ]]; then
@@ -187,17 +314,44 @@ probe_ledger_valid() {
 probe_run_volume() {
   "$probe_node" --input-type=module - "$1" "$probe_fixture" "$probe_fixture_identity" \
     "$probe_home" "$probe_volume_image" "$probe_volume_original" "$probe_volume_mounted" \
-    "$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" <<'NODE'
+    "$probe_uid" "$probe_gid" "$probe_output/run-filesystem.json" "$probe_volume_mode" "$probe_run_driver_mode" <<'NODE'
 import assert from 'node:assert/strict';
-import { constants, closeSync, existsSync, fchmodSync, fsyncSync, ftruncateSync, lstatSync,
+import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, ftruncateSync, lstatSync,
   openSync, readFileSync, readdirSync, statfsSync, writeFileSync } from 'node:fs';
-const [action, fixture, fixtureIdentity, home, image, originalFile, mountedFile, uidText, gidText, reportFile] = process.argv.slice(2);
+const [action, fixture, fixtureIdentity, home, image, originalFile, mountedFile, uidText, gidText, reportFile, volumeMode, campaign] = process.argv.slice(2);
 assert.equal(process.geteuid(), 0);
 assert.match(fixture, /^\/var\/tmp\/cliq-systemd-probe\.[A-Za-z0-9]+$/u);
 assert.equal(home, `${fixture}/home`); assert.equal(image, `${fixture}/run-home.ext4`);
 assert.equal(originalFile, `${fixture}/run-home-original.json`); assert.equal(mountedFile, `${fixture}/run-home-mounted.json`);
-const uid = Number(uidText), gid = Number(gidText), ceiling = 1024 ** 3;
+const wholeProject = ['--pr532-campaign', '--provider-pr532-campaign', '--pr532-cpu-diagnostic'].includes(campaign);
+const uid = Number(uidText), gid = Number(gidText), ceiling = (wholeProject ? 4 : 1) * 1024 ** 3;
 assert(Number.isSafeInteger(uid) && uid > 0 && uid === gid);
+assert(['loop', 'delay-50ms'].includes(volumeMode));
+assert(!wholeProject || volumeMode === 'loop');
+const chainFile = `${fixture}/run-home-device.json`, handoffFile = `${fixture}/run-home-handoff.json`;
+const delayName = `cliq-probe-${fixture.split('.').at(-1)}-delay`;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+function command(program, args) {
+  const path = program === 'umount' ? '/usr/bin/umount' : `/usr/sbin/${program}`;
+  // Request a bounded stop, but never equate the timer/signal with a join:
+  // spawnSync must actually return before any result or lifecycle advancement.
+  const value = spawnSync(path, args, { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30_000, killSignal: 'SIGKILL',
+    env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LC_ALL: 'C' } });
+  assert(!value.error && value.signal === null && value.status === 0, 'fixed owned-volume command failed');
+  assert(typeof value.stdout === 'string' && value.stdout.length <= 1024 * 1024);
+  return value.stdout.trim();
+}
+function text(file) {
+  const value = readFileSync(file, 'utf8'); assert(value.length <= 4096);
+  return value.trim();
+}
+function deviceNumber(value) {
+  const dev = BigInt(value);
+  return `${((dev >> 8n) & 0xfffn) | ((dev >> 32n) & 0xfffff000n)}:${(dev & 0xffn) | ((dev >> 12n) & 0xffffff00n)}`;
+}
+function entries(directory) { const value = [...readdirSync(directory)]; assert(value.length <= 4096); return value.sort(); }
 function identity(file, kind) {
   const value = lstatSync(file, { bigint: true });
   assert(!value.isSymbolicLink() && (kind === 'directory' ? value.isDirectory() : value.isFile()));
@@ -234,16 +388,18 @@ function imageIdentity() {
   assert.equal(value.uid, 0); assert.equal(value.gid, 0); assert.equal(value.mode, 0o600);
   assert.equal(value.links, 1); assert.equal(value.size, String(ceiling)); return value;
 }
-function noImageAssociation() {
-  const names = readdirSync('/sys/block'); assert(names.length <= 4096);
+function imageAssociations() {
+  const names = entries('/sys/block'), associated = [];
   for (const name of names.filter(value => /^loop[0-9]+$/u.test(value))) {
     let backing;
     try { backing = readFileSync(`/sys/block/${name}/loop/backing_file`, 'utf8'); }
     catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-    assert(backing.length <= 4096); assert.notEqual(backing.trim(), image);
+    assert(backing.length <= 4096); if (backing.trim() === image) associated.push(name);
   }
+  return associated;
 }
-function loop(mount, homeDevice) {
+function noImageAssociation() { assert.equal(imageAssociations().length, 0); }
+function loop(mount, homeDevice, holders = []) {
   assert.match(mount.source, /^\/dev\/loop[0-9]+$/u); assert.match(mount.device, /^7:[0-9]+$/u);
   const device = lstatSync(mount.source, { bigint: true }); assert(device.isBlockDevice() && !device.isSymbolicLink());
   assert.equal(String(device.rdev), homeDevice);
@@ -256,9 +412,78 @@ function loop(mount, homeDevice) {
     uid: Number(device.uid), gid: Number(device.gid), mode: Number(device.mode & 0o7777n),
     backingFile: read('backing_file'), offset: read('offset'), sizeLimit: read('sizelimit'), autoclear: read('autoclear') };
   assert.equal(value.uid, 0); assert.equal(value.backingFile, image); assert.equal(value.offset, '0');
-  assert.equal(value.sizeLimit, '0'); assert.equal(value.autoclear, '1'); return value;
+  assert.equal(value.sizeLimit, '0'); assert.equal(value.autoclear, '1');
+  assert.deepEqual(imageAssociations(), [mount.source.slice('/dev/'.length)]);
+  assert.deepEqual(entries(`/sys/dev/block/${mount.device}/holders`), holders);
+  assert.deepEqual(entries(`/sys/dev/block/${mount.device}/slaves`), []);
+  const actual = command('losetup', ['--list', '--raw', '--noheadings', '--output', 'NAME,BACK-INO,BACK-MAJ:MIN,OFFSET,SIZELIMIT,AUTOCLEAR', '--', mount.source]);
+  const physical = imageIdentity();
+  const cells = actual.split(/\s+/u); assert.equal(cells.length, 6);
+  // util-linux pads BACK-MAJ:MIN internally; raw smartcols encodes those
+  // spaces as \x20. Decode only this formatting in this one device column.
+  // Other escapes, interior whitespace and every other identity stay exact.
+  cells[2] = cells[2].replaceAll('\\x20', ' ').trim();
+  assert.deepEqual(cells, [mount.source, physical.inode, deviceNumber(physical.device), '0', '0', '1']);
+  return value;
 }
-function mounted(original, partial = false) {
+function original() {
+  const value = frozen(originalFile);
+  assert.match(value.filesystemUuid, uuidPattern); assert.deepEqual(imageIdentity(), value.image);
+  if (volumeMode === 'delay-50ms') {
+    assert.deepEqual(value.delay, { name: delayName, uuid: `CLIQ-QUALIFY-${value.filesystemUuid}`, delayMs: 50 });
+    if (existsSync(handoffFile) && !existsSync(chainFile)) assert.fail('original delayed-volume handoff is incomplete; resources retained');
+  } else assert.equal(value.delay, undefined);
+  return value;
+}
+function filesystemUuid(source, expected) {
+  const value = command('blkid', ['--probe', '--match-tag', 'UUID', '--output', 'value', '--', source]);
+  assert.match(value, uuidPattern); assert.equal(value, expected); return value;
+}
+function findDelay(expected) {
+  const matches = [];
+  for (const name of entries('/sys/block').filter(value => /^dm-[0-9]+$/u.test(value))) {
+    const actualName = text(`/sys/block/${name}/dm/name`), uuid = text(`/sys/block/${name}/dm/uuid`);
+    if (actualName === expected.name || uuid === expected.uuid) {
+      assert.equal(actualName, expected.name); assert.equal(uuid, expected.uuid); matches.push(name);
+    }
+  }
+  assert(matches.length <= 1); return matches[0];
+}
+function delayCapability() {
+  // Do not load/unload a host module or let libdevmapper create its control
+  // node. This opt-in qualification requires an already available target on
+  // the disposable VM; absence is a real failure, never a qualified skip.
+  assert(existsSync('/sys/module/dm_mod') && existsSync('/sys/module/dm_delay'));
+  const control = lstatSync('/dev/mapper/control', { bigint: true });
+  assert(control.isCharacterDevice() && !control.isSymbolicLink() && Number(control.uid) === 0);
+  const targets = command('dmsetup', ['targets']).split('\n').filter(line => /^delay\s/u.test(line));
+  assert.equal(targets.length, 1); assert.match(targets[0], /^delay\s+v[0-9]+\.[0-9]+\.[0-9]+$/u);
+}
+function delay(original, retainedLoop) {
+  const name = findDelay(original.delay); assert(name);
+  const source = `/dev/${name}`, device = text(`/sys/block/${name}/dev`);
+  assert.match(device, /^[1-9][0-9]*:[0-9]+$/u);
+  const metadata = lstatSync(source, { bigint: true }); assert(metadata.isBlockDevice() && !metadata.isSymbolicLink());
+  assert.equal(Number(metadata.uid), 0); assert.equal(deviceNumber(metadata.rdev), device);
+  assert.equal(text(`/sys/block/${name}/dm/suspended`), '0'); assert.equal(text(`/sys/block/${name}/ro`), '0');
+  assert.equal(text(`/sys/block/${name}/size`), String(ceiling / 512));
+  assert.deepEqual(entries(`/sys/block/${name}/holders`), []);
+  assert.deepEqual(entries(`/sys/block/${name}/slaves`), [retainedLoop.source.slice('/dev/'.length)]);
+  const table = command('dmsetup', ['table', original.delay.name]).split(/\s+/u).join(' ');
+  assert.equal(table, `0 ${ceiling / 512} delay ${retainedLoop.device} 0 50 ${retainedLoop.device} 0 50 ${retainedLoop.device} 0 50`);
+  const actualLoop = loop({ source: retainedLoop.source, device: retainedLoop.device }, retainedLoop.rdev, [name]);
+  assert.deepEqual(actualLoop, retainedLoop);
+  return { source, device, inode: String(metadata.ino), rdev: String(metadata.rdev), uid: Number(metadata.uid),
+    gid: Number(metadata.gid), mode: Number(metadata.mode & 0o7777n), name: original.delay.name, uuid: original.delay.uuid, table };
+}
+function chain(original) {
+  const value = frozen(chainFile); assert.deepEqual(value.image, original.image);
+  assert.deepEqual(frozen(handoffFile), { image: value.image, base: value.base });
+  assert.deepEqual(delay(original, value.base.loop), value.delay);
+  filesystemUuid(value.delay.source, original.filesystemUuid);
+  return value;
+}
+function mounted(original, partial = false, delayed = volumeMode === 'delay-50ms') {
   assert.deepEqual(imageIdentity(), original.image);
   const inventory = mounts(); assert.equal(inventory.length, 1);
   const mount = inventory[0]; assert.equal(mount.target, home); assert.equal(mount.root, '/'); assert.equal(mount.type, 'ext4');
@@ -272,34 +497,113 @@ function mounted(original, partial = false) {
     assert([0, uid].includes(actual.uid) && [0, gid].includes(actual.gid) && [0o700, 0o755].includes(actual.mode));
   } else { assert.equal(actual.uid, uid); assert.equal(actual.gid, gid); assert.equal(actual.mode, 0o700); }
   const observed = filesystem(); assert.equal(observed.filesystemType, 0xef53); assert(observed.totalBytes <= ceiling);
-  return { mount, home: actual, image: original.image, loop: loop(mount, actual.device), filesystem: observed };
+  const linked = delayed ? chain(original) : undefined;
+  if (linked) { assert.equal(mount.source, linked.delay.source); assert.equal(mount.device, linked.delay.device); assert.equal(actual.device, linked.delay.rdev); }
+  const backing = linked ? linked.base.loop : loop(mount, actual.device);
+  return { mount, home: actual, image: original.image, loop: backing, filesystem: observed,
+    filesystemUuid: filesystemUuid(mount.source, original.filesystemUuid), ...(linked ? { delay: linked.delay } : {}) };
 }
 if (action === 'initialize') {
+  if (volumeMode === 'delay-50ms') delayCapability();
   assert.equal(mounts().length, 0);
   const before = identity(home, 'directory'); assert.equal(before.uid, uid); assert.equal(before.gid, gid); assert.equal(before.mode, 0o700);
   const beforeFilesystem = filesystem();
   const fd = openSync(image, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   try { ftruncateSync(fd, ceiling); fsyncSync(fd); } finally { closeSync(fd); }
-  writeFrozen(originalFile, { home: before, image: imageIdentity(), beforeFilesystem });
+  const filesystemUuid = randomUUID(); assert.match(filesystemUuid, uuidPattern);
+  writeFrozen(originalFile, { home: before, image: imageIdentity(), beforeFilesystem, filesystemUuid,
+    ...(volumeMode === 'delay-50ms' ? { delay: { name: delayName, uuid: `CLIQ-QUALIFY-${filesystemUuid}`, delayMs: 50 } } : {}) });
+} else if (action === 'format-cut' || action === 'loop-mount-cut') {
+  const value = original(); assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+  noImageAssociation(); if (value.delay) assert.equal(findDelay(value.delay), undefined);
+  if (action === 'format-cut') process.stdout.write(`${value.filesystemUuid}\n`);
+  else filesystemUuid(image, value.filesystemUuid);
+} else if (action === 'link-delay') {
+  const value = original(); assert(value.delay); assert(!existsSync(chainFile) && !existsSync(mountedFile) && !existsSync(handoffFile));
+  assert.equal(findDelay(value.delay), undefined);
+  const base = mounted(value, true, false), table = `0 ${ceiling / 512} delay ${base.loop.device} 0 50 ${base.loop.device} 0 50 ${base.loop.device} 0 50`;
+  // A mounted filesystem exclusively owns its block device: dm cannot claim
+  // that loop until normal unmount. Hold the exact original AUTOCLEAR loop FD
+  // across this handoff instead, never recreating or detaching its number.
+  // A durable incomplete intent is fail-closed even before any FD is opened.
+  writeFrozen(handoffFile, { image: value.image, base });
+  let held = -1;
+  try {
+    held = openSync(base.loop.source, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_CLOEXEC);
+    const heldLoop = () => {
+      const actual = fstatSync(held, { bigint: true });
+      assert(actual.isBlockDevice() && String(actual.ino) === base.loop.inode && String(actual.rdev) === base.loop.rdev &&
+        Number(actual.uid) === base.loop.uid && Number(actual.gid) === base.loop.gid && Number(actual.mode & 0o7777n) === base.loop.mode);
+    };
+    heldLoop(); assert.deepEqual(mounted(value, true, false), base);
+    command('umount', ['--', home]);
+    assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+    assert.deepEqual(imageIdentity(), value.image); heldLoop();
+    assert.deepEqual(loop({ source: base.loop.source, device: base.loop.device }, base.loop.rdev), base.loop);
+    filesystemUuid(base.loop.source, value.filesystemUuid); assert.equal(findDelay(value.delay), undefined);
+    command('dmsetup', ['create', value.delay.name, '--uuid', value.delay.uuid, '--table', table]);
+    delay(value, base.loop); heldLoop();
+  } finally { if (held >= 0) { const original = held; held = -1; closeSync(original); } }
+  // Only actual completion of that close permits freezing the completed chain.
+  // Any close/create/inspection failure leaves handoff without chain: cleanup
+  // cannot misclassify it as an unstarted volume or erase its evidence.
+  assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+  assert.deepEqual(imageIdentity(), value.image);
+  const linked = delay(value, base.loop); filesystemUuid(linked.source, value.filesystemUuid);
+  writeFrozen(chainFile, { image: value.image, base, delay: linked });
+} else if (action === 'delayed-mount-cut') {
+  const value = original(); assert(value.delay); const linked = chain(value);
+  assert(!existsSync(mountedFile));
+  assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+  process.stdout.write(`${linked.delay.source}\n`);
+} else if (action === 'ownership-cut') {
+  assert(!existsSync(mountedFile)); mounted(original(), true);
 } else if (action === 'capture' || action === 'retire-cut') {
-  const original = frozen(originalFile), inventory = mounts();
+  const value = original(), inventory = mounts();
   if (action === 'retire-cut' && inventory.length === 0) {
-    assert(!existsSync(mountedFile)); assert.deepEqual(identity(home, 'directory'), original.home);
-    assert.deepEqual(imageIdentity(), original.image); noImageAssociation();
+    assert.deepEqual(identity(home, 'directory'), value.home);
+    if (value.delay && existsSync(chainFile)) chain(value);
+    else { assert(!existsSync(mountedFile)); noImageAssociation(); if (value.delay) assert.equal(findDelay(value.delay), undefined); }
     process.stdout.write('unmounted\n');
+  } else if (value.delay && inventory[0]?.source.startsWith('/dev/loop')) {
+    assert.equal(action, 'retire-cut'); assert(!existsSync(mountedFile) && !existsSync(chainFile) && !existsSync(handoffFile));
+    assert.equal(findDelay(value.delay), undefined); mounted(value, true, false);
+    process.stdout.write('mounted\n');
   } else {
-    const value = mounted(original, action === 'retire-cut' && !existsSync(mountedFile));
-    if (existsSync(mountedFile)) assert.deepEqual(value, frozen(mountedFile));
-    else writeFrozen(mountedFile, value);
+    const current = mounted(value, action === 'retire-cut' && !existsSync(mountedFile));
+    if (existsSync(mountedFile)) assert.deepEqual(current, frozen(mountedFile));
+    else writeFrozen(mountedFile, current);
     if (action === 'capture') writeFrozen(reportFile, { diagnosticOnly: true, dedicatedBoundedExt4: true,
-      before: original.beforeFilesystem, mounted: value.filesystem, hardCapacityCeilingBytes: ceiling,
-      nativeGenerationQuotaVerified: false, nativeWorkerVerified: false });
+      before: value.beforeFilesystem, mounted: current.filesystem, hardCapacityCeilingBytes: ceiling,
+      capacityProfile: wholeProject ? 'pr532_full_project_v1' : 'original_v1',
+      nativeGenerationQuotaVerified: false, nativeWorkerVerified: false,
+      ...(value.delay ? { storageDelay: { kind: 'dm-delay', readMs: 50, writeMs: 50, flushMs: 50, scope: 'complete-home' } } : {}) });
     else process.stdout.write('mounted\n');
   }
+} else if (action === 'remove-delay') {
+  const value = original(); assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+  assert(value.delay);
+  if (existsSync(chainFile)) {
+    const retained = frozen(chainFile);
+    if (findDelay(value.delay) === undefined) {
+      noImageAssociation(); assert(!existsSync(`/sys/dev/block/${retained.delay.device}/dm`));
+    } else {
+      chain(value);
+      // Only a normal removal of this exact frozen mapping is permitted. Busy,
+      // changed and half-created resources remain for inspection; never force,
+      // defer, suspend/reload, remove-all, or detach an observed loop number.
+      command('dmsetup', ['remove', value.delay.name]);
+      assert.equal(findDelay(value.delay), undefined);
+    }
+  } else { assert.equal(findDelay(value.delay), undefined); noImageAssociation(); }
 } else if (action === 'unmounted') {
-  const original = frozen(originalFile), retained = existsSync(mountedFile) ? frozen(mountedFile) : undefined;
-  assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), original.home);
-  assert.deepEqual(imageIdentity(), original.image); noImageAssociation();
+  const value = original(), retained = existsSync(mountedFile) ? frozen(mountedFile) : undefined;
+  assert.equal(mounts().length, 0); assert.deepEqual(identity(home, 'directory'), value.home);
+  noImageAssociation();
+  if (value.delay) {
+    assert.equal(findDelay(value.delay), undefined);
+    if (existsSync(chainFile)) assert(!existsSync(`/sys/dev/block/${frozen(chainFile).delay.device}/dm`));
+  }
   if (retained) {
     // Autoclear must have consumed the original loop association. Never detach
     // an observed/reused numeric loop device and never use lazy/force unmount.
@@ -322,8 +626,25 @@ probe_retire_run_volume() {
   if ! disposition=$(probe_run_volume retire-cut); then probe_fail_cleanup 'bounded fixture volume identity changed; refusing unmount'; return 1; fi
   if [[ "$disposition" = mounted ]]; then
     if ! probe_ledger_valid; then probe_fail_cleanup 'ownership ledger changed before bounded volume unmount'; return 1; fi
-    if ! umount -- "$probe_home"; then probe_fail_cleanup 'bounded fixture volume did not unmount; retaining account and fixture'; return 1; fi
+    if ! probe_run_volume retire-cut >/dev/null; then probe_fail_cleanup 'bounded volume identity changed immediately before unmount'; return 1; fi
+    if ! umount -- "$probe_home"; then
+      # Read-only holder diagnostics for this still-mounted, identity-checked
+      # owned volume. Never kill holders, force/lazy-unmount or adopt resources.
+      # fuser emits process IDs/access classes only; do not request command lines.
+      if [[ -x /usr/bin/fuser ]]; then
+        printf 'cleanup: read-only busy-volume holder diagnostic\n' >&2
+        /usr/bin/timeout --kill-after=1s 1s /usr/bin/fuser -m -M -- "$probe_home" >&2 || true
+      else
+        printf 'cleanup: read-only busy-volume holder diagnostic unavailable\n' >&2
+      fi
+      probe_fail_cleanup 'bounded fixture volume did not unmount; retaining account and fixture'; return 1
+    fi
   elif [[ "$disposition" != unmounted ]]; then probe_fail_cleanup 'unknown bounded volume retirement cut'; return 1
+  fi
+  if [[ "$probe_volume_mode" = delay-50ms ]]; then
+    if ! probe_ledger_valid || ! probe_run_volume remove-delay; then
+      probe_fail_cleanup 'exact delayed mapping retirement was not proven; retaining fixture'; return 1
+    fi
   fi
   # A normal unmount autoclears this exact loop association. A short bounded
   # read-only wait accommodates kernel retirement without detaching a device.
@@ -511,6 +832,17 @@ readonly probe_dropin="$probe_dropin_directory/50-cliq-probe.conf"
   printf 'UID-specific drop-in directory already exists; refusing to modify it\n' >&2; exit 1;
 }
 
+# The actual same-UID installer and clients execute this exact Node. Refuse
+# a private ancestor or an unexecutable carrier before signing or creating users.
+if [[ "$probe_campaign_kind" != secrets ]] && ! (
+  cd /
+  /usr/bin/timeout --kill-after=1s 5s /usr/bin/setpriv --reuid="$probe_uid" --regid="$probe_gid" --clear-groups -- \
+    /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$probe_node" --version
+) </dev/null >/dev/null 2>&1; then
+  printf 'Node executable is unavailable to the disposable qualification UID\n' >&2
+  exit 2
+fi
+
 # Root-owned write-once ledger/config. It cannot be replaced through the new
 # user's home; cleanup uses its frozen hash and the in-process exact identities.
 "$probe_node" --input-type=module - "$probe_ledger" "$probe_fixture" "$probe_fixture_identity" \
@@ -565,6 +897,7 @@ const runJourney = mode === 'run-journey' ? {
   controlDirectory: `${home}/probe/run-secret-service-control`,
   observer: `${fixture}/cliq-credential-journey-observer`, storeFixture: `${fixture}/cliq-credential-store-fixture`,
   workspace: `${home}/probe/run-workspace`,
+  publicationObserver: `${fixture}/cliq-publication-cleanup-crash-observer`,
   reportFile: `${output}/installed-run-journey.json`,
 } : undefined;
 writeFileSync(file, JSON.stringify({ diagnosticOnly: true, fixture, fixtureIdentity, username,
@@ -589,9 +922,24 @@ if [[ "$probe_campaign_kind" = run-journey ]]; then
   # campaign. Its HOME must remain executable: signed bootstrap and Supervisor
   # images are installed here; the private worker namespace remains unchanged.
   probe_run_volume initialize
-  mkfs.ext4 -q -F "$probe_volume_image"
+  probe_volume_uuid=$(probe_run_volume format-cut)
+  mkfs.ext4 -q -F -U "$probe_volume_uuid" "$probe_volume_image"
+  probe_run_volume loop-mount-cut
   mount -t ext4 -o loop,nodev,nosuid "$probe_volume_image" "$probe_home"
+  if [[ "$probe_volume_mode" = delay-50ms ]]; then
+    # No installer, account actor or user manager has started yet. The same
+    # owner holds the original loop FD across normal unmount before dm claims
+    # it; its actual close precedes the frozen completed device chain.
+    probe_run_volume link-delay
+    probe_volume_device=$(probe_run_volume delayed-mount-cut)
+    # Both absolute paths and the unique original device chain were checked
+    # above. Do not let libmount rewrite /dev/dm-N into its mapper alias: the
+    # later mountinfo guard still requires the exact frozen canonical source.
+    mount --no-canonicalize -t ext4 -o nodev,nosuid "$probe_volume_device" "$probe_home"
+  fi
+  probe_run_volume ownership-cut
   chown "$probe_uid:$probe_gid" "$probe_home"
+  probe_run_volume ownership-cut
   chmod 0700 "$probe_home"
   probe_run_volume capture
 fi
@@ -634,6 +982,9 @@ if [[ "$probe_campaign_kind" = run-journey ]]; then
   chmod 0555 "$probe_fixture/cliq-credential-journey-observer"
   cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_credential_store_source" -o "$probe_fixture/cliq-credential-store-fixture" "${probe_gio_flags[@]}"
   chmod 0555 "$probe_fixture/cliq-credential-store-fixture"
+  [[ -f "$probe_publication_observer_source" && ! -L "$probe_publication_observer_source" ]] || exit 2
+  cc -std=c11 -O2 -Wall -Wextra -Werror "$probe_publication_observer_source" -o "$probe_fixture/cliq-publication-cleanup-crash-observer"
+  chmod 0555 "$probe_fixture/cliq-publication-cleanup-crash-observer"
 fi
 mkdir -m 0755 -- "$probe_home/.config" "$probe_home/.config/systemd" "$probe_home/.config/systemd/user"
 if [[ "$probe_campaign_kind" = credentials || "$probe_campaign_kind" = run-journey ]]; then
@@ -738,11 +1089,23 @@ elif [[ "$probe_campaign_kind" = retirement ]]; then
 elif [[ "$probe_campaign_kind" = credentials ]]; then
   # No returned production unit name becomes privileged cleanup authority.
   # The immutable ledger's exact fresh UID/manager owns the complete retirement.
-  "$probe_node" --import "$probe_installed_loader" "$probe_credential_driver" --campaign "$probe_ledger"
+  "$probe_node" --import "$probe_installed_loader" "$probe_credential_driver" "$probe_credential_driver_mode" "$probe_ledger"
 elif [[ "$probe_campaign_kind" = run-journey ]]; then
   # Fixed driver, exact fresh UID and the same frozen ledger/baseline/cleanup.
   # No arbitrary driver, production pause flag or manager-policy override.
-  "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
+  if [[ "$probe_run_driver_mode" = --runtime-upgrade-campaign ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_upgrade_source"
+  elif [[ "$probe_run_driver_mode" = --local-inference-campaign ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_local_inference_inputs"
+  elif [[ "$probe_run_driver_mode" = --provider-campaign || "$probe_run_driver_mode" = --provider-daily-campaign || "$probe_run_driver_mode" = --provider-pr532-campaign ]]; then
+    # No key in argv/environment/config. The owner sends it only after this
+    # original driver's fixed stdin-ready marker; all setup children are done.
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" "$probe_provider_configuration"
+  elif [[ -n "$probe_locked_node_archive" ]]; then
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger" --locked-node "$probe_locked_node_archive"
+  else
+    "$probe_node" --import "$probe_installed_loader" "$probe_run_driver" "$probe_run_driver_mode" "$probe_ledger"
+  fi
 else
   "$probe_node" --import "$probe_installed_loader" "$probe_secret_driver" --campaign "$probe_ledger"
   "$probe_node" --import "$probe_installed_loader" "$probe_sqlite_driver" --campaign "$probe_ledger"

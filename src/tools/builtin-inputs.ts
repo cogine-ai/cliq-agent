@@ -2,7 +2,9 @@ import { immutableSnapshot } from '../model/immutable.js';
 import type { PolicySubject, ToolAccess } from '../policy/decision.js';
 import { parseCanonicalBash } from '../policy/canonical-bash.js';
 import { compileInputSchema } from './input-schema.js';
+import { delegateInputContract, awaitChildrenInputContract } from './child-inputs.js';
 import { requestInputContract } from './request-input.js';
+import { decodeSkillResourceInput, SKILL_RESOURCE_BYTES, SKILL_RESOURCE_RANGE_BYTES, type SkillResourceInputV1 } from '../kernel/skill.js';
 
 type Intent = Pick<Extract<PolicySubject, { kind: 'tool' }>, 'channel' | 'display'>;
 type Status = 'pending' | 'in_progress' | 'completed';
@@ -57,6 +59,16 @@ const withPlanId = <T extends { planId?: string }>(input: T): T | undefined => i
 /** Input semantics for the new runtime only; these definitions never import or execute host tools. */
 export const builtinInputContracts = Object.freeze({
   request_input: requestInputContract,
+  delegate: delegateInputContract,
+  await_children: awaitChildrenInputContract,
+  skill_resource: builtin<SkillResourceInputV1>('skill_resource', 'read', 'retry', object({
+    skillId: { ...nonempty, maxLength: 128 }, canonicalRelativePath: { ...nonempty, maxLength: 4096 },
+    offset: { type: 'integer', minimum: 0, maximum: SKILL_RESOURCE_BYTES },
+    length: { type: 'integer', minimum: 1, maximum: SKILL_RESOURCE_RANGE_BYTES }
+  }, ['skillId', 'canonicalRelativePath', 'offset', 'length']), input => {
+    try { return { ...decodeSkillResourceInput(input) }; } catch (error) { if (error instanceof TypeError) return undefined; throw error; }
+  }, input => ({ channel: { kind: 'named-action', action: 'skill_resource' },
+    display: { title: 'Read frozen skill resource?', detail: `${input.skillId}/${input.canonicalRelativePath} bytes ${input.offset}..${input.offset + input.length}` } })),
   read: builtin<{ path: string; start_line?: number; end_line?: number }>('read', 'read', 'retry',
     object({ path: nonempty, start_line: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
       end_line: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER } }, ['path']),

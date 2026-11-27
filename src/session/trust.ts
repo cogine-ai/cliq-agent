@@ -61,13 +61,13 @@ export function workspaceTrustRecordPath(ctx: WorkspaceTrustContext) {
 }
 
 async function atomicWriteTrustRecord(target: string, value: WorkspaceTrustRecord) {
-  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
   const temp = path.join(
     path.dirname(target),
     `.${path.basename(target)}.${process.pid}.${crypto.randomUUID()}.tmp`
   );
   try {
-    await fs.writeFile(temp, JSON.stringify(value, null, 2));
+    await fs.writeFile(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
     await fs.rename(temp, target);
   } catch (error) {
     await fs.rm(temp, { force: true });

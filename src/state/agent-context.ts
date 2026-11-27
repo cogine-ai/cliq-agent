@@ -1,7 +1,7 @@
 import { canonicalJsonBytes, canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type {
-  Run, RunSpec, RunAssemblyV1, ContextManifest, ContinuationItem, SessionContextProjection,
+  Run, RunSpec, RunAssemblyV1, ContextManifest, ContinuationItem,
   ToolResultPayloadV1, ToolResultModelContentV1
 } from '../kernel/types.js';
 import type { AgentModelTurn, ModelTextV1, ToolCallInputV1, ObservedToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -12,9 +12,18 @@ import type { RunAssemblyToolAuthority } from '../model/run-assembly.js';
 import type { ModelTurnMaterial } from '../runtime/continuation.js';
 import type { ArtifactCatalog } from './artifacts.js';
 import { decodeAdmittedContext, decodeRunObjective, decodeSessionProjection } from './decoders.js';
-import { joinResourceOperations, KernelStorageError } from './errors.js';
+import { KernelStorageError } from './errors.js';
+import { decodeRepairDiagnosticItem, decodeVerificationReceipt, decodeVerifierRepairDiagnostic,
+  decodeVerifierCommand, decodeVerifierRepairModelContent, verifierRepairModelContent, verifierReportedLocations } from './verifier-artifacts.js';
+import { type SessionCompactionIndex, type SessionContextEntry } from './session-context.js';
+import type { SessionContextHead } from '../kernel/session-context-pages.js';
+import { readSessionContextGraphHead, readSessionContextEntryStream } from './session-context-stream.js';
+import { MODEL_REQUEST_BODY_LIMIT_BYTES, sessionContextUserWireByteLowerBound } from '../model/request.js';
+import { childResultModelContent } from './child-result-artifacts.js';
+import { readAssemblySkills } from './skill-data.js';
+import { isLegacySessionContextKind } from '../kernel/legacy-context.js';
 
-export async function readCanonicalArtifact<T>(artifacts: ArtifactCatalog, ref: string): Promise<T> {
+export async function readCanonicalArtifact<T>(artifacts: Pick<ArtifactCatalog, 'readCanonical'>, ref: string): Promise<T> {
   const value = await artifacts.readCanonical<T>(ref);
   if (canonicalSha256(value) !== ref) throw new KernelStorageError('ARTIFACT_MISMATCH', 'artifact bytes are not canonical JSON');
   return value;
@@ -29,16 +38,17 @@ export async function readText(artifacts: ArtifactCatalog, ref: string, digest?:
 
 export async function readModelTurnMaterial(artifacts: ArtifactCatalog, ref: string): Promise<ModelTurnMaterial> {
   const turn = await readCanonicalArtifact<AgentModelTurn>(artifacts, ref);
-  return { turn, text: await readText(artifacts, turn.textRef), inputs: await joinResourceOperations(turn.toolCalls.map(async (call) => {
+  return { turn, text: await readText(artifacts, turn.textRef), inputs: await artifacts.mapReads(turn.toolCalls, async (call) => {
     const value = await readCanonicalArtifact<ToolCallInputV1>(artifacts, call.inputRef);
     const observed = await readCanonicalArtifact<ObservedToolCallInputV1>(artifacts, value.observedInputRef);
     if (value.diagnosticRef !== undefined) await artifacts.readBytes(value.diagnosticRef);
     return { value, observed };
-  })) };
+  }) };
 }
 
 /** Static, post-Trust instruction projection. Reads retained CAS only, never live repository files. */
-export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: Pick<RunAssemblyV1, 'instructions'>): Promise<string> {
+export async function loadInstructionText(artifacts: ArtifactCatalog,
+  assembly: Pick<RunAssemblyV1, 'instructions'> & Partial<Pick<RunAssemblyV1, 'runtime' | 'createdAt'>>): Promise<string> {
   const instructions = assembly.instructions;
   const system = await readText(artifacts, instructions.systemPromptRef, instructions.systemPromptDigest);
   if (!system.utf8.trim()) throw new TypeError('system instruction is empty');
@@ -52,26 +62,18 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
       workspace.manifestDigest !== instructions.workspaceInstructionsDigest ||
       digestOmitting(workspace, 'manifestDigest') !== workspace.manifestDigest) throw new TypeError('workspace instructions mismatch');
   if (workspace.entries.length > 0) {
-    const entries = await joinResourceOperations(workspace.entries.map(async (entry, index) => {
+    const entries = await artifacts.mapReads(workspace.entries, async (entry, index) => {
       if (entry.order !== index || entry.appliesToSubtree !== true) throw new TypeError('workspace instruction scope mismatch');
       return { order: entry.order, canonicalRootRelativePath: entry.canonicalRootRelativePath, appliesToSubtree: true,
         instructionUtf8: (await readText(artifacts, entry.contentRef, entry.contentDigest)).utf8 };
-    }));
+    });
     pieces.push(canonicalJsonBytes({ format: 'cliq-workspace-instruction-prompt-v1', entries }).toString('utf8'));
   }
-  for (const selected of instructions.skills) {
-    const skill = await readCanonicalArtifact<{
-      schemaVersion: 1; format: string; skillId: string; sourceScope: string;
-      instructionRef: string; instructionDigest: string; manifestDigest: string;
-    }>(artifacts, selected.manifestRef);
-    if (skill.schemaVersion !== 1 || skill.format !== 'cliq-skill-manifest-v1' || skill.skillId !== selected.skillId ||
-        skill.manifestDigest !== selected.manifestDigest || digestOmitting(skill, 'manifestDigest') !== skill.manifestDigest) {
-      throw new TypeError('selected skill does not match retained manifest');
-    }
-    const instructionUtf8 = (await readText(artifacts, skill.instructionRef, skill.instructionDigest)).utf8;
-    if (!instructionUtf8.trim()) throw new TypeError('selected skill instruction is empty');
-    pieces.push(canonicalJsonBytes({ format: 'cliq-skill-instruction-prompt-v1', skillId: skill.skillId,
-      sourceScope: skill.sourceScope, instructionUtf8 }).toString('utf8'));
+  if (instructions.skills.length) {
+    if (!assembly.runtime || !assembly.createdAt) throw new TypeError('selected skills require the original complete assembly binding');
+    const skills = await readAssemblySkills(artifacts, { instructions, runtime: assembly.runtime, createdAt: assembly.createdAt });
+    for (const skill of skills) pieces.push(canonicalJsonBytes({ format: 'cliq-skill-instruction-prompt-v1', skillId: skill.manifest.skillId,
+      sourceScope: skill.manifest.sourceScope, instructionUtf8: skill.instruction.utf8 }).toString('utf8'));
   }
   return pieces.join('\n\n');
 }
@@ -79,10 +81,36 @@ export async function loadInstructionText(artifacts: ArtifactCatalog, assembly: 
 type ContextProjectionInput = {
   artifacts: ArtifactCatalog; run: Run; spec: RunSpec; assembly: RunAssemblyV1;
   context: ContextManifest; systemInstruction: string; tools: RunAssemblyToolAuthority[];
+  sessionCompactionIndex?: (projection: SessionContextHead) => SessionCompactionIndex;
 };
 
 /** Model-visible context, shared by request projection and resource-stop recovery. */
 export async function readModelContext(input: ContextProjectionInput): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
+  return readModelContextProjection(input);
+}
+
+/** Shared normal/Run-compaction prefix. Historical legacy roles remain user
+ * data and never enter the current assistant/tool continuation sequence. */
+type SessionContextModelMessage = Extract<NormalPromptMessageV1, { role: 'system' | 'user' }> & { role: 'user' };
+export function sessionContextModelMessages(entries: readonly SessionContextEntry[], firstIndex = 0): SessionContextModelMessage[] {
+  return entries.map((entry, offset) => {
+    const message = { index: firstIndex + offset, role: 'user' as const, sourceId: entry.sourceItemId, contentUtf8: entry.contentUtf8 };
+    if (entry.sourceKind === 'summary') return { ...message, sourceKind: 'session_summary' as const };
+    if (isLegacySessionContextKind(entry.sourceKind)) return { ...message, sourceKind: 'session_legacy' as const };
+    return { ...message, sourceKind: 'session_terminal' as const };
+  });
+}
+
+/** Fixed child capture only. Normal model requests still require a closed
+ * tool batch; this reader admits only the original exact open frontier tail. */
+export async function readChildParentModelContext(input: ContextProjectionInput) {
+  if (input.run.nextStep !== 'tool' || !input.run.frontierRef) throw new TypeError('child context requires its original tool frontier');
+  const frontier = await readCanonicalArtifact<import('../kernel/types.js').RunFrontier>(input.artifacts, input.run.frontierRef);
+  if (frontier.kind !== 'tool') throw new TypeError('child context cannot infer a pending batch from text');
+  return readModelContextProjection(input, frontier.orderedCallIds.slice(frontier.nextCallIndex));
+}
+
+async function readModelContextProjection(input: ContextProjectionInput, childPendingTail?: readonly string[]): Promise<Pick<NormalPromptProjectionV1, 'messages' | 'tools'>> {
   const { artifacts, run, spec, assembly, context } = input;
   if (context.runId !== run.id || context.assemblyRef !== spec.assemblyRef || context.admittedContextRef !== spec.admittedContextRef) {
     throw new TypeError('context does not belong to the current Run');
@@ -93,30 +121,27 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
   };
   messages.push({ index: 0, role: 'system', sourceKind: 'assembly_instructions', sourceId: spec.assemblyRef, contentUtf8: input.systemInstruction });
   const admitted = decodeAdmittedContext(await readCanonicalArtifact(artifacts, spec.admittedContextRef));
-  const session: SessionContextProjection = decodeSessionProjection(await readCanonicalArtifact(artifacts, admitted.sessionProjectionRef));
+  const session = await readSessionContextGraphHead(artifacts, admitted.sessionProjectionRef);
   if (session.sessionId !== admitted.sessionId || session.contextRevision !== admitted.sessionContextRevision ||
-      session.throughItemSeq !== admitted.throughSessionItemSeq) throw new TypeError('admitted Session context mismatch');
-  for (const segment of session.segments) {
-    if (segment.kind === 'summary') user('session_summary', segment.compactionItemId,
-      (await readText(artifacts, segment.summaryRef, segment.summaryDigest)).utf8);
-    else if (segment.kind === 'raw') for (const item of segment.items) {
-      if (item.kind !== 'run_terminal') throw new TypeError('legacy Session items cannot enter the model context');
-      const terminal = await readCanonicalArtifact<{
-        format: string; kind: string; runId: string; operation: string; status: string; terminalReason: string;
-        resultRef?: string; summaryRef?: string;
-      }>(artifacts, item.payloadRef);
-      if (terminal.format !== 'cliq-session-run-terminal-v1' || terminal.kind !== 'run_terminal') throw new TypeError('invalid terminal Session item');
-      user('session_terminal', item.itemId, canonicalJsonBytes({ kind: terminal.kind, runId: terminal.runId,
-        operation: terminal.operation, status: terminal.status, terminalReason: terminal.terminalReason,
-        ...(terminal.resultRef === undefined ? {} : { resultRef: terminal.resultRef }),
-        ...(terminal.summaryRef === undefined ? {} : { summaryRef: terminal.summaryRef }) }).toString('utf8'));
-    }
+      session.throughItemSeq !== admitted.throughSessionItemSeq || session.sessionId !== run.sessionId) throw new TypeError('admitted Session context mismatch');
+  const index = input.sessionCompactionIndex?.(session);
+  let sessionMinimumBodyBytes = 0;
+  for await (const entry of readSessionContextEntryStream(artifacts, session, { compactionIndex: index })) {
+    sessionMinimumBodyBytes += sessionContextUserWireByteLowerBound(assembly.provider.name, assembly.provider.model, entry.contentUtf8);
+    if (!Number.isSafeInteger(sessionMinimumBodyBytes)) throw new RangeError('Session context exceeds the exact model byte counter');
+    // Complete every original typed edge, but never cache prose already proven
+    // impossible to dispatch. New Runs are refused earlier by the same complete
+    // admission reader; this also bounds an older frozen/admitted source.
+    if (sessionMinimumBodyBytes <= MODEL_REQUEST_BODY_LIMIT_BYTES)
+      messages.push(sessionContextModelMessages([entry], messages.length)[0]!);
   }
+  if (sessionMinimumBodyBytes > MODEL_REQUEST_BODY_LIMIT_BYTES)
+    throw new RangeError('Session context cannot fit the fixed model request limit');
   for (const ref of admitted.parentContextRefs) user('parent_context', ref, (await readText(artifacts, ref)).utf8);
   for (const ref of admitted.additionalArtifactRefs) user('additional_context', ref, (await readText(artifacts, ref)).utf8);
   user('run_objective', spec.objectiveRef, decodeRunObjective(await readCanonicalArtifact(artifacts, spec.objectiveRef)).utf8);
   let pendingCalls: string[] = [];
-  const pendingInputs: Array<{ itemId: string; content: string }> = [];
+  const pendingInputs: Array<{ itemId: string; content: string; sourceKind: 'user_input' | 'child_result' }> = [];
   const projectItem = async (itemRef: string) => {
       const item = await readCanonicalArtifact<ContinuationItem>(artifacts, itemRef);
       if (item.runId !== run.id) throw new TypeError('context item belongs to another Run');
@@ -144,14 +169,63 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
           toolCallId: item.callId, contentUtf8: canonicalJsonBytes(content.content).toString('utf8') });
         if (pendingCalls.shift() !== item.callId) throw new TypeError('tool result projection order mismatch');
         // Native providers require all tool results before another user message.
-        if (!pendingCalls.length) for (const input of pendingInputs.splice(0)) user('user_input', input.itemId, input.content);
+        if (!pendingCalls.length) for (const input of pendingInputs.splice(0)) user(input.sourceKind, input.itemId, input.content);
       } else if (item.kind === 'user_input') {
         const content = await readCanonicalArtifact<UserInputModelContentV1>(artifacts, item.modelContentRef);
         if (content.schemaVersion !== 1 || content.format !== 'cliq-user-input-model-content-v1' ||
             content.contentDigest !== item.modelContentDigest || digestOmitting(content, 'contentDigest') !== content.contentDigest ||
             !['text', 'json'].includes(content.inputKind) || pendingCalls[0] !== item.callId) throw new TypeError('input context does not belong to its open call');
-        pendingInputs.push({ itemId: item.itemId, content: content.inputKind === 'text'
+        pendingInputs.push({ itemId: item.itemId, sourceKind: 'user_input', content: content.inputKind === 'text'
           ? content.value as string : canonicalJsonBytes(content.value).toString('utf8') });
+      } else if (item.kind === 'child_result') {
+        if (item.delivery.kind === 'stop_settlement') throw new TypeError('stop child results cannot enter model context');
+        const content = await readCanonicalArtifact<import('../kernel/children.js').ChildResultModelContentV1>(artifacts, item.modelContentRef);
+        if (content.contentDigest !== item.modelContentDigest || canonicalSha256(content) !==
+            canonicalSha256(childResultModelContent(item.childRunId, item.mode, content.content)))
+          throw new TypeError('child result model content differs from its closed projection');
+        // The actual await ToolResult carries these ordered summaries. Keep
+        // the original child item as audited source without a duplicate user
+        // message or an orphan provider tool result. Finalize has no await.
+        if (item.delivery.kind === 'await_tool') return;
+        const rendered = canonicalJsonBytes({ childRunId: item.childRunId, ...content.content }).toString('utf8');
+        if (pendingCalls.length) pendingInputs.push({ itemId: item.itemId, content: rendered, sourceKind: 'child_result' });
+        else user('child_result', item.itemId, rendered);
+      } else if (item.kind === 'child_merge_result') {
+        if (!item.modelContentRef || !item.modelContentDigest || pendingCalls.length || pendingInputs.length)
+          throw new TypeError('merge audit cannot enter model context or overtake a provider call');
+        const content = (await import('./child-merge-effect.js')).decodeChildMergeModelContent(await readCanonicalArtifact(artifacts, item.modelContentRef));
+        if (content.runId !== run.id || content.mergeBatchItemId !== item.mergeBatchItemId || content.contentDigest !== item.modelContentDigest)
+          throw new TypeError('merge model summary differs from its real owning audit outcome');
+        user('child_result', item.itemId, canonicalJsonBytes({ merge: content.merge }).toString('utf8'));
+      } else if (item.kind === 'repair_diagnostic') {
+        const repair = decodeRepairDiagnosticItem(item);
+        if (pendingCalls.length || pendingInputs.length) throw new TypeError('verifier repair overtakes an unanswered tool call');
+        for (const entry of repair.diagnostics) {
+          const diagnostic = decodeVerifierRepairDiagnostic(await readCanonicalArtifact(artifacts, entry.diagnosticRef));
+          const receipt = decodeVerificationReceipt(await readCanonicalArtifact(artifacts, diagnostic.receiptRef));
+          const content = decodeVerifierRepairModelContent(await readCanonicalArtifact(artifacts, entry.modelContentRef));
+          let check: typeof content.check;
+          if (diagnostic.redactionAlgorithm === 'cliq-verifier-repair-location-v1') {
+            if (!content.check || receipt.stdoutTruncated) throw new TypeError('verifier location requires its complete bounded output');
+            const command = decodeVerifierCommand(await readCanonicalArtifact(artifacts, receipt.commandRef));
+            if (command.commandDigest !== receipt.commandDigest || command.verifierId !== receipt.verifierId ||
+                command.verifierVersion !== receipt.verifierVersion) throw new TypeError('verifier location is for another command');
+            const chunks: Buffer[] = [];
+            for await (const chunk of artifacts.readChunks(receipt.stdoutRef, content.check.stdoutBytes)) chunks.push(chunk);
+            check = verifierReportedLocations(command, Buffer.concat(chunks));
+            if (!check) throw new TypeError('verifier command has no supported location projection');
+          }
+          if (diagnostic.runId !== run.id || diagnostic.candidateItemId !== repair.candidateItemId || diagnostic.verifierPlanRef !== repair.verifierPlanRef ||
+              diagnostic.verifierId !== entry.verifierId || diagnostic.diagnosticDigest !== entry.diagnosticDigest ||
+              diagnostic.modelContentRef !== entry.modelContentRef || diagnostic.modelContentDigest !== entry.modelContentDigest ||
+              content.contentDigest !== entry.modelContentDigest || receipt.runId !== run.id || receipt.verifierId !== entry.verifierId ||
+              receipt.receiptDigest !== diagnostic.receiptDigest || receipt.stdoutRef !== diagnostic.stdoutRef || receipt.stderrRef !== diagnostic.stderrRef ||
+              canonicalSha256(content) !== canonicalSha256(verifierRepairModelContent(receipt, check)))
+            throw new TypeError('verifier repair model content differs from its fixed receipt projection');
+          const location = check ? ` Reported locations (check output, untrusted): ${canonicalJsonBytes({
+            path: check.path, lines: check.reportedLines }).toString('utf8')}.` : '';
+          user('verifier_repair', repair.itemId, content.message + location);
+        }
       } else throw new TypeError(`control item ${item.kind} cannot be projected as raw model context`);
   };
   for (const segment of context.segments) {
@@ -160,7 +234,10 @@ export async function readModelContext(input: ContextProjectionInput): Promise<P
       for (const ref of segment.preservedItemRefs) await projectItem(ref);
     } else if (segment.kind === 'raw') for (const entry of segment.items) await projectItem(entry.itemRef);
   }
-  if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
+  if (childPendingTail) {
+    if (!childPendingTail.length || canonicalSha256(childPendingTail) !== canonicalSha256(pendingCalls) || pendingInputs.length)
+      throw new TypeError('child context differs from the exact original pending tool tail');
+  } else if (pendingCalls.length || pendingInputs.length) throw new TypeError('model context contains an open tool batch');
   return { messages,
     tools: assembly.provider.negotiation.mode === 'text-only' ? [] : input.tools.map(({ replayClass: _, ...tool }, index) => ({ index, ...tool })) };
 }

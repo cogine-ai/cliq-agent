@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import { KernelStorageError } from './errors.js';
 import * as installedRuntime from './installed-runtime.js';
+import { checkHeldInstalledUpgradeKeeper, type NativeStateOwner } from './native-owner.js';
 
 test('keeper initialization rejects structural selections before observing caller properties', async () => {
   const initialize = Reflect.get(installedRuntime, 'initializeInstalledKeeper') as (held: unknown) => Promise<unknown>;
@@ -18,4 +19,12 @@ test('keeper initialization rejects structural selections before observing calle
       error => error instanceof KernelStorageError && error.code === 'ARTIFACT_MISMATCH');
   }
   assert.equal(observed, 0, 'a structural selection cannot reach the trusted native producer');
+});
+
+test('current keeper checks reject foreign native owners before reading metadata', () => {
+  let observed = false;
+  const input = new Proxy({}, { get() { observed = true; throw new Error('foreign observation metadata'); } });
+  assert.throws(() => checkHeldInstalledUpgradeKeeper({} as NativeStateOwner,
+    input as Parameters<typeof checkHeldInstalledUpgradeKeeper>[1]), { code: 'ARTIFACT_MISMATCH' });
+  assert.equal(observed, false);
 });

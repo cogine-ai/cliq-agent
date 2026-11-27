@@ -6,15 +6,45 @@ import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonic
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
 import type { StateOwnerAcquisitionEvidenceV1, StateRootIdentityV1 } from '../../../src/kernel/types.js';
 import type { RuntimeBundleManifest } from '../../../src/policy/runtime-authority.js';
+import { assertSignedKernelSchemaEntry } from '../../../src/state/signed-schema.js';
 import { inspectInstalledOwnerHistory } from './installed-read-control.js';
 import { qualifyInstalledOwnerProcess, readInstalledCasJson } from './installed-owner-history.js';
 
+type GenesisContent = { entryId: string; role: string; relativePath: string; version?: string;
+  executable: boolean; bytes: Uint8Array };
+
+/** Qualification data only. Reconstruct the entire signed seed by its actual
+ * members, including schema8, without assuming a particular object count. */
+export function expectedInstalledGenesisSeed(input: { bundle: RuntimeBundleManifest; contents: readonly GenesisContent[] }) {
+  assertSignedKernelSchemaEntry(input.bundle);
+  assert.equal(input.contents.length, input.bundle.entries.length, 'every signed entry has its original full content');
+  const ids = new Set<string>(), seed = new Map<string, { artifactRef: string; byteCount: number; bytes: Buffer }>();
+  const add = (bytes: Uint8Array) => {
+    const raw = Buffer.from(bytes), ref = sha256Bytes(raw), previous = seed.get(ref);
+    if (previous) assert.deepEqual(raw, previous.bytes, 'equal CAS refs contain equal full bytes');
+    else seed.set(ref, { artifactRef: ref, byteCount: raw.byteLength, bytes: raw });
+  };
+  add(canonicalJsonBytes(input.bundle));
+  for (const content of input.contents) {
+    assert(!ids.has(content.entryId), 'signed content identity cannot repeat'); ids.add(content.entryId);
+    const entry = input.bundle.entries.find(item => item.entryId === content.entryId);
+    assert(entry, 'content must belong to the exact original signed bundle');
+    const version = content.version ?? (content.entryId === 'kernel_schema' ? '8' : content.entryId === 'schema_conversion' ? '7-to-8' : '1');
+    assert.equal(content.role, entry.role); assert.equal(content.relativePath, entry.relativePath);
+    assert.equal(content.executable, entry.executable); assert.equal(version, entry.version);
+    assert.equal(content.bytes.byteLength, entry.byteCount); assert.equal(sha256Bytes(content.bytes), entry.digest);
+    if (!content.executable) add(content.bytes);
+  }
+  return [...seed.values()].map(({ artifactRef, byteCount }) => ({ artifactRef, byteCount }))
+    .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0);
+}
+
 export async function qualifyInstalledGenesis(input: {
   stateRoot: string; pid: number; uid: number; selectedImage: string; bundle: RuntimeBundleManifest;
-  contents: readonly { executable: boolean; bytes: Buffer }[]; report: Record<string, unknown>;
+  contents: readonly GenesisContent[]; report: Record<string, unknown>;
 }) {
   input.report.qualified = false;
-  const bundleDigest = canonicalSha256(input.bundle), manifestBytes = canonicalJsonBytes(input.bundle);
+  const bundleDigest = canonicalSha256(input.bundle);
   const imageDigest = sha256Bytes(input.contents[0]!.bytes);
   const casJson = <T>(ref: string) => readInstalledCasJson<T>(input, ref);
   const history = inspectInstalledOwnerHistory(input.stateRoot); assert.equal(history.owners.length, 1);
@@ -49,10 +79,8 @@ export async function qualifyInstalledGenesis(input: {
     identityDigest: root.identityDigest }));
   const namespace = await casJson<Record<string, any>>(generation.casNamespaceManifestRef);
   input.report.namespace = namespace;
-  const seed = [manifestBytes, ...input.contents.filter(entry => !entry.executable).map(entry => entry.bytes)]
-    .map(bytes => ({ artifactRef: sha256Bytes(bytes), byteCount: bytes.byteLength }))
-    .sort((left, right) => left.artifactRef < right.artifactRef ? -1 : left.artifactRef > right.artifactRef ? 1 : 0);
-  assert.equal(seed.length, 4); assert.equal(namespace.snapshotBoundary, 'generation_birth');
+  const seed = expectedInstalledGenesisSeed(input);
+  assert.equal(namespace.snapshotBoundary, 'generation_birth');
   assert.deepEqual(canonicalJsonBytes(namespace.entries), canonicalJsonBytes(seed)); assert.equal(namespace.objectCount, seed.length);
   assert.equal(namespace.totalBytes, seed.reduce((total, entry) => total + entry.byteCount, 0));
   assert.equal(namespace.rootDigest, canonicalSha256(seed));

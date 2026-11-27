@@ -77,6 +77,19 @@ a fresh stale revision remains `REVISION_CONFLICT`. Only a fresh request at
 the validated current terminal revision returns nonretryable `RUN_TERMINAL`,
 without changing Run, Journal, Session or events. Other invalid transitions
 are not reclassified by this narrow terminal error.
+After the original terminal continuation has retired, this inert cancellation
+path reads the complete retained Run/recovery graph, original installed model
+material and signed catalog/price pair, and the same assembly, owner, principal,
+channel and control-policy checks before entering the original Stop reducer.
+The material and recovery readers stay serial, preserving their four-reader
+groups and every existing material revalidation. It does not rebuild a
+productive Agent handle, reproject future executable model requests or open
+tool continuations merely to refuse a terminal Run. This refusal is neither a
+historical executable-semantics audit nor a substitute for the original full
+Agent loader; productive consumers retain that loader. The existing five-second
+request limit, authenticated sixteen full revalidations and replay/conflict
+precedence are unchanged. Matching Linux installation evidence is still
+required before this changed path is qualified.
 New installed Session creation holds the actual platform user's persisted
 Workspace Trust before reading workspace Git configuration, then reasserts
 that same held Trust after capture and before the final write transaction.
@@ -484,6 +497,49 @@ changed fixture lifetime, not the diagnostic or prior successful heads.
 
 ## Evidence
 
+The separate fixed original-publication-stop campaign reuses the complete
+installed Delivery source, publication, no-op, merge, cancellation, reconnect
+and first ordinary restart. Its additional publication is from the same
+verified source, not a fourth model Run or another provider request. It uses
+an independent StateRoot and the approved, uniquely owned fixed delayed
+volume; the ordinary campaign and its UNKNOWN cleanup-crash recovery remain
+separate and unchanged.
+
+The cleanup-crash observer captures the original actual control-socket stat
+before the one permitted kill. Within the existing thirty-second restart
+budget it waits for that old socket's identity to change before opening the
+single successor client. An orphaned Unix socket still passes an existence/UID
+test and can refuse a real connection with `ECONNREFUSED`; replacement is only
+a negative scheduling hint. It authenticates no process, owner or channel and
+does not replace the client's original sixteen full revalidations or its
+five-second bound. This addresses that captured-orphan fixture boundary, not
+all possible product startup races. Ordinary socket-component evidence does
+not qualify the real installed cleanup-crash or delayed-volume cuts.
+
+This cut requires an actually returned public running cut with its original
+two-row claim and arena birth before arming the native actor. A terminal cut
+cannot be truncated into that observation. Only the first arena-parent fsync,
+with one actual call and attempt and an `ok` outcome, may qualify: both native
+clock intervals must strictly enclose the complete real SIGTERM syscall.
+The original signal entry starts the unchanged two-second process death and
+join limit, including the remaining fsync, receipt, seal and durable handoff
+work. The fixed 50 ms storage profile does not guarantee either overlap or
+timely shutdown; a missed interval is still unverified, not a reason to signal
+again, pause the process or change the device table.
+
+The original process's journal must be tied to its captured trusted sender and
+exact systemd invocation. Its death cannot borrow a successor's live-image
+observation to excuse missing identity metadata. An actual normal receipt and
+sealed-M handoff must precede the original owner's graceful release, followed
+by the real successor acquisition. Full retained source/result/Checkpoint
+bytes, exact original claim and budget, independent original worker PID/start
+absence, arena retirement, public downloads and replay remain mandatory.
+The historical seal and complete recoverable CAS Checkpoint are not a claim
+that the old generation directory currently exists unchanged or was deleted.
+The diagnostic and pure-data regressions alone qualify none of these physical
+facts. This successful normal branch neither replaces UNKNOWN recovery nor
+qualifies a late result, complete I1, cross-filesystem publication or reboot.
+
 Qualification evidence is indexed in the associated complete PR's Evidence
 section and preserved in its retained evidence archive. The manifest identifies
 the exact tested source SHA, workflow run and attempt, bounded journey report,
@@ -497,3 +553,16 @@ evidence establishes no qualification. The manifest must retain every explicitly
 unverified boundary: a passing installed-loop run does not imply complete I1,
 real-provider capability/billing, macOS or I2 qualification. Lease renewal requires
 the explicit read-only observations above, not public retention alone.
+# Failed-submit diagnostic retention
+
+The fixed first-submit assembly work packets may be retained after an abnormal
+Supervisor exit only through the original process-start/full-image and unit
+invocation binding, after the original PID is observed absent. This closed
+diagnostic branch records `originalPidObservedAbsent`; it cannot record
+`originalServerJoined` or satisfy a failed Stop2 assertion. The original joined
+branch still requires all original successful stop and resource-join checks.
+Both branches retain the same complete numeric packet, entry, byte and secret
+scan bounds. A missing preexisting binding may report only its fixed local
+failed-check stage, without exception text or reconstruction from a later
+process. These observations supply progress data, never an admission, timeout
+cut, physical-retirement proof or qualification upgrade.

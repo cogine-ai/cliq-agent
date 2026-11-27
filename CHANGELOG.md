@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an ESM installed-client SDK with a bounded public declaration graph,
+  shared CLI/Ink/JSONL/RPC client host and a fixed-root, client-only signed
+  application entry. The legacy default remains until release qualification.
 - Added the hidden M0 durable-state and strong execution-backend qualification
   foundation for future Kernel work. It remains disconnected from the current
   CLI/TUI runtime.

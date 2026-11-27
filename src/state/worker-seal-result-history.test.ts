@@ -1,17 +1,208 @@
 import assert from 'node:assert/strict';
+import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import workerThreads from 'node:worker_threads';
+import { syncBuiltinESMExports } from 'node:module';
+import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting } from '../kernel/identity.js';
 import type { ProcessContainmentDeathEvidenceV1 } from '../kernel/execution.js';
-import type { ContextManifest, ToolResultItem, ToolResultPayloadV1 } from '../kernel/types.js';
+import type { ContextManifest, ToolResultItem, ToolResultPayloadV1, WorkspaceEntryManifest, WorkspaceStateManifest } from '../kernel/types.js';
+import { ARTIFACT_CHUNK_BYTES } from './cas.js';
+import { ResourceRetirementError } from './errors.js';
+import { readRecoveryClosure } from './recovery-closure.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import { openStateStore } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { postEffectObservation } from './testing/tool-effects.js';
+import { postEffectObservation, quiescedToolCheckpoint } from './testing/tool-effects.js';
+
+test('completed mutating tool history consumes an existing large CAS file with bounded memory and retains integrity and cancellation guards', async t => {
+  const clock = Date.now();
+  t.mock.method(Date, 'now', () => clock);
+  const fixture = await createAgentFixture('tool-history-stream', undefined, { mode: 'accept-edits', tools: ['edit'] });
+  const reader = openSqliteDriver(path.join(fixture.stateRoot, KERNEL_DATABASE_FILENAME));
+  const blobBytes = 64 * 1024 * 1024;
+  let restoreBlob: (() => Promise<void>) | undefined;
+  try {
+    // Existing offline seal fixture over the real Store/SQLite/CAS. It grants
+    // no native death or installed-platform qualification. Persist first;
+    // allocation/read observations below cover only fresh retained recovery.
+    await batch(fixture, [{ name: 'edit', input: { path: 'a', old_text: 'old', new_text: 'new' } }]);
+    const prepared = await prepareTool(fixture), claimed = await claimTool(fixture, prepared);
+    const proof = await quiescedToolCheckpoint(fixture, prepared.checkpointId, 'p'.repeat(blobBytes));
+    const result = await fixture.store.artifacts.readCanonical<import('../kernel/tool-authorization.js').ToolObservationV1>(
+      await observation(fixture, claimed, { changed: true }));
+    result.postEffect = proof.checkpoint; result.observationDigest = digestOmitting(result, 'observationDigest');
+    const resultArtifact = await fixture.store.artifacts.publishCanonical(result, result.format);
+    await fixture.agent.completeTool({ opId: prepared.entry.opId, attempt: 0,
+      expectedRunRevision: prepared.run.revision, observationRef: resultArtifact.ref });
+    const workspace = await fixture.store.artifacts.readCanonical<WorkspaceStateManifest>(proof.workspaceStateRef);
+    const entries = await fixture.store.artifacts.readCanonical<WorkspaceEntryManifest>(workspace.entriesRef);
+    const file = entries.entries[0]!;
+    assert.equal(file.kind, 'file'); if (file.kind !== 'file') assert.fail('fixture requires its actual persisted file');
+    assert.equal(file.size, blobBytes);
+    const blobRef = file.blobRef;
+    const root = path.join(fixture.stateRoot, KERNEL_CAS_DIRECTORY), target = path.join(root, blobRef);
+    const open = fs.open.bind(fs), lstat = fs.lstat.bind(fs), allocate = Buffer.allocUnsafe;
+    const overwriteLastByte = async (byte: number) => {
+      await fs.chmod(target, 0o600);
+      const held = await open(target, constants.O_WRONLY | constants.O_NOFOLLOW);
+      try { assert.equal((await held.write(Buffer.from([byte]), 0, 1, blobBytes - 1)).bytesWritten, 1); }
+      finally { await held.close(); await fs.chmod(target, 0o400); }
+    };
+    type Pass = { fd: number; bytes: number; reads: number; stats: number; closed: boolean; rootChecks: number;
+      threadJoined?: boolean; closedBeforeThread?: boolean };
+    let fault: 'none' | 'corrupt' | 'abort' | 'close' = 'none', injected = false;
+    let controller = new AbortController(), rootChecks = 0, largestAllocation = 0, opened = 0, closed = 0, peak = 0;
+    let passes: Pass[] = [];
+    const active = new Set<object>(), cancellation = new Error('the original retained tool history read was cancelled');
+    const closeFailure = new Error('the original history file really closed but returned retirement uncertainty');
+    const OriginalWorker = workerThreads.Worker;
+    // Observe the real synchronous syscalls in the data-only hash Worker too.
+    // Every syscall and the production hash/reply/exit still execute normally;
+    // counters supply no bytes, cancellation, result or authority to production.
+    const observe = `{
+      const d=require('node:worker_threads').workerData, c=new BigInt64Array(d.testReadCounters), fs=require('node:fs');
+      const read=fs.readSync, stat=fs.fstatSync, root=fs.lstatSync, allocate=Buffer.allocUnsafe;
+      fs.readSync=(...a)=>{
+        const n=Reflect.apply(read,fs,a);
+        if(a[0]===d.fd){
+          Atomics.add(c,0,BigInt(n)); Atomics.add(c,1,1n);
+          if(d.testAbortPort && n>0 && Atomics.load(c,1)===1n){
+            const acknowledged=new Int32Array(d.testReadCounters,40,1);
+            d.testAbortPort.postMessage('first real chunk');
+            Atomics.wait(acknowledged,0,0,5000);
+            d.testAbortPort.close();
+          }
+        }
+        return n;
+      };
+      fs.fstatSync=(...a)=>{const value=Reflect.apply(stat,fs,a);if(a[0]===d.fd)Atomics.add(c,2,1n);return value;};
+      fs.lstatSync=(...a)=>{const value=Reflect.apply(root,fs,a);if(a[0]===d.rootPath)Atomics.add(c,3,1n);return value;};
+      Buffer.allocUnsafe=size=>{if(BigInt(size)>Atomics.load(c,4))Atomics.store(c,4,BigInt(size));return allocate(size);};
+    }`;
+    workerThreads.Worker = class extends OriginalWorker {
+      constructor(source: string | URL, options?: workerThreads.WorkerOptions) {
+        const pass = typeof source === 'string' && options?.eval && options.workerData?.ref === blobRef
+          ? passes.find(pass => !pass.closed && pass.fd === options.workerData.fd) : undefined;
+        const counters = pass ? new SharedArrayBuffer(6 * 8) : undefined;
+        // Use a separate test port so the real worker protocol still emits
+        // only its original verdict. Cancel the original read after real I/O.
+        const cancel = pass && fault === 'abort' ? new workerThreads.MessageChannel() : undefined;
+        super(pass ? observe + source : source, pass ? {
+          ...options,
+          workerData: { ...options!.workerData, testReadCounters: counters, testAbortPort: cancel?.port2 },
+          ...(cancel ? { transferList: [cancel.port2] } : {})
+        } : options);
+        if (cancel) {
+          const acknowledged = new Int32Array(counters!, 40, 1);
+          cancel.port1.once('message', value => {
+            assert.equal(value, 'first real chunk');
+            injected = true; controller.abort(cancellation);
+            Atomics.store(acknowledged, 0, 1); Atomics.notify(acknowledged, 0);
+          });
+          this.once('exit', () => cancel.port1.close());
+        }
+        if (pass) {
+          pass.threadJoined = false;
+          this.once('exit', () => {
+            const values = new BigInt64Array(counters!);
+            pass.bytes += Number(values[0]); pass.reads += Number(values[1]); pass.stats += Number(values[2]);
+            pass.rootChecks += Number(values[3]); largestAllocation = Math.max(largestAllocation, Number(values[4]));
+            pass.threadJoined = true;
+          });
+        }
+      }
+    };
+    syncBuiltinESMExports();
+    t.after(() => { workerThreads.Worker = OriginalWorker; syncBuiltinESMExports(); });
+    t.mock.method(Buffer, 'allocUnsafe', (size: number) => { largestAllocation = Math.max(largestAllocation, size); return allocate(size); });
+    t.mock.method(fs, 'lstat', (...args: Parameters<typeof lstat>) => {
+      if (args[0] === root) rootChecks++;
+      return Reflect.apply(lstat, fs, args);
+    });
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof open>) => {
+      if (args[0] === target && fault === 'corrupt' && !injected) {
+        injected = true; restoreBlob = () => overwriteLastByte(0x70);
+        await overwriteLastByte(0x21); // Same real inode/length; only full-byte hashing can accept/refuse its bytes.
+      }
+      const held = await open(...args);
+      if (args[0] !== root && !String(args[0]).startsWith(`${root}/`)) return held;
+      active.add(held); opened++; peak = Math.max(peak, active.size);
+      const close = held.close.bind(held), rootChecksAtOpen = rootChecks;
+      const pass: Pass | undefined = args[0] === target ? { fd: held.fd, bytes: 0, reads: 0, stats: 0, closed: false, rootChecks: 0 } : undefined;
+      if (pass) {
+        passes.push(pass);
+        const read = held.read.bind(held), stat = held.stat.bind(held);
+        t.mock.method(held, 'read', async (...values: Parameters<typeof read>) => {
+          const result = await Reflect.apply(read, held, values); pass.bytes += result.bytesRead; pass.reads++;
+          return result;
+        });
+        t.mock.method(held, 'stat', (...values: Parameters<typeof stat>) => { pass.stats++; return Reflect.apply(stat, held, values); });
+      }
+      t.mock.method(held, 'close', async () => {
+        const closedBeforeThread = pass?.threadJoined === false;
+        await close(); assert(active.delete(held)); closed++;
+        if (pass) {
+          pass.closedBeforeThread = closedBeforeThread;
+          pass.closed = true; pass.rootChecks += rootChecks - rootChecksAtOpen;
+        }
+        if (pass && fault === 'close' && !injected) { injected = true; throw closeFailure; }
+      });
+      return held;
+    });
+    const recover = () => readRecoveryClosure(reader, fixture.store.artifacts.withReadSignal(controller.signal), fixture.runId);
+    const reset = (next: typeof fault) => {
+      fault = next; injected = false; controller = new AbortController();
+      passes = []; rootChecks = 0; largestAllocation = 0; opened = 0; closed = 0; peak = 0;
+    };
+    const joined = () => {
+      assert.equal(active.size, 0); assert.equal(opened, closed); assert(passes.every(pass => pass.closed));
+      assert(passes.every(pass => !pass.closedBeforeThread && pass.threadJoined !== false), 'real data Workers must exit before their borrowed files close');
+    };
+    await t.test('complete original recovery reads every byte without allocating the file', async () => {
+      reset('none');
+      const recovered = await recover();
+      assert.equal(recovered.run.budgetConsumed.toolCalls, 1); joined();
+      assert.equal(passes.length, 1, 'all history consumers in this cut share one complete file read');
+      const [pass] = passes;
+      assert.equal(pass!.threadJoined, true, 'the actual hash worker exits before the read returns');
+      assert.equal(pass!.bytes, blobBytes);
+      assert(pass!.stats >= 2);
+      assert.ok(largestAllocation <= ARTIFACT_CHUNK_BYTES, `retained recovery allocated ${largestAllocation} bytes for a ${blobBytes}-byte file`);
+      assert.ok(pass!.rootChecks >= pass!.reads, 'the named root remains current between bounded streamed reads');
+      t.diagnostic(JSON.stringify({ diagnosticOnly: true, existingBlobBytes: blobBytes, fullBytePasses: passes.length,
+        historyByteCount: pass!.bytes, largestAllocation, opened, closed, actualCasFdPeak: peak,
+        successor30sQualified: false, physicalPlatformQualified: false }));
+    });
+    await t.test('same-size corruption in a fresh recovery rejects after the actual last byte', async () => {
+      reset('corrupt');
+      try {
+        await assert.rejects(recover(), /CAS discard verification failed: digest/);
+        assert.equal(injected, true); joined();
+        assert.equal(passes.length, 1); assert.equal(passes[0]!.bytes, blobBytes);
+      } finally { await restoreBlob?.(); restoreBlob = undefined; }
+    });
+    await t.test('cancellation stops the original history stream and joins its real descriptors', async () => {
+      reset('abort');
+      await assert.rejects(recover(), error => error === cancellation || (error as Error).cause === cancellation);
+      assert.equal(injected, true); joined();
+      assert.equal(passes.length, 1);
+      assert.equal(passes[0]!.bytes, ARTIFACT_CHUNK_BYTES, 'cancellation stops after the first actual workspace-file chunk');
+    });
+    await t.test('actual history close uncertainty survives recovery and all issued descriptors still join', async () => {
+      reset('close');
+      await assert.rejects(recover(), error => error instanceof ResourceRetirementError && error.cause === closeFailure);
+      assert.equal(injected, true); joined();
+      assert.equal(passes.length, 1); assert.equal(passes[0]!.bytes, blobBytes);
+    });
+  } finally {
+    try { await restoreBlob?.(); } finally { t.mock.restoreAll(); reader.close(); await disposeFixture(fixture); }
+  }
+});
 
 for (const substituted of ['snapshot quiescence', 'final retirement'] as const) {
   test(`completed mutating tool recovery rejects a substituted ${substituted} proof in its immutable result`, async t => {

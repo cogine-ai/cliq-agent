@@ -279,8 +279,8 @@ async function run(input: CrashChildInput) {
   const metadata = openSqliteDriver(path.join(input.stateRoot, KERNEL_DATABASE_FILENAME));
   const sample = await open(path.join(input.stateRoot, KERNEL_CAS_DIRECTORY, before.runSpec.policyRef), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   const policy = await sample.stat({ bigint: true });
-  const prototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'readFile' | 'writeFile'>;
-  const originalRead = prototype.readFile, originalWrite = prototype.writeFile, originalOpen = fsPromises.open;
+  const prototype = Object.getPrototypeOf(sample) as Pick<FileHandle, 'read' | 'writeFile'>;
+  const originalRead = prototype.read, originalWrite = prototype.writeFile, originalOpen = fsPromises.open;
   await sample.close();
   let processLossInjected = false, paused = false;
   let controllerLoss: { pid: number; processStartToken: string } | undefined;
@@ -292,9 +292,9 @@ async function run(input: CrashChildInput) {
       assert.equal(input.retirementFault, undefined);
       return await stopPreactivation(input, metadata, execution, before, prototype);
     }
-    prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
-      const bytes: unknown = await Reflect.apply(originalRead, this, args);
-      if (!processLossInjected && Buffer.isBuffer(bytes)) {
+    prototype.read = (async function(this: FileHandle, ...args: unknown[]) {
+      const result: Awaited<ReturnType<FileHandle['read']>> = await Reflect.apply(originalRead, this, args);
+      if (!processLossInjected && result.bytesRead > 0) {
         const held = fs.fstatSync(this.fd, { bigint: true });
         if (held.dev === policy.dev && held.ino === policy.ino) {
           const launch = metadata.readSnapshot(connection => {
@@ -305,6 +305,14 @@ async function run(input: CrashChildInput) {
             return active?.active_worker_launch_id && count === 0n ? readRequiredWorkerLaunch(connection, active.active_worker_launch_id) : undefined;
           });
           if (launch?.phase === 'activated') {
+            // The real streamed read has already happened. Independently read
+            // the complete original held inode before injecting the OS fault;
+            // never replace a read result, truncate bytes or invent EOF.
+            const bytes = Buffer.alloc(Number(policy.size));
+            for (let offset = 0; offset < bytes.length;) {
+              const count = fs.readSync(this.fd, bytes, offset, bytes.length - offset, offset);
+              assert.ok(count > 0); offset += count;
+            }
             assert.equal(canonicalSha256(JSON.parse(bytes.toString('utf8'))), before.runSpec.policyRef);
             const worker = decodeWorkerIdentity(artifact<WorkerIdentity>(input.stateRoot, launch.workerIdentityDigest!));
             assert.equal(worker.launchId, launch.launchId); assert.equal(token(worker.pid), worker.processStartToken);
@@ -327,8 +335,8 @@ async function run(input: CrashChildInput) {
           }
         }
       }
-      return bytes;
-    }) as FileHandle['readFile'];
+      return result;
+    }) as FileHandle['read'];
     await assert.rejects(execution.executeCurrentTool({ expectedRunRevision: before.run.revision }), error => {
       if (input.retirementFault !== 'controller_loss') return true;
       // The old implementation rejects with only the secondary native stop
@@ -344,7 +352,7 @@ async function run(input: CrashChildInput) {
       return true;
     });
     assert.ok(processLossInjected, 'missing real activated/no-invocation process-loss fault is not a pass');
-    prototype.readFile = originalRead;
+    prototype.read = originalRead;
     const waiting = await store.readRecoveryClosure(input.runId);
     const initialWait = await store.artifacts.readCanonical<WorkerDeathWait>(waiting.run.waitingOnRef!);
     assert.deepEqual(initialWait.subject.openInvocationRefs, []); assert.equal(waiting.journal.filter(row => row.opKind === 'tool').length, 0);
@@ -399,8 +407,8 @@ async function run(input: CrashChildInput) {
         // A normal OS read failure ends one genuinely registered task. It is
         // not cleanup uncertainty, and its original work/resources can join.
         let readFaulted = false;
-        prototype.readFile = (async function(this: FileHandle, ...args: unknown[]) {
-          const bytes: unknown = await Reflect.apply(originalRead, this, args);
+        prototype.read = (async function(this: FileHandle, ...args: unknown[]) {
+          const result: Awaited<ReturnType<FileHandle['read']>> = await Reflect.apply(originalRead, this, args);
           const held = fs.fstatSync(this.fd, { bigint: true });
           if (!readFaulted && held.dev === policy.dev && held.ino === policy.ino) {
             const current = store.getRun(input.runId);
@@ -410,11 +418,11 @@ async function run(input: CrashChildInput) {
               throw Object.assign(new Error('campaign real CAS read fault after task registration'), { code: 'EIO' });
             }
           }
-          return bytes;
-        }) as FileHandle['readFile'];
+          return result;
+        }) as FileHandle['read'];
         await assert.rejects(execution.recoverWorker({ expectedRunRevision: waiting.run.revision }),
           error => !(error instanceof ResourceRetirementError));
-        prototype.readFile = originalRead;
+        prototype.read = originalRead;
         assert.ok(readFaulted, 'missing actual registered-task read fault is not coverage');
         const current = store.getRun(input.runId);
         const wait = artifact<WorkerDeathWait>(input.stateRoot, current.waitingOnRef!);
@@ -500,7 +508,7 @@ async function run(input: CrashChildInput) {
     operationFailure = { error };
     throw error;
   } finally {
-    prototype.readFile = originalRead; prototype.writeFile = originalWrite; fsPromises.open = originalOpen;
+    prototype.read = originalRead; prototype.writeFile = originalWrite; fsPromises.open = originalOpen;
     const cleanupFailures: unknown[] = [];
     try { metadata.close(); } catch (error) { cleanupFailures.push(error); }
     try { await store.close(); } catch (error) { cleanupFailures.push(error); }

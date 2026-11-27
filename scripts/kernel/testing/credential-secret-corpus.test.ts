@@ -2,22 +2,210 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { promises as fs } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { KERNEL_AUTHORITY_TABLES } from '../../../src/state/schema.js';
+import { canonicalSha256 } from '../../../src/kernel/canonical.js';
+import * as corpus from './credential-secret-corpus.js';
 import { CredentialSecretCorpusError, scanCopiedCredentialDatabase, scanCredentialSecretCorpus } from './credential-secret-corpus.js';
-import { createCredentialSecretScanner } from './credential-secret-scan.js';
+import { CredentialSecretScanError, createCredentialSecretScanner, type CredentialSecretScanStats } from './credential-secret-scan.js';
 
 // Actual disposable SQLite/filesystem fixtures test the byte diagnostic only.
 // They are not credential rows, retained process proof or installed evidence.
 const limits = { maxBytes: 32 * 1024 * 1024, maxStreams: 4096 };
 const secret = () => Buffer.from('diagnostic-only-secret-avoid-logging');
-async function copyFixture(work: (filename: string) => Promise<void>) {
+
+test('whole corpus refusal exposes only the fixed stage and bounded progress, never an input path or cause', async () => {
+  const scanner = createCredentialSecretScanner([secret()], limits);
+  try {
+    await assert.rejects(scanCredentialSecretCorpus({ stateRoot: '/private-untrusted-corpus-path', uid: 1001, evidenceDirs: [], scanner }), error => {
+      assert(error instanceof CredentialSecretCorpusError);
+      assert.deepEqual(error.corpusFailure, { stage: 'input', errorClass: 'guard_refused', filesScanned: 0,
+        fileBytesScanned: 0, sqliteDatabasesScanned: 0, logicalRowsScanned: 0, logicalValuesScanned: 0,
+        logicalBytesScanned: 0, evidenceDirectoriesScanned: 0, inventoryEntriesObserved: 0 });
+      assert.equal(Object.isFrozen(error.corpusFailure), true);
+      assert.equal(Object.hasOwn(error, 'cause'), false); assert(!JSON.stringify(error).includes('private-untrusted'));
+      assert.equal(scanner.stats().bytesScanned, 0); return true;
+    });
+  } finally { scanner.close(); }
+});
+async function copyFixture(work: (filename: string) => Promise<void>, leaf: 'authority.sqlite' | 'kernel.sqlite3' = 'authority.sqlite') {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-credential-corpus-'));
-  try { await chmod(directory, 0o700); await work(path.join(directory, 'authority.sqlite')); }
+  try { await chmod(directory, 0o700); await work(path.join(directory, leaf)); }
   finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+
+test('one copied database continuously scans every logical value beyond 4096 cells and detects the last secret', async () => {
+  await copyFixture(async filename => {
+    const value = 'ordinary database value', input = secret();
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE items(value TEXT) STRICT; BEGIN');
+      const insert = database.prepare('INSERT INTO items VALUES (?)');
+      for (let index = 0; index < 5000; index++) insert.run(value);
+      database.exec('COMMIT');
+    });
+    const before = await readFile(filename);
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      const result = scanCopiedCredentialDatabase(filename, scanner);
+      assert.deepEqual(result, { logicalRowsScanned: 5000, logicalValuesScanned: 5002,
+        logicalBytesScanned: Buffer.byteLength('itemsCREATE TABLE items(value TEXT) STRICT') + 5000 * Buffer.byteLength(value) });
+      assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
+      assert.equal(scanner.stats().bytesScanned, result.logicalBytesScanned);
+      assert.deepEqual(await readFile(filename), before);
+    } finally { scanner.close(); }
+    const writer = new DatabaseSync(filename);
+    try { writer.prepare('INSERT INTO items VALUES (?)').run(input.toString('utf8')); } finally { writer.close(); }
+    const withSecret = await readFile(filename);
+    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      assert.throws(() => scanCopiedCredentialDatabase(filename, detecting), { code: 'SECRET_DETECTED' });
+      assert.equal(detecting.stats().matched, true); assert.equal(detecting.stats().streamsOpened, 1);
+      assert.equal(detecting.stats().streamsClosed, 1); assert.deepEqual(await readFile(filename), withSecret);
+      assert.equal(detecting.stats().retainedNeedleBytes, 0); assert.equal(detecting.stats().retainedTailBytes, 0);
+    } finally { detecting.close(); input.fill(0); }
+  });
+});
+
+
+test('continuous copied-database scanning rejects a secret split across separate cells', async () => {
+  await copyFixture(async filename => {
+    const input = secret(), middle = Math.floor(input.length / 2);
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE items(value BLOB) STRICT');
+      const insert = database.prepare('INSERT INTO items VALUES (?)');
+      insert.run(input.subarray(0, middle)); insert.run(input.subarray(middle));
+    });
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+    try {
+      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), { code: 'SECRET_DETECTED' });
+      assert.equal(scanner.stats().matched, true); assert.equal(scanner.stats().streamsClosed, 1);
+    } finally { scanner.close(); input.fill(0); }
+  });
+});
+
+for (const bound of ['rows', 'cells'] as const)
+  test(`continuous copied-database scanning retains the original ${bound} bound`, async () => {
+    await copyFixture(async filename => {
+      const columns = bound === 'cells' ? 8 : 1, rows = bound === 'rows' ? 8193 : 8192;
+      await createDatabase(filename, database => {
+        database.exec(`CREATE TABLE items(${Array.from({ length: columns }, (_, index) => `value${index} TEXT`).join(',')}) STRICT; BEGIN`);
+        const insert = database.prepare(`INSERT INTO items VALUES (${Array.from({ length: columns }, () => '?').join(',')})`);
+        for (let index = 0; index < rows; index++) insert.run(...Array.from({ length: columns }, () => 'ordinary bytes'));
+        database.exec('COMMIT');
+      });
+      const before = await readFile(filename);
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 1 });
+      try {
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), CredentialSecretCorpusError);
+        assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
+        assert.equal(scanner.stats().limitExceeded, false, 'the original corpus bound refuses before scanner exhaustion');
+        assert.deepEqual(await readFile(filename), before);
+      } finally { scanner.close(); }
+    });
+  });
+
+function failureProgress(error: unknown): unknown {
+  const read = (corpus as unknown as { readCredentialSecretCorpusScanProgress?: (error: unknown) => unknown }).readCredentialSecretCorpusScanProgress;
+  assert.equal(typeof read, 'function', 'the actual error owns a fixed diagnostic accessor');
+  return read!(error);
+}
+
+for (const maxStreams of [8, 4096] as const)
+  test(`real copied SQLite keeps its original ${maxStreams}-stream refusal and partial observed counters`, async () => {
+    await copyFixture(async filename => {
+      const value = 'ordinary diagnostic bytes';
+      await createDatabase(filename, database => {
+        database.exec('CREATE TABLE items(value TEXT) STRICT; BEGIN');
+        const insert = database.prepare('INSERT INTO items VALUES (?)');
+        for (let index = 0; index < 4095; index++) insert.run(value);
+        database.exec('COMMIT');
+      });
+      const bytes = await readFile(filename);
+      let observed: unknown;
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams }, error => { observed = error; });
+      try {
+        for (let index = 0; index < maxStreams; index++) scanner.openStream().close();
+        let original: unknown;
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
+          original = error; assert.equal(error, observed); assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED'); return true;
+        });
+        const progress = failureProgress(original);
+        assert.deepEqual(progress, { diagnosticOnly: true, source: { kind: 'database_logical', database: 'authority',
+          tableBucket: 'items', part: 'table_name', logicalRowsObserved: 0, logicalValuesAttempted: 1,
+          logicalBytesObserved: Buffer.byteLength('items') } });
+        assert.equal(Object.isFrozen(progress), true); assert.equal(Object.isFrozen((progress as { source: object }).source), true);
+        assert.equal(scanner.stats().streamsOpened, maxStreams); assert.equal(scanner.stats().streamsClosed, maxStreams);
+        assert.equal(scanner.stats().closed, true); assert.equal(scanner.stats().limitExceeded, true);
+        assert.deepEqual(await readFile(filename), bytes); assert(!JSON.stringify(progress).includes(filename));
+        assert.equal(Object.hasOwn(original as object, 'cause'), false); assert.equal(Object.hasOwn(original as object, 'corpusProgress'), false);
+      } finally { scanner.close(); }
+    });
+  });
+
+const kernelTableBuckets = [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
+  ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal'],
+  ['canonical_time_fence', 'canonical_time_fence'], ['state_owners', 'state_owners'], ['sessions', 'sessions'],
+  ['runs', 'runs'], ['worker_launches', 'worker_launches'], ['workspace_generations', 'workspace_generations'],
+  ['local_inference_activation_cycles', 'local_inference_activation_cycles'], ['local_inference_launches', 'local_inference_launches'],
+  ['list_read_cuts', 'list_read_cuts'], ['list_read_cut_entries', 'list_read_cut_entries'], ['child_allocations', 'child_allocations'],
+  ['authorization_grants', 'authorization_grants'], ['source_inspection_attempts', 'source_inspection_attempts'],
+  ['mcp_registrations', 'mcp_registrations'], ['admin_operations', 'admin_operations']] as const;
+
+test('fixed diagnostic table buckets exhaust the independent canonical kernel inventory without changing six original aliases', () => {
+  assert.equal(kernelTableBuckets.length, 21);
+  assert.deepEqual(kernelTableBuckets.map(([table]) => table).sort(), [...KERNEL_AUTHORITY_TABLES].sort());
+  assert.deepEqual(kernelTableBuckets.slice(0, 6), [['artifacts', 'artifacts'], ['control_requests', 'control'], ['run_events', 'events'],
+    ['items', 'items'], ['checkpoints', 'checkpoints'], ['run_journal', 'journal']]);
+  assert(kernelTableBuckets.every(([, bucket]) => /^[a-z_]+$/u.test(bucket) && bucket.length < 96));
+});
+
+for (const [table, bucket] of [...kernelTableBuckets, ['private_unknown_table', 'other'], ['source_inspection_attempts_private', 'other']] as const)
+  test(`copied SQLite failure projects only the fixed ${bucket} bucket`, async () => {
+    await copyFixture(async filename => {
+      await createDatabase(filename, database => {
+        database.exec(`CREATE TABLE ${table}(value TEXT) STRICT; INSERT INTO ${table} VALUES ('ordinary bytes')`);
+      });
+      let observed: unknown;
+      const schemaBytes = Buffer.byteLength(table) + Buffer.byteLength(`CREATE TABLE ${table}(value TEXT) STRICT`);
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: schemaBytes, maxStreams: 2 }, error => { observed = error; });
+      try {
+        let original: unknown;
+        assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => { original = error;
+          assert.equal(error, observed); return (error as { code?: unknown }).code === 'LIMIT_EXCEEDED'; });
+        const progress = failureProgress(original) as { source: { database: string; tableBucket: string; part: string } };
+        assert.equal(progress.source.database, 'kernel'); assert.equal(progress.source.tableBucket, bucket); assert.equal(progress.source.part, 'cell');
+        assert.equal(scanner.stats().streamsOpened, 1); assert.equal(scanner.stats().streamsClosed, 1);
+        assert(!JSON.stringify(progress).includes(filename)); if (bucket === 'other') assert(!JSON.stringify(progress).includes(table));
+      } finally { scanner.close(); }
+    }, 'kernel.sqlite3');
+  });
+
+test('corpus failure accessor ignores foreign objects, functions, accessors and proxies without evaluating them', () => {
+  let invoked = 0;
+  const poisoned = Object.defineProperty({}, 'source', { get() { invoked++; throw new Error('private error body'); } });
+  const traps: ProxyHandler<object> = {};
+  for (const name of ['get', 'getPrototypeOf', 'ownKeys', 'getOwnPropertyDescriptor'] as const)
+    traps[name] = (() => { invoked++; throw new Error('private error body'); }) as never;
+  for (const input of [undefined, null, 1, 'private error body', Symbol('foreign'), () => { invoked++; }, poisoned,
+    new Proxy({}, traps), new Proxy(() => { invoked++; }, traps), new Error('private error body'), new CredentialSecretScanError('LIMIT_EXCEEDED'),
+    { diagnosticOnly: true, source: { kind: 'cas', part: 'file_bytes' } }]) assert.equal(failureProgress(input), undefined);
+  assert.equal(invoked, 0);
+});
+
+test('corpus progress is obtained after the real await catch and stays outside the unchanged four-field scan fallback', async () => {
+  const source = await readFile(new URL('./installed-node-journey.ts', import.meta.url), 'utf8');
+  assert.match(source, /secretCorpusScanProgress = readCredentialSecretCorpusScanProgress\(error\)/u);
+  assert.match(source, /copyCredentialSecretScanFailureDiagnostic\(\{ diagnosticOnly: true,\s*firstFailureStage, beforeCorpus, corpusScanFailureCode \}\)/u);
+  assert.match(source, /\.\.\.\(secretCorpusScanProgress \? \{ secretCorpusScanProgress \} : \{\}\)/u);
+  const observer = source.slice(source.indexOf('  const scanner = createCredentialSecretScanner('), source.indexOf('  const scanBytes ='));
+  assert.doesNotMatch(observer, /readCredentialSecretCorpusScanProgress/u, 'the error map does not exist before the scanner throws through corpus');
+});
 async function createDatabase(filename: string, configure: (database: DatabaseSync) => void) {
   const database = new DatabaseSync(filename);
   try { configure(database); } finally { database.close(); }
@@ -37,6 +225,51 @@ test('copied read-only diagnostics scan TEXT/BLOB cells and leave original bytes
       assert(result.logicalBytesScanned > 0); assert.equal(scanner.stats().matched, false);
       assert.deepEqual(await readFile(filename), before);
       assert.deepEqual(Object.keys(result).sort(), ['logicalBytesScanned', 'logicalRowsScanned', 'logicalValuesScanned']);
+    } finally { scanner.close(); }
+  });
+});
+
+test('a real copied SQLite stream-limit refusal retains its first corpus failure and original bytes', async () => {
+  await copyFixture(async filename => {
+    await createDatabase(filename, database => {
+      database.exec('CREATE TABLE ordinary(value TEXT) STRICT; BEGIN');
+      const insert = database.prepare('INSERT INTO ordinary VALUES (?)');
+      for (let index = 0; index < 4095; index++) insert.run('ordinary diagnostic bytes');
+      database.exec('COMMIT');
+    });
+    const before = await readFile(filename);
+    let stage: 'runtime' | 'corpus' | 'report' = 'runtime';
+    let firstFailureStage: 'runtime' | 'corpus' | 'report' | null = null, observed: unknown;
+    const observations: CredentialSecretScanStats[] = [];
+    const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, error => {
+      observed = error; firstFailureStage ??= stage;
+      observations.push(scanner.stats());
+    });
+    try {
+      for (let index = 0; index < 4096; index++) scanner.openStream().close();
+      const originalCounts = scanner.stats();
+      const beforeCorpus = Object.freeze({ streamsOpened: originalCounts.streamsOpened, bytesScanned: originalCounts.bytesScanned });
+      stage = 'corpus';
+      // A database cannot open its logical stream after the same cumulative
+      // scanner has exhausted the original 4096-stream budget.
+      assert.throws(() => scanCopiedCredentialDatabase(filename, scanner), error => {
+        assert.equal(error, observed, 'the caller receives the exact observed original scanner error');
+        assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED', 'the original stream guard still refuses');
+        return true;
+      });
+      assert.equal(observations.length, 1, 'the real copied database refusal is observed once');
+      assert.equal(observations[0]!.closed, true, 'the real scanner retires before corpus failure observation');
+      assert.equal(observations[0]!.streamsOpened, observations[0]!.streamsClosed,
+        'all original stream owners have closed at observation');
+      stage = 'report';
+      assert.throws(() => scanner.openStream(), { code: 'CLOSED' });
+      assert.equal(firstFailureStage, 'corpus', 'later report masking cannot replace the first corpus failure');
+      assert.deepEqual(beforeCorpus, { streamsOpened: 4096, bytesScanned: 0 });
+      const stats = scanner.stats();
+      assert.equal(stats.streamsOpened, 4096, 'all original independent streams remain counted');
+      assert.equal(stats.streamsClosed, 4096, 'all original independent streams close');
+      assert.equal(stats.limitExceeded, true, 'the diagnostic cannot qualify exhaustion');
+      assert.deepEqual(await readFile(filename), before, 'diagnosis never rewrites the actual copied SQLite input');
     } finally { scanner.close(); }
   });
 });
@@ -239,6 +472,286 @@ async function actualFixture(layout: typeof stateLayouts[number], work: (stateRo
     await work(stateRoot, cas);
   } finally { await rm(fixture, { recursive: true, force: true }); }
 }
+
+const clientRequestId = '019a0013-0000-7000-8000-000000000001';
+async function installedClientFixture(stateRoot: string) {
+  const root = await fs.lstat(stateRoot, { bigint: true });
+  const client = path.join(path.dirname(stateRoot), 'client-v1'), installations = path.join(client, 'installations');
+  const partition = path.join(installations, canonicalSha256({ deviceId: String(root.dev), fileId: String(root.ino),
+    ownerUid: process.geteuid!(), canonicalPath: stateRoot }));
+  const requests = path.join(partition, 'requests-v1'), group = path.join(requests, clientRequestId);
+  await mkdir(group, { recursive: true, mode: 0o700 });
+  const preferences = path.join(partition, 'preferences.json'), setup = path.join(partition, `model-setup-${'a'.repeat(64)}.json`);
+  const metadata = path.join(group, 'metadata.json'), original = path.join(group, 'request.json'), response = path.join(group, 'response.json');
+  const lock = path.join(partition, 'client-mutation.lock');
+  for (const filename of [preferences, setup, metadata, original, response])
+    await writeFile(filename, '{"owned":"public diagnostic data"}', { flag: 'wx', mode: 0o600 });
+  await writeFile(lock, '', { flag: 'wx', mode: 0o600 });
+  return { client, installations, partition, requests, group, preferences, setup, metadata, original, response, lock };
+}
+
+test('actual Linux daily corpus scans the complete physical client partition with the original scanner and joined descriptors', linux, async t => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    await installedClientFixture(stateRoot);
+    const scanner = createCredentialSecretScanner([secret()], limits), active = new Set<object>(), actualOpen = fs.open;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle);
+      t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); }); return handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      const old = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner });
+      assert.equal(old.filesScanned, 2); assert.equal(old.evidenceDirectoriesScanned, 0);
+      assert.equal(Object.hasOwn(old, 'installedClientDataScanned'), false); assert.equal(active.size, 0);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+      assert.equal(result.filesScanned, 8); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed); assert.equal(active.size, 0);
+      assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux installed readonly-host partition needs no model preferences, setup or mutation lock to be fully scanned', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      await rm(client.group, { recursive: true });
+      for (const filename of [client.preferences, client.setup, client.lock]) await rm(filename);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+      assert.equal(result.filesScanned, 2); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed); assert.equal(scanner.stats().matched, false);
+    } finally { scanner.close(); }
+  });
+});
+
+for (const leaf of ['preferences', 'setup', 'original', 'response'] as const)
+  test(`actual Linux daily corpus detects a secret in the real client ${leaf} file without retaining its path or bytes`, linux, async () => {
+    await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+      const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+      try {
+        const bytes = Buffer.from(JSON.stringify((leaf === 'original' ? 'a'.repeat(65_530) : '') + secret().toString()));
+        await writeFile(client[leaf], bytes, { mode: 0o600 });
+        // An unchanged old-mode scan is not evidence about this new footprint.
+        const old = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner });
+        assert.equal(old.evidenceDirectoriesScanned, 0); assert.equal(scanner.stats().matched, false);
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true }), error => {
+          assert(error instanceof CredentialSecretScanError); assert.equal(error.code, 'SECRET_DETECTED');
+          const progress = failureProgress(error) as { source: object };
+          assert.deepEqual(progress.source, { kind: 'evidence', part: 'file_bytes' });
+          assert(!JSON.stringify(error).includes(stateRoot)); assert(!JSON.stringify(error).includes(secret().toString())); return true;
+        });
+        assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+      } finally { scanner.close(); }
+    });
+  });
+
+test('actual Linux daily corpus refuses alias files, incomplete groups, unbound partitions and nonempty locks', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const scan = () => scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+    try {
+      const linked = path.join(path.dirname(stateRoot), 'outside-client-link');
+      await fs.link(client.preferences, linked);
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(linked);
+      const original = await readFile(client.preferences); await rm(client.preferences); await symlink(client.setup, client.preferences);
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(client.preferences);
+      await writeFile(client.preferences, original, { mode: 0o600 });
+      await chmod(client.preferences, 0o644); await assert.rejects(scan(), CredentialSecretCorpusError); await chmod(client.preferences, 0o600);
+      await rm(client.original); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await writeFile(client.original, '{}', { mode: 0o600 });
+      await writeFile(client.original, Buffer.alloc(1_048_577)); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await writeFile(client.original, '{}');
+      await writeFile(client.lock, 'x'); await assert.rejects(scan(), CredentialSecretCorpusError); await writeFile(client.lock, '');
+      const foreign = path.join(client.installations, 'f'.repeat(64));
+      await fs.rename(client.partition, foreign); await assert.rejects(scan(), CredentialSecretCorpusError); await fs.rename(foreign, client.partition);
+      const extra = path.join(client.client, 'unexpected'); await mkdir(extra, { mode: 0o700 });
+      await assert.rejects(scan(), CredentialSecretCorpusError); await rm(extra, { recursive: true });
+      assert.equal((await scan()).installedClientDataScanned, true);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily corpus scans physically bound acknowledgement residues and refuses a substituted group identity', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const group = await fs.lstat(client.group, { bigint: true });
+    const digest = canonicalSha256({ deviceId: String(group.dev), fileId: String(group.ino), ownerUid: process.geteuid!() });
+    const acknowledged = path.join(client.requests, `.ack-${clientRequestId}-${digest}-${'0'.repeat(32)}`);
+    const scan = () => scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true });
+    try {
+      await fs.rename(client.group, acknowledged); await rm(path.join(acknowledged, 'metadata.json'));
+      const result = await scan();
+      assert.equal(result.evidenceDirectoriesScanned, 1); assert.equal(result.installedClientDataScanned, true); assert.equal(result.filesScanned, 7);
+      const substituted = path.join(client.requests, `.ack-${clientRequestId}-${'f'.repeat(64)}-${'0'.repeat(32)}`);
+      await fs.rename(acknowledged, substituted); await assert.rejects(scan(), CredentialSecretCorpusError);
+      await fs.rename(substituted, acknowledged);
+      await writeFile(path.join(acknowledged, 'response.json'), secret());
+      await assert.rejects(scan(), { code: 'SECRET_DETECTED' });
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily corpus rejects replacement of its held client directory even when the replacement bytes are identical', linux, async t => {
+  await actualFixture('home/.cliq/kernel-v1', async stateRoot => {
+    const client = await installedClientFixture(stateRoot), scanner = createCredentialSecretScanner([secret()], limits);
+    const actualOpen = fs.open, active = new Set<object>(); let replaced = false;
+    t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+      const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle);
+      t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); });
+      if (String(args[0]).endsWith('/preferences.json')) {
+        const read = handle.read.bind(handle);
+        t.mock.method(handle, 'read', async (...values: Parameters<typeof handle.read>) => {
+          const result = await read(...values);
+          if (!replaced && result.bytesRead > 0) {
+            replaced = true; const retired = `${client.client}-original`;
+            await fs.rename(client.client, retired); await fs.cp(retired, client.client, { recursive: true });
+          }
+          return result;
+        });
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, scanInstalledClientData: true }), error => {
+        assert(error instanceof CredentialSecretCorpusError); assert.equal(error.corpusFailure?.stage, 'evidence'); return true;
+      });
+      assert.equal(replaced, true); assert.equal(active.size, 0);
+      assert.equal(scanner.stats().streamsOpened, scanner.stats().streamsClosed);
+    } finally { scanner.close(); }
+  });
+});
+
+test('actual Linux daily-only option cannot expand the legacy root or become an arbitrary path switch', linux, async () => {
+  await actualFixture('home/probe/credential-state', async stateRoot => {
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      for (const selected of [true, false, '/caller-selected-client-path'])
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+          scanInstalledClientData: selected as true }), CredentialSecretCorpusError);
+      assert.equal(scanner.stats().streamsOpened, 0);
+    } finally { scanner.close(); }
+  });
+});
+
+for (const part of ['entry_name', 'file_bytes'] as const)
+  test(`actual Linux CAS ${part} refusal keeps the original 4096 streams and joins real file descriptors`, linux, async t => {
+    await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+      const filename = path.join(cas, 'c'.repeat(64)), payload = Buffer.from('ordinary immutable diagnostic bytes');
+      await writeFile(filename, payload, { flag: 'wx', mode: 0o400 });
+      let observed: unknown;
+      const scanner = createCredentialSecretScanner([secret()], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 }, error => { observed = error; });
+      // Each database has its original raw-file stream and one complete
+      // continuous logical stream. Both retain the same cumulative budget.
+      for (let index = 0; index < (part === 'entry_name' ? 4092 : 4091); index++) scanner.openStream().close();
+      const active = new Set<object>(), actualOpen = fs.open; let opened = 0;
+      t.mock.method(fs, 'open', async (...args: Parameters<typeof fs.open>) => {
+        const handle = await actualOpen(...args), close = handle.close.bind(handle); active.add(handle); opened++;
+        t.mock.method(handle, 'close', async () => { await close(); assert.equal(active.delete(handle), true); });
+        return handle;
+      });
+      syncBuiltinESMExports();
+      try {
+        let original: unknown;
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner }), error => {
+          original = error; assert.equal(error, observed); assert.equal((error as { code?: unknown }).code, 'LIMIT_EXCEEDED'); return true;
+        });
+        assert(opened > 0, 'the original corpus uses the observed real descriptor opens');
+        assert.equal(active.size, 0, 'the original corpus finally closes every genuine opened descriptor before observation');
+        const progress = failureProgress(original) as { source: object; corpusCounters: Record<string, number> };
+        assert.deepEqual(progress.source, { kind: 'cas', part });
+        assert.equal(progress.corpusCounters.filesScanned, 2); assert.equal(progress.corpusCounters.sqliteDatabasesScanned, 2);
+        assert.equal(progress.corpusCounters.logicalRowsScanned, 2); assert.equal(progress.corpusCounters.logicalValuesScanned, 6);
+        assert.equal(progress.corpusCounters.inventoryEntriesObserved, 1); assert.equal(progress.corpusCounters.evidenceDirectoriesScanned, 0);
+        assert(progress.corpusCounters.fileBytesScanned! > 0); assert.equal(Object.isFrozen(progress.corpusCounters), true);
+        assert.equal(scanner.stats().streamsOpened, 4096); assert.equal(scanner.stats().streamsClosed, 4096);
+        assert(!JSON.stringify(progress).includes(filename)); assert.deepEqual(await readFile(filename), payload);
+      } finally { scanner.close(); t.mock.restoreAll(); syncBuiltinESMExports(); }
+    });
+  });
+
+test('actual Linux large CAS corpus scans all 1100 files and detects the last object secret at the default stream limit', linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+    const count = 1100, input = secret(), payload = Buffer.from('ordinary retained project object');
+    for (let index = 0; index < count; index++)
+      await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), payload, { flag: 'wx', mode: 0o400 });
+    const scanner = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
+    try {
+      for (const invalid of [false, true, 'whole_project_v1', 'unbounded', 8192])
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+          profile: invalid as 'whole_project_v2' }), CredentialSecretCorpusError);
+      assert.equal(scanner.stats().streamsOpened, 0); assert.equal(scanner.stats().bytesScanned, 0);
+      const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner,
+        profile: 'whole_project_v2' });
+      assert.equal(result.filesScanned, count + 2); assert.equal(result.sqliteDatabasesScanned, 2);
+      assert.equal(result.qualified, true); assert.equal(scanner.stats().matched, false);
+      assert.equal(scanner.stats().streamsOpened, 5); assert.equal(scanner.stats().streamsClosed, 5);
+      assert.equal(result.profile, 'whole_project_v2'); assert.equal(result.maxEntriesPerDirectory, 16384); assert.equal(result.maxFiles, 16384);
+      assert.equal(result.casProjection, 'continuous_names_and_file_bytes_v1');
+      assert.equal(scanner.stats().bytesScanned, result.fileBytesScanned + result.logicalBytesScanned + count * 64);
+    } finally { scanner.close(); }
+    const last = path.join(cas, (count - 1).toString(16).padStart(64, '0'));
+    const lastBytes = Buffer.concat([Buffer.alloc(65530, 3), input]);
+    await chmod(last, 0o600); await writeFile(last, lastBytes); await chmod(last, 0o400);
+    const detecting = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 4096 });
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: detecting,
+        profile: 'whole_project_v2' }), { code: 'SECRET_DETECTED' });
+      const stats = detecting.stats(); assert.equal(stats.matched, true); assert.equal(stats.streamsOpened, stats.streamsClosed);
+      assert.equal(stats.retainedNeedleBytes, 0); assert.equal(stats.retainedTailBytes, 0);
+      assert.deepEqual(await readFile(last), lastBytes);
+    } finally { detecting.close(); input.fill(0); }
+  });
+});
+
+for (const boundary of ['name_file', 'file_name'] as const)
+  test(`actual Linux continuous CAS projection detects the ${boundary} boundary`, linux, async () => {
+    await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+      const head = Buffer.from('diagnostic-cross-object-'), tail = Buffer.from('1'.repeat(12));
+      const input = boundary === 'name_file' ? Buffer.concat([tail, head]) : Buffer.concat([head, tail]);
+      const entries = boundary === 'name_file'
+        ? [['1'.repeat(64), head]] as const
+        : [['0'.repeat(64), head], ['1'.repeat(64), Buffer.from('ordinary bytes')]] as const;
+      for (const [name, bytes] of entries) await writeFile(path.join(cas, name), bytes, { flag: 'wx', mode: 0o400 });
+      const independent = createCredentialSecretScanner([input], limits);
+      try {
+        const result = await scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: independent });
+        assert.equal(result.qualified, true); assert.equal(independent.stats().matched, false);
+      } finally { independent.close(); }
+      const continuous = createCredentialSecretScanner([input], { maxBytes: 512 * 1024 * 1024, maxStreams: 8192 });
+      try {
+        await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner: continuous,
+          profile: 'whole_project_v2' }), { code: 'SECRET_DETECTED' });
+        const stats = continuous.stats(); assert.equal(stats.matched, true); assert.equal(stats.streamsOpened, stats.streamsClosed);
+        assert.equal(stats.retainedNeedleBytes, 0); assert.equal(stats.retainedTailBytes, 0);
+        for (const [name, bytes] of entries) assert.deepEqual(await readFile(path.join(cas, name)), bytes);
+      } finally { continuous.close(); input.fill(0); }
+    });
+  });
+
+for (const [profile, boundary] of [[undefined, 1024], ['whole_project_v2', 16384]] as const)
+  test(`actual Linux ${profile ?? 'original'} corpus refuses inventory beyond its fixed ${boundary}-entry guard`, linux, async () => {
+  await actualFixture('home/.cliq/kernel-v1', async (stateRoot, cas) => {
+    for (let index = 0; index <= boundary; index++)
+      await writeFile(path.join(cas, index.toString(16).padStart(64, '0')), '', { flag: 'wx', mode: 0o400 });
+    const scanner = createCredentialSecretScanner([secret()], limits);
+    try {
+      await assert.rejects(scanCredentialSecretCorpus({ stateRoot, uid: process.geteuid!(), evidenceDirs: [], scanner, ...(profile ? { profile } : {}) }), error => {
+        assert(error instanceof CredentialSecretCorpusError);
+        assert.equal(error.corpusFailure?.stage, 'cas_inventory'); assert.equal(error.corpusFailure.errorClass, 'entry_limit_exceeded');
+        assert.equal(error.corpusFailure.inventoryEntriesObserved, boundary + 1); assert.equal(error.corpusFailure.filesScanned, 2);
+        assert.equal(error.corpusFailure.sqliteDatabasesScanned, 2); assert.equal(error.corpusFailure.logicalRowsScanned, 2);
+        assert.equal(error.corpusFailure.evidenceDirectoriesScanned, 0); assert(!JSON.stringify(error).includes(stateRoot));
+        assert.equal(Object.hasOwn(error, 'cause'), false); return true;
+      });
+      assert.equal(scanner.stats().matched, false); assert.equal(scanner.stats().limitExceeded, false);
+    } finally { scanner.close(); }
+  });
+});
 
 for (const layout of stateLayouts) test(`actual Linux ${layout} fixed-file corpus covers both databases and a flat pinned CAS object`, linux, async () => {
   await actualFixture(layout, async (stateRoot, cas) => {

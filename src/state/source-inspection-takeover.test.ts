@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { KERNEL_CAS_DIRECTORY, KERNEL_DATABASE_FILENAME } from '../config.js';
-import type { SourceInspectionAttemptV1, SourceInspectionRetirementEvidenceV1, SourceInspectionTargetV1 } from '../kernel/execution.js';
+import type { SourceInspectionAttemptV1, SourceInspectionRetirementEvidenceV1, SourceInspectionTarget } from '../kernel/execution.js';
+import { canonicalSha256 } from '../kernel/canonical.js';
+import { DEFAULT_SANDBOX_RESOURCES } from '../kernel/control-submit.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
 import type { PlatformProcessIdentityV1, StateOwnerAcquisitionEvidenceV1, WorkspaceIdentityV1 } from '../kernel/types.js';
 import { testFixture } from '../model/testing/fixtures.js';
@@ -22,6 +24,7 @@ import { sourceInspectionRequest } from './testing/source-inspection-fixtures.js
 import { ownerAt } from './testing/state-owner-process.js';
 import { signedToolBundle } from './testing/tool-authority.js';
 import { fixtureSandboxProfile } from './testing/worker-launch.js';
+import { signedSourceInspectionMetadata } from './testing/source-git-authority.js';
 
 const SOURCE_BYTES = 'actual source bytes at the Supervisor crash boundary\n';
 type Reply = { state: string; mode?: string; pid?: number; token?: string; message?: string; code?: string; failedCloses?: number;
@@ -130,15 +133,27 @@ async function fixture(t: TestContext, gitMetadata = false) {
     await mkdir(path.join(workspace, '.git'), { mode: 0o700 });
     await writeFile(path.join(workspace, '.git', 'config'), '[core]\n\trepositoryformatversion = 0\n\tbare = false\n');
   }
-  const signed = await signedToolBundle(testFixture().assembly, []);
+  const signed = gitMetadata ? await signedSourceInspectionMetadata() : await signedToolBundle(testFixture().assembly, []);
   const profile = fixtureSandboxProfile(); profile.allowedOwners = ['source_inspection']; profile.profileDigest = digestOmitting(profile, 'profileDigest');
   const authority: StateStoreRuntimeAuthority = { bundle: signed.bundle, releaseKeys: signed.releaseKeys,
     sourceInspection: { controlledHome: home, sandboxProfile: profile } };
   const store = await openStateStore(stateRoot, authority);
   try {
+    if ('objects' in signed) for (const object of signed.objects) await store.artifacts.publishBytes(object.bytes,
+      'application/octet-stream', 'offline-source-authority-object');
     const identity = await publishInProcessChannel(store);
     const created = await store.createSession({ ...identity, requestId: uuidv7(), admissionKey: admissionKey('takeover-session'), workspacePath: workspace });
-    const request = sourceInspectionRequest({ sessionId: created.session.id, workspacePath: workspace });
+    let request = sourceInspectionRequest({ sessionId: created.session.id, workspacePath: workspace });
+    if (gitMetadata) {
+      const workspaceIdentity = await store.artifacts.readCanonical<WorkspaceIdentityV1>(created.session.workspaceIdentityRef);
+      assert.equal(workspaceIdentity.kind, 'live');
+      const core = { protocolVersion: 1, method: 'authorization.create', requestId: uuidv7(), decision: {
+        kind: 'source_git_inspection', purpose: 'source_inspection', target: { sessionId: created.session.id,
+          expectedWorkspaceIdentityDigest: workspaceIdentity.identityDigest, scope: 'in_root_git_metadata_and_objects',
+          recipe: 'cliq-source-git-inspection-v1', retention: 'ephemeral_raw_reachable_only', resourceCeiling: DEFAULT_SANDBOX_RESOURCES } } };
+      const grant = await store.createAuthorization({ ...core, requestDigest: canonicalSha256(core) }, identity);
+      request = sourceInspectionRequest({ ...request, sourceInspectionGrantId: grant.response.result.grant.grantId });
+    }
     t.after(async () => {
       await Promise.all(children.map(child => child.kill()));
       const driver = openSqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
@@ -168,7 +183,7 @@ function retained(stateRoot: string) {
 for (const scenario of [
   { mode: 'source-write', gitMetadata: false, description: 'the reserved staging still present' },
   { mode: 'retirement-write', gitMetadata: false, description: 'staging removed before the retirement SQL commit' },
-  { mode: 'retirement-write', gitMetadata: true, description: 'an unsupported Git target still in its no-process capturing prefix' }
+  { mode: 'retirement-write', gitMetadata: true, description: 'a durable original Git no-native-attempt handoff after staging removal' }
 ] as const) {
   test(`successor retires actual interrupted source capture with ${scenario.description}`, async t => {
     const { mode } = scenario;
@@ -182,14 +197,6 @@ for (const scenario of [
     const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(f.stateRoot, KERNEL_CAS_DIRECTORY)));
     const process = await artifacts.readCanonical<PlatformProcessIdentityV1>(prior.processIdentityRef);
     assert.equal(process.pid, child.child.pid); assert.equal(process.pid, paused.pid); assert.equal(process.processStartToken, paused.token);
-    if (scenario.gitMetadata) {
-      const target = await artifacts.readCanonical<SourceInspectionTargetV1>(before.targetRef);
-      const workspace = await artifacts.readCanonical<WorkspaceIdentityV1>(target.workspaceIdentityRef);
-      if (workspace.kind !== 'live') assert.fail('the real Git metadata fixture must retain its live source identity');
-      assert.match(workspace.repositoryIdentityRef ?? '', /^[0-9a-f]{64}$/);
-      assert.equal(Object.hasOwn(before, 'inputRef'), false); assert.equal(Object.hasOwn(before, 'plan'), false);
-      assert.equal(Object.hasOwn(before, 'processContainmentRef'), false);
-    }
     const stagePath = path.join(f.stateRoot, 'runtime', 'source-inspections', identityHash(before.inspectionId, before.stagingNonceDigest));
     if (mode === 'source-write') {
       const stage = await lstat(stagePath, { bigint: true });
@@ -212,7 +219,10 @@ for (const scenario of [
     assert.equal(after.supervisorInstanceId, before.supervisorInstanceId); assert.equal(after.deadlineAt, before.deadlineAt);
     await assert.rejects(lstat(stagePath), { code: 'ENOENT' });
     const evidence = await artifacts.readCanonical<SourceInspectionRetirementEvidenceV1>(after.retirementEvidenceRef);
-    assert.equal(evidence.captureOwnerClosure.kind, 'owning_process_dead'); assert.deepEqual(evidence.processClosure, { kind: 'not_planned' });
+    assert.equal(evidence.captureOwnerClosure.kind, 'owning_process_dead');
+    assert.deepEqual(evidence.processClosure, scenario.gitMetadata
+      ? { kind: 'input_not_started', inputRef: before.inputRef, inputDigest: before.inputDigest } : { kind: 'not_planned' });
+    assert.match(after.retirementHandoffRef ?? '', /^[0-9a-f]{64}$/u);
     if (evidence.captureOwnerClosure.kind !== 'owning_process_dead') assert.fail('missing original owning process death');
     const acquisition = await artifacts.readCanonical<StateOwnerAcquisitionEvidenceV1>(evidence.captureOwnerClosure.stateOwnerAcquisitionEvidenceRef);
     assert.equal(acquisition.kind, 'takeover_after_owner_death');
@@ -234,3 +244,51 @@ for (const scenario of [
     assert.deepEqual(retained(f.stateRoot), after);
   });
 }
+
+test('a successor preserves a Git intent with an incomplete handoff without inventing no-native-attempt provenance', async t => {
+  const f = await fixture(t, true), child = await childFor(f.children);
+  // Same existing actual-write seam: the unsupported local fixture has
+  // genuinely joined its original program, but the handoff has not become
+  // durable or committed. A partial CAS write cannot replace the missing
+  // original native/no-attempt provenance and never permits staging removal.
+  const paused = await child.request({ mode: 'handoff-write', stateRoot: f.stateRoot, authority: f.authority,
+    request: f.request, sourceBytes: SOURCE_BYTES });
+  assert.equal(paused.state, 'paused', paused.message);
+  const before = retained(f.stateRoot), prior = ownerAt(f.stateRoot);
+  assert.equal(before.phase, 'capturing'); assert.equal(before.stateOwnerEpoch, prior.ownerEpoch);
+  assert.equal(before.supervisorInstanceId, prior.supervisorInstanceId);
+  assert.match(before.inputRef ?? '', /^[0-9a-f]{64}$/u); assert.match(before.inputDigest ?? '', /^[0-9a-f]{64}$/u);
+  assert.equal(Object.hasOwn(before, 'plan'), false); assert.equal(Object.hasOwn(before, 'processContainmentRef'), false);
+  assert.equal(Object.hasOwn(before, 'retirementHandoffRef'), false);
+  const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(f.stateRoot, KERNEL_CAS_DIRECTORY)));
+  const originalProcess = await artifacts.readCanonical<PlatformProcessIdentityV1>(prior.processIdentityRef);
+  assert.equal(originalProcess.pid, child.child.pid); assert.equal(originalProcess.pid, paused.pid);
+  assert.equal(originalProcess.processStartToken, paused.token);
+  const target = await artifacts.readCanonical<SourceInspectionTarget>(before.targetRef);
+  assert.equal(target.schemaVersion, 2);
+  const workspace = await artifacts.readCanonical<WorkspaceIdentityV1>(target.workspaceIdentityRef);
+  if (workspace.kind !== 'live') assert.fail('Git capture must retain its original live descriptor identity');
+  assert.match(workspace.repositoryIdentityRef ?? '', /^[0-9a-f]{64}$/u);
+  const stagePath = path.join(f.stateRoot, 'runtime', 'source-inspections', identityHash(before.inspectionId, before.stagingNonceDigest));
+  const stage = await lstat(stagePath, { bigint: true });
+  assert.equal(stage.dev.toString(), before.stagingIdentity.deviceId); assert.equal(stage.ino.toString(), before.stagingIdentity.fileId);
+  await child.kill(); assert.equal((await child.exited).signal, 'SIGKILL');
+  await rename(f.workspace, `${f.workspace}-moved`); await rename(f.home, `${f.home}-moved`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const successor = await childFor(f.children);
+    const recovery = await successor.request({ mode: 'recover', stateRoot: f.stateRoot, authority: f.authority,
+      request: f.request, sourceBytes: SOURCE_BYTES });
+    assert.equal(recovery.state, 'error'); assert.equal(recovery.code, 'RECOVERY_REQUIRED');
+    assert.match(recovery.message!, /cleanup-only native owner/u);
+    assert.deepEqual(retained(f.stateRoot), before, 'owner death and an absent path cannot replace original native provenance');
+    assert.equal(Object.hasOwn(retained(f.stateRoot), 'retirementEvidenceRef'), false);
+    await successor.kill(); assert.equal((await successor.exited).signal, 'SIGKILL');
+  }
+  const driver = openSqliteDriver(path.join(f.stateRoot, KERNEL_DATABASE_FILENAME));
+  try {
+    const originalOwner = readStateOwner(driver, before.stateOwnerEpoch)!;
+    assert.equal(originalOwner.state, 'terminal');
+    if (originalOwner.state !== 'terminal') assert.fail('original owner death must still be independently established');
+    assert.equal(originalOwner.terminalReason, 'superseded_after_owner_death');
+  } finally { driver.close(); }
+});

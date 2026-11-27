@@ -11,7 +11,7 @@ import { openStateStore, publishInProcessChannel } from './store.js';
 import { createAgentFixture } from './testing/agent-fixtures.js';
 import { disposeFixture, uuidv7 } from './testing/fixtures.js';
 import { batch, claimTool, observation, prepareTool } from './testing/tool-calls.js';
-import { fixtureInspector, quiescedToolCheckpoint } from './testing/tool-effects.js';
+import { fixtureInspector, quiescedToolCheckpoint, retireFixtureToolSelection } from './testing/tool-effects.js';
 
 type Fixture = Awaited<ReturnType<typeof createAgentFixture>>;
 const revision = (fixture: Fixture) => fixture.store.getRun(fixture.runId).revision;
@@ -47,6 +47,21 @@ async function longContext(fixture: Fixture, texts = ['a', 'b', 'c'].map((text) 
   for (const text of texts) assert.equal((await modelTurn(fixture, text, 'unknown')).completed.disposition, 'batch_rejected');
 }
 
+test('a historical resource Stop cannot replace its missing registration cut with today latest Checkpoint even when the same budget still fails', async () => {
+  const f = await createAgentFixture('resource-original-registration-required', { modelTokens: 40_959 }, { mode: 'plan' });
+  try {
+    const stopped = await stop(f), before = await f.store.readRecoveryClosure(f.runId);
+    const original = await f.store.artifacts.readCanonical<StopIntent>(stopped.run.stopIntentRef!);
+    const { registeredCheckpointId: _checkpoint, registeredRunRevision: _revision, registeredJournalSeq: _journal, ...missing } = original;
+    const replacement = await f.store.artifacts.publishCanonical(missing, 'cliq-stop-intent-v1');
+    const driver = Reflect.get(f.store, 'driver') as import('./sqlite-driver.js').SqliteDriver;
+    driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(replacement.ref, f.runId);
+    try { await assert.rejects(f.store.readRecoveryClosure(f.runId), /original registration cut/); }
+    finally { driver.prepare('UPDATE runs SET stop_intent_ref=? WHERE id=?').run(stopped.run.stopIntentRef!, f.runId); }
+    assert.deepEqual(await f.store.readRecoveryClosure(f.runId), before);
+  } finally { await disposeFixture(f); }
+});
+
 for (const [counter, required] of [['modelTokens', 40_960], ['costMicros', 114_688]] as const) {
   test(`${counter} exhaustion derives the exact next reservation and publishes one recoverable terminal Session item`, async () => {
     const fixture = await createAgentFixture(`resource-${counter}`, { [counter]: required - 1 }, { mode: 'plan' });
@@ -63,7 +78,8 @@ for (const [counter, required] of [['modelTokens', 40_960], ['costMicros', 114_6
       const stopped = winner.value;
       assert.deepEqual(await fixture.store.artifacts.readCanonical<StopIntent>(stopped.run.stopIntentRef!), {
         schemaVersion: 1, runId: fixture.runId, createdAt: stopped.run.updatedAt, origin: 'budget', targetStatus: 'failed',
-        reason: 'budget_exhausted', counter, ceiling: required - 1, consumed: 0, reserved: 0, required
+        reason: 'budget_exhausted', counter, ceiling: required - 1, consumed: 0, reserved: 0, required,
+        registeredCheckpointId: before.latestCheckpoint.id, registeredRunRevision: before.run.revision, registeredJournalSeq: before.journal.length
       });
       assert.equal((await stop(fixture)).run.stopIntentRef, stopped.run.stopIntentRef);
       await reopen(fixture);
@@ -218,10 +234,15 @@ for (const expired of [false, true]) test(`tool budget stopping respects ${expir
     const claimed = await claimTool(fixture, await prepareTool(fixture));
     await fixture.agent.completeTool({ expectedRunRevision: revision(fixture), opId: claimed.entry.opId, attempt: claimed.entry.attempt,
       observationRef: await observation(fixture, claimed, 'first result') });
+    const selection = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
+    assert.ok(selection.disposition === 'retirement_required');
+    assert.equal(selection.reason, 'approval');
+    await retireFixtureToolSelection(fixture, selection);
     const pending = await fixture.agent.prepareTool({ expectedRunRevision: revision(fixture), leaseEpoch: fixture.leaseEpoch });
     assert.ok(pending.disposition === 'approval_required');
-    const proof = await quiescedToolCheckpoint(fixture, pending.checkpointId);
-    await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef, checkpoint: proof.checkpoint });
+    assert.equal(pending.run.activeWorkerLaunchId, undefined);
+    assert.equal(pending.run.budgetConsumed.toolCalls, 1);
+    await fixture.agent.waitForToolApproval({ expectedRunRevision: revision(fixture), waitingOnRef: pending.waitingOnRef });
     await assert.rejects(stop(fixture), { code: 'STATE_TRANSITION_INVALID' });
     const command = { requestId: uuidv7(), expectedRunRevision: revision(fixture),
       waitingOnRef: pending.waitingOnRef, decision: 'allow' as const, ttlMs: 1000, ...await publishInProcessChannel(fixture.store) };
