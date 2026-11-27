@@ -149,11 +149,6 @@ static bool retire_descriptor(int *descriptor) {
     return false;
 }
 
-static bool same_directory(const struct stat *expected, const struct stat *actual) {
-    return S_ISDIR(actual->st_mode) && expected->st_dev == actual->st_dev && expected->st_ino == actual->st_ino &&
-        expected->st_uid == actual->st_uid && expected->st_gid == actual->st_gid && expected->st_mode == actual->st_mode;
-}
-
 static bool private_cgroup(int directory, struct stat *identity) {
     struct statfs filesystem;
     return fstat(directory, identity) == 0 && S_ISDIR(identity->st_mode) && identity->st_uid == geteuid() &&

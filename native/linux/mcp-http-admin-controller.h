@@ -421,7 +421,8 @@ mcp_admin_cleanup_retained(struct cliq_worker_packet *request, int *passed, size
     if (valid && present)
         valid = !fstat(group, &held) && !fstatat(root, name, &named, AT_SYMLINK_NOFOLLOW) && source_stat_same(&held, &named) &&
             (uint64_t) held.st_dev == original->cgroup_device && (uint64_t) held.st_ino == original->cgroup_inode && cgroup_empty(group) && !unlinkat(root, name, AT_REMOVEDIR);
-    valid = valid && !fstat(root, &held) && source_stat_same(&held, &root_identity) && fstatat(root, name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT && tracked_absent(&tracked);
+    valid = valid && native_cgroup(root) && !fstat(root, &held) && same_directory(&root_identity, &held) &&
+        fstatat(root, name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT && tracked_absent(&tracked);
     if (!source_close_fd(&group) || !source_close_fd(&birth) || !source_close_fd(&root))
         valid = false;
     if (!valid)
