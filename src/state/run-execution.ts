@@ -332,7 +332,7 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
       nativeReservation: reservation.identity },
     createdAt: sampleCanonicalNow(), planDigest: '' };
   plan.planDigest = digestOmitting(plan, 'planDigest');
-  const containmentPlanRef = (await artifacts.publishCanonical(plan, plan.format)).ref;
+  const containmentPlanRef = canonicalSha256(plan);
   const runtime: SandboxRuntimeBindingV1 = { runtimeBundleRef: assembly.runtime.runtimeBundleRef,
     runtimeBundleManifestDigest: assembly.runtime.runtimeBundleManifestDigest, sandboxBackend: 'linux_namespace', toolchain: { kind: 'none' },
     launcher: { executableId: launcher.entryId, executableDigest: launcher.digest }, runtimeDigest: '' };
@@ -351,7 +351,12 @@ async function publishWorkerRecipe(artifacts: ArtifactCatalog, controller: Linux
     resources: profile.resources, resourcesDigest: canonicalSha256(profile.resources), containmentPlanRef,
     containmentPlanDigest: plan.planDigest, createdAt: sampleCanonicalNow(), launchSpecDigest: '' };
   spec.launchSpecDigest = digestOmitting(spec, 'launchSpecDigest');
-  const sandboxLaunchSpecRef = (await artifacts.publishCanonical(spec, spec.format)).ref;
+  const [publishedPlan, publishedSpec] = await artifacts.publishCanonicalPair([
+    { value: plan, schemaKind: plan.format }, { value: spec, schemaKind: spec.format }
+  ]);
+  if (publishedPlan.ref !== containmentPlanRef)
+    throw new KernelStorageError('ARTIFACT_MISMATCH', 'worker plan publication differs from its original bytes');
+  const sandboxLaunchSpecRef = publishedSpec.ref;
   return { spec, input: { launchId, runId: run.id, expectedRunRevision: run.revision, spawnNonceDigest, activationNonceDigest,
     workspaceGenerationRef: generationRef, containmentPlanRef, sandboxLaunchSpecRef } };
 }

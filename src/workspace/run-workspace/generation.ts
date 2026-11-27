@@ -366,8 +366,10 @@ async function readFrozenWorkspace(artifacts: ArtifactCatalog, stateRef: string,
 }
 
 async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog, sourceState: WorkspaceStateManifest,
-  privateGit: FrozenPrivateGit | undefined, signal?: AbortSignal): Promise<WorkspaceTreeObservation> {
+  privateGit: FrozenPrivateGit | undefined, signal?: AbortSignal, frozenEntries?: WorkspaceEntryManifest): Promise<WorkspaceTreeObservation> {
   signal?.throwIfAborted();
+  const expected = frozenEntries && new Map(frozenEntries.entries.map(entry => [entry.path, entry]));
+  const reads = signal ? artifacts.withReadSignal(signal) : artifacts;
   const snapshot = openGenerationSnapshot(tree);
   const observedEntries: WorkspaceEntry[] = [];
   const gitDirectories = new Set<string>(), gitFiles = new Map<string, { sha256: string; byteCount: number }>();
@@ -419,7 +421,21 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
               entry.file.assertHeld();
             }
           })();
-          const blob = await artifacts.publishChunks(chunks, 'application/octet-stream', 'cliq-workspace-file-v1', entry.byteCount);
+          // Initial and preactivation rewalks must reproduce the frozen
+          // Checkpoint. Verify its existing CAS objects without staging the
+          // same bytes again. Productive snapshots can still publish changes.
+          let blob: { ref: string; byteLength: number };
+          if (expected) {
+            const file = expected.get(entry.path);
+            if (file?.kind !== 'file' || file.size !== entry.byteCount || file.mode !== entry.mode)
+              mismatch('private generation file differs from its frozen Checkpoint');
+            const hash = createHash('sha256'); let byteLength = 0;
+            for await (const chunk of chunks) { hash.update(chunk); byteLength += chunk.length; }
+            if (byteLength !== file.size || hash.digest('hex') !== file.blobRef)
+              mismatch('private generation bytes differ from its frozen Checkpoint');
+            await reads.verifyChunks(file.blobRef, file.size);
+            blob = { ref: file.blobRef, byteLength };
+          } else blob = await artifacts.publishChunks(chunks, 'application/octet-stream', 'cliq-workspace-file-v1', entry.byteCount);
           signal?.throwIfAborted();
           if (blob.byteLength !== entry.byteCount) mismatch('native snapshot file was not completely read');
           observedEntries.push({ path: entry.path, kind: 'file', mode: entry.mode, size: entry.byteCount, blobRef: blob.ref });
@@ -438,14 +454,22 @@ async function observeTree(tree: HeldGenerationTree, artifacts: ArtifactCatalog,
     checkedEntries(manifest);
     return manifest;
   });
-  const entriesRef = (await artifacts.publishCanonical(observed, observed.format)).ref;
+  const entriesRef = expected ? canonicalSha256(observed) : (await artifacts.publishCanonical(observed, observed.format)).ref;
+  if (expected) {
+    if (entriesRef !== sourceState.entriesRef) mismatch('observed directory tree differs from its frozen Checkpoint');
+    await reads.verifyBytes(entriesRef);
+  }
   signal?.throwIfAborted();
   const privateGitStateRef = privateGit ? await observedPrivateGit(artifacts, privateGit, gitDirectories, gitFiles, signal) : undefined;
   signal?.throwIfAborted();
   const state: WorkspaceStateManifest = { ...sourceState, entriesRef,
     ...(privateGitStateRef === undefined ? {} : { privateGitStateRef }), stateDigest: '' };
   state.stateDigest = digestOmitting(state, 'stateDigest');
-  const workspaceStateRef = (await artifacts.publishCanonical(state, state.format)).ref;
+  const workspaceStateRef = expected ? canonicalSha256(state) : (await artifacts.publishCanonical(state, state.format)).ref;
+  if (expected) {
+    if (workspaceStateRef !== canonicalSha256(sourceState)) mismatch('observed workspace state differs from its frozen Checkpoint');
+    await reads.verifyBytes(workspaceStateRef);
+  }
   signal?.throwIfAborted();
   tree.assertHeld();
   return Object.freeze({ entriesRef, treeDigest: observed.treeDigest, workspaceStateRef, workspaceStateDigest: state.stateDigest,
@@ -500,15 +524,15 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
   operations?: WorkspaceOperations): Promise<RunWorkspaceGeneration> {
   const { sourceState, source, entries, privateGit } = frozen;
   const generationId = identityHash(checkpoint.runId, checkpoint.id, checkpoint.workspaceStateRef, nonce);
-  const observe = (signal?: AbortSignal) => observeTree(tree, artifacts, sourceState, privateGit,
-    lifetimeSignal && signal ? AbortSignal.any([lifetimeSignal, signal]) : lifetimeSignal ?? signal);
-  const initial = await observe();
+  const observe = (signal?: AbortSignal, frozenEntries?: WorkspaceEntryManifest) => observeTree(tree, artifacts, sourceState, privateGit,
+    lifetimeSignal && signal ? AbortSignal.any([lifetimeSignal, signal]) : lifetimeSignal ?? signal, frozenEntries);
+  const initial = await observe(undefined, entries);
   if (initial.entriesRef !== sourceState.entriesRef || initial.treeDigest !== entries.treeDigest ||
       initial.workspaceStateRef !== checkpoint.workspaceStateRef) mismatch('physical generation does not exactly reproduce the frozen ready Checkpoint');
   const publishAuthority = async (signal?: AbortSignal): Promise<MaterializedGenerationAuthority> => {
     lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
     if (process.platform !== 'linux') throw new KernelStorageError('UNSUPPORTED_PLATFORM', 'a host staging directory is not a Linux generation or macOS VM volume');
-    const observed = await observe(signal);
+    const observed = await observe(signal, entries);
     if (observed.workspaceStateRef !== checkpoint.workspaceStateRef || observed.treeDigest !== entries.treeDigest) {
       mismatch('materialized generation authority requires unchanged frozen source bytes');
     }
@@ -521,8 +545,7 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
         canonicalRootRelativePath: `runs/${checkpoint.runId}/generations/${generationId}`, deviceId: tree.identity.deviceId,
         directoryFileId: tree.identity.fileId, ownerUid: tree.identity.ownerUid, mode: 448 }, createdAt, identityDigest: '' };
     identity.identityDigest = digestOmitting(identity, 'identityDigest');
-    const generationRef = (await artifacts.publishCanonical(identity, identity.format)).ref;
-    lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
+    const generationRef = canonicalSha256(identity);
     const evidence: WorkspaceGenerationSnapshotEvidenceV1 = { schemaVersion: 1, format: 'cliq-workspace-generation-snapshot-evidence-v1',
       purpose: 'materialized_from_checkpoint', runId: checkpoint.runId, generationRef, generationIdentityDigest: identity.identityDigest,
       checkpointId: checkpoint.id, workspaceStateRef: checkpoint.workspaceStateRef, workspaceStateDigest: sourceState.stateDigest,
@@ -530,11 +553,14 @@ async function mintRunWorkspace(tree: HeldGenerationTree, filesystem: HeldStateO
       ...(observed.privateGitStateRef === undefined ? {} : { privateGitStateRef: observed.privateGitStateRef }),
       directoryFsyncComplete: true, observedAt: new Date().toISOString(), evidenceDigest: '' };
     evidence.evidenceDigest = digestOmitting(evidence, 'evidenceDigest');
-    const snapshotEvidenceRef = (await artifacts.publishCanonical(evidence, evidence.format)).ref;
+    const [publishedIdentity, snapshot] = await artifacts.publishCanonicalPair([
+      { value: identity, schemaKind: identity.format }, { value: evidence, schemaKind: evidence.format }
+    ]);
+    if (publishedIdentity.ref !== generationRef) mismatch('generation identity publication differs from its original bytes');
     lifetimeSignal?.throwIfAborted(); signal?.throwIfAborted();
     tree.assertHeld();
     return Object.freeze({ generationRef, generationIdentityDigest: identity.identityDigest,
-      snapshotEvidenceRef, snapshotEvidenceDigest: evidence.evidenceDigest });
+      snapshotEvidenceRef: snapshot.ref, snapshotEvidenceDigest: evidence.evidenceDigest });
   };
   const generation: RunWorkspaceGeneration = Object.freeze({
     generationId,
