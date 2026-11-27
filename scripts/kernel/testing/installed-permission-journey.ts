@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { chown, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
 import { canonicalJsonBytes, canonicalSha256 } from '../../../src/kernel/canonical.js';
 import { digestOmitting, sha256Bytes } from '../../../src/kernel/identity.js';
@@ -202,7 +203,9 @@ export async function runInstalledPermissionCases(context: InstalledPermissionCo
     const by = Date.now() + 90000, seen = new Set<string>(), candidates = new Set<string>(); let approvals = 0, edits = 0, workerFreeWaits = 0;
     let cut: Data, denial: { frame: Data; response: Response } | undefined;
     for (;;) {
+      const reading = performance.now();
       cut = await get(admitted.id); const run = cut.snapshot.run;
+      const readElapsed = performance.now() - reading;
       assert(Date.now() < by, 'ordinary permission terminal observation exceeded the original 90-second source window');
       if (['succeeded', 'completed_unverified', 'failed', 'cancelled'].includes(run.status)) break;
       if (run.status === 'waiting' && run.waitingReason === 'approval') {
@@ -237,7 +240,11 @@ export async function runInstalledPermissionCases(context: InstalledPermissionCo
           }
         }
       }
-      assert(Date.now() < by, 'ordinary permission case exceeded the original 90-second source window'); await delay(kind === 'waiting_deadline' ? 200 : 100);
+      assert(Date.now() < by, 'ordinary permission case exceeded the original 90-second source window');
+      // Leave time for producers between complete signed reads. The deadline
+      // case keeps its original sampling cadence for the actual expiry.
+      const pause = kind === 'waiting_deadline' ? 200 : Math.min(5_000, Math.max(250, 2 * readElapsed));
+      await delay(Math.min(pause, Math.max(0, by - Date.now())));
     }
     const run = cut.snapshot.run, claims = cut.journal.filter((row: Data) => row.opKind === 'verifier' && row.phase === 'dispatch_claimed');
     const items = await Promise.all(cut.items.map((row: Data) => read(row.payloadRef))), candidateCount = items.filter(value => value.kind === 'final_candidate').length;
