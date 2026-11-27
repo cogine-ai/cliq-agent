@@ -215,6 +215,12 @@ export async function runInstalledMcpCases(context: InstalledMcpContext) {
       const wait = decodeManualInvocationWait(await read(cut.snapshot.run.waitingOnRef));
       assert.equal(wait.subject.opId, claim.opId); assert.equal(wait.subject.attempt, claim.attempt);
       same(wait.probeState, { phase: 'manual_only', automaticProbeCount: 0, userProbeCount: 0 });
+      const checkpoint = cut.checkpoints.find((row: Data) => row.id === cut.snapshot.run.latestCheckpointId);
+      const preparation = cut.checkpoints.find((row: Data) => row.journalSeq === prepared.seq && row.runItemSeq === cut.items.length);
+      assert(checkpoint && preparation);
+      assert.equal(checkpoint.journalSeq, final.seq); assert.equal(checkpoint.runItemSeq, cut.items.length);
+      assert.equal(checkpoint.contextManifestRef, preparation.contextManifestRef);
+      assert.equal(checkpoint.workspaceStateRef, preparation.workspaceStateRef);
       if (kind === 'unknown_after_effect_restart') { await context.restart(); same(await get(runId), cut); successorAcknowledgement = true; }
       let cancel: Data | undefined;
       if (kind === 'unknown_cancel_then_ack') {

@@ -179,12 +179,13 @@ export async function prepareManualInvocationWait(driver: SqliteDriver, artifact
   attempt: number;
   expectedRunRevision: number;
 }) {
-  const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, input.runId), { run } = cut;
+  const cut = await (await import('./recovery-closure.js')).readRecoveryClosure(driver, artifacts, input.runId);
+  const { run, latestCheckpoint: checkpoint } = cut;
   if (run.revision !== input.expectedRunRevision) {
     throw new KernelStorageError('REVISION_CONFLICT', 'manual wait Run revision changed');
   }
   if (run.activeWorkerLaunchId || cut.workerLaunches.length || !run.frontierRef || run.nextStep !== 'tool' || run.status !== 'queued' ||
-    run.waitingOnRef || run.waitingReason || !same(run.budgetReserved, ZERO_BUDGET) || cut.latestCheckpoint.journalSeq !== cut.journal.length || cut.latestCheckpoint.runItemSeq !== cut.items.length) {
+    run.waitingOnRef || run.waitingReason || !same(run.budgetReserved, ZERO_BUDGET) || checkpoint.runItemSeq !== cut.items.length) {
     invalid();
   }
   assertRetiredGenerationCut(driver, run, cut.workspaceGenerations);
@@ -198,6 +199,15 @@ export async function prepareManualInvocationWait(driver: SqliteDriver, artifact
   if (original.entries.length !== 3 || original.request.frontierRef !== run.frontierRef) {
     invalid();
   }
+  // HTTP settles its permanently claimed effect without an item or a new
+  // workspace state. The worker-free wait can checkpoint just that exact tail.
+  const checkpointPending = checkpoint.journalSeq !== cut.journal.length;
+  if (checkpointPending && (original.stdio || checkpoint.journalSeq !== original.prepared.seq ||
+      !same(cut.journal.slice(checkpoint.journalSeq), [original.claim, original.unknown])))
+    invalid('manual HTTP wait does not own the exact claim and UNKNOWN after its preparation Checkpoint');
+  const checkpointId = checkpointPending
+    ? identityHash('cliq-mcp-http-manual-wait-checkpoint-v1', run.id, input.opId, input.attempt, original.unknown.seq)
+    : checkpoint.id;
   const createdAt = sampleCanonicalNow(), wait: ManualInvocationWaitV1 = {
     schemaVersion: 1,
     kind: 'reconciliation',
@@ -222,16 +232,24 @@ export async function prepareManualInvocationWait(driver: SqliteDriver, artifact
   let updated!: Run;
   driver.transaction(connection => {
     assertActiveStateOwner(connection, owner);
-    if (!same(readRun(connection, run.id), run) || !same(readInvocationJournal(connection, run.id), cut.journal)) {
+    if (!same(readRun(connection, run.id), run) || !same(readCheckpoint(connection, checkpoint.id), checkpoint) ||
+        !same(readInvocationJournal(connection, run.id), cut.journal)) {
       invalid();
     }
+    assertRetiredGenerationCut(connection, run, cut.workspaceGenerations);
     const committedAt = sampleCanonicalNow();
     if (committedAt < createdAt || advanceTimeFence(connection, owner.ownerEpoch, committedAt) !== 'healthy') {
       invalid('manual wait canonical time is not healthy');
     }
     insertArtifactMetadata(connection, artifact, committedAt);
-    connection.prepare("UPDATE runs SET status='waiting',waiting_reason='reconciliation',waiting_on_ref=?,revision=revision+1,updated_at=? WHERE id=?")
-      .run(artifact.ref, committedAt, run.id);
+    if (checkpointPending) {
+      connection.prepare(`INSERT INTO checkpoints (id, schema_version, run_id, based_on_run_revision, run_item_seq,
+        context_manifest_ref, journal_seq, workspace_state_ref, created_at, reason) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, 'auto')`)
+        .run(checkpointId, run.id, BigInt(run.revision), BigInt(checkpoint.runItemSeq), checkpoint.contextManifestRef,
+          BigInt(original.unknown.seq), checkpoint.workspaceStateRef, createdAt);
+    }
+    connection.prepare("UPDATE runs SET status='waiting',waiting_reason='reconciliation',waiting_on_ref=?,latest_checkpoint_id=?,revision=revision+1,updated_at=? WHERE id=?")
+      .run(artifact.ref, checkpointId, committedAt, run.id);
     updated = readRun(connection, run.id);
     appendRunStateEvent(connection, updated, committedAt);
   });
