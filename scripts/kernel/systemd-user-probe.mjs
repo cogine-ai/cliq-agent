@@ -101,6 +101,17 @@ function processFact(pid) {
   }
 }
 
+function observeRetiringProcesses(lifetimes) {
+  try { return lifetimes.map((recorded) => ({ recorded, actual: processFact(recorded.pid) })); }
+  catch (error) {
+    // After cgroup.kill, Linux can remove a namespace before proc stat
+    // reports a zombie. Discard the entire incomplete sample and observe again.
+    if (error.syscall === 'readlink' && ['ENOENT', 'ESRCH'].includes(error.code) &&
+        lifetimes.some(({ pid }) => error.path === `/proc/${pid}/ns/cgroup`)) return undefined;
+    throw error;
+  }
+}
+
 function cgroupPath(relative) {
   assert(relative.startsWith('/') && !relative.split('/').includes('..'), 'invalid kernel cgroup path');
   return `${cgroupMount}${relative}`;
@@ -353,12 +364,12 @@ async function retireAnchorRuns(parent, output, unit) {
       let events, processes;
       do {
         events = properties(readFileSync(`/proc/self/fd/${held.fd}/cgroup.events`, 'utf8').replaceAll(' ', '='));
-        processes = lifetimes.map((lifetime) => ({ recorded: lifetime, actual: processFact(lifetime.pid) }));
-        if (events.populated === '0' && processes.every(({ recorded, actual }) => !sameLifetime(actual, recorded))) break;
+        processes = observeRetiringProcesses(lifetimes);
+        if (events.populated === '0' && processes?.every(({ recorded, actual }) => !sameLifetime(actual, recorded))) break;
         await sleep(50);
       } while (Date.now() < deadline);
       assert.equal(events.populated, '0', 'old anchored subtree remains populated');
-      assert(processes.every(({ recorded, actual }) => !sameLifetime(actual, recorded)), 'old anchored PID/start lifetime or zombie remains');
+      assert(processes?.every(({ recorded, actual }) => !sameLifetime(actual, recorded)), 'old anchored PID/start lifetime or zombie remains');
       assert(sameDirectory(directoryFact(path), held.original), 'retirement changed the retained old cgroup identity');
       retired.push({ diagnosticOnly: true, writerUid: process.getuid(), path,
         original: held.original, heldFd: heldFact(held), beforeProcesses, events, processes,

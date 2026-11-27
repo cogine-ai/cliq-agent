@@ -36,13 +36,13 @@ test('the shared carrier builder does not load optional diagnostics in a source 
     await symlink(path.join(repository, 'src'), path.join(temporary, 'src'));
     const source = await readFile(new URL('./supervisor-sea-builder.ts', import.meta.url), 'utf8');
     const parsed = ts.createSourceFile('supervisor-sea-builder.ts', source, ts.ScriptTarget.Latest, true);
-    // Real current dependencies, except the new optional diagnostic that the
+    // Real current dependencies, except the optional diagnostics that the
     // pinned historical callback source does not contain. No image is built.
     for (const statement of parsed.statements) {
       if ((!ts.isImportDeclaration(statement) && !ts.isExportDeclaration(statement)) ||
           !statement.moduleSpecifier || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
       const name = statement.moduleSpecifier.text;
-      if (!name.startsWith('./') || name === './installed-builtin-work-banner.js') continue;
+      if (!name.startsWith('./') || ['./installed-builtin-work-banner.js', './installed-cpu-diagnostic.js'].includes(name)) continue;
       const relative = name.replace(/\.js$/u, '.ts');
       const target = path.join(folder, relative);
       try { await symlink(path.join(repository, 'scripts/kernel/testing', relative), target); }
@@ -56,6 +56,8 @@ test('the shared carrier builder does not load optional diagnostics in a source 
       const input = {assets: {'cliq-supervisor-application.mjs': 'inert guard sentinel'}};
       await assert.rejects(buildSupervisorSeaImage(input), /signed application asset cannot be replaced/);
       await assert.rejects(buildSupervisorSeaImage({...input, storeFailureDiagnostics: true}), {code: 'ERR_MODULE_NOT_FOUND'});
+      process.argv[2] = '--pr532-cpu-diagnostic';
+      await assert.rejects(buildSupervisorSeaImage(input), {code: 'ERR_MODULE_NOT_FOUND'});
     `], { cwd: repository, timeout: 30000, maxBuffer: 65536, encoding: 'utf8' });
     assert.equal(child.error, undefined); assert.equal(child.signal, null);
     assert.equal(child.status, 0, child.stderr);

@@ -3151,8 +3151,12 @@ async function parentLossBeforeRelease(retireAfterStop = false, cancelDuringProb
   }) as typeof fs.readSync;
   syncBuiltinESMExports();
   try {
-    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })),
-      /actual invocation or parent process identity was revoked/u);
+    // The lease recheck or the native release check can observe the same
+    // original process loss first. Both must refuse before the tool runs.
+    await assert.rejects(bounded(execution.executeCurrentTool({ expectedRunRevision: before.run.revision })), {
+      code: 'RECOVERY_REQUIRED',
+      message: /^(?:native worker process or executable identity drifted|actual invocation or parent process identity was revoked)$/u
+    });
     assert.ok(fault, 'actual parent loss must be injected before the release; absent coverage is a failed campaign');
     const failed = await fixture.store.readRecoveryClosure(fixture.runId);
     assert.equal(failed.run.status, 'waiting'); assert.equal(failed.run.waitingReason, 'reconciliation');

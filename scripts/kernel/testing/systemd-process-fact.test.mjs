@@ -66,6 +66,21 @@ for (const mode of ['dumpable', 'private']) {
           const fact = processFact(pid);
           assert.equal(fact.present, true); assert.equal(fact.startTimeTicks, original.startTimeTicks);
           assert.match(fact.cgroupNamespace, /^cgroup:\[[0-9]+\]$/u);
+          const namespace = `/proc/${pid}/ns/cgroup`;
+          let unavailable = true;
+          const observeRetiringProcesses = actualFunction('observeRetiringProcesses', 'cgroupPath', {
+            processFact(observedPid) {
+              const current = processFact(observedPid);
+              assert.equal(sameLifetime(current, fact), true);
+              if (unavailable) throw Object.assign(new Error('namespace disappeared during retirement observation'),
+                { code: 'ENOENT', syscall: 'readlink', path: namespace });
+              return current;
+            }
+          });
+          assert.equal(observeRetiringProcesses([fact]), undefined, 'an incomplete sample cannot prove retirement');
+          unavailable = false;
+          const [reobserved] = observeRetiringProcesses([fact]);
+          assert.equal(sameLifetime(reobserved.actual, reobserved.recorded), true);
         }
         child.stdin.write('e'); assert.deepEqual(await lines.next(), { value: 'ZOMBIE', done: false });
         const before = actualStat(pid), beforeUid = statSync(`/proc/${pid}`).uid;
