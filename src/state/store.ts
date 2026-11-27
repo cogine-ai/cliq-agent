@@ -1915,7 +1915,7 @@ export class StateStore {
   private readonly installedRunPhases = new Map<string, RunResultPhase | RunPublicationPhase | BuiltinExecutionPhase | 'scheduled' | 'drive_material' | 'drive_agent' |
     'drive_retirement' | `drive_retirement_${RunRetirementPhase}` | 'drive_verify' | 'drive_dependency' | 'drive_verifier_history' |
     'drive_verifier_permission' | 'drive_verifier_execution' | 'drive_finalize' | 'terminal_retirement' |
-    'drive_prior_read' | `drive_prior_${ModelAttemptReadPhase}` | 'drive_worker_activate' | 'drive_model_prepare' | 'drive_broker_prepare' | 'drive_credential_prepare' |
+    'drive_prior_read' | `drive_prior_${ModelAttemptReadPhase}` | 'drive_worker_activate' | 'drive_model_prepare' | import('./reducers/agent.js').ModelPreparationDiagnostic | 'drive_broker_prepare' | 'drive_credential_prepare' |
     'drive_model_claim' | 'drive_model_release'>();
   private readonly installedAgents = new Map<string, { agent: InstalledContinuation; readAbort: AbortController }>();
   private readonly installedAgentLoads = new Map<string, Promise<InstalledContinuation>>();
@@ -3574,7 +3574,7 @@ export class StateStore {
         }
         let prepared: Awaited<ReturnType<AgentRunState['prepareModel']>>;
         this.installedRunPhases.set(runId, 'drive_model_prepare');
-        try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal); }
+        try { prepared = await agent.prepareModel({ expectedRunRevision: current.revision, leaseEpoch: current.leaseEpoch }, readSignal, phase => this.installedRunPhases.set(runId, phase)); }
         catch (error) {
           if (!(error instanceof AgentContextExhaustedError) &&
               !(error instanceof KernelStorageError && error.code === 'BUDGET_EXHAUSTED')) throw error;

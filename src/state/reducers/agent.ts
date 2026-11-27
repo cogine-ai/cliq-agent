@@ -47,6 +47,7 @@ export type LoadAgentRunInput = {
    */
   releaseKeys?: readonly ReleaseTrustKey[];
 };
+export type ModelPreparationDiagnostic = 'drive_model_prepare_cut' | 'drive_model_prepare_projection' | 'drive_model_prepare_selection' | 'drive_model_prepare_retry' | 'drive_model_prepare_target' | 'drive_model_prepare_metadata' | 'drive_model_prepare_write' | 'drive_model_prepare_reserve';
 export type AgentRunState = Awaited<ReturnType<typeof loadAgentRun>>;
 export type ModelAttemptReadPhase = `recovery_${RecoveryClosurePhase}` | 'request' | 'grant';
 
@@ -289,15 +290,18 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       if (retry.kind === 'exhausted') disposition = 'stop_required';
       return { run: closure.run, entry, state, prepared, disposition, retry: immutableSnapshot(retry) };
     }),
-    prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal) => {
+    prepareModel: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, readSignal?: AbortSignal, phase: (step: ModelPreparationDiagnostic) => void = () => {}) => {
       const reads = readSignal ? artifacts.withReadSignal(readSignal) : artifacts;
       reads.assertReadActive();
       const { expectedRunRevision, leaseEpoch } = input;
+      phase('drive_model_prepare_cut');
       const cut = await agentCut(driver, reads, runId, expectedRunRevision);
       if (cut.run.specRef !== admittedRun.specRef || cut.run.deadlineAt !== admittedRun.deadlineAt || cut.run.createdAt !== admittedRun.createdAt) {
         throw new TypeError('loaded model authority no longer belongs to this Run');
       }
+      phase('drive_model_prepare_projection');
       const projection = await project(cut.run, cut.context, cut.checkpoint.contextManifestRef, reads);
+      phase('drive_model_prepare_selection');
       const selection = cut.frontier.phase === 'context_compaction' ? await compactionSource(cut.run, cut.frontier.compactionPlanRef!, reads)
         : planContextCompaction({ context: cut.context, contextRef: cut.checkpoint.contextManifestRef, items: cut.items,
           projection, policy: assembly.context, provider: assembly.provider, compactionEnvelope: material.compactionEnvelope,
@@ -316,6 +320,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         ? { ...cut.frontier, phase: 'context_compaction', compactionPlanRef: planArtifact.ref } : cut.frontier;
       const frontierPlan = planCanonicalArtifact(frontier, 'cliq-run-frontier-v1');
       const opId = modelOpId(runId, frontier);
+      phase('drive_model_prepare_retry');
       const history = await readModelRetryHistory(driver, reads, runId, opId);
       const attempt = requireRetryReady(modelRetryState(assembly.retry.model, history, sampleCanonicalNow()));
       const projectionArtifact = planCanonicalArtifact(projection, projection.format);
@@ -323,6 +328,7 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
         compactionPlanRef: planArtifact!.ref, sourceContextUtf8: compaction.sourceContextUtf8 })
         : model.prepare({ kind: 'normal', invocation: { runId, opId, attempt }, projectionRef: projectionArtifact.ref, projection });
       if (history.length) assertSameModelOperation(await readCanonicalArtifact<ModelRequestV1>(reads, history[0]!.requestRef), prepared.request);
+      phase('drive_model_prepare_target');
       const target = await readModelTarget(driver, reads, { run: cut.run, spec, assembly });
       const grantIssuedAt = sampleCanonicalNow();
       if (grantIssuedAt >= cut.run.deadlineAt) {
@@ -331,10 +337,13 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const grant = planModelOperationGrant({ ...target, run: cut.run, spec, assembly, frontier, frontierRef: frontierPlan.ref,
         request: prepared.request as ModelRequestV1, requestRef: prepared.requestRef }, grantIssuedAt, cut.run.deadlineAt);
       const grantPlan = planCanonicalArtifact(grant, grant.format);
+      phase('drive_model_prepare_metadata');
       const targetMetadata = await reads.describe(target.targetRef, 'application/json',
         target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');
+      phase('drive_model_prepare_write');
       const metadata = [...await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan,
         ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]), targetMetadata];
+      phase('drive_model_prepare_reserve');
       const admitted = await prepareValidatedInvocation(driver, reads, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
         target: target.targetRef, requestRef: prepared.requestRef, replayClass: 'retry', grantRef: grantPlan.ref,
