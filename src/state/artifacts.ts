@@ -3,6 +3,7 @@ import { setImmediate } from 'node:timers/promises';
 import { immutableSnapshot } from '../model/immutable.js';
 import type { ReleaseTrustKey } from '../policy/runtime-authority.js';
 import { canonicalJsonBytes } from '../kernel/canonical.js';
+import type { PlannedArtifact } from '../kernel/artifact-plan.js';
 import { assertArtifactRef, sha256Bytes } from '../kernel/identity.js';
 import type { ArtifactRef } from '../kernel/types.js';
 import { ContentAddressedStore } from './cas.js';
@@ -173,6 +174,24 @@ export class ArtifactCatalog {
     const result = (index: number): PublishedArtifact => ({ ...published[index]!,
       mediaType: 'application/json', schemaKind: kinds[index]! });
     return [result(0), result(1), result(2), result(3)];
+  }
+
+  /** Publish the exact planned wire bytes and metadata through the same four
+   * durability barriers, without reserializing provider payloads. */
+  async publishPlannedFour(plans: readonly [PlannedArtifact, PlannedArtifact, PlannedArtifact, PlannedArtifact]): Promise<PublishedArtifact[]> {
+    const payload = (plan: PlannedArtifact) => {
+      const { bytes, ref, mediaType, schemaKind } = plan;
+      if (sha256Bytes(bytes) !== ref) throw new TypeError('planned artifact bytes do not rehash');
+      return { bytes, ref, mediaType, schemaKind };
+    };
+    const first = payload(plans[0]), second = payload(plans[1]), third = payload(plans[2]), fourth = payload(plans[3]);
+    const contents = [first, second, third, fourth];
+    const published = await this.cas.publishFour([first.bytes, second.bytes, third.bytes, fourth.bytes]);
+    return published.map((item, index) => {
+      const { ref, mediaType, schemaKind } = contents[index]!;
+      if (item.ref !== ref) throw new KernelStorageError('ARTIFACT_MISMATCH', 'published bytes differ from the model plan');
+      return { ...item, mediaType, schemaKind };
+    });
   }
 
   async publishChunks(chunks: AsyncIterable<Uint8Array>, mediaType: string, schemaKind: string,

@@ -3,6 +3,8 @@ import { test } from 'node:test';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
 import { KERNEL_DATABASE_FILENAME } from '../config.js';
+import { sha256Bytes } from '../kernel/identity.js';
+import { ContentAddressedStore } from './cas.js';
 import { openSqliteDriver } from './sqlite-driver.js';
 import type { ContinuationItem, RunFrontier, RunContextCompactionPlan } from '../kernel/types.js';
 import { AgentContextExhaustedError, AgentHandoffPendingError } from './reducers/agent.js';
@@ -51,10 +53,20 @@ function response(fixture: Awaited<ReturnType<typeof createAgentFixture>>, prepa
   return reader.finish(sampleCanonicalNow(), fixture.agent.resolveToolInput);
 }
 
-test('real model admission binds zero-based identity, native bytes and the full signed reservation', async () => {
+test('real model admission binds zero-based identity, native bytes and the full signed reservation', async t => {
   const fixture = await createAgentFixture('typed-model');
   try {
+    const frontierRef = fixture.store.getRun(fixture.runId).frontierRef;
+    const group: string[][] = [], publish = ContentAddressedStore.prototype.publishFour;
+    const spy = t.mock.method(ContentAddressedStore.prototype, 'publishFour', function (this: ContentAddressedStore,
+      sources: Parameters<ContentAddressedStore['publishFour']>[0]) {
+      group.push(sources.map(sha256Bytes)); return publish.call(this, sources);
+    });
     const admitted = await prepare(fixture);
+    spy.mock.restore();
+    assert.deepEqual(group, [[admitted.prepared.request.promptProjectionRef, admitted.entry.grantRef,
+      admitted.prepared.request.bodyBytesRef, admitted.prepared.requestRef]]);
+    assert.equal(admitted.run.frontierRef, frontierRef);
     assert.equal(admitted.entry.attempt, 0);
     assert.equal(admitted.entry.requestRef, admitted.prepared.requestRef);
     assert.deepEqual(admitted.entry.budgetDelta, { modelTokens: 40_960, costMicros: 114_688, toolCalls: 0, repairAttempts: 0 });

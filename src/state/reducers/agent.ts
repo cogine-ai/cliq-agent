@@ -333,8 +333,19 @@ export const loadAgentRun = stateOperation('RECOVERY_REQUIRED', async function l
       const grantPlan = planCanonicalArtifact(grant, grant.format);
       const targetMetadata = await reads.describe(target.targetRef, 'application/json',
         target.target.format === 'cliq-endpoint-registration-v1' ? 'cliq-endpoint-registration-v1' : 'cliq-local-zero-cost-v1');
-      const metadata = [...await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan,
-        ...(planArtifact ? [planArtifact] : []), ...prepared.artifacts]), targetMetadata];
+      let published: PublishedArtifact[];
+      if (planArtifact) {
+        published = await publishPlans(artifacts, [projectionArtifact, frontierPlan, grantPlan, planArtifact, ...prepared.artifacts]);
+      } else {
+        const [body, request] = prepared.artifacts;
+        if (!body || !request || prepared.artifacts.length !== 2 || frontierPlan.ref !== cut.run.frontierRef)
+          throw new TypeError('normal model preparation substitutes its frontier or exact artifact group');
+        const existingFrontier = await reads.describe(frontierPlan.ref, frontierPlan.mediaType, frontierPlan.schemaKind);
+        reads.assertReadActive();
+        const durable = await artifacts.publishPlannedFour([projectionArtifact, grantPlan, body, request]);
+        published = [durable[0]!, existingFrontier, ...durable.slice(1)];
+      }
+      const metadata = [...published, targetMetadata];
       const admitted = await prepareValidatedInvocation(driver, reads, owner, {
         runId, expectedRunRevision, leaseEpoch, opId, opKind: 'model',
         target: target.targetRef, requestRef: prepared.requestRef, replayClass: 'retry', grantRef: grantPlan.ref,
