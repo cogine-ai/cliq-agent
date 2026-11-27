@@ -206,11 +206,19 @@ jobs:
         run: |
           test "$RUNNER_ENVIRONMENT" = github-hosted
           probe_node=$(realpath "$(command -v node)")
+          probe_npm=$(realpath "$(command -v npm)")
           account=cliq-kernel-gate-test
           sudo useradd --create-home --home-dir "/home/$account" --shell /usr/sbin/nologin "$account"
           trap 'sudo userdel --remove "$account"' EXIT
-          sudo --user="$account" --set-home -- /usr/bin/env CLIQ_DISPOSABLE_ACCOUNT_QUALIFICATION=1 \
-            "$probe_node" --test --import tsx scripts/kernel/testing/credential-authority-native.test.ts
+          fixture="/home/$account/source"
+          sudo --user="$account" -- mkdir "$fixture"
+          git archive --format=tar HEAD | sudo --user="$account" -- tar --no-same-owner -xf - -C "$fixture"
+          sudo --user="$account" --set-home -- /bin/bash -eu -c '
+            cd "$1"
+            export PATH="${2%/*}:$PATH"
+            "$2" "$3" ci
+            CLIQ_DISPOSABLE_ACCOUNT_QUALIFICATION=1 "$2" --test --import tsx scripts/kernel/testing/credential-authority-native.test.ts
+          ' _ "$fixture" "$probe_node" "$probe_npm"
       - name: Exercise signed credential commands and Supervisor autostart
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
