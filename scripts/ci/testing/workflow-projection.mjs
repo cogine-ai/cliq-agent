@@ -48,6 +48,27 @@ function replaceOnce(text, part, replacement) {
 export function projectQualificationWorkflow(workflow, kind = 'foundation') {
   assert(kind === 'foundation' || kind === 'permission');
   if (kind === 'foundation') {
+    // Recompose the original preflight for the immutable workflow check.
+    // Only this job's disposable test step and its evidence move runners.
+    const statePreflight = workflow.match(/^  linux-installed-state-preflight:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m)?.[0];
+    const preflightSetup = workflow.match(/^  linux-supervisor-preflight:\n[\s\S]*?(?=^      # These independent disposable fixtures)/m)?.[0];
+    assert(statePreflight && preflightSetup, 'both preflight jobs must be present');
+    const stateSetup = preflightSetup.replace('linux-supervisor-preflight:', 'linux-installed-state-preflight:')
+      .replace('name: Linux Supervisor image and actual user-manager diagnostics', 'name: Linux installed-state and native-retirement diagnostics')
+      .replace('    # Component/OS facts only, not an installed I1 qualification. Standard\n    # public-repository runner; never substitute a detached child manager.\n', '');
+    const stateTests = statePreflight.match(/^      - name: Verify installed-state and native-retirement boundaries on Linux 22.04\n[\s\S]*?(?=^      - name: Retain bounded endpoint crash evidence)/m)?.[0];
+    assert(stateTests);
+    const evidence = '            ${{ runner.temp }}/cliq-endpoint-crash-*/**\n';
+    assert.equal(statePreflight, stateSetup + stateTests + '      - name: Retain bounded endpoint crash evidence\n' +
+      '        if: always()\n        uses: actions/upload-artifact@v4\n        with:\n' +
+      '          name: installed-state-preflight-${{ github.run_id }}-${{ github.run_attempt }}\n' +
+      '          path: |\n' + evidence + '          if-no-files-found: warn\n          retention-days: 7\n\n');
+    workflow = replaceOnce(workflow, statePreflight, '');
+    const imageStep = '      - name: Qualify complete application image binding\n';
+    workflow = replaceOnce(workflow, imageStep, stateTests + imageStep);
+    const retirementArtifact = '            ${{ runner.temp }}/cliq-installed-retirement/*.json\n';
+    workflow = replaceOnce(workflow, retirementArtifact, retirementArtifact + evidence);
+
     // Check the additive real seal/ownership regressions in their exact
     // original step; keep the historical campaign digest unchanged.
     const nativeTests = '          node --test --test-concurrency=1 --import tsx scripts/kernel/testing/dependency-native-family.test.ts scripts/kernel/testing/dependency-broker-lifecycle.test.ts scripts/kernel/testing/dependency-npm-stage.test.ts scripts/kernel/testing/preparing-git-native.test.ts scripts/kernel/testing/installed-genesis.test.ts\n';

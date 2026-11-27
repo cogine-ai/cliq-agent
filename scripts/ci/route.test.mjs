@@ -245,6 +245,17 @@ test('both workflows retain every original job byte behind the exact conservativ
   }
 });
 
+test('the installed-state preflight moves its complete suite and crash evidence to the same free runner class and deadline', () => {
+  const workflow = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
+  const job = workflow.match(/^  linux-installed-state-preflight:\n[\s\S]*?(?=^  [a-z][a-z0-9-]*:$)/m)?.[0];
+  assert(job);
+  for (const changed of ['', job.replace('ubuntu-22.04', 'self-hosted'), job.replace('timeout-minutes: 15', 'timeout-minutes: 16'),
+    job.replace('          src/state/installed-runtime.test.ts\n', ''), job.replace('cliq-endpoint-crash-', 'unrelated-')]) {
+    assert.notEqual(changed, job);
+    assert.throws(() => verifyWorkflow(workflow.replace(job, changed), 'foundation'));
+  }
+});
+
 test('the additive native seal regressions cannot disappear, move, duplicate or select a substitute', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/kernel-foundation.yml'), 'utf8');
   const command = '          node --test --test-concurrency=1 --import tsx src/sandbox/sealed-images.test.ts src/sandbox/builtin-tool-native.test.ts\n';

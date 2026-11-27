@@ -687,37 +687,6 @@ jobs:
       - name: Reject unsupported credential schemas through the signed entry
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --test --import tsx scripts/kernel/testing/credential-authority-journey.test.ts
-      - name: Verify installed-state and native-retirement boundaries on Linux 22.04
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        # These component tests also run in the 24.04 matrix. Keep the real
-        # installed/native boundary on the qualified 22.04 baseline too;
-        # they do not substitute for the systemd installed execution chain.
-        run: >-
-          node --test --test-concurrency=1 --import tsx
-          src/state/installed-runtime.test.ts
-          src/state/installed-genesis.test.ts
-          src/state/installed-native-loader.test.ts
-          src/state/installed-genesis-boundaries.test.ts
-          src/state/genesis-schema-boundaries.test.ts
-          src/state/supervisor-observation.test.ts
-          src/state/installed-control.test.ts
-          src/state/installed-control-client.test.ts
-          src/sandbox/native-controller-close.test.ts
-          scripts/kernel/sqlite-extension-headers.test.ts
-          scripts/kernel/testing/installed-read-control.test.ts
-          scripts/kernel/qualify-sqlite-paths.test.ts
-          scripts/kernel/testing/sqlite-vfs-mechanism.test.ts
-          scripts/kernel/testing/credential-vfs-probe.test.ts
-          scripts/kernel/testing/credential-vfs-lock.test.ts
-          scripts/kernel/testing/credential-vfs-crash.test.ts
-          scripts/kernel/testing/credential-vfs-retirement.test.ts
-          scripts/kernel/testing/credential-vfs-storage.test.ts
-          scripts/kernel/testing/credential-authority-bridge.test.ts
-          scripts/kernel/testing/credential-authority-installed.test.ts
-          scripts/kernel/testing/endpoint-authority-installed.test.ts
-          scripts/kernel/testing/endpoint-authority-journey.test.ts
-          scripts/kernel/testing/endpoint-wal-proof.test.ts
-          scripts/kernel/testing/endpoint-authority-crash.test.ts
       - name: Qualify complete application image binding
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: node --import tsx scripts/kernel/qualify-supervisor-image.ts "$RUNNER_TEMP/cliq-supervisor-image"
@@ -775,6 +744,65 @@ jobs:
             ${{ runner.temp }}/cliq-installed-keeper/*.json
             ${{ runner.temp }}/cliq-secret-service/*.json
             ${{ runner.temp }}/cliq-installed-retirement/*.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-installed-state-preflight:
+    needs: ci-route
+    if: ${{ !cancelled() && (needs.ci-route.result != 'success' || needs.ci-route.outputs.native != 'false') }}
+    name: Linux installed-state and native-retirement diagnostics
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        id: build
+      - name: Install actual platform and worker build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y gnome-keyring libglib2.0-dev musl-tools bubblewrap libcap-dev libselinux1-dev meson ninja-build strace libext2fs-dev pkg-config
+      - name: Verify installed-state and native-retirement boundaries on Linux 22.04
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        # These component tests also run in the 24.04 matrix. Keep the real
+        # installed/native boundary on the qualified 22.04 baseline too;
+        # they do not substitute for the systemd installed execution chain.
+        run: >-
+          node --test --test-concurrency=1 --import tsx
+          src/state/installed-runtime.test.ts
+          src/state/installed-genesis.test.ts
+          src/state/installed-native-loader.test.ts
+          src/state/installed-genesis-boundaries.test.ts
+          src/state/genesis-schema-boundaries.test.ts
+          src/state/supervisor-observation.test.ts
+          src/state/installed-control.test.ts
+          src/state/installed-control-client.test.ts
+          src/sandbox/native-controller-close.test.ts
+          scripts/kernel/sqlite-extension-headers.test.ts
+          scripts/kernel/testing/installed-read-control.test.ts
+          scripts/kernel/qualify-sqlite-paths.test.ts
+          scripts/kernel/testing/sqlite-vfs-mechanism.test.ts
+          scripts/kernel/testing/credential-vfs-probe.test.ts
+          scripts/kernel/testing/credential-vfs-lock.test.ts
+          scripts/kernel/testing/credential-vfs-crash.test.ts
+          scripts/kernel/testing/credential-vfs-retirement.test.ts
+          scripts/kernel/testing/credential-vfs-storage.test.ts
+          scripts/kernel/testing/credential-authority-bridge.test.ts
+          scripts/kernel/testing/credential-authority-installed.test.ts
+          scripts/kernel/testing/endpoint-authority-installed.test.ts
+          scripts/kernel/testing/endpoint-authority-journey.test.ts
+          scripts/kernel/testing/endpoint-wal-proof.test.ts
+          scripts/kernel/testing/endpoint-authority-crash.test.ts
+      - name: Retain bounded endpoint crash evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-state-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
             ${{ runner.temp }}/cliq-endpoint-crash-*/**
           if-no-files-found: warn
           retention-days: 7
