@@ -67,8 +67,8 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
   async function readAuthorizedCut(revision: number, reads: ArtifactCatalog, signal?: AbortSignal) {
     let cut!: ToolCut;
     await reads.mapReadGroups([
-      scoped => original.assertRuntime(scoped, signal),
-      async scoped => { cut = await original.cut(revision, scoped); }
+      (scoped: ArtifactCatalog) => original.assertRuntime(scoped, signal),
+      async (scoped: ArtifactCatalog) => { cut = await original.cut(revision, scoped); }
     ], (scoped, read) => read(scoped));
     return cut;
   }
