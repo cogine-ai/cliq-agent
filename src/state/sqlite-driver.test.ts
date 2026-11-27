@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   openSqliteDriver,
   openReadOnlySqliteDriver,
+  readInstalledUpgradeDatabase,
   iterateNodeSqliteStatement,
   isRolledBackSqliteTransactionFailure,
   sqliteConnectionBelongsTo,
@@ -38,6 +39,53 @@ test('retained upgrade reads cannot create a missing database or write its origi
     try { assert.equal(actual.prepare('SELECT value FROM retained WHERE id=1').get()?.value, 'original'); }
     finally { actual.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('installed upgrade reads wait for a real SQLite BUSY and preserve other failures and cancellation', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'cliq-upgrade-sqlite-busy-'));
+  const file = path.join(directory, 'kernel.sqlite3');
+  const writer = openSqliteDriver(file);
+  let lock: DatabaseSync | undefined;
+  try {
+    writer.exec("CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES('verified')");
+    lock = new DatabaseSync(file);
+    lock.exec('BEGIN EXCLUSIVE');
+    let attempts = 0;
+    const result = await readInstalledUpgradeDatabase(file, reader => {
+      attempts++;
+      try {
+        return reader.readSnapshot(connection => connection.prepare('SELECT value FROM retained').get()?.value);
+      } catch (error) {
+        assert.equal(attempts, 1);
+        assert.equal(Object.getOwnPropertyDescriptor(error, 'errcode')?.value, 5);
+        setImmediate(() => lock!.exec('ROLLBACK'));
+        throw error;
+      }
+    });
+    assert.equal(result, 'verified');
+    assert.equal(attempts, 2);
+    attempts = 0;
+    await assert.rejects(readInstalledUpgradeDatabase(file, reader => {
+      attempts++;
+      return reader.prepare('SELECT value FROM missing').get();
+    }), { code: 'ERR_SQLITE_ERROR', errcode: 1 });
+    assert.equal(attempts, 1);
+
+    lock.exec('BEGIN EXCLUSIVE');
+    const stop = new AbortController();
+    const reason = new Error('original installed read cancelled');
+    attempts = 0;
+    await assert.rejects(readInstalledUpgradeDatabase(file, reader => {
+      attempts++;
+      try { return reader.prepare('SELECT value FROM retained').get(); }
+      finally { setImmediate(() => stop.abort(reason)); }
+    }, stop.signal), error => error === reason);
+    assert.equal(attempts, 1);
+  } finally {
+    lock?.close();
+    writer.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('owned native SQLite iteration retains a temporary statement through GC and returns every row', () => {

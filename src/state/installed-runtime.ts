@@ -10,7 +10,7 @@ import type { PublishedArtifact } from './artifacts.js';
 import { ArtifactCatalog } from './artifacts.js';
 import { readLatestStateOwner } from './state-owner.js';
 import { readRetainedStateOwnerHistory } from './state-owner-history.js';
-import { openSqliteDriver, openReadOnlySqliteDriver, type SqliteDriver } from './sqlite-driver.js';
+import { openSqliteDriver, openReadOnlySqliteDriver, readInstalledUpgradeDatabase, type SqliteDriver } from './sqlite-driver.js';
 import { decodeRuntimeUpgradeReceipt } from './runtime-upgrade-history.js';
 import { assertKernelSchemaVersion } from './schema.js';
 import { sampleCanonicalNow } from './canonical-time.js';
@@ -1961,7 +1961,7 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
         catch (cause) { mismatch('installed runtime selection has an invalid complete reference', cause); }
         active.digest = sha256Bytes(activeBytes);
         const registeredUpgrade = selection.upgradeReceiptRef === undefined ? undefined :
-          await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, selection.upgradeReceiptRef);
+          await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, selection.upgradeReceiptRef, selectionSignal);
         if (registeredUpgrade && (registeredUpgrade.targetRuntimeBundleRef !== selection.bundleDigest ||
             registeredUpgrade.installation.kind === 'not_installed' ||
             registeredUpgrade.installation.targetModelAuthorityRef !== selection.modelAuthorityRef)) mismatch('selection differs from its registered upgrade');
@@ -4357,12 +4357,12 @@ function assertUpgradeObjectIdentity(object: { info: BigIntStats }, expected: In
 
 /** Full retained SQL/CAS/signature graph, without acquiring an owner or creating
  * a missing database. A matching CAS-only receipt is never selected authority. */
-async function readRegisteredInstalledUpgrade(stateRoot: string, releaseKeys: readonly ReleaseTrustKey[], receiptRef: string): Promise<RuntimeUpgradeReceiptV1> {
+async function readRegisteredInstalledUpgrade(stateRoot: string, releaseKeys: readonly ReleaseTrustKey[], receiptRef: string,
+  signal?: AbortSignal): Promise<RuntimeUpgradeReceiptV1> {
   assertArtifactRef(receiptRef);
-  const driver = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
-  try {
+  return readInstalledUpgradeDatabase(path.join(stateRoot, KERNEL_DATABASE_FILENAME), async driver => {
     assertKernelSchemaVersion(driver, 8);
-    const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), undefined, releaseKeys);
+    const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), signal, releaseKeys);
     const latest = readLatestStateOwner(driver);
     if (!latest) mismatch('registered upgrade has no actual owner history');
     const history = await readRetainedStateOwnerHistory(driver, artifacts, latest.ownerEpoch);
@@ -4374,7 +4374,7 @@ async function readRegisteredInstalledUpgrade(stateRoot: string, releaseKeys: re
         receipt.installation.kind === 'not_installed') mismatch('registered installed upgrade receipt differs');
     driver.readSnapshot(connection => history.assertUnchanged(connection));
     return receipt;
-  } finally { driver.close(); }
+  }, signal);
 }
 
 async function upgradePathInfo(parent: Directory, name: string): Promise<BigIntStats | undefined> {
@@ -4392,7 +4392,7 @@ export async function recoverInstalledRuntimeUpgrade(stateRoot: string, receiptR
   trustedReleaseKeys: readonly ReleaseTrustKey[], signal?: AbortSignal): Promise<RuntimeUpgradeReceiptV1> {
   signal?.throwIfAborted();
   const releaseKeys = immutableSnapshot(trustedReleaseKeys);
-  const receipt = await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, receiptRef);
+  const receipt = await readRegisteredInstalledUpgrade(stateRoot, releaseKeys, receiptRef, signal);
   if (receipt.installation.kind === 'not_installed') mismatch('recovery requires its original installed stage');
   const registered = receipt.installation, scope = new Scope();
   let held: HeldInstalledRuntimeUpgrade | undefined;
@@ -4572,9 +4572,7 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
     mismatch('upgrade requires canonical installation and package locators');
   signal?.throwIfAborted();
   noteUpgradePhase(observePhase, 'read_schema');
-  let receiptRef: string | undefined;
-  const database = openReadOnlySqliteDriver(path.join(stateRoot, KERNEL_DATABASE_FILENAME));
-  try {
+  const receiptRef = await readInstalledUpgradeDatabase(path.join(stateRoot, KERNEL_DATABASE_FILENAME), async database => {
     const version = database.prepare('SELECT user_version FROM pragma_user_version').get<{ user_version: bigint }>()!.user_version;
     if (version === 8n) {
       const artifacts = new ArtifactCatalog(new ContentAddressedStore(path.join(stateRoot, KERNEL_CAS_DIRECTORY)), signal, releaseKeys);
@@ -4583,9 +4581,10 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
       const history = await readRetainedStateOwnerHistory(database, artifacts, latest.ownerEpoch);
       const boundary = history.entries.find(entry => entry.acquisition.kind === 'runtime_upgrade');
       if (!boundary || boundary.acquisition.kind !== 'runtime_upgrade') mismatch('upgrade cannot convert an unrelated schema8 birth');
-      database.readSnapshot(connection => history.assertUnchanged(connection)); receiptRef = boundary.acquisition.upgradeReceiptRef;
+      database.readSnapshot(connection => history.assertUnchanged(connection));
+      return boundary.acquisition.upgradeReceiptRef;
     } else if (version !== 7n) mismatch('only the exact signed7-to8 installed upgrade is implemented');
-  } finally { database.close(); }
+  }, signal);
   let receipt: RuntimeUpgradeReceiptV1;
   if (receiptRef) { noteUpgradePhase(observePhase, 'recover_selection'); receipt = await recoverInstalledRuntimeUpgrade(stateRoot, receiptRef, releaseKeys, signal); }
   else {
@@ -4609,7 +4608,7 @@ export async function upgradeInstalledRuntime(runtime: InstalledRuntime, stateRo
   }
   signal?.throwIfAborted();
   noteUpgradePhase(observePhase, 'target_open');
-  const selected = await runtime.openSelected(stateRoot);
+  const selected = await runtime.openSelected(stateRoot, signal);
   try {
     if (selected.bundleDigest !== receipt.targetRuntimeBundleRef || selected.bundle.manifestDigest !== receipt.targetRuntimeBundleManifestDigest)
       mismatch('upgrade restart selected another runtime');

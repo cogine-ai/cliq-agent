@@ -278,7 +278,7 @@ async function start(): Promise<void> {
     try {
       const receipt = await upgradeInstalledRuntime(runtime, stateRoot, packageRoot, stop.signal, next => { phase = next; });
       phase = 'output_selection_open';
-      const selected = await runtime.openSelected(stateRoot);
+      const selected = await runtime.openSelected(stateRoot, stop.signal);
       try {
         const { openInstalledClientStdio } = await import('../client/stdio.js');
         const { clientWriter } = await import('../client/entry.js');

@@ -1,7 +1,10 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { closeSync, constants, fstatSync, lstatSync, openSync, type Stats } from 'node:fs';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 import { channel } from 'node:diagnostics_channel';
+import { KERNEL_SQLITE_BUSY_TIMEOUT_MS } from '../config.js';
 import { beginHeldKernelArchiveBackup, assertHeldKernelArchive, assertHeldKernelArchiveSource, type HeldKernelArchive, type KernelArchiveBackupJoin } from './native-owner.js';
 import { KernelStorageError, ResourceRetirementError } from './errors.js';
 
@@ -637,4 +640,38 @@ export function openReadOnlySqliteDriver(databasePath: string): SqliteDriver {
     throw new TypeError('SQLite reader requires a normalized absolute file-backed database path');
   prepareDatabasePath(databasePath, false);
   return new NodeSqliteDriver(databasePath, true);
+}
+
+/** Installed upgrade selection can race a live writer in rollback-journal
+ * mode. Retry only a real read-only BUSY, after retiring each connection.
+ * Use the existing SQLite budget without blocking the Supervisor event loop. */
+export async function readInstalledUpgradeDatabase<T>(
+  databasePath: string, read: (driver: SqliteDriver) => T | Promise<T>, signal?: AbortSignal
+): Promise<T> {
+  const deadline = performance.now() + KERNEL_SQLITE_BUSY_TIMEOUT_MS;
+  for (;;) {
+    signal?.throwIfAborted();
+    let driver: SqliteDriver | undefined;
+    let busy: Error;
+    try {
+      driver = openReadOnlySqliteDriver(databasePath);
+      const result = await read(driver);
+      signal?.throwIfAborted();
+      return result;
+    } catch (error) {
+      const code = error instanceof Error && Object.getOwnPropertyDescriptor(error, 'code')?.value;
+      const sqliteCode = error instanceof Error && Object.getOwnPropertyDescriptor(error, 'errcode')?.value;
+      if (!(error instanceof Error) || code !== 'ERR_SQLITE_ERROR' || !Number.isSafeInteger(sqliteCode) ||
+          sqliteCode < 0 || sqliteCode % 256 !== 5) throw error;
+      busy = error;
+    } finally {
+      driver?.close();
+    }
+    signal?.throwIfAborted();
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw busy;
+    try { await delay(Math.min(20, remaining), undefined, { signal }); }
+    catch (error) { signal?.throwIfAborted(); throw error; }
+    if (performance.now() >= deadline) throw busy;
+  }
 }
