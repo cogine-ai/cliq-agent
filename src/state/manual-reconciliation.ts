@@ -336,12 +336,14 @@ type Plan = {
   cut: RecoveryClosureV1;
   mutation: Mutation;
   original: Awaited<ReturnType<typeof validateManualInvocationWait>>;
-  physical: Physical;
+  observe(): Promise<ManualDispatchObservation>;
+  release(): void;
+};
+type ManualDispatchObservation = {
   physicalRef: string;
   metadata: PublishedArtifact[];
   reobserve(connection: SqliteConnection): void;
   validate(connection: SqliteConnection, at: string): void;
-  release(): void;
 };
 const plans = new WeakMap<ManualInvocationFinalization, Plan>();
 export async function prepareManualInvocationFinalization(driver: SqliteDriver, artifacts: ArtifactCatalog, owner: StateOwnerContext, input: Mutation & {
@@ -373,21 +375,13 @@ export async function prepareManualInvocationFinalization(driver: SqliteDriver, 
   if (!original.ambiguity.creatorProcessDeathEvidenceRef) {
     await readSupervisorInspector(artifacts, claiming.owner, original.assembly, original.ambiguity);
   }
-  const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format), metadata = [inspectorArtifact];
+  const inspector = supervisorInspectorIdentity(active), inspectorArtifact = await artifacts.publishCanonical(inspector, inspector.format);
   const retained = readMcpManualDispatchOwner(original.claim);
-  let fresh = 0;
-  let death: BrokerProcessDomainDeathEvidenceV1 | undefined;
-  let observedAt = sampleCanonicalNow();
-  let kind: Pick<Physical, 'kind'> & Record<string, unknown>;
   if (retained) {
     if (active.ownerEpoch !== original.claim.stateOwnerEpoch || active.supervisorInstanceId !== original.claim.supervisorInstanceId) {
       invalid();
     }
     retained.assertJoined();
-    kind = {
-      kind: 'original_native_joined',
-      joined: retained.joined
-    };
   }
   else {
     if (active.ownerEpoch <= claiming.owner.ownerEpoch) {
@@ -405,102 +399,113 @@ export async function prepareManualInvocationFinalization(driver: SqliteDriver, 
         invalid();
       }
     });
-    const at = new Date(owner.filesystem.observePriorProcessDeath(claiming.process.pid, claiming.process.processStartToken)).toISOString();
-    death = {
+  }
+  const originalOwner = claiming;
+  // Produce the real physical observation after the terminal reducer finishes
+  // the expensive historical checks, so its original five-second bound
+  // applies to the commit preparation that can actually consume it.
+  async function observe(): Promise<ManualDispatchObservation> {
+    assertActiveStateOwner(driver, owner);
+    assertCurrentControlFrame(owner, input.identity);
+    assertMcpRunQuiescence(cut.run.id);
+    const metadata = [inspectorArtifact];
+    let fresh = 0;
+    let death: BrokerProcessDomainDeathEvidenceV1 | undefined;
+    let kind: Pick<Physical, 'kind'> & Record<string, unknown>;
+    if (retained) {
+      retained.assertJoined();
+      kind = { kind: 'original_native_joined', joined: retained.joined };
+    } else {
+      const at = new Date(owner.filesystem.observePriorProcessDeath(originalOwner.process.pid, originalOwner.process.processStartToken)).toISOString();
+      death = {
+        schemaVersion: 1,
+        format: 'cliq-broker-process-domain-death-evidence-v1',
+        runId: cut.run.id,
+        opId: original.claim.opId,
+        attempt: original.claim.attempt,
+        dispatchId: original.claim.dispatchId!,
+        dispatchJournalSeq: original.claim.seq,
+        operationRequestRef: original.prepared.requestRef,
+        operationTargetDigest: original.target.targetDigest,
+        operationGrantRef: original.prepared.grantRef!,
+        claimingSupervisorInstanceId: originalOwner.owner.supervisorInstanceId,
+        claimingStateOwnerEpoch: originalOwner.owner.ownerEpoch,
+        claimingProcessIdentityRef: originalOwner.owner.processIdentityRef,
+        claimingProcessIdentityDigest: originalOwner.owner.processIdentityDigest,
+        inspectorIdentityRef: inspectorArtifact.ref,
+        inspectorIdentityDigest: inspector.identityDigest,
+        inspectorStateOwnerEpoch: active.ownerEpoch,
+        brokerFenceTokenDigest: original.claim.brokerFenceTokenDigest!,
+        authorityDomain: 'linux_installed_native_creator_process_v1',
+        processObservation: 'absent_or_start_token_mismatch',
+        observedAt: at,
+        evidenceDigest: ''
+      };
+      death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
+      decodeBrokerProcessDomainDeath(death);
+      const published = await artifacts.publishCanonical(death, death.format);
+      metadata.push(published);
+      kind = {
+        kind: 'broker_process_domain_dead',
+        deathEvidenceRef: published.ref,
+        deathEvidenceDigest: death.evidenceDigest
+      };
+    }
+    const observedAt = sampleCanonicalNow();
+    const physical = {
       schemaVersion: 1,
-      format: 'cliq-broker-process-domain-death-evidence-v1',
+      format: 'cliq-manual-dispatch-closure-v1',
       runId: cut.run.id,
       opId: original.claim.opId,
       attempt: original.claim.attempt,
       dispatchId: original.claim.dispatchId!,
       dispatchJournalSeq: original.claim.seq,
-      operationRequestRef: original.prepared.requestRef,
-      operationTargetDigest: original.target.targetDigest,
-      operationGrantRef: original.prepared.grantRef!,
-      claimingSupervisorInstanceId: claiming.owner.supervisorInstanceId,
-      claimingStateOwnerEpoch: claiming.owner.ownerEpoch,
-      claimingProcessIdentityRef: claiming.owner.processIdentityRef,
-      claimingProcessIdentityDigest: claiming.owner.processIdentityDigest,
+      brokerFenceTokenDigest: original.claim.brokerFenceTokenDigest!,
+      unknownJournalSeq: original.unknown.seq,
       inspectorIdentityRef: inspectorArtifact.ref,
       inspectorIdentityDigest: inspector.identityDigest,
       inspectorStateOwnerEpoch: active.ownerEpoch,
-      brokerFenceTokenDigest: original.claim.brokerFenceTokenDigest!,
-      authorityDomain: 'linux_installed_native_creator_process_v1',
-      processObservation: 'absent_or_start_token_mismatch',
-      observedAt: at,
-      evidenceDigest: ''
-    };
-    death.evidenceDigest = digestOmitting(death, 'evidenceDigest');
-    decodeBrokerProcessDomainDeath(death);
-    const published = await artifacts.publishCanonical(death, death.format);
-    metadata.push(published);
-    kind = {
-      kind: 'broker_process_domain_dead',
-      deathEvidenceRef: published.ref,
-      deathEvidenceDigest: death.evidenceDigest
+      observedAt,
+      evidenceDigest: '',
+      ...kind
+    } as Physical;
+    physical.evidenceDigest = digestOmitting(physical, 'evidenceDigest');
+    decodeManualDispatchClosureData(physical);
+    const closure = await artifacts.publishCanonical(physical, physical.format);
+    metadata.push(closure);
+    return {
+      physicalRef: closure.ref,
+      metadata,
+      reobserve(connection) {
+        assertActiveStateOwner(connection, owner);
+        assertCurrentControlFrame(owner, input.identity);
+        assertMcpRunQuiescence(cut.run.id);
+        if (retained) {
+          retained.assertJoined();
+        }
+        else
+          fresh = owner.filesystem.observePriorProcessDeath(originalOwner.process.pid, originalOwner.process.processStartToken);
+      },
+      validate(connection, at) {
+        history.assertUnchanged(connection);
+        assertCurrentControlFrame(owner, input.identity);
+        if (!same(readRun(connection, cut.run.id), cut.run) || !same(readInvocationJournal(connection, cut.run.id), cut.journal) ||
+          parseCanonicalTime(at) < parseCanonicalTime(observedAt) || parseCanonicalTime(at) - parseCanonicalTime(observedAt) > 5000 ||
+          death && (fresh < parseCanonicalTime(death.observedAt) || fresh > parseCanonicalTime(at) ||
+            parseCanonicalTime(at) - parseCanonicalTime(death.observedAt) > 5000)) {
+          invalid();
+        }
+        if (retained) {
+          retained.assertJoined();
+        }
+      }
     };
   }
-  observedAt = sampleCanonicalNow();
-  const physical = {
-    schemaVersion: 1,
-    format: 'cliq-manual-dispatch-closure-v1',
-    runId: cut.run.id,
-    opId: original.claim.opId,
-    attempt: original.claim.attempt,
-    dispatchId: original.claim.dispatchId!,
-    dispatchJournalSeq: original.claim.seq,
-    brokerFenceTokenDigest: original.claim.brokerFenceTokenDigest!,
-    unknownJournalSeq: original.unknown.seq,
-    inspectorIdentityRef: inspectorArtifact.ref,
-    inspectorIdentityDigest: inspector.identityDigest,
-    inspectorStateOwnerEpoch: active.ownerEpoch,
-    observedAt,
-    evidenceDigest: '',
-    ...kind
-  } as Physical;
-  physical.evidenceDigest = digestOmitting(physical, 'evidenceDigest');
-  decodeManualDispatchClosureData(physical);
-  const closure = await artifacts.publishCanonical(physical, physical.format);
-  metadata.push(closure);
   const handle = Object.freeze({}) as ManualInvocationFinalization;
   plans.set(handle, {
-    driver,
-    owner,
-    cut,
-    mutation: {
-      request: decoded,
-      identity: immutableSnapshot(input.identity)
-    },
-    original,
-    physical,
-    physicalRef: closure.ref,
-    metadata,
-    reobserve(connection) {
-      assertActiveStateOwner(connection, owner);
-      assertCurrentControlFrame(owner, input.identity);
-      assertMcpRunQuiescence(cut.run.id);
-      if (retained) {
-        retained.assertJoined();
-      }
-      else
-        fresh = owner.filesystem.observePriorProcessDeath(claiming.process.pid, claiming.process.processStartToken);
-    },
-    validate(connection, at) {
-      history.assertUnchanged(connection);
-      assertCurrentControlFrame(owner, input.identity);
-      if (!same(readRun(connection, cut.run.id), cut.run) || !same(readInvocationJournal(connection, cut.run.id), cut.journal) ||
-        parseCanonicalTime(at) < parseCanonicalTime(observedAt) || parseCanonicalTime(at) - parseCanonicalTime(observedAt) > 5000 ||
-        death && (fresh < parseCanonicalTime(death.observedAt) || fresh > parseCanonicalTime(at) ||
-          parseCanonicalTime(at) - parseCanonicalTime(death.observedAt) > 5000)) {
-        invalid();
-      }
-      if (retained) {
-        retained.assertJoined();
-      }
-    },
-    release() {
-      retained?.release();
-    }
+    driver, owner, cut, original, observe,
+    mutation: { request: decoded, identity: immutableSnapshot(input.identity) },
+    release() { retained?.release(); }
   });
   return handle;
 }
@@ -588,7 +593,6 @@ export function stageManualInvocationFinalization(plan: Plan, now: string, journ
       attempt: o.claim.attempt,
       abandonedJournalSeq: journalSeq,
       attestationRef: artifact.ref,
-      dispatchFenceOrDeathEvidenceRef: plan.physicalRef,
       toolAbandonedItemRef: canonicalSha256(item)
     }
   };

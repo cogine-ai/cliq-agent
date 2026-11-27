@@ -245,6 +245,12 @@ export async function runInstalledMcpCases(context: InstalledMcpContext) {
       same(abandoned[0].budgetDelta, ZERO); assert.equal(abandoned[0].budgetSettlementRef, final.budgetSettlementRef);
       const attestation = decodeManualAbandonAttestation(await read(abandoned[0].attestationRef));
       assert.equal(attestation.requestDigest, acknowledgement.requestDigest); assert.equal(attestation.unknownJournalSeq, final.seq);
+      const detail = await read(terminal.resolution.terminalDetailRef);
+      const physical = await read(detail.abandonedManualInvocation.dispatchFenceOrDeathEvidenceRef);
+      assert.equal(physical.kind, kind === 'unknown_after_effect_restart' ? 'broker_process_domain_dead' : 'original_native_joined');
+      assert.equal(physical.dispatchJournalSeq, claim.seq);
+      const observationAge = Date.parse(attestation.createdAt) - Date.parse(physical.observedAt);
+      assert(observationAge >= 0 && observationAge <= 5_000);
       const items = await Promise.all(cut.items.map((row: Data) => read(row.payloadRef)));
       const marker = items.filter(item => item.kind === 'tool_abandoned'); assert.equal(marker.length, 1);
       assert.equal(decodeToolAbandonedItem(marker[0]).opId, claim.opId);

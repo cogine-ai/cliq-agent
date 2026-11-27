@@ -633,6 +633,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           throw new KernelStorageError('STATE_TRANSITION_INVALID', 'terminal stop awaits exact dispatch/reconciliation closure');
         }
         for (let retry = 0; retry < 8; retry++) {
+          const manualObservation = manual ? await manual.observe() : undefined;
           if (manual) {
             manualPreparedAt = sampleCanonicalNow();
             manualStage = stageManualInvocationFinalization(manual, manualPreparedAt, selected.journal.length + 1);
@@ -692,7 +693,9 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
           const cancelled = pending ? pending.batch.calls.slice(nextCancelled).map((_, index) => cancelledCall(pending.batch, nextCancelled + index, run.stopIntentRef!, now)) : [];
           const detail = planCanonicalArtifact({ ...agentStopDetail(intent, run.stopIntentRef!, now),
             abandonedRetryInvocations: abandoned,
-            ...(manualStage ? { abandonedManualInvocation: manualStage.detail } : {}),
+            ...(manualStage && manualObservation ? { abandonedManualInvocation: {
+              ...manualStage.detail, dispatchFenceOrDeathEvidenceRef: manualObservation.physicalRef
+            } } : {}),
             ...(publication ? { publicationResultItemRefs: publication.publicationResultItemRefs,
               deliveryTerminalProjectionEvidenceRef: publication.evidenceRef } : {}) }, 'cliq-terminal-detail-v1');
           const continuation = await prepareContinuationCommit(artifacts, { context: decodeContextManifest(await readCanonicalArtifact(artifacts, checkpoint.contextManifestRef)),
@@ -760,7 +763,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             brokerClosure.reobserve(connection);
             mcpClosure?.reobserve(connection);
             workerRecovery?.reobserve(connection);
-            manual?.reobserve(connection);
+            manualObservation?.reobserve(connection);
             const committedAt = sampleCanonicalNow();
             time = acceptTime(connection, committedAt);
             if (!time.accepted) return;
@@ -777,7 +780,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             }
             brokerClosure.validate(connection, originalRun, committedAt);
             mcpClosure?.validate(connection, originalRun, committedAt);
-            manual?.validate(connection, committedAt);
+            manualObservation?.validate(connection, committedAt);
             publication?.validate(connection, run, committedAt);
             workerRecovery?.validate(connection, committedAt);
             for (const artifact of workerRecovery?.metadata ?? []) insertArtifactMetadata(connection, artifact, committedAt);
@@ -786,7 +789,7 @@ export function loadAgentStop(driver: SqliteDriver, artifacts: ArtifactCatalog, 
             if (connection.prepare("SELECT 1 FROM worker_launches WHERE run_id = ? AND phase != 'retired' AND launch_id != ? LIMIT 1")
               .get(runId, run.activeWorkerLaunchId ?? '')) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'stop cannot retain a pending worker launch');
             for (const artifact of [...continuation.metadata, ...(seal?.metadata ?? []), ...(publication?.metadata(connection) ?? []),
-              ...brokerClosure.metadata, ...(mcpClosure?.metadata ?? []), ...(manual?.metadata ?? []), ...(manualResponseArtifact ? [manualResponseArtifact] : []), ...(childTerminal?.metadata ?? []), ...(sessionPlan ? [sessionPlan.terminalArtifact, sessionPlan.projectionArtifact] : [])]) insertArtifactMetadata(connection, artifact, committedAt);
+              ...brokerClosure.metadata, ...(mcpClosure?.metadata ?? []), ...(manualObservation?.metadata ?? []), ...(manualResponseArtifact ? [manualResponseArtifact] : []), ...(childTerminal?.metadata ?? []), ...(sessionPlan ? [sessionPlan.terminalArtifact, sessionPlan.projectionArtifact] : [])]) insertArtifactMetadata(connection, artifact, committedAt);
             publication?.validate(connection, run, committedAt);
             if (publication && sessionPlan && canonicalSha256(readSession(connection, sessionPlan.session.id)) !== canonicalSha256(sessionPlan.session))
               throw new KernelStorageError('REVISION_CONFLICT', 'publication terminal Session changed during artifact registration');
