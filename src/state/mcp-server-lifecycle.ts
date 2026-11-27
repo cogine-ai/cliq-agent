@@ -64,6 +64,14 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
   original: McpServerLifecycleComposition) {
   const runId = original.run.id;
   const liveLaunches = new Map<string, { native: NativeMcpStdioRunOwner; binding: RunMcpStdioLaunchBinding; claim: InvocationJournalEntry }>();
+  async function readAuthorizedCut(revision: number, reads: ArtifactCatalog, signal?: AbortSignal) {
+    let cut!: ToolCut;
+    await reads.mapReadGroups([
+      scoped => original.assertRuntime(scoped, signal),
+      async scoped => { cut = await original.cut(revision, scoped); }
+    ], (scoped, read) => read(scoped));
+    return cut;
+  }
   async function context(selected: ToolCut, reads: ArtifactCatalog) {
     const effect = original.requestFor(selected);
     if (effect.target.execution.kind !== 'mcp') return undefined;
@@ -345,7 +353,7 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
     prepareMcpServer: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, native: NativeMcpStdioRunOwner,
       platform: { selected: HeldInstalledRuntime; anchor: HeldInstalledAnchor; controller: LinuxWorkerController }, signal?: AbortSignal) => {
       const reads = signal ? artifacts.withReadSignal(signal) : artifacts; reads.assertReadActive();
-      const [, cut] = await joinResourceOperations([original.assertRuntime(reads, signal), original.cut(input.expectedRunRevision, reads)] as const);
+      const cut = await readAuthorizedCut(input.expectedRunRevision, reads, signal);
       assertLinuxWorkerController(platform.controller);
       const selected = await selection(cut, reads);
       if (!selected?.grant) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP server launch requires its own exact permission before preparation');
@@ -443,7 +451,7 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
       native: NativeMcpStdioRunOwner, binding: RunMcpStdioLaunchBinding,
       physical: Readonly<{ scope: InstalledMcpStdioRunScope; input: HeldRunMcpStdioInput }>, signal?: AbortSignal) => {
       const reads = signal ? artifacts.withReadSignal(signal) : artifacts; reads.assertReadActive();
-      const [, cut] = await joinResourceOperations([original.assertRuntime(reads, signal), original.cut(input.expectedRunRevision, reads)] as const);
+      const cut = await readAuthorizedCut(input.expectedRunRevision, reads, signal);
       const selected = await context(cut, reads);
       const prepared = readHighestPreparedAttempt(driver, runId, input.opId);
       if (!selected || !prepared?.grantRef || prepared.opKind !== 'mcp-server' || prepared.attempt !== input.attempt || prepared.requestRef !== canonicalSha256(selected.request) ||
