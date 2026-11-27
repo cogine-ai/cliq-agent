@@ -58,7 +58,7 @@ import { createInstalledMcpRecoveryModelResponder, INSTALLED_MCP_RECOVERY_MODEL_
 import { createInstalledMcpRetryHttpHandler, MCP_RETRY_HTTP_PATH } from './installed-mcp-retry-http.js';
 import { INSTALLED_MCP_CASES, type InstalledMcpCase } from './installed-mcp-responder.js';
 import { assertInstalledUnusedDeliveryGrant, type InstalledPermissionEvidence } from './installed-permission-evidence.js';
-import { inspectInstalledPermissionRecord, inspectInstalledMcpPreclaimRefusal } from './installed-worker-lease.js';
+import { inspectInstalledPermissionRecord, inspectInstalledMcpPreclaimRefusal, inspectInstalledMcpWorkerRetirementHistory } from './installed-worker-lease.js';
 import { createInstalledDependencyResponder, installedDependencyPackage, INSTALLED_DEPENDENCY_PACKAGE_PATH,
   INSTALLED_DEPENDENCY_PROFILE, runInstalledDependencyCases } from './installed-dependency-journey.js';
 import { createInstalledChildrenResponder, INSTALLED_CHILDREN_PROFILE, INSTALLED_CHILD_CASES, runInstalledChildCase } from './installed-children-journey.js';
@@ -1451,7 +1451,7 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
             canonicalJsonBytes({ modelTokens: 0, costMicros: 0, toolCalls: 0, repairAttempts: 0 }));
           const observed = inspectInstalledWorkerLaunchIds(recipe.stateRoot, ledger.uid, runId);
           for (const launchId of observed.launchIds) {
-            const retired = inspectInstalledWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
+            const retired = inspectInstalledMcpWorkerRetirementHistory(recipe.stateRoot, ledger.uid, { runId, launchId });
             assert.match(retired.processStartToken, /^linux-proc-start-ticks:[1-9][0-9]*$/u);
             await absent(retired.pid, retired.processStartToken.slice('linux-proc-start-ticks:'.length));
           }

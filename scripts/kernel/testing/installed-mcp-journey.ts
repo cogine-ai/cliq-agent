@@ -139,8 +139,12 @@ export async function runInstalledMcpCases(context: InstalledMcpContext) {
       assert(remaining > 0, 'MCP source case exhausted the original 90-second observation window');
       cut = await get(runId, Math.min(30_000, remaining));
       assert(Date.now() < by, 'the observed MCP result arrived after the original 90-second window');
-      if (installedMcpKnown(kind) ? cut.snapshot.run.status === 'succeeded'
-        : cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation') break;
+      if (installedMcpKnown(kind) && cut.snapshot.run.status === 'succeeded') break;
+      if (!installedMcpKnown(kind) && cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation') {
+        const wait = await read(cut.snapshot.run.waitingOnRef);
+        assert(Date.now() < by);
+        if (wait.subject?.kind !== 'worker_death') { decodeManualInvocationWait(wait); break; }
+      }
       assert(!['failed', 'cancelled', 'completed_unverified'].includes(cut.snapshot.run.status), 'the real MCP case reached an unexpected terminal state');
       assert(Date.now() < by, 'MCP source case exceeded the original 90-second terminal observation window'); await delay(100);
     }

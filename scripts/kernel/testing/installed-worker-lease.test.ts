@@ -14,7 +14,8 @@ import type { ProcessContainmentPlanV1, SandboxLaunchSpecV1 } from '../../../src
 import type { WorkerIdentity, WorkerLaunch, WorkspaceGenerationStateV1 } from '../../../src/kernel/types.js';
 import { assertInstalledWorkerLeaseRenewed, inspectInstalledWorkerIdentity, inspectInstalledWorkerLease,
   inspectInstalledWorkerRetirement, inspectInstalledWorkerRetirementHistory, inspectInstalledWorkerLaunchIds } from './installed-worker-lease.js';
-import { inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement, inspectInstalledVerifierClaim, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
+import { inspectInstalledMcpWorkerRetirementHistory, inspectInstalledPublicationClaim, inspectInstalledRecoveredWorkerRetirement,
+  inspectInstalledVerifierClaim, inspectInstalledVerifierParentRetirement } from './installed-worker-lease.js';
 import type { VerifierParentDomainDispatchClosureV1 } from '../../../src/state/verifier-unknown-retirement.js';
 import { publicationArenaId } from '../../../src/kernel/publication.js';
 import { addCanonicalDuration, identityHash } from '../../../src/kernel/identity.js';
@@ -241,6 +242,10 @@ async function recoveredFixture(t: TestContext) {
 test('actual readonly SQL recovery diagnostics require the complete original quarantine, death and retirement graph', async t => {
   const value = await recoveredFixture(t), before = await readFile(value.filename), names = await readdir(value.cas);
   const observed = inspectInstalledRecoveredWorkerRetirement(value.stateRoot, process.getuid!(), value.expected);
+  const mcp = inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, process.getuid!(),
+    { runId: value.expected.runId, launchId: value.expected.resources.workerLaunchId });
+  assert.equal(mcp.generationPhase, 'retired'); assert.equal(mcp.retirementEvidenceRef, observed.retirementEvidenceRef);
+  assert.equal(mcp.launchIdentityDigest, observed.launchIdentityDigest);
   assert.equal(observed.generationPhase, 'retired'); assert.equal(observed.generationWriteState, 'fenced_reconciling');
   assert.equal(observed.retirementEvidenceRef, value.expected.resources.retirementEvidenceRef);
   assert.equal(observed.pid, 12345); assert.equal(Object.hasOwn(observed, 'qualified'), false);
@@ -554,11 +559,14 @@ test('retirement diagnostic follows the captured original worker after the Run p
 
 test('retirement history reads a real retained seal without inventing an earlier live observation', async t => {
   const value = await workerFixture(t), expected = { runId: value.expected.runId, launchId: value.expected.launchId };
+  assert.throws(() => inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected));
   assert.throws(() => inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected),
     { message: 'installed worker retirement history inspection refused' });
   const retired = await retireFixture(value), before = await readFile(value.filename), names = await readdir(value.cas);
   const bytes = await Promise.all(names.map(name => readFile(path.join(value.cas, name))));
   const observed = inspectInstalledWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected);
+  const mcp = inspectInstalledMcpWorkerRetirementHistory(value.stateRoot, value.expected.uid, expected);
+  assert.equal(mcp.generationPhase, 'sealed'); assert.equal(mcp.launchIdentityDigest, observed.launchIdentityDigest);
   assert.equal(observed.diagnosticOnly, true); assert.equal(observed.launchId, value.expected.launchId);
   assert.equal(observed.phase, 'retired'); assert.equal(observed.generationWriteState, 'sealed'); assert.equal(observed.generationPhase, 'sealed');
   assert.equal(observed.retirementEvidenceRef, retired.retiredLaunch.retirementEvidenceRef);

@@ -553,6 +553,31 @@ export function inspectInstalledWorkerRetirementHistory(stateRoot: string, uid: 
   } catch { throw new Error('installed worker retirement history inspection refused'); }
 }
 
+/** An MCP source can seal normally or retire via worker recovery after an
+ * unknown effect. Each branch uses its original complete evidence reader. */
+export function inspectInstalledMcpWorkerRetirementHistory(stateRoot: string, uid: number,
+  expected: Readonly<{ runId: string; launchId: string }>) {
+  const selection = readWorkerDiagnostic(stateRoot, uid, (database, databaseIdentity, readCas) => {
+    const { launch, generation } = readWorkerRows(database, expected.runId, expected.launchId);
+    requireValue(launch.phase === 'retired');
+    if (launch.generationWriteState === 'sealed') return { databaseIdentity };
+    requireValue(launch.generationWriteState === 'fenced_reconciling' && generation.phase === 'retired' &&
+      launch.leaseEpoch && generation.retirementEvidenceRef);
+    const evidence = readCas(generation.retirementEvidenceRef) as Record<string, unknown>;
+    requireValue(evidence && digest(evidence.inspectorIdentityRef) && digest(evidence.inspectorIdentityDigest) && digest(evidence.quarantineEvidenceRef));
+    return { databaseIdentity, recovery: { runId: expected.runId, supervisorInstanceId: launch.supervisorInstanceId,
+      leaseEpoch: launch.leaseEpoch, inspectorIdentityRef: evidence.inspectorIdentityRef, inspectorIdentityDigest: evidence.inspectorIdentityDigest,
+      resources: { kind: 'genuinely_retired_from_verified_checkpoint' as const, workerLaunchId: launch.launchId, generationRef: generation.generationRef,
+        sourceCheckpointId: generation.sourceCheckpointId, quarantineEvidenceRef: evidence.quarantineEvidenceRef,
+        retirementEvidenceRef: generation.retirementEvidenceRef } } };
+  });
+  const actual = selection.recovery
+    ? inspectInstalledRecoveredWorkerRetirement(stateRoot, uid, selection.recovery)
+    : inspectInstalledWorkerRetirementHistory(stateRoot, uid, expected);
+  requireValue(actual.databaseIdentity === selection.databaseIdentity);
+  return actual;
+}
+
 /** Original identifiers only, not worker/retirement evidence. A known empty
  * Run is distinguished from a missing Run; every returned launch still needs
  * the complete retained seal reader and independent process checks. Sixteen

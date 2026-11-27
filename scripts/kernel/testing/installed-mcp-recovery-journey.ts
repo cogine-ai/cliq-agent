@@ -333,13 +333,19 @@ export async function runInstalledMcpRecoveryCases(context: Context) {
     for (;;) {
       const remaining = by - Date.now(); assert(remaining > 0, 'the original installed recovery campaign observation window expired');
       cut = await get(runId, Math.min(30_000, remaining)); assert(Date.now() < by);
-      if (observeActive && cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation' && cut.snapshot.run.waitingOnRef) {
-        const wait = decodeMcpInvocationWait(await read(cut.snapshot.run.waitingOnRef));
-        if (wait.probeState.phase === 'automatic_in_flight') { observedStatusWait = wait; break; }
-      }
-      if (firstClosure && cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation' && cut.snapshot.run.waitingOnRef) {
-        closedStatusWait = await firstAutomaticClosure(cut.snapshot.run.waitingOnRef);
-        if (closedStatusWait) break;
+      if ((observeActive || firstClosure) && cut.snapshot.run.status === 'waiting' &&
+          cut.snapshot.run.waitingReason === 'reconciliation' && cut.snapshot.run.waitingOnRef) {
+        const value = await read(cut.snapshot.run.waitingOnRef);
+        assert(Date.now() < by);
+        if (value.subject?.kind !== 'worker_death') {
+          const wait = decodeMcpInvocationWait(value);
+          if (observeActive && wait.probeState.phase === 'automatic_in_flight') { observedStatusWait = wait; break; }
+          if (firstClosure) {
+            closedStatusWait = await firstAutomaticClosure(cut.snapshot.run.waitingOnRef);
+            assert(Date.now() < by);
+            if (closedStatusWait) break;
+          }
+        }
       }
       if (!observeActive && !firstClosure && cut.snapshot.run.status === (knownResult ? 'succeeded' : 'failed')) break;
       assert(!['failed', 'succeeded', 'cancelled', 'completed_unverified'].includes(cut.snapshot.run.status), 'the original recovery Run reached the wrong terminal state');

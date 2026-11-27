@@ -142,8 +142,12 @@ export async function runInstalledMcpStdioCases(context: Context) {
           expectedRevision: cancellationCut.snapshot.run.revision });
         accepted(await context.send(cancellation), 'run.cancel');
       }
-      if (installedMcpStdioKnown(kind) ? cut.snapshot.run.status === 'succeeded'
-        : cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation') break;
+      if (installedMcpStdioKnown(kind) && cut.snapshot.run.status === 'succeeded') break;
+      if (!installedMcpStdioKnown(kind) && cut.snapshot.run.status === 'waiting' && cut.snapshot.run.waitingReason === 'reconciliation') {
+        const wait = await read(cut.snapshot.run.waitingOnRef);
+        assert(Date.now() < by);
+        if (wait.subject?.kind !== 'worker_death') { decodeManualInvocationWait(wait); break; }
+      }
       assert(!['failed', 'cancelled', 'completed_unverified'].includes(cut.snapshot.run.status), 'stdio source reached an unexpected terminal state');
       await delay(100);
     }
