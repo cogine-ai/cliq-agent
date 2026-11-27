@@ -15,6 +15,13 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+/* A delegated directory's entries may change during the operation. Its held
+ * inode, owner and mode must still match before and after those changes. */
+static inline bool same_directory(const struct stat *expected, const struct stat *actual) {
+    return S_ISDIR(actual->st_mode) && expected->st_dev == actual->st_dev && expected->st_ino == actual->st_ino &&
+        expected->st_uid == actual->st_uid && expected->st_gid == actual->st_gid && expected->st_mode == actual->st_mode;
+}
+
 /* A fixed private exec-error pipe carries one native int only. A failed
  * optional diagnostic still exits unsuccessfully; partial writes cannot be
  * mistaken for a complete errno or stage, and EINTR never loses its tail. */

@@ -202,7 +202,7 @@ static bool mcp_stdio_cleanup_retained(struct cliq_worker_packet *request, int *
             source_stat_same(&held, &named) && (uint64_t)held.st_dev == original->cgroup_device &&
             (uint64_t)held.st_ino == original->cgroup_inode && cgroup_empty(group) &&
             !unlinkat(root, original->cgroup_name, AT_REMOVEDIR);
-    valid = valid && !fstat(root, &held) && source_stat_same(&held, &root_identity) &&
+    valid = valid && native_cgroup(root) && !fstat(root, &held) && same_directory(&root_identity, &held) &&
         fstatat(root, original->cgroup_name, &named, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT && tracked_absent(&tracked);
     if (!source_close_fd(&group) || !source_close_fd(&birth) || !source_close_fd(&root)) valid = false;
     if (!valid) return false;

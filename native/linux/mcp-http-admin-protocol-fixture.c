@@ -4,7 +4,26 @@
  */
 #define _GNU_SOURCE
 #include "mcp-http-admin-protocol.h"
+#include "worker-common.h"
 #include <assert.h>
+
+static void fixture_directory_identity(void)
+{
+    char directory[] = "/tmp/cliq-mcp-anchor.XXXXXX";
+    assert(mkdtemp(directory));
+    int root = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat original, mutated, child;
+    assert(root >= 0 && !fstat(root, &original));
+    assert(!mkdirat(root, "owned", 0700));
+    assert(!fstat(root, &mutated) && same_directory(&original, &mutated));
+    assert(!fstatat(root, "owned", &child, AT_SYMLINK_NOFOLLOW) && !same_directory(&original, &child));
+    assert(!unlinkat(root, "owned", AT_REMOVEDIR));
+    assert(!fstat(root, &mutated) && same_directory(&original, &mutated));
+    assert(!fchmod(root, 0755));
+    assert(!fstat(root, &mutated) && !same_directory(&original, &mutated));
+    assert(!close(root) && !rmdir(directory));
+}
+
 static void
 fixture_digest(char digest[65])
 {
@@ -14,6 +33,7 @@ fixture_digest(char digest[65])
 int
 main(void)
 {
+    fixture_directory_identity();
     struct cliq_mcp_admin_birth header = {0};
     header.magic = CLIQ_MCP_ADMIN_BIRTH_MAGIC;
     header.version = 1;

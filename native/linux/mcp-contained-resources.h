@@ -30,7 +30,7 @@ static void mcp_contained_note_reaped(struct mcp_contained_resource *scope, pid_
 }
 static bool mcp_contained_root_current(const struct mcp_contained_resource *scope) {
     struct stat root, named;
-    return scope->anchor >= 0 && !fstat(scope->anchor, &root) && source_stat_same(&root, &scope->anchor_identity) && native_cgroup(scope->anchor) &&
+    return scope->anchor >= 0 && !fstat(scope->anchor, &root) && same_directory(&scope->anchor_identity, &root) && native_cgroup(scope->anchor) &&
         (!scope->created || (!fstatat(scope->anchor, scope->identity.cgroup_name, &named, AT_SYMLINK_NOFOLLOW) && source_stat_same(&named, &scope->cgroup_identity)));
 }
 static bool mcp_contained_step(struct mcp_contained_resource *scope, unsigned kind) {
