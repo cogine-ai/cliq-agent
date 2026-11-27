@@ -15,7 +15,7 @@ import { readCanonicalArtifact } from './agent-context.js';
 import { advanceTimeFence, readTimeFence, sampleCanonicalNow, type TimeFenceAdvance } from './canonical-time.js';
 import { prepareContinuationCommit } from './continuation-commit.js';
 import { assertChildAncestryRelease } from './child-ancestry.js';
-import { KernelStorageError, stateOperation } from './errors.js';
+import { joinResourceOperations, KernelStorageError, stateOperation } from './errors.js';
 import { planMcpServerLaunch, loadMcpServerPolicy, decodeMcpStdioExecutableIdentity } from './mcp-server-policy.js';
 import { readMcpServerGrant, readMcpServerApproval, readMcpServerApprovalWait, mcpServerPolicyItem, mcpServerApprovalCheckpointId,
   mcpServerDecisionCheckpointId, type McpServerPermissionContext } from './mcp-server-permission.js';
@@ -345,8 +345,9 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
     prepareMcpServer: stateOperation('RECOVERY_REQUIRED', async (input: { expectedRunRevision: number; leaseEpoch: number }, native: NativeMcpStdioRunOwner,
       platform: { selected: HeldInstalledRuntime; anchor: HeldInstalledAnchor; controller: LinuxWorkerController }, signal?: AbortSignal) => {
       const reads = signal ? artifacts.withReadSignal(signal) : artifacts; reads.assertReadActive();
-      await original.assertRuntime(reads, signal); assertLinuxWorkerController(platform.controller);
-      const cut = await original.cut(input.expectedRunRevision, reads), selected = await selection(cut, reads);
+      const [, cut] = await joinResourceOperations([original.assertRuntime(reads, signal), original.cut(input.expectedRunRevision, reads)] as const);
+      assertLinuxWorkerController(platform.controller);
+      const selected = await selection(cut, reads);
       if (!selected?.grant) throw new KernelStorageError('STATE_TRANSITION_INVALID', 'MCP server launch requires its own exact permission before preparation');
       const expectedTool = readHighestPreparedAttempt(driver, runId, selected.context.effect.request.opId);
       if (!expectedTool?.grantRef || expectedTool.opKind !== 'mcp' || expectedTool.requestRef !== canonicalSha256(selected.context.effect.request) ||
@@ -366,11 +367,14 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
         parseCanonicalTime(parent.leaseExpiresAt), selected.context.callDeadlineMs ?? Number.MAX_SAFE_INTEGER);
       const launchDeadlineMs = Math.min(parseCanonicalTime(createdAt) + selected.context.target.launchTimeoutMs, callDeadlineMs);
       if (parseCanonicalTime(createdAt) >= launchDeadlineMs) throw new KernelStorageError('LEASE_FENCED', 'MCP original call permission expired before server preparation');
-      const runtime = await withHeldInstalledRuntime(platform.selected, async held => { await held.revalidate(signal); return held.bundle; }, signal);
       const transport = selected.context.registry.registry.transport;
       if (transport.kind !== 'stdio') throw new TypeError('MCP server original preparation changed its transport');
+      const [runtime, originalSupervisor, recipe] = await joinResourceOperations([
+        withHeldInstalledRuntime(platform.selected, async held => { await held.revalidate(signal); return held.bundle; }, signal),
+        readCanonicalArtifact(reads, owner.processIdentityRef).then(decodePlatformProcessIdentity),
+        originalRecipe(selected.context, native, reads)
+      ] as const);
       let cgroupParent = ''; withInstalledWorkerRoot(platform.selected, platform.anchor, (_fd, root) => { cgroupParent = root; });
-      const originalSupervisor = decodePlatformProcessIdentity(await readCanonicalArtifact(reads, owner.processIdentityRef));
       const processOwner = { kind: 'run_invocation' as const, runId, intendedLeaseEpoch: input.leaseEpoch, workerLaunchId: parent.launchId,
         opId: selected.context.request.opId, attempt, dispatchId };
       const launch = await publishMcpStdioLaunch(reads, { purpose: { kind: 'run', owner: processOwner,
@@ -378,7 +382,6 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
         targetRef: canonicalSha256(selected.context.target), targetDigest: selected.context.target.targetDigest,
         grantRef: canonicalSha256(selected.grant), parentWorkerContainmentRef: parent.processContainmentRef }, bundle: runtime,
         controller: platform.controller, cgroupParent, lock: owner.filesystem, executable: transport.executable, nonce, createdAt, resources });
-      const recipe = await originalRecipe(selected.context, native, reads);
       const recipeArtifact = await reads.publishBytes(recipe.bytes, 'application/octet-stream', 'cliq-mcp-stdio-native-recipe-bytes-v1');
       const preparationCore = { schemaVersion: 1 as const, format: 'cliq-mcp-server-launch-preparation-v1' as const, runId,
         principalId: original.principalId, launchOpId: selected.context.request.opId, attempt, batchItemId: selected.context.request.batchItemId,
@@ -440,8 +443,8 @@ export function loadMcpServerLifecycle(driver: SqliteDriver, artifacts: Artifact
       native: NativeMcpStdioRunOwner, binding: RunMcpStdioLaunchBinding,
       physical: Readonly<{ scope: InstalledMcpStdioRunScope; input: HeldRunMcpStdioInput }>, signal?: AbortSignal) => {
       const reads = signal ? artifacts.withReadSignal(signal) : artifacts; reads.assertReadActive();
-      await original.assertRuntime(reads, signal);
-      const cut = await original.cut(input.expectedRunRevision, reads), selected = await context(cut, reads);
+      const [, cut] = await joinResourceOperations([original.assertRuntime(reads, signal), original.cut(input.expectedRunRevision, reads)] as const);
+      const selected = await context(cut, reads);
       const prepared = readHighestPreparedAttempt(driver, runId, input.opId);
       if (!selected || !prepared?.grantRef || prepared.opKind !== 'mcp-server' || prepared.attempt !== input.attempt || prepared.requestRef !== canonicalSha256(selected.request) ||
           !input.sandboxLaunchSpecRef || input.brokerFenceTokenDigest !== undefined)
