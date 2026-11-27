@@ -1481,7 +1481,8 @@ export async function runInstalledNodeJourney(filename: string, journeyKind: 've
         reconnect: async () => { assert(client); await client.close(); client = await persistentClient(); },
         restart: async () => {
           assert(services && client && inspectionClient);
-          const prior = show(services.supervisorUnit), history = inspectInstalledOwnerHistory(recipe.stateRoot).owners;
+          const prior = show(services.supervisorUnit);
+          const history = (await waitForInstalledOwnerHistory(recipe.stateRoot, Date.now() + 1_000)).owners;
           await client.close(); client = undefined; await inspectionClient.close(); inspectionClient = undefined;
           const stoppedAt = performance.now(); assert.equal(command('/usr/bin/systemctl', ['--user', 'stop', services.supervisorUnit]).status, 0);
           assert(performance.now() - stoppedAt <= 2000, 'the actual MCP Supervisor must stop and join within two seconds');
