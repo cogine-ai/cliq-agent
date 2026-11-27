@@ -90,7 +90,8 @@ type BirthMember = { artifactRef: string; byteCount: number };
 async function readInstalledSeed(artifacts: ArtifactCatalog, first: Entry,
   generation: Extract<KernelGenerationIdentityV1, { origin: 'fresh_installed' }>, members: readonly BirthMember[]): Promise<void> {
   const smallBytes = 1_048_576, trustBytes = 16 * smallBytes;
-  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object', 'guest_toolchain', 'schema', 'trust_store', 'skill_bundle']);
+  const dataRoles = new Set(['policy_engine', 'sandbox_root_profile', 'system_prompt', 'compaction_prompt', 'bundle_object',
+    'guest_toolchain', 'schema', 'trust_store', 'skill_bundle', 'mcp_recovery_profile']);
   const inventory = new Map(members.map(member => [member.artifactRef, member.byteCount]));
   const expected = new Map<string, number>(), buffers = new Map<string, Buffer>();
   const requireMember = (ref: string, byteCount: number) => {

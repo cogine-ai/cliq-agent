@@ -119,15 +119,12 @@ export async function runInstalledMcpCases(context: InstalledMcpContext) {
       decision: 'trusted', decidedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }); await chown(trust, context.uid, context.gid);
     const session = (await send(signed({ protocolVersion: 1, method: 'session.create', requestId: context.nextId(),
       admissionKey: randomBytes(32).toString('base64url'), workspacePath: workspace, name: 'Owned MCP lifecycle' }))).snapshot.session;
-    const verifiers: Data[] = [];
-    if (installedMcpKnown(kind)) {
-      const grant = (await send(signed({ protocolVersion: 1, method: 'authorization.create', requestId: context.nextId(),
-        decision: { kind: 'execution_identity_read', purpose: 'verifier', target: {
-          kind: 'guest_toolchain', guestToolchainManifestId: context.guestToolchainManifestId, toolId: 'node' } } }))).grant;
-      verifiers.push({ id: 'node-tests', version: '1', required: true, executable: { kind: 'toolchain', toolId: 'node' },
-        argv: ['--test', '--test-concurrency=1', 'check.test.mjs'].map(value => ({ kind: 'non_secret_literal', value })),
-        cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant.grantId, timeoutMs: 10_000, retries: 0, outputLimitBytes: 65_536 });
-    }
+    const grant = (await send(signed({ protocolVersion: 1, method: 'authorization.create', requestId: context.nextId(),
+      decision: { kind: 'execution_identity_read', purpose: 'verifier', target: {
+        kind: 'guest_toolchain', guestToolchainManifestId: context.guestToolchainManifestId, toolId: 'node' } } }))).grant;
+    const verifiers = [{ id: 'node-tests', version: '1', required: true, executable: { kind: 'toolchain', toolId: 'node' },
+      argv: ['--test', '--test-concurrency=1', 'check.test.mjs'].map(value => ({ kind: 'non_secret_literal', value })),
+      cwd: '.', env: {}, writableEphemeralPaths: [], identityReadGrantId: grant.grantId, timeoutMs: 10_000, retries: 0, outputLimitBytes: 65_536 }];
     const submit = signed({ protocolVersion: 1, method: 'run.submit', requestId: context.nextId(),
       admissionKey: randomBytes(32).toString('base64url'), sessionId: session.id, expectedContextRevision: session.contextRevision,
       workspacePath: workspace, objective: installedMcpObjective(kind), model: context.model, policyMode: 'yolo',
