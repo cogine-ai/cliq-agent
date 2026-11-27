@@ -177,7 +177,7 @@ import { loadRunExecution, type LoadRunExecutionInput, type RunExecutionInstalla
 import { retireAbandonedPreactivations } from './preactivation-retirement.js';
 import { exactKeys, requireEqual, verifyRuntimeBundle, type ReleaseTrustKey, type RuntimeBundleManifest } from '../policy/runtime-authority.js';
 import { readCanonicalArtifact } from './agent-context.js';
-import { assertMcpRunQuiescence } from './mcp-execution.js';
+import { assertMcpRunQuiescence, retireReleasedMcpHttpOwners } from './mcp-execution.js';
 import { closeMcpAdminOperations, retireRetainedMcpAdminOperations } from './mcp-registration.js';
 import { closeMcpStdioRecoveries } from './mcp-stdio-recovery.js';
 import { hasInstalledMcpRecipe } from './mcp-admission.js';
@@ -4847,6 +4847,7 @@ export class StateStore {
         await gracefullyReleaseStateOwner(this.driver, this.artifacts, this.owner);
         this.released = true;
       }
+      retireReleasedMcpHttpOwners(this.driver, this.owner);
       if (!this.rollbackDriverRetired) this.driver.close();
       this.owner.filesystem.close();
       this.accountParticipant?.close();

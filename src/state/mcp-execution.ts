@@ -23,7 +23,7 @@ import { settleValidatedInvocation } from './reducers/invocation.js';
 import { readInvocationAttempt } from './repositories/journal.js';
 import { readWorkerLaunch } from './repositories/worker-launches.js';
 import { readRun, readSessionPrincipalId } from './rows.js';
-import { assertActiveStateOwner, type StateOwnerContext } from './state-owner.js';
+import { assertActiveStateOwner, readStateOwner, type StateOwnerContext } from './state-owner.js';
 import { supervisorInspectorIdentity } from './supervisor-inspector.js';
 import { sampleCanonicalNow } from './canonical-time.js';
 import { decodeBrokerInvocationAmbiguity, type BrokerInvocationAmbiguityEvidenceV1 } from '../kernel/broker-ambiguity.js';
@@ -60,8 +60,8 @@ type RunState = { binding: RunMcpHttpBinding; captures: Map<McpHttpPhase, Captur
   resultReceived: boolean; receivedFinal?: NativeMcpMessage; running: boolean; joined?: NativeMcpRunJoined; failure?: unknown;
   noReleaseFence?: NativeMcpNoReleaseFence };
 const runOwners = new WeakMap<NativeMcpRunHttpOwner, RunState>();
-// Strong ownership persists across ordinary errors until original settlement
-// or exact manual terminal acknowledgement consumes the retained C domain.
+// Strong ownership persists across ordinary errors until original settlement,
+// exact acknowledgement, or retirement of this actual StateOwner.
 const retainedRunOwners = new Map<string, { owner: NativeMcpRunHttpOwner; state: RunState }>();
 const dispatchKey = (claim: Pick<InvocationJournalEntry, 'runId' | 'opId' | 'attempt' | 'dispatchId'>) =>
   canonicalSha256([claim.runId, claim.opId, claim.attempt, claim.dispatchId]);
@@ -282,6 +282,32 @@ export function assertMcpRunQuiescence(runId: string): void {
   for (const { owner, state } of retainedRunOwners.values()) if (state.binding.runId === runId) {
     if (state.running || !state.joined) throw new ResourceRetirementError('MCP original producer still owns physical work', undefined);
     assertInstalledMcpRunJoined(owner, state.joined, state.binding);
+  }
+}
+
+/** A graceful Store release may discard its joined in-process proof. The
+ * original UNKNOWN stays durable and a successor still needs real PID death. */
+export function retireReleasedMcpHttpOwners(driver: SqliteDriver, stateOwner: StateOwnerContext): void {
+  const owned = [...retainedRunOwners].filter(([, { state: { binding } }]) =>
+    binding.supervisorInstanceId === stateOwner.supervisorInstanceId && binding.stateOwnerEpoch === stateOwner.ownerEpoch);
+  if (!owned.length) return;
+  const terminal = readStateOwner(driver, stateOwner.ownerEpoch);
+  if (terminal?.state !== 'terminal' || terminal.terminalReason !== 'graceful_release' ||
+      terminal.supervisorInstanceId !== stateOwner.supervisorInstanceId || terminal.stateLockIdentityRef !== stateOwner.stateLockIdentityRef) {
+    throw new ResourceRetirementError('MCP HTTP shutdown requires its original released StateOwner', undefined);
+  }
+  for (const [key, { owner, state }] of owned) {
+    const { binding } = state;
+    const attempt = readInvocationAttempt(driver, binding.runId, binding.opId, binding.attempt);
+    const claim = attempt.find(entry => entry.phase === 'dispatch_claimed');
+    if (!claim || claim.seq !== binding.dispatchJournalSeq || claim.dispatchId !== binding.dispatchId ||
+        claim.brokerFenceTokenDigest !== binding.brokerFenceTokenDigest || attempt.at(-1)?.phase !== 'unknown' ||
+        state.running || !state.joined || state.resultReceived || state.noReleaseFence) {
+      throw new ResourceRetirementError('released StateOwner retains an unclosed MCP HTTP claim', undefined);
+    }
+    assertInstalledMcpRunJoined(owner, state.joined, binding);
+    owner.releaseDispatchFence();
+    retainedRunOwners.delete(key);
   }
 }
 export async function readMcpOriginalClaim(driver: SqliteDriver, artifacts: ArtifactCatalog, input: {
