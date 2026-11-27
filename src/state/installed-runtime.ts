@@ -405,6 +405,7 @@ type InstalledRuntimeBinding = {
   sealSourceGitInspector(signal?: AbortSignal): Promise<NativeSourceGitInspectorImage>;
   sealMcpAdminProbe(signal?: AbortSignal): Promise<NativeMcpAdminProbeImage>;
   readMcpStdioServerBytes(bundleRef: string, entryId: string, signal?: AbortSignal): Promise<Buffer>;
+  retainMcpRecoveryAdapter(bundleRef: string, entryId: string): Promise<PublishedArtifact>;
   sealMcpStdioServer(entryId: string, signal?: AbortSignal, role?: 'mcp_server' | 'mcp_recovery_adapter'): Promise<NativeMcpStdioServerImage>;
   retainSourceGitRecipe(signal?: AbortSignal): Promise<void>;
   retainLocalInferenceRuntime(expectedBundleRef: string, signal?: AbortSignal): Promise<readonly PublishedArtifact[]>;
@@ -659,6 +660,12 @@ export function readInstalledMcpStdioServerBytes(selected: HeldInstalledRuntime,
   const binding = heldInstalledRuntimes.get(selected);
   if (!binding) mismatch('MCP identity requires a genuine held installed selection');
   return binding.readMcpStdioServerBytes(bundleRef, entryId, signal);
+}
+/** Preserve the selected adapter as inert evidence for later registry replay. */
+export function retainInstalledMcpRecoveryAdapter(selected: HeldInstalledRuntime, bundleRef: string, entryId: string): Promise<PublishedArtifact> {
+  const binding = heldInstalledRuntimes.get(selected);
+  if (!binding) mismatch('MCP recovery requires a genuine held installed selection');
+  return binding.retainMcpRecoveryAdapter(bundleRef, entryId);
 }
 /** The entry id selects only a held member of the current verified bundle.
  * The purpose-specific native seal repeats the complete static ELF check. */
@@ -3327,6 +3334,21 @@ export function createInstalledRuntime(input: { releaseKeys: readonly ReleaseTru
               const bytes = await readSmall(file, MCP_STDIO_EXECUTABLE_BYTES, signal);
               await checkedRevalidate(signal);
               return bytes;
+            });
+          },
+          retainMcpRecoveryAdapter(bundleRef, entryId) {
+            return enqueue(async () => {
+              await checkedRevalidate();
+              const entry = signed.bundle.entries.find(value => value.entryId === entryId), file = signed.entries.get(entryId);
+              if (signed.bundleDigest !== bundleRef || !entry || !file || entry.role !== 'mcp_recovery_adapter' ||
+                  !entry.executable || entry.byteCount < 1 || entry.byteCount > MCP_STDIO_EXECUTABLE_BYTES)
+                mismatch('MCP recovery evidence differs from its exact current signed adapter');
+              const cas = new ContentAddressedStore(childPath(casRoot, '.'));
+              const retained = await cas.publishChunks(artifactChunks(file), entry.byteCount);
+              if (retained.ref !== entry.digest || retained.byteLength !== entry.byteCount)
+                mismatch('retained MCP recovery adapter differs from its original signed bytes');
+              await checkedRevalidate();
+              return { ...retained, mediaType: 'application/octet-stream', schemaKind: 'cliq-runtime-bundle-entry-v1' };
             });
           },
           sealMcpStdioServer(entryId, signal, role = 'mcp_server') {

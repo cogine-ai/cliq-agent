@@ -30,6 +30,7 @@ import type { AdminMcpNativeLifecycle } from './native-owner.js';
 import { decodeAdminMcpLifecycleData, decodeMcpStdioLifecycleData, stateRootIdentityForLock } from './native-owner.js';
 import { publishMcpAdminCurrentRetirement } from './mcp-admin-current-retirement.js';
 import { deriveMcpRecoveryToolContracts } from './mcp-recovery-contract.js';
+import type { HeldInstalledRuntime } from './installed-runtime.js';
 import type { McpStdioNativeLifecycle } from './mcp-stdio-lifecycle.js';
 import type { SqliteConnection, SqliteDriver } from './sqlite-driver.js';
 
@@ -46,6 +47,7 @@ export async function publishMcpAdminDiscovery(input: Readonly<{
   launch: Readonly<{ plan: ProcessContainmentPlanV1; planArtifact: PublishedArtifact; spec: SandboxLaunchSpecV1; specArtifact: PublishedArtifact }>;
   containment: ProcessContainment; containmentArtifact: PublishedArtifact; lifecycleBytes: Buffer;
   lifecycle: AdminMcpNativeLifecycle | McpStdioNativeLifecycle; physical: Physical;
+  installed: HeldInstalledRuntime;
   published: Readonly<{ captures: Readonly<{ get(phase: 'initialize' | 'tools_list'): Capture | undefined }>; metadata: PublishedArtifact[] }>;
   original?: Readonly<{ registry: McpRegistryRevisionV1; assertUnchanged(connection: SqliteConnection): void }>;
 }>) {
@@ -116,8 +118,8 @@ export async function publishMcpAdminDiscovery(input: Readonly<{
   (result as {resultDigest:string}).resultDigest = digestOmitting(result, 'resultDigest'); const resultArtifact = await artifacts.publishCanonical(result, result.format);
   const revision = (original?.registry.registryRevision ?? 0) + 1;
   const derived = await deriveMcpRecoveryToolContracts(artifacts, { target, targetRef: prepared.targetRef,
-    result, resultRef: resultArtifact.ref, probePayloadCoreRef: prepared.probePayloadCoreRef, registryRevision: revision });
-  const recoveryMetadata: PublishedArtifact[] = [];
+    result, resultRef: resultArtifact.ref, probePayloadCoreRef: prepared.probePayloadCoreRef, registryRevision: revision, installed: input.installed });
+  const recoveryMetadata: PublishedArtifact[] = [...derived.adapterMetadata];
   for (const template of derived.templates) recoveryMetadata.push(await artifacts.publishCanonical(template, template.format));
   const tools = derived.tools, finishedAt = sampleCanonicalNow();
   const registryCore = { schemaVersion: 1 as const, format: 'cliq-mcp-registry-v1' as const, registrationId: request.registrationId,
@@ -137,7 +139,8 @@ export async function publishMcpAdminDiscovery(input: Readonly<{
   const registryArtifact = await artifacts.publishCanonical(registry, registry.format);
   const response: Extract<InstalledControlResponseV1,{ok:true}> = { protocolVersion: 1, ok: true, result: { method: request.method, registry: mcpRegistrySummary(registry) } };
   const responseArtifact = await artifacts.publishCanonical(response, 'cliq-control-response-v1');
-  const completed: AdminOperationV1 = { ...active, phase: 'completed', probeDispatch: active.probeDispatch,
+  const { leaseExpiresAt: _activeLease, ...releasedAttempt } = active;
+  const completed: AdminOperationV1 = { ...releasedAttempt, phase: 'completed', rowVersion: active.rowVersion + 1, probeDispatch: active.probeDispatch,
     resultRef: resultArtifact.ref, resultDigest: result.resultDigest, evidenceRef: closureArtifact.ref, evidenceDigest: closure.evidenceDigest,
     controlResponseRef: responseArtifact.ref, controlResponseDigest: responseArtifact.ref, finishedAt };
   // The lifecycle closes first. One original transaction publishes the

@@ -15,6 +15,7 @@ import { selectMcpRecoveryProfile, verifyMcpRecoveryAdapterAuthority } from '../
 import { readCanonicalArtifact } from './agent-context.js';
 import type { ArtifactCatalog, PublishedArtifact } from './artifacts.js';
 import type { AuthenticatedControlIdentity } from './control-channel.js';
+import { retainInstalledMcpRecoveryAdapter, type HeldInstalledRuntime } from './installed-runtime.js';
 
 type RequestedTools = McpAdminProbeTargetV1['requestedToolRecovery'];
 const sortedRequests = (request: McpRegisterRequestV1) => Object.entries(request.toolRecovery)
@@ -93,10 +94,12 @@ export async function mcpRequestedRecoveryFromRegistry(artifacts: ArtifactCatalo
   }
   return immutableSnapshot(requested);
 }
-type Derived = Readonly<{ tools: readonly McpToolContractV1[]; templates: readonly McpRecoveryStatusRequestTemplateV1[] }>;
+type Derived = Readonly<{ tools: readonly McpToolContractV1[]; templates: readonly McpRecoveryStatusRequestTemplateV1[];
+  adapterMetadata: readonly PublishedArtifact[] }>;
 export async function deriveMcpRecoveryToolContracts(artifacts: ArtifactCatalog, input: Readonly<{
   target: McpAdminProbeTargetV1; targetRef: string; result: McpAdminProbeResultV1; resultRef: string;
   probePayloadCoreRef: string; registryRevision: number;
+  installed?: HeldInstalledRuntime;
 }>): Promise<Derived> {
   const target = decodeMcpAdminProbeTarget(input.target), result = decodeMcpAdminProbeResult(input.result);
   if (input.targetRef !== canonicalSha256(target) || input.resultRef !== canonicalSha256(result) || result.targetRef !== input.targetRef ||
@@ -106,6 +109,7 @@ export async function deriveMcpRecoveryToolContracts(artifacts: ArtifactCatalog,
   if (target.requestedToolRecovery.some(item => result.normalizedTools.filter(tool => tool.name === item.toolName).length !== 1))
     throw new TypeError('MCP explicitly requested recovery tool is absent or ambiguous in original discovery');
   const tools: McpToolContractV1[] = [], templates: McpRecoveryStatusRequestTemplateV1[] = [];
+  const retainedAdapters = new Map<string, PublishedArtifact>();
   let bundle: RuntimeBundleManifest | undefined;
   for (const tool of result.normalizedTools) {
     const requested = byName.get(tool.name) ?? { kind: 'manual' as const };
@@ -129,6 +133,8 @@ export async function deriveMcpRecoveryToolContracts(artifacts: ArtifactCatalog,
         adapterRef: root.artifactRef, manifest: await readCanonicalArtifact(artifacts, root.artifactRef) });
       const executable = bundle.entries.find(entry => entry.entryId === manifest.entryId);
       if (!executable) throw new TypeError('MCP signed status adapter has no original executable bytes');
+      if (input.installed && !retainedAdapters.has(executable.digest))
+        retainedAdapters.set(executable.digest, await retainInstalledMcpRecoveryAdapter(input.installed, canonicalSha256(bundle), executable.entryId));
       for await (const _chunk of artifacts.readChunks(executable.digest, executable.byteCount)) artifacts.assertReadActive();
       const profile = selectMcpRecoveryProfile({ bundle, target, result, manifest, serverToolName: tool.name });
       const completed = decodeMcpRecoveryPredicate(await readCanonicalArtifact(artifacts, profile.completedPredicateRef));
@@ -161,7 +167,7 @@ export async function deriveMcpRecoveryToolContracts(artifacts: ArtifactCatalog,
     const core = { ...tool, version: 'mcp-tool-contract-v1' as const, recovery: decodeMcpRecoveryContract(recovery) };
     tools.push({ ...core, toolContractDigest: canonicalSha256(core) });
   }
-  return immutableSnapshot({ tools, templates });
+  return immutableSnapshot({ tools, templates, adapterMetadata: [...retainedAdapters.values()] });
 }
 export async function readMcpRecoveryTemplates(artifacts: ArtifactCatalog, derived: Derived): Promise<void> {
   for (const expected of derived.templates) {

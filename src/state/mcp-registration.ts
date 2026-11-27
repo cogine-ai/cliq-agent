@@ -1346,7 +1346,7 @@ async function executeMcpStdioAdminAttempt(input: Readonly<{
       invalid('MCP stdio original Admin probe did not actually finish and join its fixed protocol');
     const finish = async (): Promise<InstalledControlResponseV1> => {
       const published = await received.publish(artifacts, actual.ownerJoined), originalPhysical = nativeAttempt.original();
-      const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch, containment,
+      const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch, containment, installed: selected,
         containmentArtifact, lifecycleBytes: actual.lifecycleSnapshot, lifecycle, published, ...(original ? { original } : {}),
         physical: { kind: 'stdio', native: originalPhysical.native, binding, scope: originalPhysical.scope, joined: actual.joined, ownerJoined: actual.ownerJoined } });
       nativeAttempt.release(); owners!.delete(resource); adminProducers.get(driver)!.delete(key); return response;
@@ -1581,7 +1581,7 @@ export async function mutateInstalledMcpRegistration(driver: SqliteDriver, artif
         physicalInput!.close();
         const finish = async (): Promise<InstalledControlResponseV1> => {
           const published = await received.publish(artifacts);
-          const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch,
+          const response = await publishMcpAdminDiscovery({ driver, artifacts, owner, request, identity, target, prepared, active, launch, installed: selected,
             containment, containmentArtifact, lifecycleBytes, lifecycle, published, ...(original ? { original } : {}),
             physical: { kind: 'http', native: native!, binding, scope: scope!, joined, ownerJoined: published.joined } });
           native!.releaseDomain(); owners!.delete(resource); producers!.delete(key); return response;
