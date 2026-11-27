@@ -41,7 +41,7 @@ import { decodeToolAbandonedItem } from '../kernel/mcp.js';
  * subject-specific retained policy/control/Journal history below. */
 export function assertRunPolicyDecisionSubject(operation: RunSpec['operation'], subjectKind: unknown): void {
   if (!['agent', 'delivery'].includes(operation) || subjectKind !== 'verifier_launch' && subjectKind !== 'dependency_install_scripts' &&
-      !(operation === 'agent' && (subjectKind === 'tool_call' || subjectKind === 'child_merge')) &&
+      !(operation === 'agent' && (subjectKind === 'tool_call' || subjectKind === 'child_merge' || subjectKind === 'mcp_server_launch')) &&
       !(operation === 'delivery' && subjectKind === 'delivery_plan'))
     throw new TypeError('policy decision has an unsupported subject for its Run operation');
 }

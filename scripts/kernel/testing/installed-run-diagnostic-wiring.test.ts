@@ -416,6 +416,9 @@ test('authorization diagnosis records only existing await boundaries and rethrow
     '      ? await selectDependencyScriptsTarget(driver, artifacts, owner, runtime, identity.principalId, request as DependencyInstallScriptsCreateRequest, signal) : undefined;'));
   assert(body.includes("const readScope = decision.kind === 'read_scope'\n" +
     '      ? await selectSourceReadTarget(driver, artifacts, identity.principalId, request as SourceReadScopeCreateRequest, signal) : undefined;'));
+  const mcpSelection = "const mcpStdio = decision.kind === 'execution_identity_read' && decision.purpose === 'mcp_stdio'\n" +
+    '      ? await selectMcpStdioIdentity(artifacts, runtime, request as McpIdentityCreateRequest, signal, installed) : undefined;';
+  assert(body.indexOf(mcpSelection) > selectedStart && body.indexOf(mcpSelection) < selectedAwait);
   assert(body.includes("const executionIdentity = decision.kind === 'verifier_execution' ? readAuthorizationGrant(driver, decision.executionIdentityGrantId) : undefined;"));
   assert(body.includes("if (decision.kind === 'verifier_execution') {\n" +
     "      if (!executionIdentity || executionIdentity.state !== 'active' || executionIdentity.ownerPrincipalId !== identity.principalId ||\n" +
@@ -428,7 +431,7 @@ test('authorization diagnosis records only existing await boundaries and rethrow
     '      maxCandidateGenerations: decision.maxCandidateGenerations, maxAttemptsPerCandidate: decision.maxAttemptsPerCandidate\n' +
     "    } : decision.kind === 'dependency_install_scripts' ? dependency!.target : decision.kind === 'read_scope' ? readScope!.target : decision.kind === 'source_git_inspection'\n" +
     "      ? await selectSourceInspectionTarget(driver, artifacts, runtime, identity.principalId, request as SourceGitInspectionCreateRequest, signal)\n" +
-    "      : decision.purpose === 'mcp_stdio' ? await selectMcpStdioIdentity(artifacts, runtime, request as McpIdentityCreateRequest, signal)\n" +
+    "      : decision.purpose === 'mcp_stdio' ? mcpStdio!.target\n" +
     '      : await (async () => {\n        const selected = await readRetainedVerifierToolchain'),
   'the verifier selection stays in its execution-only branch, after source and MCP identity selection');
   assert.match(body, /catch \(error\) \{\s*diagnosis\?\.failure\(error\);\s*throw error;/u);
@@ -438,6 +441,7 @@ test('authorization diagnosis records only existing await boundaries and rethrow
   assert.match(transaction, /if \(channel.channel.transport.kind === 'uds_peer'\) assertCurrentControlFrame\(owner, identity\);/u);
   assert.match(transaction, /const now = sampleCanonicalNow\(\);\s*outcome = advanceTimeFence\(connection, owner.ownerEpoch, now\);\s*if \(outcome !== 'healthy'\) return;/u);
   assert.match(transaction, /if \(now < createdAt \|\| now >= grant.expiresAt \|\| currentOwner.acquiredAt > createdAt \|\| channel.channel.openedAt > createdAt\)/u);
+  assert.match(transaction, /if \(mcpServerArtifact\) insertArtifactMetadata\(connection, mcpServerArtifact, now\);\s*insertAuthorizationGrant\(connection, grant\);/u);
   assert.match(transaction, /responseRef: published.ref, committedAt: now/u);
   assert.equal((body.match(/sampleCanonicalNow\(\)/gu) ?? []).length, 2, 'preparation and actual final-transaction commit remain two distinct samples');
 });
