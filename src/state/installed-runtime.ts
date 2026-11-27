@@ -1627,6 +1627,7 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
   const entries = new Map<string, InstalledFile>();
   const roots = new Map<string, Buffer>([[bundleDigest, manifestBytes]]);
   const streamedRoots = new Map<string, InstalledFile>();
+  const discard: InstalledFile[] = [];
   const singleCasPaths = new Set<string>(), delegatedPaths = new Set<string>(), delegatedRefs = new Set<string>();
   const inodes = new Set<string>([`${manifest.info.dev}:${manifest.info.ino}`]);
   // Metadata is read before data placement is resolved. Only the exact signed
@@ -1654,7 +1655,7 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
       roots.set(entry.digest, await readSmall(file, BUILTIN_SCRIPT_RECIPE.scriptBytes, signal));
     } else if (isNpmAdapterEntry(entry)) {
       roots.set(entry.digest, await readSmall(file, SMALL_BYTES, signal));
-    } else if (entry.role !== 'bundle_object') await verifyBytes(file, signal);
+    } else discard.push(file);
   }
   const guests = guestToolchainRoots(bundle).map(root => {
     const bytes = roots.get(root.artifactRef);
@@ -1683,22 +1684,25 @@ async function verifyPackageBytes(scope: Scope, root: Directory, releaseKeys: re
     if (isNpmDataEntry(entry)) {
       // The sole fixed complete official image is a raw signed data edge,
       // never JSON, an executable or thousands of separate CAS members.
-      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
+      discard.push(file); streamedRoots.set(entry.digest, file);
     } else if (imageRefs.has(entry.digest)) {
       if (entry.executable || entry.byteCount < 1 || entry.byteCount > GUEST_EXTRACTOR_RECIPE.maxImageBytes)
         mismatch('installed guest image exceeds the supported signed recipe bound');
-      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
+      discard.push(file); streamedRoots.set(entry.digest, file);
     } else if (skillMembers.instructions.has(entry.digest)) {
       roots.set(entry.digest, await readSmall(file, SMALL_BYTES, signal));
     } else if (skillMembers.resources.has(entry.digest)) {
       if (entry.executable || entry.byteCount > SKILL_RESOURCE_BYTES) mismatch('installed skill resource exceeds its signed data bound');
-      await verifyBytes(file, signal); streamedRoots.set(entry.digest, file);
+      discard.push(file); streamedRoots.set(entry.digest, file);
     } else {
       const bytes = await readSmall(file, signatureRefs.has(entry.digest) ? 64 : SMALL_BYTES, signal);
       if (!signatureRefs.has(entry.digest)) checkCanonicalBytes(bytes);
       roots.set(entry.digest, bytes);
     }
   }
+  // Join the independent descriptor checks and hashes before consuming the
+  // signed closure. The reader retains its existing concurrency/scratch bounds.
+  await scope.verifyDiscard(discard, signal);
   await validateBundledSkillReferences(skillClosures, async (ref, byteCount) => {
     const retained = roots.get(ref); if (retained) return retained;
     const declarations = bundle.entries.filter(entry => entry.digest === ref), entry = declarations[0];

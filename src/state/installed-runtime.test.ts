@@ -622,7 +622,8 @@ if (process.platform === 'linux') test('installed work measurements count the co
   try {
     const image = Buffer.alloc(8 * 1_048_576 + 17, 0x61);
     image.fill(0x63, 1_048_576, 2 * 1_048_576); image[image.length - 1] = 0x7a;
-    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, undefined, image);
+    const supervisorImage = Buffer.alloc(8 * 1_048_576 + 31, 0x73);
+    const signed = await writeInstallerOnlyPackage(packageRoot, undefined, supervisorImage, image);
     const runtime = createInstalledRuntime({ releaseKeys: signed.releaseKeys });
     const installation = await runtime.installInitial({ packageRoot, stateRoot });
     const manifestBytes = canonicalJsonBytes(signed.bundle).length;
