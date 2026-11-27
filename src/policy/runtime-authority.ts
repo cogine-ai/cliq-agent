@@ -137,9 +137,15 @@ export function verifyToolRuntimeAuthority(input: {
     if (!retained || retained.ref !== selected.registryRevisionRef || canonicalSha256(retained.registry) !== retained.ref ||
         retained.registry.manifestDigest !== selected.manifestDigest || retained.registry.registryRevision !== selected.registryRevision ||
         retained.registry.ownerPrincipalId !== policy.principalId || retained.registry.stateModel !== 'stateless_per_call' ||
-        (retained.registry.transport.kind === 'streamable_http' && retained.registry.transport.credentialGrantRefs.length > 1) ||
-        retained.registry.tools.some(tool => tool.recovery.kind !== 'manual'))
+        (retained.registry.transport.kind === 'streamable_http' && retained.registry.transport.credentialGrantRefs.length > 1))
       throw new TypeError('MCP tool authority substitutes its principal, frozen registry or supported recovery');
+    for (const { recovery } of retained.registry.tools) {
+      if (recovery.kind === 'manual' || recovery.kind === 'retry') continue;
+      if (recovery.kind !== 'reconcile' || retained.registry.transport.kind !== 'stdio' ||
+          bundle.structuredArtifacts.filter(root => root.kind === 'mcp_recovery_adapter' &&
+            root.artifactRef === recovery.adapterRef && root.semanticDigest === recovery.adapterDigest).length !== 1)
+        throw new TypeError('MCP reconcile requires the original signed stdio recovery adapter');
+    }
     if (retained.registry.transport.kind === 'stdio') {
       const identity = retained.registry.transport.executable;
       if (identity.kind !== 'runtime_bundle' || identity.runtimeBundleRef !== assembly.runtime.runtimeBundleRef ||

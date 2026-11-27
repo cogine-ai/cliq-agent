@@ -3,6 +3,7 @@ import { after, before, test } from 'node:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalSha256 } from '../kernel/canonical.js';
 import { digestOmitting, identityHash } from '../kernel/identity.js';
+import { mcpExposedToolDescription, mcpExposedToolName, type McpRecoveryContractV1, type McpRegistryRevisionV1 } from '../kernel/mcp.js';
 import type { RunSpec, ToolContractManifestV1 } from '../kernel/types.js';
 import type { RunPolicySnapshotV1, ToolRequestV1, ToolTargetV1, ToolApprovalDecisionV1 } from '../kernel/tool-authorization.js';
 import type { ToolCallInputV1 } from '../protocol/agent-ir.js';
@@ -262,6 +263,39 @@ test('policy profile requires a real trusted signature and the exact non-executa
     assert.throws(() => verifyToolRuntimeAuthority({ ...material, assembly, policy, bundle,
       releaseKeys: [{ keyId: bundle.publisherKeyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }] }));
   }
+});
+
+test('frozen HTTP MCP accepts retry and refuses stdio-only reconciliation', () => {
+  const signed = fixture.signed!, hash = canonicalSha256('MCP policy fixture');
+  const verify = (recovery: McpRecoveryContractV1) => {
+    const interfaceCore = { version: 'mcp-tool-interface-v1' as const, name: 'effect', description: 'Fixture effect',
+      access: 'exec' as const, inputSchemaRef: hash, inputSchemaDigest: hash };
+    const probed = { ...interfaceCore, interfaceDigest: canonicalSha256(interfaceCore) };
+    const tool = { ...probed, version: 'mcp-tool-contract-v1' as const, recovery };
+    const frozenTool = { ...tool, toolContractDigest: canonicalSha256(tool) };
+    const core = { schemaVersion: 1, format: 'cliq-mcp-registry-v1', registrationId: 'mcp-registry',
+      registryRevision: 1, ownerPrincipalId: snapshot.principalId, transport: { kind: 'streamable_http',
+        endpointRegistrationRef: hash, endpointIdentityDigest: hash, tlsPolicyDigest: hash, credentialGrantRefs: [] },
+      stateModel: 'stateless_per_call', initializeDigest: hash, capabilityDigest: hash, probedToolsListDigest: canonicalSha256([probed]),
+      toolsListDigest: canonicalSha256([frozenTool]), tools: [frozenTool],
+      lifecycle: { launchTimeoutMs: 5000, callTimeoutMs: 5000, maxLaunchesPerCall: 1 },
+      registrationReceiptRef: hash, createdAt: now } satisfies Omit<McpRegistryRevisionV1, 'manifestDigest'>;
+    const registry = { ...core, manifestDigest: canonicalSha256(core) };
+    const ref = canonicalSha256(registry), { registrationId, registryRevision, manifestDigest } = registry;
+    verifyToolRuntimeAuthority({ bundle: signed.bundle, profile: signed.profile, policy: snapshot, releaseKeys: signed.releaseKeys,
+      assembly: { ...fixture.authority.assembly, mcpServers: [{ registrationId, registryRevision, manifestDigest, registryRevisionRef: ref }] },
+      mcpRegistries: [{ ref, registry }], tools: [{ name: mcpExposedToolName(registrationId, tool.name),
+        description: mcpExposedToolDescription(registrationId, tool.name, tool.description), access: 'exec', version: tool.version,
+        inputSchemaRef: tool.inputSchemaRef, inputSchemaDigest: tool.inputSchemaDigest, replayClass: recovery.kind,
+        execution: { kind: 'mcp', registrationId, registryRevisionRef: ref, registryManifestDigest: manifestDigest,
+          serverToolName: tool.name, toolContractDigest: frozenTool.toolContractDigest } }] });
+  };
+  assert.doesNotThrow(() => verify({ kind: 'retry', explicitRiskConsentRef: hash, explicitRiskConsentDigest: hash,
+    safetyAssertionRef: hash, safetyAssertionDigest: hash }));
+  assert.throws(() => verify({ kind: 'reconcile', adapterRef: hash, adapterDigest: hash, profileId: 'fixture', profileDigest: hash,
+    idempotencyKeyInjection: { jsonPointer: '/key' }, statusRequestTemplateRef: hash, statusRequestTemplateDigest: hash,
+    completedPredicateRef: hash, completedPredicateDigest: hash, failedPredicateRef: hash, failedPredicateDigest: hash }),
+    /MCP reconcile requires the original signed stdio recovery adapter/);
 });
 
 test('fixed Bash evidence preserves literal/nested order, refuses dynamic heads and bounds nesting/occurrences', () => {
