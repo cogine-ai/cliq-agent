@@ -2,7 +2,7 @@
 type Word = { text: string; start: number };
 type Command = { words: Word[]; start: number };
 
-const SHELLS = new Set(['sh', 'bash', 'dash', 'ash', 'ksh', 'zsh', 'fish']);
+const SHELLS = new Set(['sh', 'bash', 'dash', 'ash', 'ksh', 'posh', 'yash', 'zsh', 'fish']);
 const DYNAMIC_HEADS = new Set(['eval', 'source', '.', 'xargs', 'find']);
 const SCRIPT_INTERPRETER = /^(?:node(?:js)?|python|pypy|perl|php|ruby|lua|luajit)[\d.-]*$/u;
 const basename = (value: string) => value.split('/').at(-1)!;

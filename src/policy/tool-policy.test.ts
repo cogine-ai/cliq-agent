@@ -268,6 +268,8 @@ test('fixed Bash evidence preserves literal/nested order, refuses dynamic heads 
   assert.deepEqual(parseCanonicalBash('printf ok'), { outerCommandHead: 'printf', nestedBuiltinDenyHeads: [], unsafeForAllow: false });
   assert.deepEqual(parseCanonicalBash("sh -c 'rm a; sh -c \"rm b\"; rm c'"),
     { outerCommandHead: 'sh', nestedBuiltinDenyHeads: ['rm', 'rm', 'rm'], unsafeForAllow: true });
+  assert.deepEqual(parseCanonicalBash("yash -c 'rm -rf /'"),
+    { outerCommandHead: 'yash', nestedBuiltinDenyHeads: ['rm'], unsafeForAllow: true });
   assert.equal(parseCanonicalBash('$COMMAND args').outerCommandHead, undefined);
   assert.equal(parseCanonicalBash('printf "unterminated').outerCommandHead, undefined);
   assert.equal(parseCanonicalBash('&& printf ok').outerCommandHead, undefined);
